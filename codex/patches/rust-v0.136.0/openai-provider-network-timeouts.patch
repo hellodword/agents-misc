@@ -1,0 +1,913 @@
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor_tests.rs b/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
+index 2a4b2722ec..0c80ea6501 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
+@@ -586,6 +586,7 @@ mod thread_processor_behavior_tests {
+             stream_max_retries: None,
+             stream_idle_timeout_ms: None,
+             websocket_connect_timeout_ms: None,
++            compact_request_timeout_ms: None,
+             requires_openai_auth: false,
+             supports_websockets: true,
+         };
+diff --git a/codex-rs/codex-api/src/endpoint/compact.rs b/codex-rs/codex-api/src/endpoint/compact.rs
+index a3da854844..c15c36af85 100644
+--- a/codex-rs/codex-api/src/endpoint/compact.rs
++++ b/codex-rs/codex-api/src/endpoint/compact.rs
+@@ -77,11 +77,16 @@ struct CompactHistoryResponse {
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    use crate::auth::AuthProvider;
+     use async_trait::async_trait;
++    use bytes::Bytes;
+     use codex_client::Request;
+     use codex_client::Response;
+     use codex_client::StreamResponse;
+     use codex_client::TransportError;
++    use http::StatusCode;
++    use pretty_assertions::assert_eq;
++    use std::sync::Mutex;
+ 
+     #[derive(Clone, Default)]
+     struct DummyTransport;
+@@ -101,4 +106,74 @@ mod tests {
+     fn path_is_responses_compact() {
+         assert_eq!(CompactClient::<DummyTransport>::path(), "responses/compact");
+     }
++
++    #[derive(Clone, Default)]
++    struct CapturingTransport {
++        timeout: Arc<Mutex<Option<Duration>>>,
++    }
++
++    #[async_trait]
++    impl HttpTransport for CapturingTransport {
++        async fn execute(&self, req: Request) -> Result<Response, TransportError> {
++            *self.timeout.lock().expect("timeout mutex should lock") = req.timeout;
++            Ok(Response {
++                status: StatusCode::OK,
++                headers: HeaderMap::new(),
++                body: Bytes::from_static(br#"{"output":[]}"#),
++            })
++        }
++
++        async fn stream(&self, _req: Request) -> Result<StreamResponse, TransportError> {
++            Err(TransportError::Build("stream should not run".to_string()))
++        }
++    }
++
++    struct NoAuth;
++
++    #[async_trait]
++    impl AuthProvider for NoAuth {
++        fn add_auth_headers(&self, _headers: &mut HeaderMap) {}
++    }
++
++    fn provider() -> Provider {
++        Provider {
++            name: "test".to_string(),
++            base_url: "https://example.com/v1".to_string(),
++            query_params: None,
++            headers: HeaderMap::new(),
++            retry: crate::RetryConfig {
++                max_attempts: 1,
++                base_delay: Duration::from_millis(1),
++                retry_429: false,
++                retry_5xx: false,
++                retry_transport: false,
++            },
++            stream_idle_timeout: Duration::from_secs(1),
++            compact_request_timeout: None,
++        }
++    }
++
++    #[tokio::test]
++    async fn compact_uses_supplied_request_timeout() {
++        let timeout = Arc::new(Mutex::new(None));
++        let transport = CapturingTransport {
++            timeout: Arc::clone(&timeout),
++        };
++        let client = CompactClient::new(transport, provider(), Arc::new(NoAuth));
++
++        let output = client
++            .compact(
++                serde_json::json!({}),
++                HeaderMap::new(),
++                Duration::from_millis(123),
++            )
++            .await
++            .expect("compact request should succeed");
++
++        assert_eq!(output, Vec::<ResponseItem>::new());
++        assert_eq!(
++            *timeout.lock().expect("timeout mutex should lock"),
++            Some(Duration::from_millis(123))
++        );
++    }
+ }
+diff --git a/codex-rs/codex-api/src/endpoint/images.rs b/codex-rs/codex-api/src/endpoint/images.rs
+index 9d1bd41eea..0b93aafd86 100644
+--- a/codex-rs/codex-api/src/endpoint/images.rs
++++ b/codex-rs/codex-api/src/endpoint/images.rs
+@@ -144,6 +144,7 @@ mod tests {
+                 retry_transport: true,
+             },
+             stream_idle_timeout: Duration::from_secs(1),
++            compact_request_timeout: None,
+         }
+     }
+ 
+diff --git a/codex-rs/codex-api/src/endpoint/memories.rs b/codex-rs/codex-api/src/endpoint/memories.rs
+index a6c25641f2..126e6c33b7 100644
+--- a/codex-rs/codex-api/src/endpoint/memories.rs
++++ b/codex-rs/codex-api/src/endpoint/memories.rs
+@@ -152,6 +152,7 @@ mod tests {
+                 retry_transport: true,
+             },
+             stream_idle_timeout: Duration::from_secs(1),
++            compact_request_timeout: None,
+         }
+     }
+ 
+diff --git a/codex-rs/codex-api/src/endpoint/models.rs b/codex-rs/codex-api/src/endpoint/models.rs
+index ec9ee7aac6..00a216ef54 100644
+--- a/codex-rs/codex-api/src/endpoint/models.rs
++++ b/codex-rs/codex-api/src/endpoint/models.rs
+@@ -150,6 +150,7 @@ mod tests {
+                 retry_transport: true,
+             },
+             stream_idle_timeout: Duration::from_secs(1),
++            compact_request_timeout: None,
+         }
+     }
+ 
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_call.rs b/codex-rs/codex-api/src/endpoint/realtime_call.rs
+index b0342c5349..6d4680e2d8 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_call.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_call.rs
+@@ -307,6 +307,7 @@ mod tests {
+                 retry_transport: true,
+             },
+             stream_idle_timeout: Duration::from_secs(1),
++            compact_request_timeout: None,
+         }
+     }
+ 
+diff --git a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+index ad26549a26..8e0a224db6 100644
+--- a/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
++++ b/codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs
+@@ -1691,6 +1691,7 @@ mod tests {
+                 retry_transport: false,
+             },
+             stream_idle_timeout: Duration::from_secs(5),
++            compact_request_timeout: None,
+         };
+         let client = RealtimeWebsocketClient::new(provider);
+         let connection = client
+@@ -1985,6 +1986,7 @@ mod tests {
+                 retry_transport: false,
+             },
+             stream_idle_timeout: Duration::from_secs(5),
++            compact_request_timeout: None,
+         };
+         let client = RealtimeWebsocketClient::new(provider);
+         let connection = client
+@@ -2100,6 +2102,7 @@ mod tests {
+                 retry_transport: false,
+             },
+             stream_idle_timeout: Duration::from_secs(5),
++            compact_request_timeout: None,
+         };
+         let client = RealtimeWebsocketClient::new(provider);
+         let connection = client
+@@ -2204,6 +2207,7 @@ mod tests {
+                 retry_transport: false,
+             },
+             stream_idle_timeout: Duration::from_secs(5),
++            compact_request_timeout: None,
+         };
+         let client = RealtimeWebsocketClient::new(provider);
+         let connection = client
+@@ -2294,6 +2298,7 @@ mod tests {
+                 retry_transport: false,
+             },
+             stream_idle_timeout: Duration::from_secs(5),
++            compact_request_timeout: None,
+         };
+         let client = RealtimeWebsocketClient::new(provider);
+         let connection = client
+diff --git a/codex-rs/codex-api/src/endpoint/search.rs b/codex-rs/codex-api/src/endpoint/search.rs
+index d01fbfb780..2a74acfb15 100644
+--- a/codex-rs/codex-api/src/endpoint/search.rs
++++ b/codex-rs/codex-api/src/endpoint/search.rs
+@@ -130,6 +130,7 @@ mod tests {
+                 retry_transport: true,
+             },
+             stream_idle_timeout: Duration::from_secs(1),
++            compact_request_timeout: None,
+         }
+     }
+ 
+diff --git a/codex-rs/codex-api/src/provider.rs b/codex-rs/codex-api/src/provider.rs
+index 45f2512dc3..de70f3417c 100644
+--- a/codex-rs/codex-api/src/provider.rs
++++ b/codex-rs/codex-api/src/provider.rs
+@@ -38,7 +38,7 @@ impl RetryConfig {
+ /// HTTP endpoint configuration used to talk to a concrete API deployment.
+ ///
+ /// Encapsulates base URL, default headers, query params, retry policy, and
+-/// stream idle timeout, plus helper methods for building requests.
++/// stream/request timeouts, plus helper methods for building requests.
+ #[derive(Debug, Clone)]
+ pub struct Provider {
+     pub name: String,
+@@ -47,6 +47,7 @@ pub struct Provider {
+     pub headers: HeaderMap,
+     pub retry: RetryConfig,
+     pub stream_idle_timeout: Duration,
++    pub compact_request_timeout: Option<Duration>,
+ }
+ 
+ impl Provider {
+diff --git a/codex-rs/codex-api/tests/clients.rs b/codex-rs/codex-api/tests/clients.rs
+index afaf82389f..c64eaf45b1 100644
+--- a/codex-rs/codex-api/tests/clients.rs
++++ b/codex-rs/codex-api/tests/clients.rs
+@@ -137,6 +137,7 @@ fn provider(name: &str) -> Provider {
+             retry_transport: true,
+         },
+         stream_idle_timeout: Duration::from_millis(10),
++        compact_request_timeout: None,
+     }
+ }
+ 
+diff --git a/codex-rs/codex-api/tests/models_integration.rs b/codex-rs/codex-api/tests/models_integration.rs
+index 38d8dc9862..1a7cae67e3 100644
+--- a/codex-rs/codex-api/tests/models_integration.rs
++++ b/codex-rs/codex-api/tests/models_integration.rs
+@@ -42,6 +42,7 @@ fn provider(base_url: &str) -> Provider {
+             retry_transport: true,
+         },
+         stream_idle_timeout: std::time::Duration::from_secs(1),
++        compact_request_timeout: None,
+     }
+ }
+ 
+diff --git a/codex-rs/codex-api/tests/realtime_websocket_e2e.rs b/codex-rs/codex-api/tests/realtime_websocket_e2e.rs
+index cb9d7122f4..8c592a0c28 100644
+--- a/codex-rs/codex-api/tests/realtime_websocket_e2e.rs
++++ b/codex-rs/codex-api/tests/realtime_websocket_e2e.rs
+@@ -72,6 +72,7 @@ fn test_provider(base_url: String) -> Provider {
+             retry_transport: false,
+         },
+         stream_idle_timeout: Duration::from_secs(5),
++        compact_request_timeout: None,
+     }
+ }
+ 
+diff --git a/codex-rs/codex-api/tests/sse_end_to_end.rs b/codex-rs/codex-api/tests/sse_end_to_end.rs
+index bf880fefcf..029980235e 100644
+--- a/codex-rs/codex-api/tests/sse_end_to_end.rs
++++ b/codex-rs/codex-api/tests/sse_end_to_end.rs
+@@ -71,6 +71,7 @@ fn provider(name: &str) -> Provider {
+             retry_transport: true,
+         },
+         stream_idle_timeout: Duration::from_millis(50),
++        compact_request_timeout: None,
+     }
+ }
+ 
+diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
+index 0765819fb7..00b34890dd 100644
+--- a/codex-rs/config/src/config_toml.rs
++++ b/codex-rs/config/src/config_toml.rs
+@@ -886,6 +886,7 @@ pub fn validate_reserved_model_provider_ids(
+         .keys()
+         .filter(|key| {
+             key.as_str() != AMAZON_BEDROCK_PROVIDER_ID
++                && key.as_str() != OPENAI_PROVIDER_ID
+                 && RESERVED_MODEL_PROVIDER_IDS.contains(&key.as_str())
+         })
+         .map(|key| format!("`{key}`"))
+@@ -907,7 +908,7 @@ pub fn validate_model_providers(
+ ) -> Result<(), String> {
+     validate_reserved_model_provider_ids(model_providers)?;
+     for (key, provider) in model_providers {
+-        if key == AMAZON_BEDROCK_PROVIDER_ID {
++        if key == AMAZON_BEDROCK_PROVIDER_ID || key == OPENAI_PROVIDER_ID {
+             continue;
+         }
+         if provider.aws.is_some() {
+diff --git a/codex-rs/config/src/thread_config.rs b/codex-rs/config/src/thread_config.rs
+index 1b3ea8fe87..ae0d9d5d39 100644
+--- a/codex-rs/config/src/thread_config.rs
++++ b/codex-rs/config/src/thread_config.rs
+@@ -311,6 +311,7 @@ mod tests {
+             stream_max_retries: None,
+             stream_idle_timeout_ms: None,
+             websocket_connect_timeout_ms: None,
++            compact_request_timeout_ms: None,
+             requires_openai_auth: false,
+             supports_websockets: true,
+         }
+diff --git a/codex-rs/config/src/thread_config/remote.rs b/codex-rs/config/src/thread_config/remote.rs
+index 7b7feacec5..78b217e56a 100644
+--- a/codex-rs/config/src/thread_config/remote.rs
++++ b/codex-rs/config/src/thread_config/remote.rs
+@@ -182,6 +182,7 @@ fn model_provider_from_proto(
+         stream_max_retries: provider.stream_max_retries,
+         stream_idle_timeout_ms: provider.stream_idle_timeout_ms,
+         websocket_connect_timeout_ms: provider.websocket_connect_timeout_ms,
++        compact_request_timeout_ms: None,
+         requires_openai_auth: provider.requires_openai_auth,
+         supports_websockets: provider.supports_websockets,
+     };
+@@ -209,6 +210,7 @@ fn model_provider_to_proto(
+         stream_max_retries,
+         stream_idle_timeout_ms,
+         websocket_connect_timeout_ms,
++        compact_request_timeout_ms: _,
+         requires_openai_auth,
+         supports_websockets,
+     } = provider;
+@@ -509,6 +511,7 @@ mod tests {
+             stream_max_retries: Some(8),
+             stream_idle_timeout_ms: Some(9_000),
+             websocket_connect_timeout_ms: Some(10_000),
++            compact_request_timeout_ms: None,
+             requires_openai_auth: false,
+             supports_websockets: true,
+             aws: None,
+diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
+index 77d2c97d6e..429fd8a45d 100644
+--- a/codex-rs/core/config.schema.json
++++ b/codex-rs/core/config.schema.json
+@@ -1449,6 +1449,12 @@
+           "description": "Base URL for the provider's OpenAI-compatible API.",
+           "type": "string"
+         },
++        "compact_request_timeout_ms": {
++          "description": "Optional total timeout (in milliseconds) for unary `/responses/compact` requests.",
++          "format": "uint64",
++          "minimum": 0.0,
++          "type": "integer"
++        },
+         "env_http_headers": {
+           "additionalProperties": {
+             "type": "string"
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 620645d8f6..a7a20867cf 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -160,6 +160,14 @@ pub(crate) struct CompactConversationRequestSettings {
+     pub(crate) service_tier: Option<String>,
+ }
+ 
++fn compact_request_timeout(api_provider: &ApiProvider) -> Duration {
++    api_provider.compact_request_timeout.unwrap_or(
++        api_provider
++            .stream_idle_timeout
++            .saturating_mul(COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER),
++    )
++}
++
+ /// Session-scoped state shared by all [`ModelClient`] clones.
+ ///
+ /// This is intentionally kept minimal so `ModelClient` does not need to hold a full `Config`. Most
+@@ -523,10 +531,7 @@ impl ModelClient {
+         if let Some(header_value) = self.generate_attestation_header_for().await {
+             extra_headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
+         }
+-        let compact_request_timeout = client_setup
+-            .api_provider
+-            .stream_idle_timeout
+-            .saturating_mul(COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER);
++        let compact_request_timeout = compact_request_timeout(&client_setup.api_provider);
+         let client =
+             ApiCompactClient::new(transport, client_setup.api_provider, client_setup.api_auth)
+                 .with_telemetry(Some(request_telemetry));
+diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
+index b9d9172c83..ebf5b5386e 100644
+--- a/codex-rs/core/src/client_tests.rs
++++ b/codex-rs/core/src/client_tests.rs
+@@ -108,6 +108,36 @@ fn test_model_info() -> ModelInfo {
+     .expect("deserialize test model info")
+ }
+ 
++#[test]
++fn compact_request_timeout_defaults_to_four_times_stream_idle_timeout() {
++    let mut provider =
++        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Responses)
++            .to_api_provider(/*auth_mode*/ None)
++            .expect("provider should convert");
++    provider.stream_idle_timeout = Duration::from_millis(250);
++    provider.compact_request_timeout = None;
++
++    assert_eq!(
++        super::compact_request_timeout(&provider),
++        Duration::from_millis(1_000)
++    );
++}
++
++#[test]
++fn compact_request_timeout_uses_provider_override() {
++    let mut provider =
++        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Responses)
++            .to_api_provider(/*auth_mode*/ None)
++            .expect("provider should convert");
++    provider.stream_idle_timeout = Duration::from_millis(250);
++    provider.compact_request_timeout = Some(Duration::from_millis(123));
++
++    assert_eq!(
++        super::compact_request_timeout(&provider),
++        Duration::from_millis(123)
++    );
++}
++
+ fn test_session_telemetry() -> SessionTelemetry {
+     SessionTelemetry::new(
+         ThreadId::new(),
+diff --git a/codex-rs/core/src/compact_tests.rs b/codex-rs/core/src/compact_tests.rs
+index 69bd95f2df..ae3f65d066 100644
+--- a/codex-rs/core/src/compact_tests.rs
++++ b/codex-rs/core/src/compact_tests.rs
+@@ -233,6 +233,7 @@ fn should_use_remote_compact_task_for_azure_provider() {
+         stream_max_retries: None,
+         stream_idle_timeout_ms: None,
+         websocket_connect_timeout_ms: None,
++        compact_request_timeout_ms: None,
+         requires_openai_auth: false,
+         supports_websockets: false,
+     };
+diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
+index fa024c0bc3..9b6853a47b 100644
+--- a/codex-rs/core/src/config/config_tests.rs
++++ b/codex-rs/core/src/config/config_tests.rs
+@@ -617,6 +617,96 @@ region = "us-west-2"
+     ));
+ }
+ 
++#[test]
++fn accepts_openai_network_overrides() {
++    let cfg = toml::from_str::<ConfigToml>(
++        r#"
++[model_providers.openai]
++request_max_retries = 6
++stream_max_retries = 7
++stream_idle_timeout_ms = 8000
++websocket_connect_timeout_ms = 9000
++compact_request_timeout_ms = 10000
++"#,
++    )
++    .expect("OpenAI network overrides should deserialize");
++
++    let provider = cfg
++        .model_providers
++        .get("openai")
++        .expect("OpenAI override should be present");
++    assert_eq!(provider.request_max_retries, Some(6));
++    assert_eq!(provider.stream_max_retries, Some(7));
++    assert_eq!(provider.stream_idle_timeout_ms, Some(8_000));
++    assert_eq!(provider.websocket_connect_timeout_ms, Some(9_000));
++    assert_eq!(provider.compact_request_timeout_ms, Some(10_000));
++}
++
++#[tokio::test]
++async fn load_config_applies_openai_network_overrides() {
++    let cfg = toml::from_str::<ConfigToml>(
++        r#"
++model_provider = "openai"
++
++[model_providers.openai]
++request_max_retries = 6
++stream_max_retries = 7
++stream_idle_timeout_ms = 8000
++websocket_connect_timeout_ms = 9000
++compact_request_timeout_ms = 10000
++"#,
++    )
++    .expect("OpenAI network overrides should deserialize");
++
++    let config = Config::load_from_base_config_with_overrides(
++        cfg,
++        ConfigOverrides::default(),
++        tempdir().expect("tempdir").abs(),
++    )
++    .await
++    .expect("load config");
++
++    assert_eq!(config.model_provider_id, "openai");
++    assert_eq!(config.model_provider.request_max_retries, Some(6));
++    assert_eq!(config.model_provider.stream_max_retries, Some(7));
++    assert_eq!(config.model_provider.stream_idle_timeout_ms, Some(8_000));
++    assert_eq!(
++        config.model_provider.websocket_connect_timeout_ms,
++        Some(9_000)
++    );
++    assert_eq!(
++        config.model_provider.compact_request_timeout(),
++        Some(Duration::from_millis(10_000))
++    );
++}
++
++#[tokio::test]
++async fn load_config_rejects_unsupported_openai_overrides() {
++    let cfg = toml::from_str::<ConfigToml>(
++        r#"
++model_provider = "openai"
++
++[model_providers.openai]
++name = "Custom OpenAI"
++request_max_retries = 6
++"#,
++    )
++    .expect("OpenAI unsupported overrides should deserialize");
++
++    let err = Config::load_from_base_config_with_overrides(
++        cfg,
++        ConfigOverrides::default(),
++        tempdir().expect("tempdir").abs(),
++    )
++    .await
++    .unwrap_err();
++
++    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
++    assert!(err.to_string().contains(
++        "model_providers.openai only supports changing `stream_idle_timeout_ms`, `stream_max_retries`, `request_max_retries`, `websocket_connect_timeout_ms`, and `compact_request_timeout_ms`; other non-default provider fields are not supported"
++    ));
++}
++
+ #[test]
+ fn config_toml_deserializes_model_availability_nux() {
+     let toml = r#"
+diff --git a/codex-rs/core/tests/responses_headers.rs b/codex-rs/core/tests/responses_headers.rs
+index 6f0429e644..257fd42600 100644
+--- a/codex-rs/core/tests/responses_headers.rs
++++ b/codex-rs/core/tests/responses_headers.rs
+@@ -66,6 +66,7 @@ async fn responses_stream_includes_subagent_header_on_review() {
+         stream_max_retries: Some(0),
+         stream_idle_timeout_ms: Some(5_000),
+         websocket_connect_timeout_ms: None,
++        compact_request_timeout_ms: None,
+         requires_openai_auth: false,
+         supports_websockets: false,
+     };
+@@ -193,6 +194,7 @@ async fn responses_stream_includes_subagent_header_on_other() {
+         stream_max_retries: Some(0),
+         stream_idle_timeout_ms: Some(5_000),
+         websocket_connect_timeout_ms: None,
++        compact_request_timeout_ms: None,
+         requires_openai_auth: false,
+         supports_websockets: false,
+     };
+@@ -305,6 +307,7 @@ async fn responses_respects_model_info_overrides_from_config() {
+         stream_max_retries: Some(0),
+         stream_idle_timeout_ms: Some(5_000),
+         websocket_connect_timeout_ms: None,
++        compact_request_timeout_ms: None,
+         requires_openai_auth: false,
+         supports_websockets: false,
+     };
+diff --git a/codex-rs/core/tests/suite/client.rs b/codex-rs/core/tests/suite/client.rs
+index 7234c59c0f..f7549ecfe2 100644
+--- a/codex-rs/core/tests/suite/client.rs
++++ b/codex-rs/core/tests/suite/client.rs
+@@ -865,6 +865,7 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
+         stream_max_retries: Some(0),
+         stream_idle_timeout_ms: Some(5_000),
+         websocket_connect_timeout_ms: None,
++        compact_request_timeout_ms: None,
+         requires_openai_auth: false,
+         supports_websockets: false,
+     };
+@@ -2320,6 +2321,7 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
+         stream_max_retries: Some(0),
+         stream_idle_timeout_ms: Some(5_000),
+         websocket_connect_timeout_ms: None,
++        compact_request_timeout_ms: None,
+         requires_openai_auth: false,
+         supports_websockets: false,
+     };
+@@ -2931,6 +2933,7 @@ async fn azure_overrides_assign_properties_used_for_responses_url() {
+         stream_max_retries: None,
+         stream_idle_timeout_ms: None,
+         websocket_connect_timeout_ms: None,
++        compact_request_timeout_ms: None,
+         requires_openai_auth: false,
+         supports_websockets: false,
+     };
+@@ -3021,6 +3024,7 @@ async fn env_var_overrides_loaded_auth() {
+         stream_max_retries: None,
+         stream_idle_timeout_ms: None,
+         websocket_connect_timeout_ms: None,
++        compact_request_timeout_ms: None,
+         requires_openai_auth: false,
+         supports_websockets: false,
+     };
+diff --git a/codex-rs/core/tests/suite/client_websockets.rs b/codex-rs/core/tests/suite/client_websockets.rs
+index 09d0093f99..cd67d13b2d 100755
+--- a/codex-rs/core/tests/suite/client_websockets.rs
++++ b/codex-rs/core/tests/suite/client_websockets.rs
+@@ -2077,6 +2077,7 @@ fn websocket_provider_with_connect_timeout(
+         stream_max_retries: Some(0),
+         stream_idle_timeout_ms: Some(5_000),
+         websocket_connect_timeout_ms,
++        compact_request_timeout_ms: None,
+         requires_openai_auth: false,
+         supports_websockets: true,
+     }
+diff --git a/codex-rs/core/tests/suite/stream_error_allows_next_turn.rs b/codex-rs/core/tests/suite/stream_error_allows_next_turn.rs
+index d82692c26c..2bba86e9b2 100644
+--- a/codex-rs/core/tests/suite/stream_error_allows_next_turn.rs
++++ b/codex-rs/core/tests/suite/stream_error_allows_next_turn.rs
+@@ -79,6 +79,7 @@ async fn continue_after_stream_error() {
+         stream_max_retries: Some(1),
+         stream_idle_timeout_ms: Some(2_000),
+         websocket_connect_timeout_ms: None,
++        compact_request_timeout_ms: None,
+         requires_openai_auth: false,
+         supports_websockets: false,
+     };
+diff --git a/codex-rs/core/tests/suite/stream_no_completed.rs b/codex-rs/core/tests/suite/stream_no_completed.rs
+index 471c60db5a..636f828889 100644
+--- a/codex-rs/core/tests/suite/stream_no_completed.rs
++++ b/codex-rs/core/tests/suite/stream_no_completed.rs
+@@ -62,6 +62,7 @@ async fn retries_on_early_close() {
+         stream_max_retries: Some(1),
+         stream_idle_timeout_ms: Some(2000),
+         websocket_connect_timeout_ms: None,
++        compact_request_timeout_ms: None,
+         requires_openai_auth: false,
+         supports_websockets: false,
+     };
+diff --git a/codex-rs/login/src/auth_env_telemetry.rs b/codex-rs/login/src/auth_env_telemetry.rs
+index 3cec5a4ce3..cf089ddab8 100644
+--- a/codex-rs/login/src/auth_env_telemetry.rs
++++ b/codex-rs/login/src/auth_env_telemetry.rs
+@@ -74,6 +74,7 @@ mod tests {
+             stream_max_retries: None,
+             stream_idle_timeout_ms: None,
+             websocket_connect_timeout_ms: None,
++            compact_request_timeout_ms: None,
+             requires_openai_auth: false,
+             supports_websockets: false,
+         };
+diff --git a/codex-rs/model-provider-info/src/lib.rs b/codex-rs/model-provider-info/src/lib.rs
+index c20a51a3aa..856b06bc31 100644
+--- a/codex-rs/model-provider-info/src/lib.rs
++++ b/codex-rs/model-provider-info/src/lib.rs
+@@ -125,6 +125,8 @@ pub struct ModelProviderInfo {
+     /// Maximum time (in milliseconds) to wait for a websocket connection attempt before treating
+     /// it as failed.
+     pub websocket_connect_timeout_ms: Option<u64>,
++    /// Optional total timeout (in milliseconds) for unary `/responses/compact` requests.
++    pub compact_request_timeout_ms: Option<u64>,
+     /// Does this provider require an OpenAI API Key or ChatGPT login token? If true,
+     /// user is presented with login screen on first run, and login preference and token/key
+     /// are stored in auth.json. If false (which is the default), login screen is skipped,
+@@ -264,6 +266,7 @@ impl ModelProviderInfo {
+             headers,
+             retry,
+             stream_idle_timeout: self.stream_idle_timeout(),
++            compact_request_timeout: self.compact_request_timeout(),
+         })
+     }
+ 
+@@ -316,6 +319,11 @@ impl ModelProviderInfo {
+             .unwrap_or(Duration::from_millis(DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS))
+     }
+ 
++    /// Effective timeout for unary `/responses/compact` requests, when explicitly configured.
++    pub fn compact_request_timeout(&self) -> Option<Duration> {
++        self.compact_request_timeout_ms.map(Duration::from_millis)
++    }
++
+     pub fn create_openai_provider(base_url: Option<String>) -> ModelProviderInfo {
+         ModelProviderInfo {
+             name: OPENAI_PROVIDER_NAME.into(),
+@@ -348,6 +356,7 @@ impl ModelProviderInfo {
+             stream_max_retries: None,
+             stream_idle_timeout_ms: None,
+             websocket_connect_timeout_ms: None,
++            compact_request_timeout_ms: None,
+             requires_openai_auth: true,
+             supports_websockets: true,
+         }
+@@ -378,6 +387,7 @@ impl ModelProviderInfo {
+             stream_max_retries: None,
+             stream_idle_timeout_ms: None,
+             websocket_connect_timeout_ms: None,
++            compact_request_timeout_ms: None,
+             requires_openai_auth: false,
+             supports_websockets: false,
+         }
+@@ -445,7 +455,39 @@ pub fn merge_configured_model_providers(
+     configured_model_providers: HashMap<String, ModelProviderInfo>,
+ ) -> Result<HashMap<String, ModelProviderInfo>, String> {
+     for (key, mut provider) in configured_model_providers {
+-        if key == AMAZON_BEDROCK_PROVIDER_ID {
++        if key == OPENAI_PROVIDER_ID {
++            let request_max_retries = provider.request_max_retries.take();
++            let stream_max_retries = provider.stream_max_retries.take();
++            let stream_idle_timeout_ms = provider.stream_idle_timeout_ms.take();
++            let websocket_connect_timeout_ms = provider.websocket_connect_timeout_ms.take();
++            let compact_request_timeout_ms = provider.compact_request_timeout_ms.take();
++            if provider != ModelProviderInfo::default() {
++                return Err(
++                    "model_providers.openai only supports changing `stream_idle_timeout_ms`, \
++`stream_max_retries`, `request_max_retries`, `websocket_connect_timeout_ms`, and \
++`compact_request_timeout_ms`; other non-default provider fields are not supported"
++                        .to_string(),
++                );
++            }
++
++            if let Some(built_in_provider) = model_providers.get_mut(OPENAI_PROVIDER_ID) {
++                if request_max_retries.is_some() {
++                    built_in_provider.request_max_retries = request_max_retries;
++                }
++                if stream_max_retries.is_some() {
++                    built_in_provider.stream_max_retries = stream_max_retries;
++                }
++                if stream_idle_timeout_ms.is_some() {
++                    built_in_provider.stream_idle_timeout_ms = stream_idle_timeout_ms;
++                }
++                if websocket_connect_timeout_ms.is_some() {
++                    built_in_provider.websocket_connect_timeout_ms = websocket_connect_timeout_ms;
++                }
++                if compact_request_timeout_ms.is_some() {
++                    built_in_provider.compact_request_timeout_ms = compact_request_timeout_ms;
++                }
++            }
++        } else if key == AMAZON_BEDROCK_PROVIDER_ID {
+             let aws_override = provider.aws.take();
+             if provider != ModelProviderInfo::default() {
+                 return Err(format!(
+@@ -509,6 +551,7 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
+         stream_max_retries: None,
+         stream_idle_timeout_ms: None,
+         websocket_connect_timeout_ms: None,
++        compact_request_timeout_ms: None,
+         requires_openai_auth: false,
+         supports_websockets: false,
+     }
+diff --git a/codex-rs/model-provider-info/src/model_provider_info_tests.rs b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
+index abfa40a36a..47aacb130e 100644
+--- a/codex-rs/model-provider-info/src/model_provider_info_tests.rs
++++ b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
+@@ -3,6 +3,7 @@ use codex_utils_absolute_path::AbsolutePathBuf;
+ use codex_utils_absolute_path::AbsolutePathBufGuard;
+ use pretty_assertions::assert_eq;
+ use std::num::NonZeroU64;
++use std::time::Duration;
+ use tempfile::tempdir;
+ 
+ #[test]
+@@ -27,6 +28,7 @@ base_url = "http://localhost:11434/v1"
+         stream_max_retries: None,
+         stream_idle_timeout_ms: None,
+         websocket_connect_timeout_ms: None,
++        compact_request_timeout_ms: None,
+         requires_openai_auth: false,
+         supports_websockets: false,
+     };
+@@ -61,6 +63,7 @@ query_params = { api-version = "2025-04-01-preview" }
+         stream_max_retries: None,
+         stream_idle_timeout_ms: None,
+         websocket_connect_timeout_ms: None,
++        compact_request_timeout_ms: None,
+         requires_openai_auth: false,
+         supports_websockets: false,
+     };
+@@ -98,6 +101,7 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
+         stream_max_retries: None,
+         stream_idle_timeout_ms: None,
+         websocket_connect_timeout_ms: None,
++        compact_request_timeout_ms: None,
+         requires_openai_auth: false,
+         supports_websockets: false,
+     };
+@@ -132,6 +136,23 @@ supports_websockets = true
+     assert_eq!(provider.websocket_connect_timeout_ms, Some(15_000));
+ }
+ 
++#[test]
++fn test_deserialize_compact_request_timeout() {
++    let provider_toml = r#"
++name = "OpenAI"
++base_url = "https://api.openai.com/v1"
++compact_request_timeout_ms = 120000
++        "#;
++
++    let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
++
++    assert_eq!(provider.compact_request_timeout_ms, Some(120_000));
++    assert_eq!(
++        provider.compact_request_timeout(),
++        Some(Duration::from_millis(120_000))
++    );
++}
++
+ #[test]
+ fn test_supports_remote_compaction_for_openai() {
+     let provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+@@ -157,6 +178,7 @@ fn test_supports_remote_compaction_for_azure_name() {
+         stream_max_retries: None,
+         stream_idle_timeout_ms: None,
+         websocket_connect_timeout_ms: None,
++        compact_request_timeout_ms: None,
+         requires_openai_auth: false,
+         supports_websockets: false,
+     };
+@@ -182,6 +204,7 @@ fn test_supports_remote_compaction_for_non_openai_non_azure_provider() {
+         stream_max_retries: None,
+         stream_idle_timeout_ms: None,
+         websocket_connect_timeout_ms: None,
++        compact_request_timeout_ms: None,
+         requires_openai_auth: false,
+         supports_websockets: false,
+     };
+@@ -265,6 +288,7 @@ fn test_create_amazon_bedrock_provider() {
+             stream_max_retries: None,
+             stream_idle_timeout_ms: None,
+             websocket_connect_timeout_ms: None,
++            compact_request_timeout_ms: None,
+             requires_openai_auth: false,
+             supports_websockets: false,
+         }
+@@ -351,6 +375,62 @@ fn test_merge_configured_model_providers_applies_amazon_bedrock_profile_override
+     );
+ }
+ 
++#[test]
++fn test_merge_configured_model_providers_applies_openai_network_overrides() {
++    let configured_model_providers = std::collections::HashMap::from([(
++        OPENAI_PROVIDER_ID.to_string(),
++        ModelProviderInfo {
++            request_max_retries: Some(9),
++            stream_max_retries: Some(10),
++            stream_idle_timeout_ms: Some(11_000),
++            websocket_connect_timeout_ms: Some(12_000),
++            compact_request_timeout_ms: Some(13_000),
++            ..ModelProviderInfo::default()
++        },
++    )]);
++
++    let mut expected = built_in_model_providers(/*openai_base_url*/ None);
++    let openai_provider = expected
++        .get_mut(OPENAI_PROVIDER_ID)
++        .expect("OpenAI provider should be built in");
++    openai_provider.request_max_retries = Some(9);
++    openai_provider.stream_max_retries = Some(10);
++    openai_provider.stream_idle_timeout_ms = Some(11_000);
++    openai_provider.websocket_connect_timeout_ms = Some(12_000);
++    openai_provider.compact_request_timeout_ms = Some(13_000);
++
++    assert_eq!(
++        merge_configured_model_providers(
++            built_in_model_providers(/*openai_base_url*/ None),
++            configured_model_providers,
++        ),
++        Ok(expected)
++    );
++}
++
++#[test]
++fn test_merge_configured_model_providers_rejects_openai_non_network_fields() {
++    let configured_model_providers = std::collections::HashMap::from([(
++        OPENAI_PROVIDER_ID.to_string(),
++        ModelProviderInfo {
++            name: "Custom OpenAI".to_string(),
++            request_max_retries: Some(9),
++            ..ModelProviderInfo::default()
++        },
++    )]);
++
++    assert_eq!(
++        merge_configured_model_providers(
++            built_in_model_providers(/*openai_base_url*/ None),
++            configured_model_providers,
++        ),
++        Err(
++            "model_providers.openai only supports changing `stream_idle_timeout_ms`, `stream_max_retries`, `request_max_retries`, `websocket_connect_timeout_ms`, and `compact_request_timeout_ms`; other non-default provider fields are not supported"
++                .to_string()
++        )
++    );
++}
++
+ #[test]
+ fn test_merge_configured_model_providers_rejects_amazon_bedrock_non_default_fields() {
+     let configured_model_providers = std::collections::HashMap::from([(
+diff --git a/codex-rs/model-provider/src/provider.rs b/codex-rs/model-provider/src/provider.rs
+index e2ef3f3650..746c99e1d6 100644
+--- a/codex-rs/model-provider/src/provider.rs
++++ b/codex-rs/model-provider/src/provider.rs
+@@ -319,6 +319,7 @@ mod tests {
+             stream_max_retries: Some(0),
+             stream_idle_timeout_ms: Some(5_000),
+             websocket_connect_timeout_ms: None,
++            compact_request_timeout_ms: None,
+             requires_openai_auth: false,
+             supports_websockets: false,
+         }
