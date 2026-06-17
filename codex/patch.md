@@ -133,6 +133,87 @@ Example payload:
 }
 ```
 
+## Local Hook Helper Scripts
+
+`codex/config` contains two optional helper scripts for forwarding Codex hook
+events to local desktop or webhook notifications.
+
+Copy them into `~/.codex`:
+
+```bash
+cp codex/config/codex_hook_forwarder.py ~/.codex/
+cp codex/config/codex_hook_notify_server.py ~/.codex/
+```
+
+Start the receiver server:
+
+```bash
+python3 ~/.codex/codex_hook_notify_server.py --host 0.0.0.0 --port 8765 --verbose
+```
+
+The server reads CLI flags and `~/.codex/hook-notify-server.toml`; it does not
+read environment variables. Empty or omitted `events` means handle every
+received event:
+
+```toml
+events = []
+
+[notify_send]
+enabled = true
+timeout_ms = 0
+
+[webhook]
+enabled = false
+url = "https://foo.com/notify"
+```
+
+Use `codex_hook_forwarder.py` as the Codex hook command. It reads the hook JSON
+from stdin and posts to the notification server. The forwarder does not accept
+CLI arguments; configure it only with environment variables such as
+`CODEX_HOOK_SERVER_URL`, `CODEX_HOOK_FORWARDER_EVENTS`,
+`CODEX_HOOK_FORWARDER_TIMEOUT`, `CODEX_HOOK_FORWARDER_VERBOSE`,
+`CODEX_HOOK_FORWARDER_STRICT`, `CODEX_HOOK_FORWARDER_INCLUDE_RAW`,
+`CODEX_HOOK_FORWARDER_PREVIEW_LIMIT`, and
+`CODEX_HOOK_FORWARDER_MAX_STDIN_BYTES`.
+
+Minimal `~/.codex/hooks.json` example:
+
+```json
+{
+  "hooks": {
+    "RequestError": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "env CODEX_HOOK_SERVER_URL=http://172.17.0.1:8765/hook python3 ~/.codex/codex_hook_forwarder.py",
+            "timeout": 5,
+            "statusMessage": "Forwarding request error"
+          }
+        ]
+      }
+    ],
+    "AbnormalStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "env CODEX_HOOK_SERVER_URL=http://172.17.0.1:8765/hook python3 ~/.codex/codex_hook_forwarder.py",
+            "timeout": 5,
+            "statusMessage": "Forwarding abnormal stop"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Review and trust command hooks with `/hooks`. `RequestError` and `AbnormalStop`
+are emitted only after this patch is applied to Codex. If you test with
+`SessionStart`, remember it fires only when a matching session starts or
+resumes, not in the middle of an already-running session.
+
 ## Apply The Patch
 
 ```bash
