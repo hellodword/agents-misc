@@ -10,9 +10,14 @@ def build_site(static_dir: Path, data_dir: Path, out_dir: Path) -> None:
     for item in static_dir.iterdir():
         target = out_dir / item.name
         if item.is_dir():
-            shutil.copytree(item, target, dirs_exist_ok=True)
+            if target.exists():
+                shutil.rmtree(target)
+            shutil.copytree(item, target)
         else:
             shutil.copy2(item, target)
 
-    shutil.copytree(data_dir, out_dir / "data", dirs_exist_ok=True)
+    data_target = out_dir / "data"
+    if data_target.exists():
+        shutil.rmtree(data_target)
+    shutil.copytree(data_dir, data_target)
     (out_dir / ".nojekyll").write_text("")

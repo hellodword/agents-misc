@@ -76,9 +76,9 @@ let
 
   checkConfigData = pkgs.runCommand "check-codex-config-data-${codexVersion}" { } ''
     test -f ${codexConfigData}/versions.json
-    test -f ${codexConfigData}/current.json
     test -d ${codexConfigData}/versions
-    test -d ${codexConfigData}/diffs
+    test ! -e ${codexConfigData}/current.json
+    test ! -e ${codexConfigData}/diffs
 
     mkdir -p "$out"
     touch "$out/ok"
@@ -87,7 +87,9 @@ let
   checkConfigSite = pkgs.runCommand "check-codex-config-site-${codexVersion}" { } ''
     test -f ${codexConfigSite}/index.html
     test -f ${codexConfigSite}/data/versions.json
-    test -f ${codexConfigSite}/data/current.json
+    test -d ${codexConfigSite}/data/versions
+    test ! -e ${codexConfigSite}/data/current.json
+    test ! -e ${codexConfigSite}/data/diffs
 
     mkdir -p "$out"
     touch "$out/ok"
