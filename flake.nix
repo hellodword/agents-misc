@@ -1,6 +1,15 @@
 {
   description = "agents-misc";
 
+  nixConfig = {
+    extra-substituters = [
+      "https://hellodword-codex.cachix.org"
+    ];
+    extra-trusted-public-keys = [
+      "hellodword-codex.cachix.org-1:0URmcnC9aynWh9+FJ2tf+HQloylGgZzPtrz3sttTTiQ="
+    ];
+  };
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 

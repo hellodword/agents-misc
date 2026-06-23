@@ -58,8 +58,8 @@ jobs:
           cat <<EOF | sudo tee -a /etc/nix/nix.conf
           experimental-features = nix-command flakes
           max-jobs = auto
-          substituters = https://cache.nixos.org https://${CACHIX_CACHE_NAME}.cachix.org
-          trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWm5YsIZxRcoxIhtpCKD4HLqMsF0Q= ${CACHIX_PUBLIC_KEY}
+          extra-substituters = https://${CACHIX_CACHE_NAME}.cachix.org
+          extra-trusted-public-keys = ${CACHIX_PUBLIC_KEY}
           trusted-users = root ${USER}
           EOF
 
@@ -74,8 +74,8 @@ jobs:
           set -euxo pipefail
 
           nix build \
+            --accept-flake-config \
             --no-link \
-            --print-build-logs \
             --print-out-paths \
             "$FLAKE_PACKAGE" \
             | tee /tmp/nix-build-out-paths
@@ -89,7 +89,6 @@ jobs:
         run: |
           set -euxo pipefail
 
-          test -n "$CACHIX_AUTH_TOKEN"
           test -s /tmp/nix-build-out-paths
 
           cat /tmp/nix-build-out-paths \
