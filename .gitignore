@@ -1,3 +1,4 @@
 tmp
 .devcontainer
 .vscode
+/result*
