@@ -1,0 +1,96 @@
+name: build codex
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agents-misc-patch-codex
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and push Cachix cache
+    runs-on: ubuntu-latest
+
+    env:
+      CACHIX_CACHE_NAME: hellodword-codex
+      CACHIX_PUBLIC_KEY: hellodword-codex.cachix.org-1:0URmcnC9aynWh9+FJ2tf+HQloylGgZzPtrz3sttTTiQ=
+      FLAKE_PACKAGE: .#codex
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Nix with official installer
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y xz-utils
+
+          curl -L https://nixos.org/nix/install | sh -s -- --daemon
+
+          echo "/nix/var/nix/profiles/default/bin" >> "$GITHUB_PATH"
+          echo "NIX_REMOTE=daemon" >> "$GITHUB_ENV"
+
+          . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+
+          nix --version
+
+      - name: Configure Nix
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          sudo sed -i \
+            -e '/^experimental-features[[:space:]]*=/d' \
+            -e '/^max-jobs[[:space:]]*=/d' \
+            -e '/^substituters[[:space:]]*=/d' \
+            -e '/^trusted-public-keys[[:space:]]*=/d' \
+            -e '/^trusted-users[[:space:]]*=/d' \
+            /etc/nix/nix.conf
+
+          cat <<EOF | sudo tee -a /etc/nix/nix.conf
+          experimental-features = nix-command flakes
+          max-jobs = auto
+          substituters = https://cache.nixos.org https://${CACHIX_CACHE_NAME}.cachix.org
+          trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWm5YsIZxRcoxIhtpCKD4HLqMsF0Q= ${CACHIX_PUBLIC_KEY}
+          trusted-users = root ${USER}
+          EOF
+
+          sudo systemctl restart nix-daemon
+
+          nix config show experimental-features
+          nix config show substituters
+
+      - name: Build package
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          nix build \
+            --no-link \
+            --print-build-logs \
+            --print-out-paths \
+            "$FLAKE_PACKAGE" \
+            | tee /tmp/nix-build-out-paths
+
+          test -s /tmp/nix-build-out-paths
+
+      - name: Push runtime closure to Cachix
+        shell: bash
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          set -euxo pipefail
+
+          test -n "$CACHIX_AUTH_TOKEN"
+          test -s /tmp/nix-build-out-paths
+
+          cat /tmp/nix-build-out-paths \
+            | nix shell nixpkgs#cachix -c cachix push "$CACHIX_CACHE_NAME"
