@@ -1,0 +1,8 @@
+{
+  "fetchedAt": "2026-06-23T11:35:23Z",
+  "schemaFile": "codex-rs/core/config.schema.json",
+  "schemaSha256": "sha256:b0b98970b011e59441ab93451146aec42c4088d33e3b0fff75c0c55aeca5920d",
+  "schemaUrl": "https://raw.githubusercontent.com/openai/codex/refs/tags/rust-v0.136.0/codex-rs/core/config.schema.json",
+  "tag": "rust-v0.136.0",
+  "version": "0.136.0"
+}

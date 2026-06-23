@@ -1,0 +1,81 @@
+name: Publish Codex config site
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: agents-misc-codex-github-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    env:
+      CACHIX_CACHE_NAME: hellodword-codex
+      CACHIX_PUBLIC_KEY: hellodword-codex.cachix.org-1:0URmcnC9aynWh9+FJ2tf+HQloylGgZzPtrz3sttTTiQ=
+      FLAKE_PACKAGE: .#codex
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Nix with official installer
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y xz-utils
+
+          curl -L https://nixos.org/nix/install | sh -s -- --daemon
+
+          echo "/nix/var/nix/profiles/default/bin" >> "$GITHUB_PATH"
+          echo "NIX_REMOTE=daemon" >> "$GITHUB_ENV"
+
+          . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+
+          nix --version
+
+      - name: Configure Nix
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          sudo sed -i \
+            -e '/^experimental-features[[:space:]]*=/d' \
+            -e '/^max-jobs[[:space:]]*=/d' \
+            -e '/^substituters[[:space:]]*=/d' \
+            -e '/^trusted-public-keys[[:space:]]*=/d' \
+            -e '/^trusted-users[[:space:]]*=/d' \
+            /etc/nix/nix.conf
+
+          cat <<EOF | sudo tee -a /etc/nix/nix.conf
+          experimental-features = nix-command flakes
+          max-jobs = auto
+          extra-substituters = https://${CACHIX_CACHE_NAME}.cachix.org
+          extra-trusted-public-keys = ${CACHIX_PUBLIC_KEY}
+          trusted-users = root ${USER}
+          EOF
+
+          sudo systemctl restart nix-daemon
+
+          nix config show experimental-features
+          nix config show substituters
+
+      - name: Build site
+        run: nix build .#codexConfigSite
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: result
+
+      - uses: actions/configure-pages@v6
+      - uses: actions/deploy-pages@v5

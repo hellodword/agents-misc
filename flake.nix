@@ -67,19 +67,66 @@
 
       codexFor = system: patchCodex llm-agents.packages.${system}.codex;
 
+      codexConfigFor =
+        system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+          codex = codexFor system;
+          codexVersion = codex.version or (builtins.parseDrvName codex.name).version;
+        in
+        import ./codex/nix {
+          inherit lib pkgs codexVersion;
+          repoSchemas = ./codex/schemas;
+          repoSiteStatic = ./codex/site/static;
+          minVersion = "0.129.0";
+        };
+    in
+    {
       packages = lib.genAttrs supportedSystems (
         system:
         let
           codex = codexFor system;
+          codexConfig = codexConfigFor system;
         in
         {
           inherit codex;
+          inherit (codexConfig)
+            codexcfg
+            codexSchemaRegistry
+            codexConfigData
+            codexConfigSite
+            ;
           default = codex;
         }
       );
-    in
-    {
-      inherit packages;
+
+      apps = lib.genAttrs supportedSystems (
+        system:
+        let
+          codexConfig = codexConfigFor system;
+        in
+        {
+          codexcfg = {
+            type = "app";
+            program = "${codexConfig.codexcfgApp}/bin/codexcfg";
+            meta = {
+              description = "Codex config schema tooling wrapper";
+            };
+          };
+        }
+      );
+
+      checks = lib.genAttrs supportedSystems (
+        system:
+        let
+          codexConfig = codexConfigFor system;
+        in
+        {
+          codex-schema-registry = codexConfig.checkSchemaRegistry;
+          codex-config-data = codexConfig.checkConfigData;
+          codex-config-site = codexConfig.checkConfigSite;
+        }
+      );
 
       overlays.default = final: _prev: {
         agents-misc = {
