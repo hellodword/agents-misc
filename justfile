@@ -56,6 +56,10 @@ codexcfg-current:
 codexcfg-check-registry:
   nix run .#codexcfg -- check-registry --schemas codex/schemas
 
+# Sync an upstream Codex config schema into the registry.
+codexcfg-sync-schema version:
+  nix run .#codexcfg -- sync-schema --schemas codex/schemas --version {{version}}
+
 # Diff Codex config schemas between two versions.
 codexcfg-diff from to:
   nix run .#codexcfg -- diff --schemas codex/schemas --from {{from}} --to {{to}}

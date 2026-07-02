@@ -9,7 +9,7 @@ without committing a patched upstream source tree.
 codex/
   upstream.yaml
   patches/
-    rust-v0.142.0/
+    rust-v0.142.5/
       series
       0001-agents-misc-codex-overrides.patch
       config.schema.json
@@ -19,7 +19,7 @@ codex/
     refresh-patches.py
     build.py
     test.py
-.work/codex/rust-v0.142.0/src/
+.work/codex/rust-v0.142.5/src/
 ```
 
 `codex/patches/<ref>/series` is the patch order. Patch paths are relative to
@@ -36,31 +36,31 @@ patch series.
 Fetch or update a shallow upstream checkout:
 
 ```sh
-just codex-fetch rust-v0.142.0
+just codex-fetch rust-v0.142.5
 ```
 
 Check that the committed patch series applies:
 
 ```sh
-just codex-apply-check rust-v0.142.0
+just codex-apply-check rust-v0.142.5
 ```
 
 Apply the patch series:
 
 ```sh
-just codex-apply rust-v0.142.0
+just codex-apply rust-v0.142.5
 ```
 
 Refresh the patch and generated schema from the current `.work` checkout:
 
 ```sh
-just codex-refresh rust-v0.142.0
+just codex-refresh rust-v0.142.5
 ```
 
 Run the narrow patch validation:
 
 ```sh
-just codex-test rust-v0.142.0
+just codex-test rust-v0.142.5
 ```
 
 Run the Codex config schema tooling:
@@ -68,9 +68,10 @@ Run the Codex config schema tooling:
 ```sh
 just codexcfg-current
 just codexcfg-check-registry
-just codexcfg-diff 0.141.0 0.142.0
-just codexcfg-diff-defaults 0.141.0 0.142.0
-just codexcfg-gen-toml 0.142.0 reference
+just codexcfg-sync-schema 0.142.5
+just codexcfg-diff 0.142.0 0.142.5
+just codexcfg-diff-defaults 0.142.0 0.142.5
+just codexcfg-gen-toml 0.142.5 reference
 ```
 
 ## Upgrading To A New Codex Ref

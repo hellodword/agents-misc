@@ -218,14 +218,14 @@ resumes, not in the middle of an already-running session.
 
 ```bash
 cd /workspaces/agents-misc
-just codex-fetch rust-v0.142.0
-just codex-apply rust-v0.142.0
+just codex-fetch rust-v0.142.5
+just codex-apply rust-v0.142.5
 ```
 
 You can also run a dry-run apply check first:
 
 ```bash
 cd /workspaces/agents-misc
-just codex-apply-check rust-v0.142.0
-just codex-test rust-v0.142.0
+just codex-apply-check rust-v0.142.5
+just codex-test rust-v0.142.5
 ```
