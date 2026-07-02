@@ -1,6 +1,6 @@
 ---
 name: standalone-final-execution-plan
-description: Produce a complete, standalone final execution plan with evidence, workload estimation, step splitting, status tracking, validation checkpoints, and per-step precise commits. Use when the user asks for a final complete plan, a standalone plan, an unattended execution plan, a no-hidden-knowledge answer, detailed evidence, or a non-patch-style final answer. Default output language is English unless the user requests another language.
+description: Produce a complete, standalone final execution plan with evidence, workload estimation, step splitting, status tracking, validation checkpoints, and commit policy. Use when the user asks for a final complete plan, a standalone plan, an unattended execution plan, a no-hidden-knowledge answer, detailed evidence, or a non-patch-style final answer. Default output language is English unless the user requests another language.
 ---
 
 # Standalone Final Execution Plan
@@ -116,6 +116,7 @@ When relevant, explicitly include:
 - per-step status;
 - per-step acceptance criteria;
 - checkpoint acceptance criteria;
+- commit mode;
 - commit strategy;
 - validation method;
 - final acceptance criteria;
@@ -200,11 +201,11 @@ Each evidence item should explain why it matters to the plan.
 
 A good evidence item has this shape:
 
-    Evidence location: Observable fact → Impact on the plan.
+    Evidence location: Observable fact -> Impact on the plan.
 
 Example:
 
-    backend/jobs/video.go:42-68: Existing background job scheduling entry point → The new job should reuse this scheduler instead of introducing a second framework.
+    backend/jobs/video.go:42-68: Existing background job scheduling entry point -> The new job should reuse this scheduler instead of introducing a second framework.
 
 ## Workload Estimation Rule
 
@@ -214,34 +215,80 @@ Use relative effort, not a promise of wall-clock completion time.
 
 Prefer this format:
 
-| Item                      | Estimate                                              |
-| ------------------------- | ----------------------------------------------------- |
-| Scope                     | small / medium / large / extra-large                  |
-| Risk                      | low / medium / high                                   |
-| Affected areas            | list of files, modules, services, tools, or workflows |
-| Expected number of steps  | number                                                |
-| Split required            | yes / no                                              |
-| Reason for split decision | concise reason                                        |
+| Item                                 | Estimate                                              |
+| ------------------------------------ | ----------------------------------------------------- |
+| Scope                                | small / medium / large / extra-large                  |
+| Risk                                 | low / medium / high                                   |
+| Affected areas                       | list of files, modules, services, tools, or workflows |
+| Expected normal execution steps      | number                                                |
+| Split required                       | yes / no                                              |
+| Commit mode                          | manual / automatic / deferred                         |
+| Reason for split and commit decision | concise reason                                        |
 
 Recommended sizing:
 
-- `small`: one focused change, one area, low risk, usually 1-2 steps.
-- `medium`: multiple files or one cross-boundary behavior, usually 3-5 steps.
-- `large`: multiple subsystems, generated artifacts, migrations, E2E, security, or compatibility risk, usually 6-10 steps.
-- `extra-large`: long-running migration, large upstream patch workflow, multi-platform client, or high-risk automation, usually split into phases.
+- `small`: one focused change, one area, low risk, usually one normal execution step.
+- `medium`: multiple files or one cross-boundary behavior, usually 2-5 normal execution steps.
+- `large`: multiple subsystems, generated artifacts, migrations, E2E, security, or compatibility risk, usually 6-10 normal execution steps.
+- `extra-large`: long-running migration, pure patch workflow, multi-platform client, or high-risk automation, usually split into phases.
 
-Split the plan into steps when any of the following is true:
+## Step Splitting Rule
 
-- expected steps exceed 2;
+A normal execution step is an independent, verifiable, semantically complete unit of implementation.
+
+The following do not count as separate normal execution steps:
+
+- implementation and validation of the same change;
+- step acceptance criteria;
+- repair before the same step reaches verified status;
+- documentation sync required by the same implementation step;
+- checkpoint validation.
+
+The following usually count as multiple normal execution steps:
+
+- separate feature slices with distinct user-visible behavior;
+- backend and frontend slices that are independently verifiable;
+- schema or migration setup followed by dependent application behavior;
+- generated artifact setup followed by consumer code;
+- pure patch fetch/apply/refresh/build phases;
+- separate compatibility, security, or data-risk repairs.
+
+Split the plan when any of the following is true:
+
+- there are at least two normal execution steps;
 - multiple subsystems are involved;
 - database/schema/API/config/CLI contracts change;
 - generated artifacts are involved;
 - tests require multiple layers;
 - security or compatibility risk exists;
 - unattended execution is expected;
-- the task is too large to safely commit as one unit.
+- the task is too large to safely validate as one unit.
 
-If the plan is not split, explicitly state why a single step is safe.
+If the plan is not split, explicitly state why a single normal execution step is safe.
+
+## Automatic Commit Decision Rule
+
+Automatic commit mode depends on the number of normal execution steps.
+
+If the plan has no split or only one normal execution step:
+
+- automatic commit mode is disabled by default;
+- the plan must not commit automatically unless the user explicitly requests automatic commits;
+- still provide the proposed commit message and exact staging rule.
+
+If the plan has two or more normal execution steps:
+
+- automatic commit mode is enabled by default;
+- each verified normal step must be precisely staged and committed;
+- checkpoint repairs, if any, must be precisely staged and committed separately.
+
+If commits are forbidden by user instruction, execution mode, or environment:
+
+- set commit mode to `deferred`;
+- provide files to stage;
+- provide proposed commit messages;
+- provide validation performed;
+- explain why commits are deferred.
 
 ## Step Status Rule
 
@@ -256,17 +303,22 @@ Use this status vocabulary:
 - `repairing`: fixing a failed validation or checkpoint;
 - `completed`: implementation work for the step is done;
 - `verified`: implementation and validation for the step passed;
-- `committed`: the step has been precisely staged and committed.
+- `committed`: the step has been precisely staged and committed;
+- `commit_deferred`: the step is verified but commit is not allowed or not requested.
 
-In a final plan that has not been executed yet, initial step statuses should usually be `pending`.
+In a final plan that has not been executed yet, initial normal step statuses should usually be `pending`.
 
-For unattended execution, each step should define how the status changes:
+For unattended execution with automatic commit mode, each step should define this normal status flow:
 
     pending -> in_progress -> completed -> verified -> committed
 
+For one-step or unsplit execution without explicit automatic commit request:
+
+    pending -> in_progress -> completed -> verified -> commit_deferred
+
 If validation fails:
 
-    completed -> failed -> repairing -> completed -> verified -> committed
+    completed -> failed -> repairing -> completed -> verified
 
 If the task cannot continue safely:
 
@@ -287,7 +339,7 @@ Use this structure for each step:
 | Actions         | concrete operations                                         |
 | Validation      | exact commands or manual checks                             |
 | Step acceptance | observable criteria for passing this step                   |
-| Commit          | exact staging rule and commit message pattern               |
+| Commit          | commit mode, exact staging rule, and commit message pattern |
 
 Avoid vague step actions such as:
 
@@ -326,14 +378,14 @@ The executor must:
 
 ## Checkpoint Rule
 
-For unattended or multi-step execution, add checkpoint acceptance after every 3 normal steps.
+For unattended or multi-step execution, add checkpoint acceptance after every 3 normal execution steps.
 
-If the plan has 1-2 steps:
+If the plan has 1-2 normal execution steps:
 
 - no checkpoint is required;
 - still include per-step validation and final acceptance.
 
-If the plan has 3 or more steps:
+If the plan has 3 or more normal execution steps:
 
 - add `Checkpoint C1` after steps `S1-S3`;
 - add `Checkpoint C2` after steps `S4-S6`;
@@ -357,22 +409,24 @@ The executor must:
 3. create a repair sub-step, such as `C1-R1`;
 4. apply the minimal repair;
 5. validate again;
-6. precisely stage and commit the repair;
+6. precisely stage and commit the repair when automatic commit mode is active;
 7. mark the checkpoint `verified`.
 
-Checkpoint repairs must use their own commits.
+Checkpoint repairs must use their own commits when commits are allowed and automatic commit mode is active.
 
 ## Commit Rule
 
-Every completed step must be precisely staged and committed.
+When automatic commit mode is active, every verified normal execution step must be precisely staged and committed.
+
+When automatic commit mode is disabled, do not commit automatically. Provide the proposed commit message and staging rule instead.
 
 Do not rely on `.gitignore` as the only safety mechanism.
 
-After each step reaches `verified`, the executor must:
+When a commit is allowed and required, the executor must:
 
 1. run `git status --short`;
 2. inspect the relevant diffs;
-3. stage only explicit file paths that belong to the current step;
+3. stage only explicit file paths that belong to the current verified step;
 4. never run:
    - `git add .`;
    - `git add -A`;
@@ -402,9 +456,9 @@ Allowed default types:
 - `refactor`;
 - `test`.
 
-The plan must include a proposed commit message for each step.
+The plan must include a proposed commit message for each normal step.
 
-If a checkpoint repair is required, it must also be committed with a separate precise commit.
+If a checkpoint repair is required and commits are allowed, it must also be committed with a separate precise commit.
 
 If commits are not allowed by user instruction, execution mode, or environment, the plan must state that and provide:
 
@@ -436,7 +490,8 @@ Default stop conditions:
 - validation failure that cannot be repaired within the current step;
 - test failure outside the planned scope;
 - command requiring system-level or global environment modification;
-- user decision required by compatibility, security, licensing, or data-loss risk.
+- user decision required by compatibility, security, licensing, or data-loss risk;
+- a one-step or unsplit plan attempts to commit automatically without explicit user request.
 
 Unattended execution must not:
 
@@ -474,8 +529,8 @@ After repair:
 
 - rerun the smallest relevant validation;
 - update status;
-- precisely stage files;
-- commit the repair;
+- precisely stage files if a commit is required;
+- commit the repair if commit mode allows it;
 - continue only when validation passes.
 
 ## Evidence of Completion Rule
@@ -583,7 +638,7 @@ Do not mechanically include irrelevant sections.
 
 ## Step Table Template
 
-Use a table like this when the task has multiple steps:
+Use a table like this when the task has multiple normal execution steps:
 
     | Step | Status | Goal | Files or areas | Validation | Commit |
     |---|---|---|---|---|---|
@@ -607,9 +662,9 @@ Include a commit plan like this:
 
     | Step | Files to stage | Commit message | Commit condition |
     |---|---|---|---|
-    | S1 | exact paths | `type(scope): subject` | after S1 validation passes |
-    | S2 | exact paths | `type(scope): subject` | after S2 validation passes |
-    | C1-R1 | exact repair paths | `fix(scope): repair checkpoint failure` | only if C1 fails and repair passes |
+    | S1 | exact paths | `type(scope): subject` | after S1 validation passes and commit mode allows it |
+    | S2 | exact paths | `type(scope): subject` | after S2 validation passes and commit mode allows it |
+    | C1-R1 | exact repair paths | `fix(scope): repair checkpoint failure` | only if C1 fails, repair passes, and commit mode allows it |
 
 When exact files are not known before discovery, state the discovery rule:
 
@@ -622,7 +677,7 @@ Include a validation plan like this:
     | Level | Command or check | Success condition | Failure handling |
     |---|---|---|---|
     | Step | ... | ... | mark step failed and repair |
-    | Checkpoint | ... | ... | create repair sub-step and commit |
+    | Checkpoint | ... | ... | create repair sub-step and commit if allowed |
     | Final | ... | ... | stop and report unresolved issue |
 
 ## Acceptance Criteria Rule
@@ -634,10 +689,13 @@ Good acceptance criteria are specific and checkable.
 Examples:
 
 - The plan states goal, scope, assumptions, constraints, evidence, execution steps, validation, commits, risks, and rollback.
+- Workload is estimated before steps are defined.
+- The plan explains whether the task has one normal execution step or multiple normal execution steps.
+- One-step or unsplit plans do not commit automatically unless the user explicitly requested automatic commits.
+- Multi-step plans commit each verified normal step precisely.
 - Every step has a status, validation method, acceptance criteria, and proposed commit message.
-- Every group of 3 steps has a checkpoint acceptance rule.
+- Every group of 3 normal execution steps has a checkpoint acceptance rule when the plan has 3 or more normal steps.
 - A failed step or checkpoint triggers repair before continuing.
-- Each completed step is precisely staged and committed.
 - Bulk staging commands are forbidden.
 - Important claims include evidence or are labeled as assumptions.
 - The answer does not depend on previous conversation history.
@@ -723,11 +781,15 @@ Before producing the final answer, verify that it satisfies all of the following
 - Missing evidence is clearly labeled as an assumption, inference, or item requiring verification.
 - Workload is estimated before steps are defined.
 - The plan states whether step splitting is required and why.
+- The plan defines what counts as a normal execution step.
+- The commit mode is explicit.
+- One-step or unsplit plans do not commit automatically unless explicitly requested.
+- Multi-step plans enable automatic commits by default.
 - Every step has a status.
 - Every step has its own validation and acceptance criteria.
-- Every completed step requires precise staging and commit.
+- Every completed step follows the correct commit policy.
 - Bulk staging commands are forbidden.
-- Every 3-step group has checkpoint acceptance when the plan has 3 or more steps.
+- Every 3-step group has checkpoint acceptance when the plan has 3 or more normal steps.
 - Checkpoint failure triggers repair before continuing.
 - Unattended execution safeguards are included when relevant.
 - Validation or acceptance criteria are included.

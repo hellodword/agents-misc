@@ -14,7 +14,7 @@ Load only the smallest relevant rule files. Do not preload the full `.agents/rul
 
 - Work planning and task slicing: `.agents/rules/core/working-model.md`
 - Environment and devcontainer limits: `.agents/rules/core/environment.md`
-- Git and commits: `.agents/rules/core/git.md`
+- Git, automatic commit policy, and commit boundaries: `.agents/rules/core/git.md`
 - Repo hygiene: `.agents/rules/core/repo-hygiene.md`
 - Architecture: `.agents/rules/core/architecture.md`
 - Code quality: `.agents/rules/core/code-quality.md`
@@ -37,7 +37,8 @@ Load only the smallest relevant rule files. Do not preload the full `.agents/rul
 
 ## Toolchain
 
-- Nix and Just: `.agents/rules/toolchain/nix-just.md`
+- Nix and Just command workflow: `.agents/rules/toolchain/nix-just.md`
+- Flake file organization and outputs: `.agents/rules/toolchain/flake-organization.md`
 - Command discovery: `.agents/rules/toolchain/command-discovery.md`
 - Formatting: `.agents/rules/toolchain/formatting.md`
 - Browser E2E: `.agents/rules/toolchain/browser-e2e.md`
