@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest",
+        "--isolated",
+        "--config",
+        ".agents/references/playwright-mcp.config.example.json"
+      ]
+    }
+  }
+}

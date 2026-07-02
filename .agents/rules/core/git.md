@@ -1,0 +1,27 @@
+# Git Rules
+
+- Commit is the smallest unit of agent progress.
+- Commit after each independent, verifiable, semantically complete task.
+- Never run bulk staging commands.
+- Stage explicit target files only.
+- Never stage ignored files.
+- Never use force-add for ignored files unless the ignore policy is explicitly changed first.
+- Use non-interactive commits.
+- Allowed commit types:
+  - `feat`
+  - `fix`
+  - `chore`
+  - `docs`
+  - `refactor`
+  - `test`
+- Header format:
+  - `type(scope): subject`
+  - `type: subject`
+- Subject must be an English imperative phrase.
+- Subject must not end with a period.
+- Body may describe key changes, validation, migrations, generated artifacts, or documentation sync.
+- If `$AI_COMMIT_COAUTHOR` is non-blank, append `Co-authored-by: $AI_COMMIT_COAUTHOR` as the final line.
+- If commits are forbidden by mode or user instruction, provide:
+  - changed file list;
+  - verification performed;
+  - suggested commit message.
