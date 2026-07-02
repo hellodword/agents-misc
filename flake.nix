@@ -80,6 +80,15 @@
           repoSiteStatic = ./codex/site/static;
           minVersion = "0.129.0";
         };
+
+      rulesyncFor =
+        system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+        in
+        import ./rulesync/nix {
+          inherit lib pkgs;
+        };
     in
     {
       packages = lib.genAttrs supportedSystems (
@@ -87,6 +96,7 @@
         let
           codex = codexFor system;
           codexConfig = codexConfigFor system;
+          rulesyncConfig = rulesyncFor system;
         in
         {
           inherit codex;
@@ -97,6 +107,7 @@
             codexConfigSite
             ;
           default = codex;
+          inherit (rulesyncConfig) rulesync;
         }
       );
 
