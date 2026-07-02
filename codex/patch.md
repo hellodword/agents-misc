@@ -1,6 +1,6 @@
 # OpenAI Network Configuration and Model Request Failure Hooks
 
-This patch is based on `rust-v0.140.0`. It keeps the restricted override behavior for the built-in OpenAI provider and adds two notification-only hooks: `RequestError` and `AbnormalStop`.
+The current patch series lives under `codex/patches/<rust-tag>/`. It keeps the restricted override behavior for the built-in OpenAI provider and adds two notification-only hooks: `RequestError` and `AbnormalStop`.
 
 ## OpenAI Provider Network Field Overrides
 
@@ -217,18 +217,15 @@ resumes, not in the middle of an already-running session.
 ## Apply The Patch
 
 ```bash
-cd /workspaces/agents-misc/codex/origin
-git checkout rust-v0.140.0
-git apply /workspaces/agents-misc/codex/patches/rust-v0.140.0/openai-provider-network-timeouts.patch
-cd codex-rs
-cargo check -p codex-protocol -p codex-config -p codex-hooks -p codex-core -p codex-app-server-protocol -p codex-analytics
-cargo check -p codex-app-server -p codex-tui
+cd /workspaces/agents-misc
+just codex-fetch rust-v0.142.0
+just codex-apply rust-v0.142.0
 ```
 
 You can also run a dry-run apply check first:
 
 ```bash
-cd /workspaces/agents-misc/codex/origin
-git checkout rust-v0.140.0
-git apply --check /workspaces/agents-misc/codex/patches/rust-v0.140.0/openai-provider-network-timeouts.patch
+cd /workspaces/agents-misc
+just codex-apply-check rust-v0.142.0
+just codex-test rust-v0.142.0
 ```

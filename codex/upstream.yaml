@@ -1,0 +1,26 @@
+name: codex
+url: https://github.com/openai/codex
+worktreeRoot: .work/codex
+schemaFile: codex-rs/core/config.schema.json
+schemaCommand:
+  - just
+  - write-config-schema
+patchesRoot: codex/patches
+currentRef: rust-v0.142.0
+maintainedRefs:
+  - rust-v0.130.0
+  - rust-v0.136.0
+  - rust-v0.139.0
+  - rust-v0.140.0
+  - rust-v0.141.0
+  - rust-v0.142.0
+validation:
+  narrowCargoCheck:
+    - codex-protocol
+    - codex-config
+    - codex-hooks
+    - codex-core
+    - codex-app-server-protocol
+    - codex-analytics
+    - codex-app-server
+    - codex-tui
