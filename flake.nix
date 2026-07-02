@@ -33,9 +33,7 @@
         let
           patchDir = ./codex/patches/rust-v${version};
           series = patchDir + "/series";
-          parseSeriesLine =
-            line:
-            line != "" && !(lib.hasPrefix "#" line);
+          parseSeriesLine = line: line != "" && !(lib.hasPrefix "#" line);
           patchForSeriesEntry =
             entry:
             let
@@ -138,6 +136,7 @@
         system:
         let
           codexConfig = codexConfigFor system;
+          rulesyncConfig = rulesyncFor system;
         in
         {
           codexcfg = {
@@ -147,6 +146,14 @@
               description = "Codex config schema tooling wrapper";
             };
           };
+
+          rulesync = {
+            type = "app";
+            program = "${rulesyncConfig.rulesync}/bin/rulesync";
+            meta = {
+              description = "Strict Rulesync wrapper";
+            };
+          };
         }
       );
 
@@ -154,11 +161,13 @@
         system:
         let
           codexConfig = codexConfigFor system;
+          rulesyncConfig = rulesyncFor system;
         in
         {
           codex-schema-registry = codexConfig.checkSchemaRegistry;
           codex-config-data = codexConfig.checkConfigData;
           codex-config-site = codexConfig.checkConfigSite;
+          rulesync-build = rulesyncConfig.rulesync;
         }
       );
 

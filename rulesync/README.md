@@ -41,6 +41,19 @@ nix run .#rulesync -- init
 nix run .#rulesync -- generate
 ```
 
+The repository `justfile` exposes the same wrapper:
+
+```sh
+just rulesync-build
+just rulesync-version
+just rulesync-init
+just rulesync-generate
+just rulesync-generate-check
+just rulesync-gitignore
+just rulesync-import
+just rulesync-convert
+```
+
 Supported commands:
 
 ```sh
@@ -66,6 +79,12 @@ rulesync generate --input-root ..
 Run the command from the project root, or set `RULESYNC_PROJECT_ROOT` to an
 existing project directory. The project root must not resolve to the real
 `$HOME` directory.
+
+Runtime commands require Bubblewrap and a container or host that allows
+unprivileged user namespaces. If that kernel or container capability is not
+available, `nix build .#rulesync` and `just rulesync-build` can still validate
+the package build, but `nix run .#rulesync -- ...` and the runtime `just`
+recipes will fail when Bubblewrap tries to create the jail.
 
 Typical first-time setup:
 

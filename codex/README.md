@@ -63,6 +63,16 @@ Run the narrow patch validation:
 just codex-test rust-v0.142.0
 ```
 
+Run the Codex config schema tooling:
+
+```sh
+just codexcfg-current
+just codexcfg-check-registry
+just codexcfg-diff 0.141.0 0.142.0
+just codexcfg-diff-defaults 0.141.0 0.142.0
+just codexcfg-gen-toml 0.142.0 reference
+```
+
 ## Upgrading To A New Codex Ref
 
 Use an explicit target. Do not infer the target from upstream tags.
