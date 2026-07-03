@@ -50,7 +50,7 @@ For ordinary Go, Rust, Node.js, Python, Flutter, or frontend projects that merel
    - `nixosModules`;
    - `homeManagerModules`.
 3. Inspect existing `flake.nix`, `flake.lock`, and `./nix/`.
-4. Align `nixpkgs` with the devcontainer revision when `$DEVCONTAINER_FLAKE_INPUTS` provides `.inputs.nixpkgs.rev`.
+4. Before initializing or updating `nixpkgs`, read `.agents/references/nixpkgs-devcontainer-alignment.md` and align to the devcontainer revision when available and verified.
 5. Keep `flake.nix` thin.
 6. Move reusable Nix logic into focused files under `./nix/`.
 7. Add or update checks for exported outputs.
@@ -88,6 +88,8 @@ Report:
 
 - why the project is classified as pure Nix;
 - flake outputs changed;
+- nixpkgs source decision;
+- whether `flake.lock` records the intended nixpkgs revision when it changed;
 - files under `./nix/` changed;
 - whether `justfile` is absent by design or present as optional convenience;
 - validation commands run;

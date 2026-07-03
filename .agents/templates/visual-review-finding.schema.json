@@ -2,17 +2,37 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "batch_id": { "type": "string" },
+    "schema_version": {
+      "type": "string",
+      "const": "1"
+    },
+    "batch_id": {
+      "type": "string"
+    },
     "findings": {
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "finding_id": { "type": "string" },
-          "screenshot_id": { "type": "string" },
-          "page_or_component": { "type": "string" },
-          "severity": { "type": "string", "enum": ["P0", "P1", "P2", "P3"] },
+          "finding_id": {
+            "type": "string"
+          },
+          "screenshot_id": {
+            "type": "string"
+          },
+          "page_or_component": {
+            "type": "string"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "P0",
+              "P1",
+              "P2",
+              "P3"
+            ]
+          },
           "category": {
             "type": "string",
             "enum": [
@@ -31,12 +51,32 @@
               "possible-bug"
             ]
           },
-          "evidence": { "type": "string" },
-          "recommendation": { "type": "string" },
-          "affected_context": { "type": "string" },
-          "duplicate_candidate_id": { "type": ["string", "null"] },
-          "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
-          "needs_human_decision": { "type": "boolean" }
+          "evidence": {
+            "type": "string"
+          },
+          "recommendation": {
+            "type": "string"
+          },
+          "affected_context": {
+            "type": "string"
+          },
+          "duplicate_candidate_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "confidence": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ]
+          },
+          "needs_human_decision": {
+            "type": "boolean"
+          }
         },
         "required": [
           "finding_id",
@@ -54,5 +94,9 @@
       }
     }
   },
-  "required": ["batch_id", "findings"]
+  "required": [
+    "schema_version",
+    "batch_id",
+    "findings"
+  ]
 }

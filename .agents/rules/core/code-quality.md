@@ -7,6 +7,8 @@ triggers:
   - 'error handling'
   - 'pure logic'
   - 'maintainability'
+summary: Keep code readable, local, boring, and aligned with existing conventions.
+load_with: []
 ---
 
 # Code Quality

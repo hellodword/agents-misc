@@ -8,16 +8,22 @@ triggers:
   - 'Home Manager module'
   - 'overlay'
   - 'template'
+summary: Apply defaults for projects whose primary product is Nix outputs.
+load_with:
+  rules:
+    - toolchain.flake-organization
+  skills:
+    - pure-nix-project
+  references:
+    - nixpkgs-devcontainer-alignment
 ---
 
 # Pure Nix Project Rules
 ## Applicability
 
-Use these defaults only for new projects, greenfield scaffolding, or when the existing repository has no clear convention.
+Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.
 
-Do not introduce this stack, package manager, framework, database, toolchain, workflow, or directory structure into an existing project merely because it is preferred here.
-
-Prefer the current local convention when it is coherent and working.
+Prefer coherent local conventions.
 
 ## Purpose
 
@@ -138,11 +144,9 @@ Default nixpkgs branch:
 
     github:NixOS/nixpkgs/nixos-unstable
 
-Inside a devcontainer, first check `$DEVCONTAINER_FLAKE_INPUTS` for `.inputs.nixpkgs.rev`.
+Before initializing or updating `nixpkgs`, read `.agents/references/nixpkgs-devcontainer-alignment.md`.
 
-If a rev exists, align repository nixpkgs to that exact rev using the devcontainer alignment rule in `.agents/rules/toolchain/nix-just.md`.
-
-If no rev exists, use `nixos-unstable`.
+Use the devcontainer revision when it is available and verified in `flake.lock`; otherwise use `nixos-unstable`.
 
 ## Formatting
 

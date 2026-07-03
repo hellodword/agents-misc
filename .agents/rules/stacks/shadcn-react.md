@@ -7,17 +7,17 @@ triggers:
   - 'components.json'
   - 'Tailwind'
   - 'design tokens'
+summary: Apply shadcn React defaults for components, registries, tokens, and accessibility.
+load_with: []
 ---
 
 # shadcn React Rules
 
 ## Applicability
 
-Use these defaults only for new projects, greenfield scaffolding, or when the existing repository has no clear convention.
+Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.
 
-Do not introduce this stack, package manager, framework, database, toolchain, workflow, or directory structure into an existing project merely because it is preferred here.
-
-Prefer the current local convention when it is coherent and working.
+Prefer coherent local conventions.
 
 ## Rules
 

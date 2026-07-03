@@ -8,6 +8,8 @@ triggers:
   - 'Python script'
   - 'just recipe'
   - 'idempotent'
+summary: Keep repository scripts documented, narrow, reproducible, and project-local.
+load_with: []
 ---
 
 # Repository Script Rules

@@ -8,6 +8,8 @@ triggers:
   - 'analytics'
   - 'telemetry'
   - 'fixtures'
+summary: Minimize, protect, and avoid exposing personal or sensitive data.
+load_with: []
 ---
 
 # Data and Privacy Rules

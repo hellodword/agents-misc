@@ -8,6 +8,13 @@ triggers:
   - 'branch'
   - 'status'
   - 'Conventional Commit'
+summary: Keep commits atomic, explicit, and safe around unrelated user changes.
+load_with:
+  rules:
+    - core.repo-hygiene
+  skills:
+    - atomic-commit
+    - repo-hygiene-review
 ---
 
 # Git Rules

@@ -8,6 +8,8 @@ triggers:
   - 'a11y'
   - 'accessibility'
   - 'responsive'
+summary: Keep UI changes accessible, localized, responsive, and state-aware.
+load_with: []
 ---
 
 # UI/UX, i18n, and Accessibility Rules

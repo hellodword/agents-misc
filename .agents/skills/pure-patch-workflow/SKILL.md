@@ -16,13 +16,14 @@ Maintain reproducible patch sets against upstream revisions.
 3. Fetch only the needed upstream source into `.work/<upstream>/<rev>/src`.
 4. Do not commit `.work/`.
 5. Create or update the Nix dev shell for the patch workspace.
-6. Add just recipes that call Nix and then upstream-native commands.
-7. Keep patches under `<upstream>/patches/<rev>/`.
-8. Keep a `series` file for patch order.
-9. Use build jobs no higher than `max(1, nproc - 1)`.
-10. If the first full build is very expensive, provide the exact command and ask the user to run it manually.
-11. Avoid deleting build caches or triggering full rebuilds while iterating patches.
-12. When upgrading upstream, create a new patch directory and preserve the old one.
+6. Before initializing or updating `nixpkgs`, read `.agents/references/nixpkgs-devcontainer-alignment.md`.
+7. Add just recipes that call Nix and then upstream-native commands.
+8. Keep patches under `<upstream>/patches/<rev>/`.
+9. Keep a `series` file for patch order.
+10. Use build jobs no higher than `max(1, nproc - 1)`.
+11. If the first full build is very expensive, provide the exact command and ask the user to run it manually.
+12. Avoid deleting build caches or triggering full rebuilds while iterating patches.
+13. When upgrading upstream, create a new patch directory and preserve the old one.
 
 ## Validation
 
@@ -33,6 +34,7 @@ Report:
 - patch directory;
 - series file;
 - build/test command;
+- nixpkgs source decision;
 - jobs limit;
 - cache status;
 - validation limitations.

@@ -1,15 +1,30 @@
 ---
 name: standalone-final-execution-plan
-description: Produce a complete standalone final execution plan with evidence, assumptions, step splitting, validation, acceptance criteria, and commit mode. Use when the user asks for a final complete plan, standalone plan, unattended execution plan, detailed evidence, or a copyable no-hidden-context answer.
+description: Use only when the user explicitly asks for a final complete plan, standalone plan, unattended execution plan, copyable execution plan, or no-hidden-context answer. Do not use for ordinary coding tasks, routine final reports, or brief implementation summaries.
 ---
 
 # Standalone Final Execution Plan
 
 ## Purpose
 
-Use this skill when the final deliverable must be a complete, standalone execution plan that can be copied, reviewed, shared, or reused independently.
+Use this skill only when the final deliverable is a complete, standalone execution plan that can be copied, reviewed, shared, or reused independently.
 
-This skill controls the answer structure. It does not decide the technical solution by itself. The solution must still follow the user's request, repository rules, loaded task-specific rules, and available evidence.
+This skill controls answer structure. It does not decide the technical solution. The solution must still follow the user's request, repository rules, loaded task-specific rules, and available evidence.
+
+Do not use this skill for normal code modification reports, routine summaries, or ordinary step-by-step implementation work unless the user explicitly asks for a standalone plan.
+
+## Explicit trigger phrases
+
+Load this skill when the user asks for one of:
+
+- final complete plan;
+- standalone plan;
+- unattended execution plan;
+- copyable execution plan;
+- no-hidden-context answer;
+- a plan that another agent or human can execute without the conversation.
+
+Do not infer this skill merely from a complex task.
 
 ## Required companion files
 

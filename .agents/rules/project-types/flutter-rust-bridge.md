@@ -6,13 +6,17 @@ triggers:
   - 'cross-platform client'
   - 'flutter_rust_bridge'
   - 'mobile desktop'
+summary: Apply defaults for Flutter clients with Rust core or bridge layers.
+load_with: []
 ---
 
 # Flutter + Rust Bridge Project Rules
 
 ## Applicability
 
-Use these defaults only for new cross-platform client projects, greenfield scaffolding, or repositories without clear existing client/native conventions. Do not introduce Flutter, Rust, or a bridge layer into an existing project merely because they are preferred here.
+Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.
+
+Prefer coherent local conventions.
 
 ## Default stack
 

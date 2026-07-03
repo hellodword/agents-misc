@@ -7,6 +7,18 @@ triggers:
   - 'protocol'
   - 'API contract'
   - 'FFI contract'
+summary: Define and preserve config, schema, protocol, and API contracts.
+load_with:
+  rules:
+    - core.compatibility
+    - core.testing
+  skills:
+    - compatibility-review
+  templates:
+    - api-contract
+    - config-contract
+    - protocol
+    - schema
 ---
 
 # Config, Schema, Protocol, and API Rules

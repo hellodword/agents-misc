@@ -7,6 +7,16 @@ triggers:
   - 'SQLite migration'
   - 'data reset'
   - 'schema version'
+summary: Make schema and persisted data changes explicit, validated, and recoverable.
+load_with:
+  rules:
+    - core.backup-import-export
+    - stack.database-sqlite
+    - core.testing
+  skills:
+    - sqlite-migration-backup
+  templates:
+    - migration-plan
 ---
 
 # Data Migration Rules

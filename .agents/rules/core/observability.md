@@ -7,6 +7,8 @@ triggers:
   - 'tracing'
   - 'observability'
   - 'diagnostics'
+summary: Add useful logs and diagnostics without leaking sensitive information.
+load_with: []
 ---
 
 # Observability Rules

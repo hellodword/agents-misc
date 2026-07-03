@@ -2,6 +2,10 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1"
+    },
     "run_id": {
       "type": "string"
     },
@@ -100,6 +104,7 @@
     }
   },
   "required": [
+    "schema_version",
     "run_id",
     "approved_findings",
     "rejected_or_duplicate_findings",

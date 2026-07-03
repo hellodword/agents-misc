@@ -16,17 +16,16 @@ Run high-cost screenshot-based review without overloading the main context and w
 3. Create `manifest.jsonl` with screenshot id, route, viewport, locale, theme, state, path, hash, and capture command.
 4. Create one shared `rubric.md`.
 5. Batch screenshots by page family, component family, or user flow.
-6. Use one-shot review tasks when available:
-   - Codex: `codex exec`
-   - OpenCode: `opencode run`
-   - generic fallback: smaller main-context batches with the same manifest, rubric, and schema discipline.
-7. Require structured findings that reference screenshot ids.
-8. Use exactly the categories defined in `.agents/templates/visual-review-finding.schema.json`.
-9. Do not implement per-batch recommendations directly.
-10. Run a synthesis task to merge duplicates, resolve conflicts, and produce an approved issue list.
-11. Apply code changes only from the approved issue list.
-12. Use AI image editing only when explicitly requested; store outputs under `tmp/visual-review/<run-id>/image-edits/`.
-13. Treat edited images as references, not source of truth.
+6. Read `.agents/rules/toolchain/agent-tool-adapters.md` before using one-shot review tasks.
+7. Use one-shot review tasks only when the adapter command and required flags are available in the current environment.
+8. If adapter schema enforcement is unavailable, write JSON under `tmp/visual-review/<run-id>/` and validate it separately.
+9. Require structured findings that reference screenshot ids and include `schema_version` value `1`.
+10. Use exactly the categories defined in `.agents/templates/visual-review-finding.schema.json`.
+11. Do not implement per-batch recommendations directly.
+12. Run a synthesis task to merge duplicates, resolve conflicts, and produce an approved issue list.
+13. Apply code changes only from the approved issue list.
+14. Use AI image editing only when explicitly requested; store outputs under `tmp/visual-review/<run-id>/image-edits/`.
+15. Treat edited images as references, not source of truth.
 
 ## Consistency controls
 

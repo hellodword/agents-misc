@@ -7,13 +7,15 @@ triggers:
   - 'host tool'
   - 'global install'
   - 'system dependency'
+summary: Respect local environment limits, devcontainer boundaries, and available capabilities.
+load_with: []
 ---
 
 # Environment Rules
 
 - Assume the default development environment may be a VS Code devcontainer.
 - Do not read or write `.vscode/**` or `.devcontainer/**` by default.
-- If the user explicitly asks for editor/container diagnostics, read-only access is allowed.
+- If the user explicitly asks for editor/container diagnostics, inspect only the narrow files needed for the diagnosis.
 - Never modify system-level package managers or global toolchains.
 - Do not run `apt`, `brew`, `sudo apt`, global npm installs, global cargo installs, or Go installs into a global bin.
 - Do not execute curl/wget-to-shell installers.

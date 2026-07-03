@@ -7,6 +7,8 @@ triggers:
   - 'cache'
   - 'latency'
   - 'memory'
+summary: Measure and scope performance changes before adding complexity.
+load_with: []
 ---
 
 # Performance Rules

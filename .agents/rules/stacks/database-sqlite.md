@@ -8,6 +8,14 @@ triggers:
   - 'WAL'
   - 'foreign keys'
   - 'SQL migrations'
+summary: Apply SQLite defaults for native SQL, migrations, local database files, and validation.
+load_with:
+  rules:
+    - core.data-migrations
+    - core.backup-import-export
+    - core.testing
+  skills:
+    - sqlite-migration-backup
 ---
 
 # SQLite Rules
@@ -33,8 +41,8 @@ Do not introduce SQLite into an existing project that already has a clear storag
 Default Go SQLite stack:
 
 - `database/sql`;
-- `modernc.org/sqlite` by default for simple portable builds;
-- `mattn/go-sqlite3` only when CGO or extension support is intentionally acceptable;
+- `github.com/mattn/go-sqlite3`;
+- native SQL;
 - `sqlc` only when query volume or type-safety needs justify generated code.
 
 ## Rust

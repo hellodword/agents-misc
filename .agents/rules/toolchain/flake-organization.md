@@ -8,6 +8,10 @@ triggers:
   - 'apps'
   - 'checks'
   - 'devShells'
+summary: Organize flake inputs, outputs, packages, apps, checks, and dev shells consistently.
+load_with:
+  references:
+    - nixpkgs-devcontainer-alignment
 ---
 
 # Flake Organization Rules
@@ -125,7 +129,7 @@ Default nixpkgs branch:
 
     github:NixOS/nixpkgs/nixos-unstable
 
-Before pinning or updating nixpkgs inside a devcontainer, apply the devcontainer alignment rule from `.agents/rules/toolchain/nix-just.md`.
+Before pinning or updating nixpkgs, apply `.agents/references/nixpkgs-devcontainer-alignment.md`.
 
 ## `./nix/`
 

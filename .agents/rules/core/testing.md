@@ -8,6 +8,10 @@ triggers:
   - 'race detector'
   - 'coverage'
   - 'flaky test'
+summary: Choose narrow validation and avoid weakening tests to hide failures.
+load_with:
+  skills:
+    - validation-selection
 ---
 
 # Testing Rules

@@ -8,13 +8,17 @@ triggers:
   - 'React'
   - 'Vue'
   - 'browser app'
+summary: Apply defaults for standalone frontend applications and browser UI behavior.
+load_with: []
 ---
 
 # Frontend-only Project Rules
 
 ## Applicability
 
-Use these defaults only for new frontend projects, greenfield scaffolding, or repositories without a clear existing frontend convention. Do not introduce these stacks into an existing project merely because they are preferred here.
+Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.
+
+Prefer coherent local conventions.
 
 ## Default stack
 

@@ -8,16 +8,21 @@ triggers:
   - 'go-sqlite3'
   - 'slog'
   - 'race detector'
+summary: Apply Go defaults for modules, formatting, SQLite, logging, and race validation.
+load_with:
+  rules:
+    - core.testing
+  skills:
+    - validation-selection
 ---
 
 # Go Rules
+
 ## Applicability
 
-Use these defaults only for new projects, greenfield scaffolding, or when the existing repository has no clear convention.
+Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.
 
-Do not introduce this stack, package manager, framework, database, toolchain, workflow, or directory structure into an existing project merely because it is preferred here.
-
-Prefer the current local convention when it is coherent and working.
+Prefer coherent local conventions.
 
 - Use Go modules.
 - Use `gofmt`.
@@ -32,7 +37,6 @@ Prefer the current local convention when it is coherent and working.
   - use `log/slog`;
   - use JSON logs for services and machine-consumed CLIs;
   - use `gopkg.in/natefinch/lumberjack.v2` when file log rotation is required.
-- If `github.com/mattn/go-sqlite3` is used, ensure the Nix dev shell provides CGO, a C compiler, and SQLite development support.
 - Use `context.Context` for request-scoped and cancelable work.
 - Keep migrations as SQL files for non-trivial persistence.
 - Do not install Go tools globally.

@@ -8,15 +8,32 @@ triggers:
   - 'opencode run'
   - 'subagent'
   - 'one-shot review'
+summary: Probe available agent CLIs before using Codex, OpenCode, or generic one-shot review workflows.
+load_with:
+  references:
+    - agent-tool-adapter-examples
 ---
 
 # Agent Tool Adapter Rules
 
 Use this rule when a workflow needs a one-shot sub-agent, structured review, sandboxed review, or tool-specific command invocation.
 
+## Probe before use
+
+Before using tool-specific commands or flags:
+
+1. Run `command -v codex` or `command -v opencode` for the intended adapter.
+2. Run the relevant `--help` command when available.
+3. Use only flags shown by the current environment.
+4. If schema enforcement is unavailable, write output to a file and validate it separately.
+
+Treat command examples as shapes, not guaranteed stable invocations. Verify current CLI help before use.
+
+Reference command shapes live in `.agents/references/agent-tool-adapter-examples.md`.
+
 ## Codex
 
-Use `codex exec` for one-shot read-only or workspace-write sub-agent tasks when available.
+Use `codex exec` for one-shot non-mutating or workspace-write sub-agent tasks when available and verified in the current environment.
 
 Use Codex-specific flags only when the current environment exposes them.
 
@@ -26,11 +43,11 @@ Suitable tasks include:
 - structured finding extraction;
 - synthesis of review outputs;
 - independent compatibility or security review;
-- read-only exploration that benefits from isolated context.
+- non-mutating exploration that benefits from isolated context.
 
 ## OpenCode
 
-Use `opencode run` for the corresponding one-shot sub-agent or non-interactive task when available.
+Use `opencode run` for the corresponding one-shot sub-agent or non-interactive task when available and verified in the current environment.
 
 Use OpenCode-specific flags only when the current environment exposes them.
 
@@ -50,7 +67,7 @@ When using the fallback:
 
 ## Safety
 
-Use read-only execution for review tasks.
+Use non-mutating execution for review tasks.
 
 Use workspace-write only when the task intentionally writes generated mockups, image edits, reports, or other outputs under an ignored temporary path.
 

@@ -7,6 +7,8 @@ triggers:
   - 'browser automation'
   - 'isolated profile'
   - 'browser verification'
+summary: Use Playwright MCP for exploratory browser checks when useful and available.
+load_with: []
 ---
 
 # Playwright MCP Rules

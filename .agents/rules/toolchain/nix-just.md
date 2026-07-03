@@ -8,23 +8,26 @@ triggers:
   - 'flake.nix'
   - 'dev shell'
   - 'nixpkgs'
+summary: Use Nix for reproducible environments and Just for documented project commands.
+load_with:
+  rules:
+    - toolchain.flake-organization
+    - core.scripts
+  skills:
+    - nix-just-workflow
+  references:
+    - nixpkgs-devcontainer-alignment
 ---
 
 # Nix and Just Rules
 
 ## Applicability
 
-Use these defaults only for new projects, greenfield scaffolding, or when the existing repository has no clear convention.
+Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.
 
-Do not introduce this stack, package manager, framework, database, toolchain, workflow, or directory structure into an existing project merely because it is preferred here.
-
-Prefer the current local convention when it is coherent and working.
+Prefer coherent local conventions.
 
 ## Defaults
-
-Use these defaults only for new projects, greenfield scaffolding, or repositories with no clear convention.
-
-Do not introduce Nix or Just into an existing project merely because they are preferred here.
 
 - Default system: `x86_64-linux`.
 - Default nixpkgs branch: `nixos-unstable`.
@@ -64,32 +67,14 @@ For pure Nix projects:
 
 ## Devcontainer nixpkgs alignment
 
-Before initializing or updating the repository `nixpkgs` input inside a devcontainer, check whether the current devcontainer exposes an exact nixpkgs revision through `$DEVCONTAINER_FLAKE_INPUTS`.
+Before initializing or updating the repository `nixpkgs` input, read `.agents/references/nixpkgs-devcontainer-alignment.md`.
 
-Use:
+Summary requirements:
 
-    devcontainer_nixpkgs_rev=""
-    if [ -n "${DEVCONTAINER_FLAKE_INPUTS:-}" ] && [ -r "$DEVCONTAINER_FLAKE_INPUTS" ]; then
-      devcontainer_nixpkgs_rev="$(jq -r '.inputs.nixpkgs.rev // empty' "$DEVCONTAINER_FLAKE_INPUTS")"
-    fi
-
-If `devcontainer_nixpkgs_rev` is non-empty, align to it with:
-
-    nix flake update nixpkgs --override-input nixpkgs "github:NixOS/nixpkgs/${devcontainer_nixpkgs_rev}"
-
-After running the command, verify the result:
-
-    jq -r '.nodes.nixpkgs.locked.rev // empty' flake.lock
-
-Success means the locked rev matches `devcontainer_nixpkgs_rev`.
-
-If the lockfile does not record the intended revision, stop and report the mismatch. Do not claim that the repository is aligned.
-
-If `$DEVCONTAINER_FLAKE_INPUTS` is unset, unreadable, lacks `.inputs.nixpkgs.rev`, or the extracted value is empty, use:
-
-    github:NixOS/nixpkgs/nixos-unstable
-
-Do not install `jq` globally. If `jq` is unavailable before the dev shell exists, use an already available `python3` fallback only if it is present; otherwise report an environment blocker.
+- prefer the exact nixpkgs revision exposed through `$DEVCONTAINER_FLAKE_INPUTS` when available;
+- verify that `flake.lock` records the intended revision after updating;
+- fall back to `github:NixOS/nixpkgs/nixos-unstable` only when no devcontainer revision is available;
+- do not install `jq` or other helpers globally.
 
 ## Command classes
 

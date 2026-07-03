@@ -8,6 +8,16 @@ triggers:
   - 'stdout'
   - 'stderr'
   - 'machine-readable output'
+summary: Keep CLI commands, flags, output, and exit behavior stable and scriptable.
+load_with:
+  rules:
+    - project-type.cli
+    - core.compatibility
+    - core.testing
+  skills:
+    - cli-contract
+  templates:
+    - cli-contract
 ---
 
 # CLI Stability Rules

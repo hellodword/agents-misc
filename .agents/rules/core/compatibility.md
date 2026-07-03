@@ -7,6 +7,8 @@ triggers:
   - 'deprecation'
   - 'migration path'
   - 'contract stage'
+summary: Preserve durable contracts unless aggressive early-stage behavior is explicit.
+load_with: []
 ---
 
 # Compatibility Rules

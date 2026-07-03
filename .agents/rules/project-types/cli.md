@@ -7,13 +7,17 @@ triggers:
   - 'subcommands'
   - 'flags'
   - 'terminal app'
+summary: Apply defaults for durable command-line tools and CLI contracts.
+load_with: []
 ---
 
 # CLI Project Rules
 
 ## Applicability
 
-Use these defaults only for new CLI projects, greenfield scaffolding, or repositories without a clear existing CLI convention. Do not introduce these stacks into an existing project merely because they are preferred here.
+Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.
+
+Prefer coherent local conventions.
 
 ## Default languages
 

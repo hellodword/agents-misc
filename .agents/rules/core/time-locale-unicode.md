@@ -8,6 +8,8 @@ triggers:
   - 'Unicode'
   - 'encoding'
   - 'i18n text'
+summary: Handle time, locale, Unicode, and formatting consistently.
+load_with: []
 ---
 
 # Time, Locale, and Unicode Rules

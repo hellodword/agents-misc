@@ -6,6 +6,8 @@ triggers:
   - 'copyright'
   - 'third-party code'
   - 'SPDX'
+summary: Handle licenses deliberately for new projects and added third-party assets.
+load_with: []
 ---
 
 # Licensing Rules

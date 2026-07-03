@@ -6,6 +6,7 @@ triggers:
   - design
   - module boundaries
   - system design
+summary: Prefer simple local architecture with clear boundaries and minimal abstraction.
 load_with: []
 ---
 

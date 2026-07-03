@@ -8,6 +8,8 @@ triggers:
   - 'gofmt'
   - 'nix fmt'
   - 'touched files'
+summary: Use project formatting narrowly and avoid unrelated repository-wide churn.
+load_with: []
 ---
 
 # Formatting Rules

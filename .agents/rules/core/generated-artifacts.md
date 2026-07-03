@@ -7,6 +7,10 @@ triggers:
   - 'snapshot'
   - 'generated docs'
   - 'reproducibility'
+summary: Classify generated artifacts and commit only reproducible durable outputs.
+load_with:
+  skills:
+    - generated-artifacts-review
 ---
 
 # Generated Artifact Rules

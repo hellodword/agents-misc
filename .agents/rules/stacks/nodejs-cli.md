@@ -7,20 +7,18 @@ triggers:
   - 'TypeScript CLI'
   - 'package-lock'
   - 'bundled JavaScript'
+summary: Apply Node.js CLI defaults when npm, frontend, or browser tooling fit best.
+load_with: []
 ---
 
 # Node.js CLI Rules
 ## Applicability
 
-Use these defaults only for new projects, greenfield scaffolding, or when the existing repository has no clear convention.
+Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.
 
-Do not introduce this stack, package manager, framework, database, toolchain, workflow, or directory structure into an existing project merely because it is preferred here.
-
-Prefer the current local convention when it is coherent and working.
+Prefer coherent local conventions.
 
 Use Node.js for CLI projects when ecosystem fit justifies it, especially frontend/tooling/npm/browser automation workflows.
-
-Use these defaults only for new projects, greenfield scaffolding, or repositories with no clear convention.
 
 - Default package manager for new projects: npm.
 - Commit `package-lock.json`.

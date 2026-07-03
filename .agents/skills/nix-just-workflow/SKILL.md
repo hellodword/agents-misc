@@ -31,12 +31,8 @@ Use this skill when working on:
    - project command;
    - environment capability command.
 2. Run bootstrap commands directly when needed.
-3. Before initializing or updating `nixpkgs`, check `$DEVCONTAINER_FLAKE_INPUTS`:
-   - read `jq -r '.inputs.nixpkgs.rev // empty' "$DEVCONTAINER_FLAKE_INPUTS"` when the file exists and is readable;
-   - if a rev is present, run `nix flake update nixpkgs --override-input nixpkgs "github:NixOS/nixpkgs/<rev>"`;
-   - verify `flake.lock` actually records the intended rev;
-   - if the lockfile does not record the intended rev, stop and report the mismatch.
-4. If no devcontainer nixpkgs rev is available, use `github:NixOS/nixpkgs/nixos-unstable`.
+3. Before initializing or updating `nixpkgs`, read `.agents/references/nixpkgs-devcontainer-alignment.md`.
+4. Use the devcontainer nixpkgs revision when it is available and verified; otherwise use `github:NixOS/nixpkgs/nixos-unstable`.
 5. Run project commands through `nix develop .#<env> --command ...`.
 6. Use `nix develop path:$PWD#<env> --command ...` when flake source tracking hides new files.
 7. Put stable repeated commands in `justfile`.

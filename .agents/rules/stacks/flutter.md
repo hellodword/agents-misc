@@ -7,6 +7,8 @@ triggers:
   - 'widget test'
   - 'flutter analyze'
   - 'mobile UI'
+summary: Apply Flutter defaults for formatting, analysis, state management, and tests.
+load_with: []
 ---
 
 # Flutter Rules

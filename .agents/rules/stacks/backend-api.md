@@ -8,6 +8,8 @@ triggers:
   - 'authorization'
   - 'pagination'
   - 'error shape'
+summary: Apply backend API defaults for contracts, validation, authorization, and handlers.
+load_with: []
 ---
 
 # Backend API Rules

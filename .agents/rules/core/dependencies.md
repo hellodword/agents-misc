@@ -8,6 +8,8 @@ triggers:
   - 'license risk'
   - 'supply chain'
   - 'new dependency'
+summary: Add dependencies only when justified and through project-local tooling.
+load_with: []
 ---
 
 # Dependency Rules

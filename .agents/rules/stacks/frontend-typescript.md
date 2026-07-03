@@ -8,20 +8,16 @@ triggers:
   - 'Next.js'
   - 'frontend state'
   - 'locales'
+summary: Apply TypeScript frontend defaults for framework choice, state, i18n, and validation.
+load_with: []
 ---
 
 # Frontend TypeScript Rules
 ## Applicability
 
-Use these defaults only for new projects, greenfield scaffolding, or when the existing repository has no clear convention.
+Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.
 
-Do not introduce this stack, package manager, framework, database, toolchain, workflow, or directory structure into an existing project merely because it is preferred here.
-
-Prefer the current local convention when it is coherent and working.
-
-Use these defaults only for new projects, greenfield scaffolding, or repositories with no clear convention.
-
-Do not introduce a preferred frontend framework into an existing project merely because it is listed here.
+Prefer coherent local conventions.
 
 - Prefer TypeScript for durable frontend work.
 - Do not force a specific framework when the current shadcn ecosystem provides a better fit.

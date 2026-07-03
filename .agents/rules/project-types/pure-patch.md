@@ -7,16 +7,23 @@ triggers:
   - 'patch series'
   - 'refresh patch'
   - 'apply patch'
+summary: Maintain reproducible patch sets against upstream projects without committing worktrees.
+load_with:
+  rules:
+    - toolchain.nix-just
+    - core.repo-hygiene
+  skills:
+    - pure-patch-workflow
+  references:
+    - nixpkgs-devcontainer-alignment
 ---
 
 # Pure Patch Project Rules
 ## Applicability
 
-Use these defaults only for new projects, greenfield scaffolding, or when the existing repository has no clear convention.
+Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.
 
-Do not introduce this stack, package manager, framework, database, toolchain, workflow, or directory structure into an existing project merely because it is preferred here.
-
-Prefer the current local convention when it is coherent and working.
+Prefer coherent local conventions.
 
 Use this for maintaining patches against upstream projects such as Chromium, Firefox, codex_rs, dnsmasq, and similar projects.
 
@@ -68,10 +75,11 @@ Before editing patches:
 3. Fetch only what is needed for the selected revision/tag when possible.
 4. Place upstream checkout under `.work/<upstream>/<rev>/src`.
 5. Create or update Nix dev shell for the patch workspace.
-6. Add just recipes that call Nix and then upstream-native commands.
-7. Verify the narrowest build/test command that can compile or validate the unpatched upstream checkout.
-8. Apply existing patches.
-9. Verify the narrowest build/test command after patches.
+6. Before initializing or updating `nixpkgs`, read `.agents/references/nixpkgs-devcontainer-alignment.md`.
+7. Add just recipes that call Nix and then upstream-native commands.
+8. Verify the narrowest build/test command that can compile or validate the unpatched upstream checkout.
+9. Apply existing patches.
+10. Verify the narrowest build/test command after patches.
 
 ## Fetch strategy
 

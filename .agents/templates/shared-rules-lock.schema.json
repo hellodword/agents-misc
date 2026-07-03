@@ -1,0 +1,29 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1"
+    },
+    "expected_name": {
+      "type": "string"
+    },
+    "expected_version": {
+      "type": "string"
+    },
+    "expected_rules_schema_version": {
+      "type": "string"
+    },
+    "expected_overlay_discovery_version": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "expected_name",
+    "expected_version",
+    "expected_rules_schema_version",
+    "expected_overlay_discovery_version"
+  ]
+}

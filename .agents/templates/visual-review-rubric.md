@@ -45,6 +45,7 @@ Use exactly these category values:
 
 ## Review instructions
 
+- Include top-level `schema_version` with value `1` in structured JSON outputs.
 - Cite screenshot ids.
 - Provide visual evidence.
 - Avoid subjective preference without evidence.
