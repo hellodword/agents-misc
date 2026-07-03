@@ -1,3 +1,15 @@
+---
+id: stack.backend-api
+kind: stack
+triggers:
+  - 'backend API'
+  - 'HTTP API'
+  - 'handlers'
+  - 'authorization'
+  - 'pagination'
+  - 'error shape'
+---
+
 # Backend API Rules
 
 - Define API contracts before implementation when clients depend on them.

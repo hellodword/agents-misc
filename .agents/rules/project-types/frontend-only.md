@@ -1,6 +1,22 @@
+---
+id: project-type.frontend-only
+kind: project-type
+triggers:
+  - 'frontend-only'
+  - 'SPA'
+  - 'Next.js'
+  - 'React'
+  - 'Vue'
+  - 'browser app'
+---
+
 # Frontend-only Project Rules
 
-Default stack:
+## Applicability
+
+Use these defaults only for new frontend projects, greenfield scaffolding, or repositories without a clear existing frontend convention. Do not introduce these stacks into an existing project merely because they are preferred here.
+
+## Default stack
 
 - TypeScript.
 - npm.
@@ -11,14 +27,14 @@ Default stack:
 - No backend by default.
 - No deployment setup by default.
 
-Design:
+## Design
 
 - Model user flows, empty states, loading states, error states, permission states, unavailable/offline states, and responsive layouts.
 - Prefer simple local state before global state.
 - Keep API mock/data boundaries clear.
 - Use plain HTML only for very small static demos.
 
-Validation:
+## Validation
 
 - Type checks.
 - Narrow unit/component tests when behavior is non-trivial.

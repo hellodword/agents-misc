@@ -1,3 +1,14 @@
+---
+id: stack.flutter
+kind: stack
+triggers:
+  - 'Flutter'
+  - 'Dart'
+  - 'widget test'
+  - 'flutter analyze'
+  - 'mobile UI'
+---
+
 # Flutter Rules
 
 - Follow existing project conventions first.

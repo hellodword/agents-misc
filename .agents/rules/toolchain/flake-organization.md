@@ -1,3 +1,15 @@
+---
+id: toolchain.flake-organization
+kind: toolchain
+triggers:
+  - 'flake organization'
+  - 'nix directory'
+  - 'flake outputs'
+  - 'apps'
+  - 'checks'
+  - 'devShells'
+---
+
 # Flake Organization Rules
 
 ## Purpose
@@ -12,12 +24,39 @@ Use this rule when creating or reorganizing:
 - `devShells`
 - `checks`
 - `formatter`
+- `templates`
+- `overlays`
+- `nixosModules`
+- `homeManagerModules`
 
 The goal is to keep the flake readable, reproducible, and easy for agents to extend without turning `flake.nix` into a large unstructured file.
 
+## Ordinary projects and pure Nix projects
+
+In ordinary projects, Nix is primarily the reproducible toolchain, build, test, package, and development environment entrypoint.
+
+In pure Nix projects, Nix is the core product language and the flake outputs are the public interface.
+
+A project should be treated as pure Nix only when the user explicitly says so or the repository clearly states that its main product is Nix-based.
+
+Pure Nix examples:
+
+- Nix package collections;
+- overlays;
+- NixOS modules;
+- Home Manager modules;
+- flake templates;
+- Nix libraries;
+- development-environment distributions;
+- Nix-based infrastructure or deployment modules.
+
+Ordinary projects should prefer a commented `justfile` as a human command menu.
+
+Pure Nix projects do not require a `justfile`. If a pure Nix project has a `justfile`, it should remain an optional convenience layer over flake-native commands.
+
 ## Root layout
 
-Recommended root layout:
+Recommended ordinary-project layout:
 
     .
     ├── flake.nix
@@ -30,6 +69,27 @@ Recommended root layout:
     │   ├── dev-shells.nix
     │   ├── checks.nix
     │   └── formatter.nix
+    └── scripts/
+        └── <durable-script>.<ext>
+
+Recommended pure-Nix layout:
+
+    .
+    ├── flake.nix
+    ├── flake.lock
+    ├── nix/
+    │   ├── lib.nix
+    │   ├── packages.nix
+    │   ├── apps.nix
+    │   ├── dev-shells.nix
+    │   ├── checks.nix
+    │   ├── formatter.nix
+    │   ├── overlays/
+    │   ├── modules/
+    │   ├── nixos-modules/
+    │   ├── home-manager-modules/
+    │   └── templates/
+    ├── tests/
     └── scripts/
         └── <durable-script>.<ext>
 
@@ -53,11 +113,13 @@ It should contain:
 It should not contain:
 
 - long shell scripts;
-- large derivation bodies;
+- large unrelated derivation bodies;
 - long per-language tool lists when they can be moved to `./nix/dev-shells.nix`;
 - complex code generation orchestration;
-- product logic;
+- stateful workflow algorithms;
 - pure patch apply/refresh/build algorithms.
+
+For pure Nix projects, product-level Nix output wiring belongs in `flake.nix`, but reusable logic should still be split into `./nix/`.
 
 Default nixpkgs branch:
 
@@ -77,6 +139,11 @@ Recommended file responsibilities:
 - `nix/dev-shells.nix`: `devShells.${system}` definitions.
 - `nix/checks.nix`: `checks.${system}` definitions.
 - `nix/formatter.nix`: `formatter.${system}` definition.
+- `nix/overlays/`: overlay definitions.
+- `nix/modules/`: project-specific Nix modules.
+- `nix/nixos-modules/`: NixOS module definitions.
+- `nix/home-manager-modules/`: Home Manager module definitions.
+- `nix/templates/`: template definitions and template assets.
 
 Keep module interfaces simple.
 
@@ -113,6 +180,8 @@ Scripts used by flake outputs must be reproducible:
 - output paths must be stable;
 - scripts must not rely on global installs.
 
+Pure Nix projects should not move Nix product logic into scripts merely to avoid writing Nix. Scripts should handle imperative orchestration, not replace Nix modules or flake outputs.
+
 ## Outputs
 
 ### `packages`
@@ -129,7 +198,8 @@ Use packages for:
 - compiled applications;
 - generated static outputs intended as build products;
 - packaged CLI binaries;
-- reusable derivations.
+- reusable derivations;
+- pure Nix package exports.
 
 Do not use packages for:
 
@@ -153,7 +223,8 @@ Use apps for:
 - invoking durable repository scripts;
 - project-local codegen commands;
 - migration commands when they are safe and documented;
-- pure patch helper commands.
+- pure patch helper commands;
+- pure Nix maintenance commands that are safe to run through `nix run`.
 
 Apps should be thin wrappers around packages or scripts.
 
@@ -176,6 +247,8 @@ A dev shell should include:
 - project-local codegen tools;
 - native libraries required by project dependencies.
 
+Pure Nix projects should include Nix formatters, linters, and test tools in the dev shell when they are part of the project workflow.
+
 Do not add host-specific tools just because they are useful in one environment.
 
 Do not add Chromium-family browsers to the dev shell only for exploratory E2E. Add browser dependencies only when browser testing is a durable project requirement and the Nix package works in the target environment.
@@ -190,6 +263,9 @@ Good checks:
 - unit test derivations;
 - formatting checks when stable;
 - codegen reproducibility checks;
+- Nix module evaluation checks;
+- overlay evaluation checks;
+- flake template checks;
 - lightweight integration checks that do not require secrets, network, display, or host services.
 
 Do not put long-running, flaky, credentialed, browser-display-dependent, or host-specific checks in `checks` by default.
@@ -202,11 +278,42 @@ Formatter output should support:
 
     nix fmt
 
+Pure Nix projects should normally expose a formatter.
+
 Do not add a formatter output if the project has no stable formatting command.
+
+### `templates`
+
+Use `templates.<name>` when the project intentionally provides reusable flake templates.
+
+Each template should include:
+
+- a clear description;
+- minimal files;
+- no secrets;
+- no machine-specific paths;
+- a documented validation command.
+
+### `overlays`
+
+Use `overlays.<name>` when the project intentionally exports overlays.
+
+Overlays should be documented and evaluated by checks when practical.
+
+### `nixosModules` and `homeManagerModules`
+
+Use module outputs when the project intentionally exports NixOS or Home Manager modules.
+
+Modules should include:
+
+- options with descriptions;
+- sensible defaults;
+- examples when practical;
+- evaluation checks when practical.
 
 ## Justfile integration
 
-Expose stable commands through commented just recipes.
+Ordinary projects should expose stable commands through commented just recipes.
 
 Each recipe should call Nix.
 
@@ -232,11 +339,27 @@ Example:
     test:
       nix develop .#dev --command just _test
 
+Pure Nix projects do not require a justfile.
+
+When a pure Nix project does include a justfile, it should stay optional and forward to flake-native commands:
+
+    # Show flake outputs.
+    show:
+      nix flake show
+
+    # Run stable flake checks.
+    check:
+      nix flake check
+
+    # Format Nix files through the flake formatter.
+    fmt:
+      nix fmt
+
 Private helper recipes may be prefixed with `_`, but they should still stay simple.
 
 ## Complexity boundary
 
-Move logic out of `flake.nix` and `justfile` when it needs:
+Move imperative workflow logic out of `flake.nix` and `justfile` when it needs:
 
 - loops;
 - branching;
@@ -247,13 +370,13 @@ Move logic out of `flake.nix` and `justfile` when it needs:
 - long command sequences;
 - environment probing.
 
-Durable complex logic belongs in `./scripts/`.
+Durable complex imperative logic belongs in `./scripts/`.
 
-Nix should pin tools and compose outputs.
+Nix should pin tools, compose outputs, evaluate modules, and define reproducible build logic.
 
-Just should make commands discoverable.
+Just should make ordinary-project commands discoverable when a justfile is used.
 
-Scripts should implement orchestration.
+Scripts should implement imperative orchestration.
 
 ## Validation
 
@@ -266,4 +389,12 @@ When newly created files are invisible because of Git flake source tracking, use
 
     nix develop path:$PWD#dev --command <command> ...
 
-If output changes are intended to be durable, wrap common commands in commented just recipes.
+For pure Nix projects, validation should usually include:
+
+    nix flake show
+    nix flake check
+    nix fmt
+
+If output changes are intended to be durable in an ordinary project, wrap common commands in commented just recipes.
+
+If output changes are intended to be durable in a pure Nix project, ensure the flake outputs themselves are discoverable and documented.

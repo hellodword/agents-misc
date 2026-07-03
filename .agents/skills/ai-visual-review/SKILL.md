@@ -11,18 +11,22 @@ Run high-cost screenshot-based review without overloading the main context and w
 
 ## Workflow
 
-1. Confirm the user explicitly requested visual review or image editing.
+1. Verify that the user explicitly requested visual review or image editing.
 2. Capture screenshots into `tmp/visual-review/<run-id>/screenshots/`.
 3. Create `manifest.jsonl` with screenshot id, route, viewport, locale, theme, state, path, hash, and capture command.
 4. Create one shared `rubric.md`.
 5. Batch screenshots by page family, component family, or user flow.
-6. Use one-shot sub-agent tasks such as `codex exec` for each batch.
+6. Use one-shot review tasks when available:
+   - Codex: `codex exec`
+   - OpenCode: `opencode run`
+   - generic fallback: smaller main-context batches with the same manifest, rubric, and schema discipline.
 7. Require structured findings that reference screenshot ids.
-8. Do not implement per-batch recommendations directly.
-9. Run a synthesis sub-agent to merge duplicates, resolve conflicts, and produce an approved issue list.
-10. Apply code changes only from the approved issue list.
-11. Use AI image editing only when explicitly requested; store outputs under `tmp/visual-review/<run-id>/image-edits/`.
-12. Treat edited images as references, not source of truth.
+8. Use exactly the categories defined in `.agents/templates/visual-review-finding.schema.json`.
+9. Do not implement per-batch recommendations directly.
+10. Run a synthesis task to merge duplicates, resolve conflicts, and produce an approved issue list.
+11. Apply code changes only from the approved issue list.
+12. Use AI image editing only when explicitly requested; store outputs under `tmp/visual-review/<run-id>/image-edits/`.
+13. Treat edited images as references, not source of truth.
 
 ## Consistency controls
 

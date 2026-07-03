@@ -14,8 +14,8 @@ Decide whether generated files should be committed and how to keep generation re
 1. Identify generated files and their generator.
 2. Identify tracked inputs.
 3. Identify whether the generated files are imported by source, required by build/tests/runtime, or expected by upstream.
-4. Confirm generator tooling is pinned by `flake.nix`, lockfiles, or both.
-5. Confirm generation command is documented in `justfile` or project docs.
+4. Verify generator tooling is pinned by `flake.nix`, lockfiles, or both.
+5. Verify generation command is documented in `justfile` or project docs.
 6. Check for timestamps, absolute paths, random ids, machine-specific data, or nondeterministic ordering.
 7. Commit durable generated assets when required.
 8. Do not commit runtime/build outputs.

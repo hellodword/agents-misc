@@ -1,3 +1,15 @@
+---
+id: core.ui-ux-i18n-a11y
+kind: core
+triggers:
+  - 'UI'
+  - 'UX'
+  - 'i18n'
+  - 'a11y'
+  - 'accessibility'
+  - 'responsive'
+---
+
 # UI/UX, i18n, and Accessibility Rules
 
 ## UX defaults

@@ -1,12 +1,35 @@
+---
+id: stack.shadcn-react
+kind: stack
+triggers:
+  - 'shadcn'
+  - 'React components'
+  - 'components.json'
+  - 'Tailwind'
+  - 'design tokens'
+---
+
 # shadcn React Rules
+
+## Applicability
+
+Use these defaults only for new projects, greenfield scaffolding, or when the existing repository has no clear convention.
+
+Do not introduce this stack, package manager, framework, database, toolchain, workflow, or directory structure into an existing project merely because it is preferred here.
+
+Prefer the current local convention when it is coherent and working.
+
+## Rules
 
 - Use the official shadcn skill when installed.
 - Inspect `components.json` before adding or modifying shadcn components.
-- Use the project's package runner:
-  - npm: `npx shadcn@latest ...`
-  - pnpm: `pnpm dlx shadcn@latest ...`
-  - yarn: `yarn dlx shadcn@latest ...`
-  - bun: `bunx --bun shadcn@latest ...`
+- Use the project's package runner and a reviewed explicit shadcn version for durable project automation:
+  - npm: `npx shadcn@<reviewed-version> ...`
+  - pnpm: `pnpm dlx shadcn@<reviewed-version> ...`
+  - yarn: `yarn dlx shadcn@<reviewed-version> ...`
+  - bun: `bunx --bun shadcn@<reviewed-version> ...`
+- Replace `<reviewed-version>` with a version already pinned by the project or with an explicit version reviewed for the current change.
+- Do not commit durable scripts, docs, or config that depend on a floating shadcn version.
 - Prefer `shadcn info --json` for project context.
 - Use `shadcn docs <component>` before implementing unfamiliar components.
 - Use `--dry-run` before adding or overwriting components when local customizations may exist.

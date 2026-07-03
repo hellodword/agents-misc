@@ -1,4 +1,22 @@
+---
+id: project-type.pure-patch
+kind: project-type
+triggers:
+  - 'pure patch'
+  - 'upstream patch'
+  - 'patch series'
+  - 'refresh patch'
+  - 'apply patch'
+---
+
 # Pure Patch Project Rules
+## Applicability
+
+Use these defaults only for new projects, greenfield scaffolding, or when the existing repository has no clear convention.
+
+Do not introduce this stack, package manager, framework, database, toolchain, workflow, or directory structure into an existing project merely because it is preferred here.
+
+Prefer the current local convention when it is coherent and working.
 
 Use this for maintaining patches against upstream projects such as Chromium, Firefox, codex_rs, dnsmasq, and similar projects.
 

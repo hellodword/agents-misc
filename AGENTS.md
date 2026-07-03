@@ -1,49 +1,47 @@
 # Agent Rules
 
-## Scope
+## Priority
 
-This repository uses a compact root `AGENTS.md` plus on-demand rules, skills, templates, and references under `.agents/`.
+User instructions override this file.
 
-Read this file first. Do not preload `.agents/rules/**`, `.agents/skills/**`, `.agents/templates/**`, or `.agents/references/**`.
+Existing local project conventions override generic defaults when they are clear, working, and local to the touched area.
 
-User instructions override these defaults. Existing project conventions override generic defaults when they are clear, working, and local to the touched area.
+Task-specific loaded rules override root defaults for their scope.
+
+When rules conflict, choose the narrower, safer, and more local rule.
+
+Do not infer the contents of an unseen referenced rule from its path or name alone.
 
 ## Context Loading
 
-Load only the smallest matching rule files for the current task.
+Read this file first.
 
-Use `.agents/rules/route-map.md` only when routing is unclear.
+Do not preload `.agents/rules/**`, `.agents/skills/**`, `.agents/templates/**`, or `.agents/references/**`.
 
-Common routes:
+For each task:
 
-- Full-stack Go + web frontend work: `.agents/rules/project-types/fullstack-go-web.md`
-- CLI work: `.agents/rules/project-types/cli.md`
-- Frontend-only work: `.agents/rules/project-types/frontend-only.md`
-- Flutter + Rust bridge work: `.agents/rules/project-types/flutter-rust-bridge.md`
-- Pure patch work: `.agents/rules/project-types/pure-patch.md`
-- Nix/Just work: `.agents/rules/toolchain/nix-just.md`
-- Flake organization work: `.agents/rules/toolchain/flake-organization.md`
-- Command discovery work: `.agents/rules/toolchain/command-discovery.md`
-- Browser E2E work: `.agents/rules/toolchain/browser-e2e.md`
-- AI visual review work: `.agents/rules/toolchain/ai-visual-review.md`
-- Playwright MCP work: `.agents/rules/toolchain/playwright-mcp.md`
-- GitHub Actions work: `.agents/rules/toolchain/github-actions.md`
-- Frontend TypeScript work: `.agents/rules/stacks/frontend-typescript.md`
-- shadcn/React work: `.agents/rules/stacks/shadcn-react.md`
-- Vue work: `.agents/rules/stacks/vue.md`
-- Go work: `.agents/rules/stacks/go.md`
-- Rust work: `.agents/rules/stacks/rust.md`
-- Flutter work: `.agents/rules/stacks/flutter.md`
-- SQLite work: `.agents/rules/stacks/database-sqlite.md`
-- Compatibility-sensitive work: `.agents/rules/core/compatibility.md`
-- Migration work: `.agents/rules/core/data-migrations.md`
-- Generated artifact work: `.agents/rules/core/generated-artifacts.md`
-- Script work: `.agents/rules/core/scripts.md`
-- Security-sensitive work: `.agents/rules/core/security.md`
-- Testing work: `.agents/rules/core/testing.md`
-- UI/UX/i18n/a11y work: `.agents/rules/core/ui-ux-i18n-a11y.md`
+1. Identify the task type and the touched area.
+2. If the route is obvious, read only the smallest matching rule files.
+3. If the route is unclear, read `.agents/rules/route-map.md`.
+4. Load at most the relevant project-type rule, stack rule, core concern rule, and toolchain rule before editing.
+5. When a referenced rule path is relevant to the task, use the file-read tool to open that file before making changes.
+6. Load skills only when a reusable workflow is needed.
+7. Load templates only when producing that artifact.
+8. Load references only when a rule or skill explicitly points to them.
 
-Use skills under `.agents/skills/**/SKILL.md` for reusable workflows, not for always-on rules.
+## Universal Safety
+
+Do not commit secrets, user data, local databases, logs, coverage, screenshots, browser profiles, machine-specific files, or temporary artifacts.
+
+Do not run global installs, host package managers, curl/wget-to-shell installers, or system-level environment changes.
+
+Do not use `git add .`, `git add -A`, `git add --all`, or equivalent bulk staging.
+
+Prefer narrow validation for the behavior touched by the task.
+
+Do not weaken, split, or delete tests just to hide failures.
+
+Verify that large docs, fixtures, tests, generated files, snapshots, or dependencies are the smallest useful scope. Ask the user only when the action is destructive, irreversible, security-sensitive, costly, or changes public behavior beyond the request.
 
 ## Environment Defaults
 
@@ -55,202 +53,48 @@ Treat `.vscode/**` and `.devcontainer/**` as local environment files and keep th
 
 Do not rely on privileged containers, KVM, host browser policy, host package managers, systemd, Docker daemon access, GPU access, USB devices, Android emulator access, or extra kernel capabilities unless the project already proves they are available.
 
-Do not perform system-level or global environment changes.
+## New Project Defaults
 
-Do not run global installs, host package managers, or curl/wget-to-shell installers.
+Use product and stack defaults only for new projects, greenfield scaffolding, or repositories with no clear convention.
+
+Do not introduce a preferred stack into an existing project merely because it is listed as a default here.
+
+Default preferences for new or unconstrained work:
+
+- Nix + Just for ordinary project commands.
+- SQLite for local/default persistence.
+- Go backend + TypeScript frontend for full-stack web products.
+- React + Vite + shadcn/ui for SPA-style product UI.
+- Next.js + shadcn/ui for SSR, SEO, App Router, or server-integrated React apps.
+- Go or Rust for CLI projects, with Python or Node.js when ecosystem fit strongly favors them.
+- Flutter + Rust bridge for cross-platform clients when native, system, or performance logic benefits from Rust.
+- MIT license for new non-patch projects.
+- English and Simplified Chinese UI for user-facing products.
+
+Do not add deployment, release, publishing, cloud auth, or GitHub Actions unless the user explicitly asks.
 
 ## Git Defaults
 
 The default branch for new repositories is `master`. For existing repositories, detect and preserve the current default branch.
 
-Commit is the smallest unit of agent progress when automatic commit mode is active.
+Automatic commit mode is active only when the user explicitly requests commits, the task prompt says auto-commit, or the repository has an explicit agent auto-commit policy.
 
-A normal execution step is an independent, verifiable, semantically complete unit of implementation. The implementation, validation, repair, and acceptance of one unit are part of the same step and must not be counted as multiple steps. Checkpoints are validation gates and are not normal execution steps.
+For multi-step implementation without explicit automatic commit permission, after each verified step report the changed files, validation run, suggested commit message, and exact files that would be staged.
 
-Automatic commit policy:
+Before committing, run `git status --short`. If unrelated user changes are present and cannot be cleanly separated, do not commit automatically; report the intended staging paths and defer the commit.
 
-- If a plan has no split or has only one normal execution step, do not create commits automatically unless the user explicitly asks for automatic commits.
-- If a plan has two or more normal execution steps with distinct goals or file sets, automatic commit mode is active by default.
-- When automatic commit mode is active, create one non-interactive commit after each normal step reaches verified status.
-- Checkpoint repairs, if any, require their own precise commit after repair validation passes.
-- If commits are forbidden by user instruction, execution mode, or repository state, provide the exact files to stage, proposed commit message, validation performed, and reason the commit is deferred.
-
-Never run `git add .`, `git add -A`, `git add --all`, or equivalent bulk staging.
-
-Stage only explicit file paths that belong to the current task or current verified step.
-
-Never stage ignored paths.
-
-Use Conventional Commit headers with only these types:
-
-- `feat`
-- `fix`
-- `chore`
-- `docs`
-- `refactor`
-- `test`
-
-Use `type(scope): subject` or `type: subject`.
-
-The subject must be an English imperative phrase and must not end with a period.
-
-A multi-line commit message is allowed. Use the body for key changes, validation, migrations, generated artifacts, or documentation sync.
-
-If `$AI_COMMIT_COAUTHOR` is non-blank, append `Co-authored-by: $AI_COMMIT_COAUTHOR` as the final line.
+Use Conventional Commit headers with only these types: `feat`, `fix`, `chore`, `docs`, `refactor`, and `test`.
 
 ## Toolchain Defaults
 
-Prefer `flake.nix` and `justfile`.
+Prefer `flake.nix`.
 
-Default Nix system: `x86_64-linux`.
+Prefer `justfile` for ordinary projects, where Nix is the reproducible command environment and Just is the human-friendly command menu.
 
-Default nixpkgs branch: `nixos-unstable`.
+Pure Nix projects are an explicit exception: flake outputs are the primary public interface, and a `justfile` is not required.
 
-Before initializing or updating the repository `nixpkgs` input inside a devcontainer, check whether the current devcontainer exposes an exact nixpkgs revision through `$DEVCONTAINER_FLAKE_INPUTS`.
+Use project formatting rules. Run narrow formatting on touched files. Do not run repository-wide formatting unless the task is formatting-focused or the project already requires it.
 
-Use this read pattern:
+## Routes
 
-    devcontainer_nixpkgs_rev=""
-    if [ -n "${DEVCONTAINER_FLAKE_INPUTS:-}" ] && [ -r "$DEVCONTAINER_FLAKE_INPUTS" ]; then
-      devcontainer_nixpkgs_rev="$(jq -r '.inputs.nixpkgs.rev // empty' "$DEVCONTAINER_FLAKE_INPUTS")"
-    fi
-
-If `devcontainer_nixpkgs_rev` is non-empty, prefer aligning the repository `nixpkgs` input to that revision with:
-
-    nix flake update nixpkgs --override-input nixpkgs "github:NixOS/nixpkgs/${devcontainer_nixpkgs_rev}"
-
-After running this command, verify whether `flake.lock` actually records the intended revision. If the local Nix implementation treats `--override-input` as non-persistent and `flake.lock` does not record the intended revision, stop and report the mismatch instead of pretending the lockfile was updated.
-
-If `$DEVCONTAINER_FLAKE_INPUTS` is unset, unreadable, lacks `.inputs.nixpkgs.rev`, or the extracted value is empty, use:
-
-    github:NixOS/nixpkgs/nixos-unstable
-
-Use `just` as the outer command convenience layer. The `just` executable itself is a bootstrap tool and is not required to be provided by this repository's `flake.nix`.
-
-Every durable just recipe should have a short documentation comment immediately above it so `just --list` is useful for quick command selection.
-
-Stable repeated commands should be exposed as just recipes. Those recipes should call Nix.
-
-For one-off project commands, use:
-
-    nix develop .#<env> --command <command> ...
-
-When flake source tracking hides newly created files, use:
-
-    nix develop path:$PWD#<env> --command <command> ...
-
-If a required project tool is missing from `flake.nix` and edits are allowed, update `flake.nix` before retrying. If edits are not allowed, stop and report the missing package.
-
-Keep just recipes simple. Move branching, loops, parsing, retries, cleanup orchestration, and long shell logic into project scripts.
-
-## Flake Organization Defaults
-
-Keep `./flake.nix` as a thin entry point.
-
-Use `./nix/` for reusable Nix code and output definitions.
-
-Use `./scripts/` for durable repository scripts called by Nix apps, just recipes, or project commands.
-
-Recommended split:
-
-- `./flake.nix`: inputs, supported systems, and output assembly.
-- `./nix/lib.nix`: small local helper functions when needed.
-- `./nix/packages.nix`: package derivations for `packages`.
-- `./nix/apps.nix`: executable wrappers for `apps`.
-- `./nix/dev-shells.nix`: development shells for `devShells`.
-- `./nix/checks.nix`: stable checks for `checks` when useful.
-- `./nix/formatter.nix`: formatter output when useful.
-- `./scripts/`: durable scripts, preferably Python when logic is non-trivial.
-
-Output defaults:
-
-- `packages.${system}.default`: the default buildable artifact when the project has one.
-- `packages.${system}.<name>`: named buildable artifacts.
-- `apps.${system}.default`: the default runnable app for `nix run`.
-- `apps.${system}.<name>`: named runnable tools or scripts.
-- `devShells.${system}.dev`: the default development shell.
-- `devShells.${system}.<name>`: additional shells only when they materially differ.
-- `checks.${system}.<name>`: stable checks intended for `nix flake check`.
-- `formatter.${system}`: project formatter when it is stable and useful.
-
-Do not put complex product logic directly in Nix. Use Nix to pin tools, assemble packages, expose apps, and define development environments.
-
-## Product Defaults
-
-Prefer SQLite for default/local persistence.
-
-Prefer schema, protocol, and API documentation before implementation when behavior crosses module, process, storage, FFI, or network boundaries.
-
-Use Markdown contract first for API documentation.
-
-YAML preference applies only to project-developed application configuration file design when multiple formats are equally valid. It does not apply to toolchain-defined configuration files.
-
-Prefer MIT license for new non-patch projects.
-
-Prefer internationalized UI by default with English and Simplified Chinese.
-
-For AI-assisted frontend work, prefer TypeScript and the current shadcn ecosystem when it fits the product. Do not force Vue or Vite when shadcn/React/Next/TanStack/Vite best practices are a better fit.
-
-For new frontend framework selection:
-
-- use React + Vite + shadcn/ui for SPA-style product UI;
-- use Next.js + shadcn/ui for SSR, SEO, App Router, or server-integrated React apps;
-- use a framework such as TanStack Start only when its routing/data model clearly fits the project;
-- keep Vue when the project already uses Vue or the user asks for Vue.
-
-For Vue projects, use `vue-i18n` by default unless the project already uses a different i18n approach.
-
-Prefer Go backend + TypeScript frontend for full-stack web projects.
-
-Prefer Go or Rust for CLI projects. Use Python or Node.js for CLI projects when ecosystem fit strongly favors them.
-
-For Python CLI projects, use `uv` with a root `.venv/`.
-
-For Node.js CLI projects, default to npm and a bundled JavaScript CLI artifact. Use native single executable packaging only when the user explicitly requires running without Node.js.
-
-Prefer Flutter + Rust bridge for cross-platform client projects when native/system/performance logic benefits from Rust.
-
-Flutter projects do not include web support by default and do not assume Android emulator availability by default.
-
-Do not add deployment, release, publishing, cloud auth, or GitHub Actions unless the user explicitly asks.
-
-## Lockfiles
-
-Commit lockfiles by default for application and CLI projects, including `flake.lock`, `package-lock.json`, `Cargo.lock`, `uv.lock`, and `pubspec.lock`.
-
-For library packages, follow ecosystem convention and existing repository policy.
-
-## Repository Hygiene
-
-New files must have a long-term home.
-
-Temporary drafts, command output, run logs, screenshots, browser traces, coverage, databases, archives, local upstream checkouts, and generated experiments go under ignored paths such as `tmp/` or `.work/`.
-
-Do not commit real tokens, secrets, deployment config, user uploads, local databases, logs, coverage output, or machine-specific files.
-
-Before adding large docs, fixtures, tests, generated files, snapshots, or dependencies, confirm they are the smallest useful scope for the current task.
-
-## Validation
-
-Prefer narrow tests that cover the behavior touched by this task.
-
-Escalate to broader checks only when shared contracts, cross-module behavior, database migrations, public APIs, security boundaries, FFI boundaries, generated artifacts, or user workflows are affected.
-
-For Go code involving concurrency, shared mutable state, HTTP handlers, background workers, caches, database access, or cancellation, include a narrow `go test -race` validation when practical.
-
-Do not weaken, split, or delete tests just to bypass failures.
-
-Treat failures as implementation issues, unclear contracts, environment blockers, or tests that need legitimate correction.
-
-## Formatting
-
-Use project formatting rules.
-
-Default formatters:
-
-- Go: `gofmt`
-- Rust: `cargo fmt`
-- Dart/Flutter: `dart format`
-- JSON, JSONC, Markdown, HTML, YAML, JavaScript, TypeScript, Vue: Prettier
-
-Run narrow formatting on touched files. Do not run repository-wide formatting unless the task is formatting-focused or the project already requires it.
+For routing, use `.agents/rules/route-map.md`.

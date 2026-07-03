@@ -1,3 +1,15 @@
+---
+id: toolchain.formatting
+kind: toolchain
+triggers:
+  - 'formatting'
+  - 'formatter'
+  - 'Prettier'
+  - 'gofmt'
+  - 'nix fmt'
+  - 'touched files'
+---
+
 # Formatting Rules
 
 - Go: `gofmt`.

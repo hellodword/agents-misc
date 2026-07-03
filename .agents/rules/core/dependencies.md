@@ -1,3 +1,15 @@
+---
+id: core.dependencies
+kind: core
+triggers:
+  - 'dependency'
+  - 'package'
+  - 'library'
+  - 'license risk'
+  - 'supply chain'
+  - 'new dependency'
+---
+
 # Dependency Rules
 
 Prefer no new dependency when the standard library or an existing project dependency is enough.

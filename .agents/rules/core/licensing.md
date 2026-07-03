@@ -1,3 +1,13 @@
+---
+id: core.licensing
+kind: core
+triggers:
+  - 'license'
+  - 'copyright'
+  - 'third-party code'
+  - 'SPDX'
+---
+
 # Licensing Rules
 
 - Default license for new non-patch projects: MIT.

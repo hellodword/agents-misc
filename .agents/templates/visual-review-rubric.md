@@ -1,3 +1,4 @@
+
 # Visual Review Rubric
 
 ## Product context
@@ -26,19 +27,21 @@
 
 ## Categories
 
-- layout
-- hierarchy
-- spacing
-- alignment
-- typography
-- color/contrast
-- responsive behavior
-- i18n/copy
-- accessibility
-- state handling
-- consistency
-- visual polish
-- possible bug
+Use exactly these category values:
+
+- `layout`
+- `hierarchy`
+- `spacing`
+- `alignment`
+- `typography`
+- `color-contrast`
+- `responsive-behavior`
+- `i18n-copy`
+- `accessibility`
+- `state-handling`
+- `consistency`
+- `visual-polish`
+- `possible-bug`
 
 ## Review instructions
 

@@ -1,9 +1,10 @@
+
 {
   "mcpServers": {
     "playwright": {
       "command": "npx",
       "args": [
-        "@playwright/mcp@latest",
+        "@playwright/mcp@<pinned-version>",
         "--isolated",
         "--config",
         ".agents/references/playwright-mcp.config.example.json"

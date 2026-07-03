@@ -1,3 +1,15 @@
+---
+id: core.scripts
+kind: core
+triggers:
+  - 'script'
+  - 'automation'
+  - 'shell'
+  - 'Python script'
+  - 'just recipe'
+  - 'idempotent'
+---
+
 # Repository Script Rules
 
 Repository scripts are not the same thing as the project's main product language.

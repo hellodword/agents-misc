@@ -1,6 +1,19 @@
+---
+id: route-map
+kind: index
+triggers:
+  - route
+  - routing
+  - rules
+  - context loading
+load_with: []
+---
+
 # Agent Rule Route Map
 
 Load only the smallest relevant rule files. Do not preload the full `.agents/rules/` tree.
+
+When a route points to a relevant rule path, read that file before editing. Do not infer unseen rule contents from the route label.
 
 ## Project type
 
@@ -9,12 +22,13 @@ Load only the smallest relevant rule files. Do not preload the full `.agents/rul
 - Frontend-only project: `.agents/rules/project-types/frontend-only.md`
 - Cross-platform client with Flutter + Rust bridge: `.agents/rules/project-types/flutter-rust-bridge.md`
 - Pure patch project: `.agents/rules/project-types/pure-patch.md`
+- Pure Nix project: `.agents/rules/project-types/pure-nix.md`
 
 ## Core concerns
 
 - Work planning and task slicing: `.agents/rules/core/working-model.md`
 - Environment and devcontainer limits: `.agents/rules/core/environment.md`
-- Git, automatic commit policy, and commit boundaries: `.agents/rules/core/git.md`
+- Git, commit policy, and commit boundaries: `.agents/rules/core/git.md`
 - Repo hygiene: `.agents/rules/core/repo-hygiene.md`
 - Architecture: `.agents/rules/core/architecture.md`
 - Code quality: `.agents/rules/core/code-quality.md`
@@ -39,6 +53,7 @@ Load only the smallest relevant rule files. Do not preload the full `.agents/rul
 
 - Nix and Just command workflow: `.agents/rules/toolchain/nix-just.md`
 - Flake file organization and outputs: `.agents/rules/toolchain/flake-organization.md`
+- Codex, OpenCode, and generic agent tool adapters: `.agents/rules/toolchain/agent-tool-adapters.md`
 - Command discovery: `.agents/rules/toolchain/command-discovery.md`
 - Formatting: `.agents/rules/toolchain/formatting.md`
 - Browser E2E: `.agents/rules/toolchain/browser-e2e.md`

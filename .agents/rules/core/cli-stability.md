@@ -1,3 +1,15 @@
+---
+id: core.cli-stability
+kind: core
+triggers:
+  - 'CLI contract'
+  - 'flags'
+  - 'exit codes'
+  - 'stdout'
+  - 'stderr'
+  - 'machine-readable output'
+---
+
 # CLI Stability Rules
 
 CLI behavior is a contract.

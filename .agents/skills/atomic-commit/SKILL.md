@@ -1,24 +1,24 @@
 ---
 name: atomic-commit
-description: Use this when a verified step should be committed, or when the user explicitly asks for a commit. In a one-step or unsplit plan, do not create the commit unless the user explicitly requested automatic commits. In a multi-step plan, use this after each verified normal step.
+description: Use this when the user explicitly asks for a commit, the task prompt says auto-commit, or the repository has an explicit agent auto-commit policy and a verified step should be committed. Do not create commits automatically merely because a plan has multiple steps.
 ---
 
 # Atomic Commit
 
 ## Purpose
 
-Create a small, explicit, reviewable commit for one verified unit of work.
+Create a small, explicit, reviewable commit for one verified unit of work when commit mode allows commits.
 
 ## When to use
 
 Use this skill when:
 
-- automatic commit mode is active because the plan has two or more normal execution steps;
-- a checkpoint repair has passed validation and needs its own commit;
 - the user explicitly asks for a commit;
-- the repository rules require a verified step to be committed.
+- the task prompt says auto-commit;
+- the repository has an explicit agent auto-commit policy and a verified step should be committed;
+- a checkpoint repair has passed validation and commit mode allows its own commit.
 
-Do not use this skill to create a commit automatically when the plan has no split or only one normal execution step unless the user explicitly requested automatic commits.
+Do not use this skill to create a commit automatically merely because the plan has multiple normal execution steps.
 
 ## Step boundary
 
@@ -34,28 +34,31 @@ The following do not create multiple normal steps by themselves:
 
 ## Workflow
 
-1. Confirm that the relevant step has reached verified status.
-2. Confirm that commit mode allows a commit:
-   - multi-step plan: automatic commit is enabled by default;
-   - one-step or unsplit plan: commit only if the user explicitly requested it.
+1. Verify that the relevant step has reached verified status.
+2. Verify that commit mode allows a commit:
+   - explicit user request: commit the verified scope;
+   - task prompt says auto-commit: commit the verified scope;
+   - repository policy says auto-commit: commit according to that policy;
+   - otherwise: do not commit, and report the deferred commit details.
 3. Run `git status --short`.
 4. Identify files changed by the current verified step only.
-5. Exclude ignored paths, local artifacts, logs, databases, screenshots, coverage, browser traces, `.work/`, and temporary files.
-6. Review diffs for the explicit target files.
-7. Stage only explicit file paths.
-8. Never run `git add .`, `git add -A`, or `git add --all`.
-9. Never stage ignored files.
-10. Write a Conventional Commit header using only:
+5. If unrelated user changes are present and cannot be cleanly separated, do not commit automatically.
+6. Exclude ignored paths, local artifacts, logs, databases, screenshots, coverage, browser traces, `.work/`, and temporary files.
+7. Review diffs for the explicit target files.
+8. Stage only explicit file paths.
+9. Never run `git add .`, `git add -A`, or `git add --all`.
+10. Never stage ignored files.
+11. Write a Conventional Commit header using only:
     - `feat`
     - `fix`
     - `chore`
     - `docs`
     - `refactor`
     - `test`
-11. Use an English imperative subject with no trailing period.
-12. Add a body only when it clarifies key changes, validation, migrations, generated artifacts, flake lock alignment, or documentation sync.
-13. If `$AI_COMMIT_COAUTHOR` is non-blank, append `Co-authored-by: $AI_COMMIT_COAUTHOR` as the final line.
-14. Commit non-interactively.
+12. Use an English imperative subject with no trailing period.
+13. Add a body only when it clarifies key changes, validation, migrations, generated artifacts, flake lock alignment, or documentation sync.
+14. If `$AI_COMMIT_COAUTHOR` is non-blank, append `Co-authored-by: $AI_COMMIT_COAUTHOR` as the final line.
+15. Commit non-interactively.
 
 ## Validation
 

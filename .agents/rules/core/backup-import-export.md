@@ -1,3 +1,15 @@
+---
+id: core.backup-import-export
+kind: core
+triggers:
+  - 'backup'
+  - 'restore'
+  - 'import'
+  - 'export'
+  - 'destructive migration'
+  - 'SQLite backup'
+---
+
 # Backup, Import, and Export Rules
 
 ## Backup

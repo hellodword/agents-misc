@@ -1,6 +1,21 @@
+---
+id: project-type.fullstack-go-web
+kind: project-type
+triggers:
+  - 'full-stack'
+  - 'Go backend'
+  - 'TypeScript frontend'
+  - 'SQLite web app'
+  - 'API frontend'
+---
+
 # Full-stack Go + Web Project Rules
 
-Default stack:
+## Applicability
+
+Use these defaults only for new full-stack projects, greenfield scaffolding, or repositories without clear existing backend/frontend conventions. Do not introduce these stacks into an existing project merely because they are preferred here.
+
+## Default stack
 
 - Backend: Go.
 - Frontend: TypeScript.
@@ -15,7 +30,7 @@ Default stack:
 - Project-developed application config files: YAML when format is optional.
 - Toolchain: Nix + Just.
 
-Architecture:
+## Architecture
 
 - Prefer one repository.
 - Prefer modular monolith.
@@ -24,7 +39,7 @@ Architecture:
 - Keep handlers thin and move business logic into application/domain layers.
 - Use narrow vertical slices.
 
-Validation:
+## Validation
 
 - Backend unit tests for domain logic.
 - Backend integration tests for database/API boundaries.

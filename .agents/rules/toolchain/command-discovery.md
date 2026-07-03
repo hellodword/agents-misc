@@ -1,3 +1,14 @@
+---
+id: toolchain.command-discovery
+kind: toolchain
+triggers:
+  - 'command discovery'
+  - 'just --list'
+  - 'README commands'
+  - 'available scripts'
+  - 'validation command'
+---
+
 # Command Discovery Rules
 
 Do not assume a conventional Linux filesystem layout.

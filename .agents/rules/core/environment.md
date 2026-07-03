@@ -1,3 +1,14 @@
+---
+id: core.environment
+kind: core
+triggers:
+  - 'environment'
+  - 'devcontainer'
+  - 'host tool'
+  - 'global install'
+  - 'system dependency'
+---
+
 # Environment Rules
 
 - Assume the default development environment may be a VS Code devcontainer.

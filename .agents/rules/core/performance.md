@@ -1,3 +1,14 @@
+---
+id: core.performance
+kind: core
+triggers:
+  - 'performance'
+  - 'benchmark'
+  - 'cache'
+  - 'latency'
+  - 'memory'
+---
+
 # Performance Rules
 
 - Do not optimize speculatively.

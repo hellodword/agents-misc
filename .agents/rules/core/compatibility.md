@@ -1,3 +1,14 @@
+---
+id: core.compatibility
+kind: core
+triggers:
+  - 'compatibility'
+  - 'breaking change'
+  - 'deprecation'
+  - 'migration path'
+  - 'contract stage'
+---
+
 # Compatibility Rules
 
 ## Default mode: durable compatibility

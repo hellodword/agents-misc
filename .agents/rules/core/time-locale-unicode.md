@@ -1,3 +1,15 @@
+---
+id: core.time-locale-unicode
+kind: core
+triggers:
+  - 'time'
+  - 'timezone'
+  - 'locale'
+  - 'Unicode'
+  - 'encoding'
+  - 'i18n text'
+---
+
 # Time, Locale, and Unicode Rules
 
 ## Time

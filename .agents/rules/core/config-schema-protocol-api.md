@@ -1,3 +1,14 @@
+---
+id: core.config-schema-protocol-api
+kind: core
+triggers:
+  - 'config'
+  - 'schema'
+  - 'protocol'
+  - 'API contract'
+  - 'FFI contract'
+---
+
 # Config, Schema, Protocol, and API Rules
 
 - Prefer designing contracts before implementation when multiple components depend on them.

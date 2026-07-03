@@ -1,8 +1,20 @@
+---
+id: core.git
+kind: core
+triggers:
+  - 'git'
+  - 'commit'
+  - 'staging'
+  - 'branch'
+  - 'status'
+  - 'Conventional Commit'
+---
+
 # Git Rules
 
 ## Commit boundary
 
-Commit is the smallest unit of agent progress when automatic commit mode is active.
+Commit is the smallest unit of agent progress only when commit mode allows commits.
 
 A normal execution step is an independent, verifiable, semantically complete unit of implementation.
 
@@ -23,25 +35,32 @@ The following usually count as multiple normal execution steps:
 - pure patch fetch/apply/refresh/build phases;
 - separate compatibility, security, or data-risk repairs.
 
-## Automatic commit policy
+## Commit policy
 
-If a plan has no split or only one normal execution step, do not commit automatically unless the user explicitly asks for automatic commits.
+Commit mode is active only when one of these is true:
 
-If a plan has two or more normal execution steps with distinct goals or file sets, automatic commit mode is enabled by default.
+- the user explicitly requests commits;
+- the task prompt says auto-commit;
+- the repository has an explicit agent auto-commit policy.
 
-When automatic commit mode is active:
+Do not create commits automatically merely because a plan has multiple steps.
+
+For multi-step implementation without explicit commit permission, after each verified step report:
+
+- changed files;
+- validation run;
+- suggested commit message;
+- exact files that would be staged.
+
+When commit mode is active:
 
 - commit after each normal step reaches verified status;
 - commit checkpoint repairs separately after their repair validation passes;
-- keep each commit non-interactive and reviewable.
+- keep each commit non-interactive and reviewable;
+- run `git status --short` before committing;
+- if unrelated user changes are present and cannot be cleanly separated, do not commit automatically. Report the intended staging paths and defer.
 
-When automatic commit mode is not active:
-
-- still provide the exact files that would be staged;
-- still provide the proposed commit message;
-- do not create the commit without explicit user instruction.
-
-If commits are forbidden by mode, user instruction, or repository state, provide:
+If commits are forbidden by mode, user instruction, execution environment, or repository state, provide:
 
 - changed file list;
 - explicit files to stage;

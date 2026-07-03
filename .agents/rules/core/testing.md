@@ -1,3 +1,15 @@
+---
+id: core.testing
+kind: core
+triggers:
+  - 'test'
+  - 'validation'
+  - 'regression'
+  - 'race detector'
+  - 'coverage'
+  - 'flaky test'
+---
+
 # Testing Rules
 
 - Prefer narrow tests for the current change.

@@ -1,3 +1,15 @@
+---
+id: core.repo-hygiene
+kind: core
+triggers:
+  - 'repo hygiene'
+  - 'temporary files'
+  - 'ignored paths'
+  - 'large files'
+  - 'fixtures'
+  - 'snapshots'
+---
+
 # Repository Hygiene
 
 - New files must have a durable purpose.

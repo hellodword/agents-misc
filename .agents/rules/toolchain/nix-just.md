@@ -1,11 +1,66 @@
+---
+id: toolchain.nix-just
+kind: toolchain
+triggers:
+  - 'Nix'
+  - 'Just'
+  - 'justfile'
+  - 'flake.nix'
+  - 'dev shell'
+  - 'nixpkgs'
+---
+
 # Nix and Just Rules
 
+## Applicability
+
+Use these defaults only for new projects, greenfield scaffolding, or when the existing repository has no clear convention.
+
+Do not introduce this stack, package manager, framework, database, toolchain, workflow, or directory structure into an existing project merely because it is preferred here.
+
+Prefer the current local convention when it is coherent and working.
+
 ## Defaults
+
+Use these defaults only for new projects, greenfield scaffolding, or repositories with no clear convention.
+
+Do not introduce Nix or Just into an existing project merely because they are preferred here.
 
 - Default system: `x86_64-linux`.
 - Default nixpkgs branch: `nixos-unstable`.
 - Prefer `flake.nix` and `flake.lock`.
 - Prefer a default dev shell named `dev`.
+
+## Ordinary projects and pure Nix projects
+
+For ordinary projects, Nix is the reproducible environment and command entrypoint, while `justfile` is the human-friendly command menu.
+
+For ordinary projects:
+
+- prefer a root `justfile`;
+- every durable just recipe must have a documentation comment;
+- stable recipes should call Nix;
+- recipes should stay thin.
+
+For pure Nix projects, the project itself is primarily Nix.
+
+A project is pure Nix only when the user explicitly says so or the repository clearly states that its core product is Nix-based, such as:
+
+- a Nix package set;
+- NixOS modules;
+- Home Manager modules;
+- overlays;
+- flake templates;
+- Nix library functions;
+- Nix-based development environment distribution;
+- Nix-based infrastructure or deployment modules.
+
+For pure Nix projects:
+
+- a `justfile` is not required;
+- flake outputs are the primary public interface;
+- `nix flake show`, `nix build`, `nix run`, `nix develop`, `nix flake check`, and `nix fmt` should be first-class;
+- add `justfile` only when the user explicitly wants a command menu or when it materially improves local usability.
 
 ## Devcontainer nixpkgs alignment
 
@@ -62,7 +117,9 @@ Bootstrap commands may run directly:
 
 The `just` executable itself is an outer bootstrap tool. Do not add `just` to `flake.nix` solely because the root `justfile` exists.
 
-Project commands must run through Nix, usually via just recipes:
+Project commands must run through Nix.
+
+For ordinary projects, project commands usually run through commented just recipes that call Nix:
 
 - build
 - test
@@ -75,6 +132,18 @@ Project commands must run through Nix, usually via just recipes:
 - app/server commands
 - durable validation commands
 - pure patch apply/refresh/build scripts
+
+For pure Nix projects, project commands should primarily be expressed through flake outputs:
+
+- `packages`
+- `apps`
+- `devShells`
+- `checks`
+- `formatter`
+- `templates`
+- `overlays`
+- `nixosModules`
+- `homeManagerModules`
 
 Environment capability commands are discovered from the current environment and are not automatically added to `flake.nix`:
 
@@ -103,7 +172,7 @@ Use `justfile` as a convenience layer over Nix, not as a second build system.
 
 Every durable recipe must have a short documentation comment immediately above it so `just --list` is useful.
 
-Good recipe shape:
+Good ordinary-project recipe shape:
 
     # Run Go unit tests.
     test:
@@ -120,6 +189,30 @@ Good recipe shape:
     # Run stable flake checks.
     check:
       nix flake check
+
+Pure Nix projects do not require a justfile. When a pure Nix project has a justfile, it should document and forward to flake-native commands rather than becoming the primary interface.
+
+Good pure-Nix optional recipe shape:
+
+    # Show exported flake outputs.
+    show:
+      nix flake show
+
+    # Build the default package.
+    build:
+      nix build .#default
+
+    # Run the default app.
+    run:
+      nix run .#default
+
+    # Run all stable flake checks.
+    check:
+      nix flake check
+
+    # Format Nix files through the flake formatter.
+    fmt:
+      nix fmt
 
 Move logic into checked-in scripts when it needs:
 
@@ -143,7 +236,9 @@ Keep reusable Nix code under `./nix/`.
 
 Keep durable non-trivial orchestration under `./scripts/`.
 
-Expose stable commands through outputs and just recipes.
+Expose stable commands through outputs and, for ordinary projects, commented just recipes.
+
+For pure Nix projects, expose stable commands through outputs first. Add just recipes only when explicitly useful.
 
 ## Missing packages
 

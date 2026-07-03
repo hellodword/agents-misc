@@ -1,3 +1,15 @@
+---
+id: core.data-privacy
+kind: core
+triggers:
+  - 'privacy'
+  - 'user data'
+  - 'uploads'
+  - 'analytics'
+  - 'telemetry'
+  - 'fixtures'
+---
+
 # Data and Privacy Rules
 
 - Minimize stored user data.

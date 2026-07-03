@@ -1,3 +1,15 @@
+---
+id: core.security
+kind: core
+triggers:
+  - 'security'
+  - 'secret'
+  - 'auth'
+  - 'token'
+  - 'permission'
+  - 'untrusted input'
+---
+
 # Security Rules
 
 - Never commit real secrets, tokens, private keys, local credentials, production config, user uploads, or private data.

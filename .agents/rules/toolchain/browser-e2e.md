@@ -1,3 +1,14 @@
+---
+id: toolchain.browser-e2e
+kind: toolchain
+triggers:
+  - 'browser E2E'
+  - 'Playwright'
+  - 'critical flow'
+  - 'screenshot'
+  - 'web verification'
+---
+
 # Browser E2E Rules
 
 ## Tool choice

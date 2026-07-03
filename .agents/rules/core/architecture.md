@@ -1,3 +1,14 @@
+---
+id: core.architecture
+kind: core
+triggers:
+  - architecture
+  - design
+  - module boundaries
+  - system design
+load_with: []
+---
+
 # Architecture Rules
 
 - Prefer a modular monolith for solo full-stack projects unless distribution is explicitly required.

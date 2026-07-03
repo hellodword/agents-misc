@@ -1,3 +1,14 @@
+---
+id: core.working-model
+kind: core
+triggers:
+  - 'planning'
+  - 'task slicing'
+  - 'incremental work'
+  - 'handoff'
+  - 'scope'
+---
+
 # Working Model
 
 - Work in small, verifiable, semantic increments.

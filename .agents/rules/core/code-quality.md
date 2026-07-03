@@ -1,3 +1,14 @@
+---
+id: core.code-quality
+kind: core
+triggers:
+  - 'code quality'
+  - 'refactor'
+  - 'error handling'
+  - 'pure logic'
+  - 'maintainability'
+---
+
 # Code Quality
 
 - Prefer clear, typed, cohesive code over premature abstraction.

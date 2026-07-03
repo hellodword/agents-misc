@@ -1,4 +1,23 @@
+---
+id: stack.go
+kind: stack
+triggers:
+  - 'Go'
+  - 'gofmt'
+  - 'go test'
+  - 'go-sqlite3'
+  - 'slog'
+  - 'race detector'
+---
+
 # Go Rules
+## Applicability
+
+Use these defaults only for new projects, greenfield scaffolding, or when the existing repository has no clear convention.
+
+Do not introduce this stack, package manager, framework, database, toolchain, workflow, or directory structure into an existing project merely because it is preferred here.
+
+Prefer the current local convention when it is coherent and working.
 
 - Use Go modules.
 - Use `gofmt`.

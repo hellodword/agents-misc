@@ -1,3 +1,14 @@
+---
+id: core.data-migrations
+kind: core
+triggers:
+  - 'migration'
+  - 'schema change'
+  - 'SQLite migration'
+  - 'data reset'
+  - 'schema version'
+---
+
 # Data Migration Rules
 
 ## Default migration strategy
@@ -27,9 +38,11 @@ Minimum table intent:
 
 Before destructive changes:
 
-- confirm the data is disposable dev/test data; or
+- verify the data is disposable dev/test data; or
 - write a preserving migration; or
 - document backup/restore steps.
+
+Ask the user only when the operation is destructive, irreversible, affects real user data, or cannot be proven to target disposable data.
 
 Use transactions for multi-step writes.
 

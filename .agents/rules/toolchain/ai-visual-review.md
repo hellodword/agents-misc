@@ -1,3 +1,14 @@
+---
+id: toolchain.ai-visual-review
+kind: toolchain
+triggers:
+  - 'AI visual review'
+  - 'screenshot review'
+  - 'visual QA'
+  - 'design critique'
+  - 'image editing'
+---
+
 # AI Visual Review Rules
 
 ## Trigger
@@ -26,7 +37,7 @@ The main agent is the orchestrator:
 1. capture screenshots;
 2. write a manifest;
 3. write a shared rubric;
-4. launch one-shot sub-agent tasks such as `codex exec`;
+4. launch one-shot sub-agent tasks through the available tool adapter;
 5. collect structured findings;
 6. synthesize conflicts;
 7. decide a single implementation plan;
@@ -119,21 +130,21 @@ Each finding must include:
 - confidence;
 - whether it needs human decision.
 
-Categories:
+Use exactly these category values:
 
-- layout;
-- hierarchy;
-- spacing;
-- alignment;
-- typography;
-- color/contrast;
-- responsive behavior;
-- i18n/copy;
-- accessibility;
-- state handling;
-- consistency;
-- visual polish;
-- possible bug.
+- `layout`
+- `hierarchy`
+- `spacing`
+- `alignment`
+- `typography`
+- `color-contrast`
+- `responsive-behavior`
+- `i18n-copy`
+- `accessibility`
+- `state-handling`
+- `consistency`
+- `visual-polish`
+- `possible-bug`
 
 ## Consistency controls
 
@@ -152,13 +163,11 @@ To avoid inconsistent review results across separate screenshot batches:
 11. Maintain a final approved issue list.
 12. Apply code changes only from the approved issue list.
 
-## Sub-agent execution
+## Tool adapters
 
-For Codex, prefer `codex exec` for single-shot visual tasks when available.
+### Codex
 
-Use read-only sandbox for review-only tasks.
-
-Use workspace-write only for image editing or generated mockups that intentionally write under `tmp/`.
+Use `codex exec` for single-shot visual review tasks when available.
 
 Example review command shape:
 
@@ -175,6 +184,30 @@ Example synthesis command shape:
       --output-schema .agents/templates/visual-review-synthesis.schema.json \
       -o tmp/visual-review/<run-id>/synthesis/final.json \
       "Merge visual review findings, deduplicate, resolve conflicts, and produce one approved implementation plan."
+
+### OpenCode
+
+Use `opencode run` for single-shot visual review tasks when available.
+
+Example review command shape:
+
+    opencode run \
+      "Review the screenshots listed in <batch-manifest> using <rubric>. Return only JSON that matches .agents/templates/visual-review-finding.schema.json." \
+      > tmp/visual-review/<run-id>/findings/<batch-id>.json
+
+Example synthesis command shape:
+
+    opencode run \
+      "Merge visual review findings, deduplicate, resolve conflicts, and return only JSON that matches .agents/templates/visual-review-synthesis.schema.json." \
+      > tmp/visual-review/<run-id>/synthesis/final.json
+
+### Generic fallback
+
+If the current agent cannot spawn subagents or enforce output schemas, perform the review in the main context with smaller batches, manually validate the JSON shape against the template, and report the limitation.
+
+Use read-only execution for review-only tasks.
+
+Use workspace-write only for image editing or generated mockups that intentionally write under `tmp/`.
 
 ## AI image editing
 

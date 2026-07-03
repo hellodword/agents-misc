@@ -1,3 +1,14 @@
+---
+id: core.generated-artifacts
+kind: core
+triggers:
+  - 'generated artifact'
+  - 'codegen'
+  - 'snapshot'
+  - 'generated docs'
+  - 'reproducibility'
+---
+
 # Generated Artifact Rules
 
 ## Commit generated artifacts when all are true

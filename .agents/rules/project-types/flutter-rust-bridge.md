@@ -1,6 +1,20 @@
+---
+id: project-type.flutter-rust-bridge
+kind: project-type
+triggers:
+  - 'Flutter Rust bridge'
+  - 'cross-platform client'
+  - 'flutter_rust_bridge'
+  - 'mobile desktop'
+---
+
 # Flutter + Rust Bridge Project Rules
 
-Default stack:
+## Applicability
+
+Use these defaults only for new cross-platform client projects, greenfield scaffolding, or repositories without clear existing client/native conventions. Do not introduce Flutter, Rust, or a bridge layer into an existing project merely because they are preferred here.
+
+## Default stack
 
 - UI/client shell: Flutter.
 - Native/system/performance logic: Rust.
@@ -11,7 +25,7 @@ Default stack:
 - Android emulator is not assumed by default.
 - No signing, release, store, Firebase, cloud config, or deployment by default.
 
-Architecture:
+## Architecture
 
 - Keep Flutter UI, bridge boundary, and Rust core logic separate.
 - Treat bridge types as contracts.
@@ -20,7 +34,7 @@ Architecture:
 - Avoid pushing heavy domain logic into Flutter widgets.
 - Document thread, lifetime, cancellation, and error mapping rules at the bridge boundary.
 
-Validation:
+## Validation
 
 - Rust unit tests for core logic.
 - Flutter widget tests for UI behavior.

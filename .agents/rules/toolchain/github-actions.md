@@ -1,3 +1,14 @@
+---
+id: toolchain.github-actions
+kind: toolchain
+triggers:
+  - 'GitHub Actions'
+  - 'workflow'
+  - 'CI'
+  - 'action pinning'
+  - 'permissions'
+---
+
 # GitHub Actions Rules
 
 Do not create or modify GitHub Actions unless the user explicitly asks.

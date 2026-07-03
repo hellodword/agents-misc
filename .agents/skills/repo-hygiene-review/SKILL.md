@@ -13,7 +13,7 @@ Keep the repository small, durable, and reviewable.
 
 1. Run `git status --short --ignored`.
 2. Identify files created or changed by the current task.
-3. Confirm each new file has a durable home.
+3. Verify each new file has a durable home.
 4. Keep temporary output under `tmp/`.
 5. Keep pure patch upstream checkouts under `.work/`.
 6. Exclude logs, screenshots, browser traces, coverage, databases, archives, build outputs, and local credentials.

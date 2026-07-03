@@ -1,3 +1,14 @@
+---
+id: toolchain.playwright-mcp
+kind: toolchain
+triggers:
+  - 'Playwright MCP'
+  - 'MCP config'
+  - 'browser automation'
+  - 'isolated profile'
+  - 'browser verification'
+---
+
 # Playwright MCP Rules
 
 Use Playwright MCP for exploratory, agent-driven browser verification.
@@ -17,3 +28,5 @@ Commit only example MCP configuration under `.agents/references/`.
 Do not commit machine-specific MCP config, secrets, browser profiles, storage state, cookies, or local endpoints.
 
 When MCP needs container-specific launch flags, generate a temporary config under `tmp/` rather than hard-coding local environment assumptions in the committed example.
+
+For durable committed examples or automation, replace `<pinned-version>` with a reviewed explicit version. Do not commit floating MCP package versions in durable config.

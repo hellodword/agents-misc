@@ -1,3 +1,14 @@
+---
+id: core.observability
+kind: core
+triggers:
+  - 'logging'
+  - 'metrics'
+  - 'tracing'
+  - 'observability'
+  - 'diagnostics'
+---
+
 # Observability Rules
 
 - Prefer structured logs for services and CLI diagnostics.
