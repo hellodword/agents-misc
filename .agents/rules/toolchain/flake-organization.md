@@ -125,11 +125,13 @@ It should not contain:
 
 For pure Nix projects, product-level Nix output wiring belongs in `flake.nix`, but reusable logic should still be split into `./nix/`.
 
-Default nixpkgs branch:
+Default `nixpkgs` input in `flake.nix`:
 
     github:NixOS/nixpkgs/nixos-unstable
 
-Before pinning or updating nixpkgs, apply `.agents/references/nixpkgs-devcontainer-alignment.md`.
+Before lockfile pinning or updating nixpkgs, apply `.agents/references/nixpkgs-devcontainer-alignment.md`.
+
+When a specific nixpkgs revision is required for the current environment, run `nix flake update nixpkgs --override-input nixpkgs "github:NixOS/nixpkgs/<rev>"`. Do not rewrite the durable `flake.nix` input to `github:NixOS/nixpkgs/<rev>` unless the project already has that convention.
 
 ## `./nix/`
 

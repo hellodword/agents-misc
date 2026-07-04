@@ -30,7 +30,7 @@ Prefer coherent local conventions.
 ## Defaults
 
 - Default system: `x86_64-linux`.
-- Default nixpkgs branch: `nixos-unstable`.
+- Default `nixpkgs` input in `flake.nix`: `github:NixOS/nixpkgs/nixos-unstable`.
 - Prefer `flake.nix` and `flake.lock`.
 - Prefer a default dev shell named `dev`.
 
@@ -71,9 +71,11 @@ Before initializing or updating the repository `nixpkgs` input, read `.agents/re
 
 Summary requirements:
 
-- prefer the exact nixpkgs revision exposed through `$DEVCONTAINER_FLAKE_INPUTS` when available;
-- verify that `flake.lock` records the intended revision after updating;
-- fall back to `github:NixOS/nixpkgs/nixos-unstable` only when no devcontainer revision is available;
+- use `github:NixOS/nixpkgs/nixos-unstable` as the durable `flake.nix` input unless the project already has another convention;
+- prefer the exact nixpkgs revision exposed through `$DEVCONTAINER_FLAKE_INPUTS` when available by running `nix flake update nixpkgs --override-input nixpkgs "github:NixOS/nixpkgs/<rev>"`;
+- verify that `.nodes.nixpkgs.locked.rev` in `flake.lock` matches the intended revision after updating;
+- when no devcontainer revision is available, let `flake.lock` resolve from `github:NixOS/nixpkgs/nixos-unstable`;
+- do not rewrite `flake.nix` to `github:NixOS/nixpkgs/<rev>` merely because `--override-input` was used;
 - do not install `jq` or other helpers globally.
 
 ## Command classes

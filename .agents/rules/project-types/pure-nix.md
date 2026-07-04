@@ -140,13 +140,13 @@ Do not expose outputs that are unstable, experimental, or undocumented unless th
 
 ## nixpkgs input
 
-Default nixpkgs branch:
+Default `nixpkgs` input in `flake.nix`:
 
     github:NixOS/nixpkgs/nixos-unstable
 
 Before initializing or updating `nixpkgs`, read `.agents/references/nixpkgs-devcontainer-alignment.md`.
 
-Use the devcontainer revision when it is available and verified in `flake.lock`; otherwise use `nixos-unstable`.
+Use a devcontainer revision by running `nix flake update nixpkgs --override-input nixpkgs "github:NixOS/nixpkgs/<rev>"` when it is available and verified. Do not rewrite `flake.nix` to `github:NixOS/nixpkgs/<rev>` unless the project already uses revision URLs there.
 
 ## Formatting
 

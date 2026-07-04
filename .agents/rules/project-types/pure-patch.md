@@ -75,7 +75,7 @@ Before editing patches:
 3. Fetch only what is needed for the selected revision/tag when possible.
 4. Place upstream checkout under `.work/<upstream>/<rev>/src`.
 5. Create or update Nix dev shell for the patch workspace.
-6. Before initializing or updating `nixpkgs`, read `.agents/references/nixpkgs-devcontainer-alignment.md`.
+6. Before initializing or updating `nixpkgs`, read `.agents/references/nixpkgs-devcontainer-alignment.md`; keep `flake.nix` on `github:NixOS/nixpkgs/nixos-unstable` and use `--override-input` only through `nix flake update`.
 7. Add just recipes that call Nix and then upstream-native commands.
 8. Verify the narrowest build/test command that can compile or validate the unpatched upstream checkout.
 9. Apply existing patches.

@@ -4,7 +4,9 @@ Use this reference before initializing or updating a repository `nixpkgs` input 
 
 ## Goal
 
-Keep project `nixpkgs` aligned with the development container's exact nixpkgs revision when that revision is available, while falling back to `nixos-unstable` for unconstrained new work.
+Keep the durable `flake.nix` `nixpkgs` input on `github:NixOS/nixpkgs/nixos-unstable` for unconstrained work. When the development container exposes an exact nixpkgs revision, use the update command below.
+
+`--override-input` belongs on the `nix flake update` command in this workflow. It is not a reason to rewrite `flake.nix` to `github:NixOS/nixpkgs/<rev>`.
 
 ## Procedure
 
@@ -19,10 +21,16 @@ if [ -n "${DEVCONTAINER_FLAKE_INPUTS:-}" ] && [ -r "$DEVCONTAINER_FLAKE_INPUTS" 
 fi
 ```
 
-If `devcontainer_nixpkgs_rev` is non-empty, align to it:
+If `devcontainer_nixpkgs_rev` is non-empty, run the Nix update command for it:
 
 ```sh
 nix flake update nixpkgs --override-input nixpkgs "github:NixOS/nixpkgs/${devcontainer_nixpkgs_rev}"
+```
+
+Keep `flake.nix` on:
+
+```text
+github:NixOS/nixpkgs/nixos-unstable
 ```
 
 Verify the result:
@@ -69,5 +77,5 @@ Report:
 - whether `$DEVCONTAINER_FLAKE_INPUTS` was present and readable;
 - whether `.inputs.nixpkgs.rev` existed;
 - selected nixpkgs input;
-- whether `flake.lock` records the intended revision;
+- whether `.nodes.nixpkgs.locked.rev` in `flake.lock` matches the intended revision;
 - any tool availability blockers.

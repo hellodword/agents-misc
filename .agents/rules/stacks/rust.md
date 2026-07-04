@@ -37,9 +37,24 @@ Default Rust flake input:
 
     rust-overlay.url = "github:oxalica/rust-overlay";
 
-Default toolchain expression:
+When this rule applies and the project has no explicit Rust toolchain convention, the default Rust toolchain MUST be nightly from rust-overlay.
+
+Use this exact default expression:
 
     rust-bin.selectLatestNightlyWith (toolchain: toolchain.default)
+
+Default means required fallback, not preference. Do not replace this with `rust-bin.stable.*` merely because the project is a normal CLI, uses Cargo, or does not obviously require nightly.
+
+Existing project convention overrides this default only when one of these exists:
+
+- `rust-toolchain.toml` or `rust-toolchain`;
+- an existing `flake.nix` pinning a Rust toolchain;
+- project documentation that explicitly requires stable, beta, nightly, or a specific Rust version;
+- dependency or upstream build documentation that requires a specific compiler.
+
+Cargo edition, including edition 2024, is not by itself a project toolchain convention.
+
+If latest nightly fails to build because of compiler or dependency incompatibility, do not silently switch to stable. First prefer pinning a known-working nightly toolchain. Switch to stable only when the project explicitly requires stable or the user approves that deviation, and report the reason.
 
 Add components or targets only when the project needs them.
 

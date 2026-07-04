@@ -104,6 +104,24 @@ Prefer a small rule set for each task:
 
 For unclear shared tasks, use `.agents/rules/route-map.md` to choose the smallest relevant rule set.
 
+## Toolchain defaults
+
+Shared Nix rules use this default `nixpkgs` input in `flake.nix`:
+
+```text
+github:NixOS/nixpkgs/nixos-unstable
+```
+
+When a workflow needs an exact nixpkgs revision, run `nix flake update nixpkgs --override-input nixpkgs "github:NixOS/nixpkgs/<rev>"`. Do not replace the durable `flake.nix` input with `github:NixOS/nixpkgs/<rev>` unless an existing project convention requires it.
+
+Shared Rust rules treat nightly from rust-overlay as the required fallback when no local toolchain evidence exists:
+
+```nix
+rust-bin.selectLatestNightlyWith (toolchain: toolchain.default)
+```
+
+Stable Rust is used only when the project already pins or documents stable, or when the user approves a documented deviation.
+
 ## Maintenance
 
 When adding or changing a shared rule:

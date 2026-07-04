@@ -32,7 +32,7 @@ Use this skill when working on:
    - environment capability command.
 2. Run bootstrap commands directly when needed.
 3. Before initializing or updating `nixpkgs`, read `.agents/references/nixpkgs-devcontainer-alignment.md`.
-4. Use the devcontainer nixpkgs revision when it is available and verified; otherwise use `github:NixOS/nixpkgs/nixos-unstable`.
+4. Keep `flake.nix` on `github:NixOS/nixpkgs/nixos-unstable` unless local convention says otherwise; use `--override-input` only through `nix flake update`.
 5. Run project commands through `nix develop .#<env> --command ...`.
 6. Use `nix develop path:$PWD#<env> --command ...` when flake source tracking hides new files.
 7. Put stable repeated commands in `justfile`.
@@ -77,7 +77,7 @@ Report:
 - Nix shell used;
 - nixpkgs source decision;
 - whether devcontainer nixpkgs rev was found;
-- whether `flake.lock` records the intended rev;
+- whether `.nodes.nixpkgs.locked.rev` in `flake.lock` matches the intended rev;
 - just recipes added or changed;
 - missing package changes;
 - any environment capability discovered outside Nix.
