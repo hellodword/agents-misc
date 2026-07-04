@@ -56,7 +56,7 @@ The following do not create multiple normal steps by themselves:
     - `refactor`
     - `test`
 12. Use an English imperative subject with no trailing period.
-13. Add a body only when it clarifies key changes, validation, migrations, generated artifacts, flake lock alignment, or documentation sync.
+13. Add a body only when it clarifies key changes, migrations, generated artifacts, flake lock alignment, or documentation sync.
 14. If `$AI_COMMIT_COAUTHOR` is non-blank, append `Co-authored-by: $AI_COMMIT_COAUTHOR` as the final line.
 15. Commit non-interactively.
 

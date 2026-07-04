@@ -113,6 +113,6 @@ Subject must be an English imperative phrase.
 
 Subject must not end with a period.
 
-Body may describe key changes, validation, migrations, generated artifacts, or documentation sync.
+Body may describe key changes, migrations, generated artifacts, or documentation sync.
 
 If `$AI_COMMIT_COAUTHOR` is non-blank, append `Co-authored-by: $AI_COMMIT_COAUTHOR` as the final line.
