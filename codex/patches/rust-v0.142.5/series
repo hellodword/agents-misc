@@ -1,1 +1,3 @@
-0001-agents-misc-codex-overrides.patch
+0001-openai-provider-network-overrides.patch
+0002-model-request-failure-hooks.patch
+0003-plan-mode-request-user-input-auto-resolution.patch

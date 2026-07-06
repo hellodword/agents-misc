@@ -1,6 +1,6 @@
-# OpenAI Network Configuration and Model Request Failure Hooks
+# OpenAI Network Configuration, Model Request Failure Hooks, and Plan Mode Input Timeout
 
-The current patch series lives under `codex/patches/<rust-tag>/`. It keeps the restricted override behavior for the built-in OpenAI provider and adds two notification-only hooks: `RequestError` and `AbnormalStop`.
+The current patch series lives under `codex/patches/<rust-tag>/`. It is split into three patches: OpenAI provider network overrides, model request failure hooks, and Plan mode `request_user_input` auto-resolution handling.
 
 ## OpenAI Provider Network Field Overrides
 
@@ -132,6 +132,12 @@ Example payload:
   }
 }
 ```
+
+## Plan Mode Request User Input Auto Resolution
+
+The Plan mode input timeout patch preserves the local `request_user_input`
+behavior: Plan mode strips `autoResolutionMs`, while Default mode with the
+feature enabled can pass an auto-resolution timeout through to the client.
 
 ## Local Hook Helper Scripts
 

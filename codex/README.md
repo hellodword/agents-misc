@@ -11,7 +11,9 @@ codex/
   patches/
     rust-v0.142.5/
       series
-      0001-agents-misc-codex-overrides.patch
+      0001-openai-provider-network-overrides.patch
+      0002-model-request-failure-hooks.patch
+      0003-plan-mode-request-user-input-auto-resolution.patch
       config.schema.json
   scripts/
     fetch-upstream.py
@@ -51,7 +53,7 @@ Apply the patch series:
 just codex-apply rust-v0.142.5
 ```
 
-Refresh the patch and generated schema from the current `.work` checkout:
+Refresh the patch series and generated schema from the current `.work` checkout:
 
 ```sh
 just codex-refresh rust-v0.142.5
