@@ -132,7 +132,21 @@ Built-in provider override rules are narrower than user-defined provider rules:
   built-ins. Define a distinct custom provider ID when customized OSS provider
   settings are needed.
 
-### RequestError Hook
+### Model Request Failure Hooks
+
+Codex exposes model request failures through two hook events. `RequestError`
+is an observational hook for every failed model request attempt, including
+attempts that will be retried. `AbnormalStop` is the final-stop hook for model
+request failures that would end the current execution.
+
+Together they support notification, diagnostics, and recovery policy around
+provider outages, streaming disconnects, retry exhaustion, context-window
+failures, usage limits, sandbox failures, and policy blocks. `AbnormalStop`
+also carries the active `/goal` state and the effective permission mode, so a
+hook can distinguish yolo sessions and decide whether a failed turn should
+deliver turn error lifecycle events to extensions.
+
+#### RequestError Hook
 
 `RequestError` fires whenever a model request fails, including intermediate
 retry failures and final failures. On final failure, `willRetry` is `false` and
@@ -176,11 +190,12 @@ Example payload:
 }
 ```
 
-### AbnormalStop Hook
+#### AbnormalStop Hook
 
 `AbnormalStop` fires once only when a final model request failure causes Codex
-to stop the current execution. After `HookStarted` is emitted, the hook command
-completes in the background and does not block the original stop flow.
+to stop the current execution. Codex runs the hook before it emits turn error
+lifecycle events, so hook output can control whether that lifecycle is
+delivered to extensions.
 
 Included cases:
 
@@ -209,6 +224,9 @@ Example payload:
   "hookEventName": "AbnormalStop",
   "model": "gpt-5",
   "provider": "openai",
+  "goalMode": true,
+  "approvalPolicy": "never",
+  "sandboxMode": "danger-full-access",
   "reason": "request_error",
   "requestType": "compact",
   "requestSubtype": "remote",
@@ -222,6 +240,34 @@ Example payload:
   }
 }
 ```
+
+`goalMode` is true when the failed turn is executing the active `/goal`.
+`approvalPolicy` and `sandboxMode` describe the effective permissions for the
+turn; a hook can treat `approvalPolicy == "never"` and
+`sandboxMode == "danger-full-access"` as yolo mode.
+
+`errorKind` is the concrete Codex error category, such as `ServerOverloaded`,
+`ConnectionFailed`, `ResponseStreamFailed`, `InternalServerError`,
+`RetryLimit`, `ContextWindowExceeded`, `CyberPolicy`, `UsageLimitReached`, or
+`Sandbox`.
+
+Hook output may include:
+
+```json
+{
+  "suppressTurnErrorLifecycle": true
+}
+```
+
+When this field is absent, Codex suppresses turn error lifecycle delivery by
+default for `/goal` turns unless `errorKind` is `CyberPolicy`. Other turns
+default to normal turn error lifecycle delivery. Setting the field explicitly
+overrides the default for that hook run.
+
+This keeps active goals from being ended by transient provider, transport,
+retry, context-window, usage-limit, or sandbox failures unless a hook chooses
+normal lifecycle delivery. Policy blocks still use normal lifecycle delivery by
+default.
 
 ### Plan Mode Request User Input Auto Resolution
 
