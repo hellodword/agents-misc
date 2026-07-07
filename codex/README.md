@@ -132,6 +132,71 @@ Built-in provider override rules are narrower than user-defined provider rules:
   built-ins. Define a distinct custom provider ID when customized OSS provider
   settings are needed.
 
+### Terminal Wait Command Rules
+
+Codex accepts root-level `terminal_wait.commands` entries for command-specific
+unified exec wait behavior. Profile-scoped `terminal_wait` is not supported in
+this patch series.
+
+| Field | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `pattern` | yes | none | `regex-lite` pattern matched against the original `exec_command.cmd`. |
+| `mode` | yes | none | `wait_until_exit` or `long_poll`. |
+| `name` | no | none | Human-readable label for the rule. |
+| `enabled` | no | `true` | Disabled rules are skipped. |
+| `cwd_pattern` | no | none | `regex-lite` pattern matched against the effective cwd string. |
+| `allow_tty` | no | `false` | TTY commands match only when this is `true`. |
+| `max_output_tokens` | no | request/default | Positive model-visible output token cap for this command. |
+| `wait_timeout_ms` | mode-specific | none | Positive timeout for `wait_until_exit`; forbidden for `long_poll`. |
+| `poll_interval_ms` | mode-specific | none | Positive poll interval for `long_poll`; forbidden for `wait_until_exit`. |
+
+Rules are evaluated in TOML order and the first enabled match wins. `pattern`
+matches the raw command string from the tool request. `cwd_pattern` matches the
+native absolute cwd string when one is available, otherwise the `PathUri`
+string. TTY requests are ignored unless `allow_tty = true`.
+
+`wait_until_exit` applies to the initial `exec_command` response and to later
+empty `write_stdin` polls for the same process. Without `wait_timeout_ms`, the
+wait has no deadline but still ends on process exit, cancellation, output
+closure, or failure. With `wait_timeout_ms`, the wait may exceed the normal
+30-second initial clamp and returns a live process if the timeout expires first.
+
+`long_poll` leaves the initial `exec_command` wait unchanged. It changes only
+empty `write_stdin` polls, which wait for `poll_interval_ms`; a smaller
+tool-request `yield_time_ms` does not shorten that interval. Non-empty stdin
+writes keep the existing interactive response cap.
+
+`max_output_tokens` affects only the model-visible tool result. UI streaming and
+terminal transcript events are not truncated by this setting.
+
+Patterns are compiled with `regex-lite` during config load. Use Rust-regex-style
+syntax supported by `regex-lite`; avoid look-around, backreferences, and
+Unicode property classes.
+
+Example:
+
+```toml
+[terminal_wait]
+
+[[terminal_wait.commands]]
+name = "workspace cargo tests"
+pattern = "^cargo test( |$)"
+cwd_pattern = "/workspaces/my-project"
+mode = "wait_until_exit"
+wait_timeout_ms = 600000
+max_output_tokens = 20000
+
+[[terminal_wait.commands]]
+name = "vite dev server"
+pattern = "npm run dev"
+mode = "long_poll"
+poll_interval_ms = 60000
+allow_tty = true
+```
+
+When `terminal_wait` is unset or no rule matches, the `rust-v0.142.5` terminal
+wait and background polling behavior is unchanged.
+
 ### Model Request Failure Hooks
 
 Codex exposes model request failures through two hook events. `RequestError`

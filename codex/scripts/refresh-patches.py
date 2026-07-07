@@ -21,16 +21,22 @@ from common import (
     worktree_path,
 )
 
-SPLIT_PATCH_NAMES = [
+OLD_SPLIT_PATCH_NAMES = [
     "0001-openai-provider-network-overrides.patch",
     "0002-model-request-failure-hooks.patch",
     "0003-plan-mode-request-user-input-auto-resolution.patch",
 ]
 
+TERMINAL_WAIT_PATCH_NAME = "0004-terminal-wait-command-rules.patch"
+
+SPLIT_PATCH_NAMES = [
+    *OLD_SPLIT_PATCH_NAMES,
+    TERMINAL_WAIT_PATCH_NAME,
+]
+
 MODEL_PROVIDER_PATCH_PATHS = frozenset(
     {
         "codex-rs/app-server/src/request_processors/thread_processor_tests.rs",
-        "codex-rs/config/src/config_toml.rs",
         "codex-rs/config/src/thread_config.rs",
         "codex-rs/config/src/thread_config/proto/codex.thread_config.v1.proto",
         "codex-rs/config/src/thread_config/proto/codex.thread_config.v1.rs",
@@ -59,7 +65,28 @@ REQUEST_INPUT_PATCH_PATHS = frozenset(
     }
 )
 
+TERMINAL_WAIT_PATCH_PATHS = frozenset(
+    {
+        "codex-rs/config/Cargo.toml",
+        "codex-rs/config/src/lib.rs",
+        "codex-rs/config/src/terminal_wait.rs",
+        "codex-rs/core/src/config/mod.rs",
+        "codex-rs/core/src/session/config_lock.rs",
+        "codex-rs/core/src/session/session.rs",
+        "codex-rs/core/src/session/tests.rs",
+        "codex-rs/core/src/unified_exec/mod.rs",
+        "codex-rs/core/src/unified_exec/mod_tests.rs",
+        "codex-rs/core/src/unified_exec/process_manager.rs",
+        "codex-rs/core/src/unified_exec/process_manager_tests.rs",
+        "codex-rs/thread-manager-sample/src/main.rs",
+    }
+)
+
+SHARED_CONFIG_TOML_PATH = "codex-rs/config/src/config_toml.rs"
 SHARED_CONFIG_SCHEMA_PATH = "codex-rs/core/config.schema.json"
+DIFF_EXCLUDE_PATHS = (
+    ":(exclude)codex-rs/Cargo.lock",
+)
 
 
 def _intent_to_add_untracked(src):
@@ -115,27 +142,56 @@ def _series_names(series: Path) -> list[str]:
     return [line.strip() for line in series.read_text().splitlines() if line.strip() and not line.strip().startswith("#")]
 
 
+def _append_hunks(
+    patch_blocks: dict[str, list[list[str]]],
+    patch_name: str,
+    header: list[str],
+    hunks: list[list[str]],
+) -> None:
+    if hunks:
+        patch_blocks[patch_name].append(header + [line for hunk in hunks for line in hunk])
+
+
+def _config_toml_patch_name(hunk: list[str]) -> str:
+    text = "".join(hunk)
+    if "TerminalWaitToml" in text or "terminal_wait" in text:
+        return TERMINAL_WAIT_PATCH_NAME
+    return SPLIT_PATCH_NAMES[0]
+
+
+def _config_schema_patch_name(hunk: list[str]) -> str:
+    text = "".join(hunk)
+    if "terminal_wait" in text or "TerminalWait" in text:
+        return TERMINAL_WAIT_PATCH_NAME
+    if "compact_request_timeout_ms" in text:
+        return SPLIT_PATCH_NAMES[0]
+    return SPLIT_PATCH_NAMES[1]
+
+
 def _split_patch_texts(diff: str) -> dict[str, str]:
     patch_blocks: dict[str, list[list[str]]] = {name: [] for name in SPLIT_PATCH_NAMES}
     for block in _diff_blocks(diff):
         path = _diff_block_path(block)
-        if path == SHARED_CONFIG_SCHEMA_PATH:
+        if path == SHARED_CONFIG_TOML_PATH:
             header, hunks = _split_hunks(block)
-            model_hunks: list[list[str]] = []
-            hooks_hunks: list[list[str]] = []
+            grouped_hunks: dict[str, list[list[str]]] = {name: [] for name in SPLIT_PATCH_NAMES}
             for hunk in hunks:
-                if "compact_request_timeout_ms" in "".join(hunk):
-                    model_hunks.append(hunk)
-                else:
-                    hooks_hunks.append(hunk)
-            if model_hunks:
-                patch_blocks[SPLIT_PATCH_NAMES[0]].append(header + [line for hunk in model_hunks for line in hunk])
-            if hooks_hunks:
-                patch_blocks[SPLIT_PATCH_NAMES[1]].append(header + [line for hunk in hooks_hunks for line in hunk])
+                grouped_hunks[_config_toml_patch_name(hunk)].append(hunk)
+            for patch_name, patch_hunks in grouped_hunks.items():
+                _append_hunks(patch_blocks, patch_name, header, patch_hunks)
+        elif path == SHARED_CONFIG_SCHEMA_PATH:
+            header, hunks = _split_hunks(block)
+            grouped_hunks: dict[str, list[list[str]]] = {name: [] for name in SPLIT_PATCH_NAMES}
+            for hunk in hunks:
+                grouped_hunks[_config_schema_patch_name(hunk)].append(hunk)
+            for patch_name, patch_hunks in grouped_hunks.items():
+                _append_hunks(patch_blocks, patch_name, header, patch_hunks)
         elif path in MODEL_PROVIDER_PATCH_PATHS:
             patch_blocks[SPLIT_PATCH_NAMES[0]].append(block)
         elif path in REQUEST_INPUT_PATCH_PATHS:
             patch_blocks[SPLIT_PATCH_NAMES[2]].append(block)
+        elif path in TERMINAL_WAIT_PATCH_PATHS:
+            patch_blocks[TERMINAL_WAIT_PATCH_NAME].append(block)
         else:
             patch_blocks[SPLIT_PATCH_NAMES[1]].append(block)
 
@@ -147,7 +203,7 @@ def _split_patch_texts(diff: str) -> dict[str, str]:
 
 
 def _write_patch_files(directory: Path, series: Path, diff: str) -> list[Path]:
-    if _series_names(series) == SPLIT_PATCH_NAMES:
+    if _series_names(series) in (OLD_SPLIT_PATCH_NAMES, SPLIT_PATCH_NAMES):
         patch_texts = _split_patch_texts(diff)
         for name in SPLIT_PATCH_NAMES:
             (directory / name).write_text(patch_texts[name])
@@ -182,7 +238,11 @@ def main() -> int:
     shutil.copyfile(generated_schema, schema)
 
     untracked = _intent_to_add_untracked(src)
-    diff = run(["git", "diff", "--binary"], cwd=src, capture=True).stdout
+    diff = run(
+        ["git", "diff", "--binary", "--", ".", *DIFF_EXCLUDE_PATHS],
+        cwd=src,
+        capture=True,
+    ).stdout
     if not diff:
         raise RuntimeError("no upstream changes to write as a patch")
     patches = _write_patch_files(directory, series, diff)

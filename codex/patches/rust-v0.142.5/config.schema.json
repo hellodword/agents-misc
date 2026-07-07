@@ -2865,6 +2865,71 @@
       },
       "type": "object"
     },
+    "TerminalWaitCommandToml": {
+      "additionalProperties": false,
+      "properties": {
+        "allow_tty": {
+          "default": false,
+          "type": "boolean"
+        },
+        "cwd_pattern": {
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "max_output_tokens": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "mode": {
+          "$ref": "#/definitions/TerminalWaitModeToml"
+        },
+        "name": {
+          "type": "string"
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "poll_interval_ms": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "wait_timeout_ms": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "mode",
+        "pattern"
+      ],
+      "type": "object"
+    },
+    "TerminalWaitModeToml": {
+      "enum": [
+        "wait_until_exit",
+        "long_poll"
+      ],
+      "type": "string"
+    },
+    "TerminalWaitToml": {
+      "additionalProperties": false,
+      "properties": {
+        "commands": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/TerminalWaitCommandToml"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "ThreadStoreToml": {
       "oneOf": [
         {
@@ -5449,6 +5514,15 @@
     "suppress_unstable_features_warning": {
       "description": "Suppress warnings about unstable (under development) features.",
       "type": "boolean"
+    },
+    "terminal_wait": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/TerminalWaitToml"
+        }
+      ],
+      "default": null,
+      "description": "Command-specific unified exec wait and polling rules."
     },
     "tool_output_token_limit": {
       "description": "Token budget applied when storing tool/function outputs in the context manager.",
