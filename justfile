@@ -26,27 +26,27 @@ build-tools:
 
 # Fetch an upstream Codex checkout for a ref.
 codex-fetch ref:
-  nix develop path:$PWD#dev --command python3 codex/scripts/fetch-upstream.py --ref {{ref}}
+  nix develop .#dev --command python3 codex/scripts/fetch-upstream.py --ref {{ref}}
 
 # Check whether Codex patches apply to a ref.
 codex-apply-check ref:
-  nix develop path:$PWD#dev --command python3 codex/scripts/apply-patches.py --ref {{ref}} --check
+  nix develop .#dev --command python3 codex/scripts/apply-patches.py --ref {{ref}} --check
 
 # Apply Codex patches to a fetched ref.
 codex-apply ref:
-  nix develop path:$PWD#dev --command python3 codex/scripts/apply-patches.py --ref {{ref}}
+  nix develop .#dev --command python3 codex/scripts/apply-patches.py --ref {{ref}}
 
 # Refresh Codex patches against a ref.
 codex-refresh ref:
-  nix develop path:$PWD#dev --command python3 codex/scripts/refresh-patches.py --ref {{ref}}
+  nix develop .#dev --command python3 codex/scripts/refresh-patches.py --ref {{ref}}
 
 # Run Codex patch tests against a ref.
 codex-test ref:
-  nix develop path:$PWD#dev --command python3 codex/scripts/test.py --ref {{ref}}
+  nix develop .#dev --command python3 codex/scripts/test.py --ref {{ref}}
 
 # Build patched Codex against a ref.
 codex-build ref:
-  nix develop path:$PWD#dev --command python3 codex/scripts/build.py --ref {{ref}}
+  nix develop .#dev --command python3 codex/scripts/build.py --ref {{ref}}
 
 # Print current Codex config schema metadata.
 codexcfg-current:

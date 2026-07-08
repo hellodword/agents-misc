@@ -6,7 +6,7 @@ schemaCommand:
   - just
   - write-config-schema
 patchesRoot: codex/patches
-currentRef: rust-v0.142.5
+currentRef: rust-v0.143.0
 maintainedRefs:
   - rust-v0.130.0
   - rust-v0.136.0
@@ -15,6 +15,7 @@ maintainedRefs:
   - rust-v0.141.0
   - rust-v0.142.0
   - rust-v0.142.5
+  - rust-v0.143.0
 validation:
   narrowCargoCheck:
     - codex-protocol
