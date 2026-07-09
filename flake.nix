@@ -37,7 +37,6 @@
       inherit (project)
         codexConfigFor
         codexFor
-        rulesyncFor
         supportedSystems
         ;
     in
@@ -47,7 +46,6 @@
           lib
           codexConfigFor
           codexFor
-          rulesyncFor
           supportedSystems
           ;
       };
@@ -57,7 +55,6 @@
           lib
           codexConfigFor
           codexFor
-          rulesyncFor
           supportedSystems
           ;
       };
@@ -66,7 +63,6 @@
         inherit
           lib
           codexConfigFor
-          rulesyncFor
           supportedSystems
           ;
       };

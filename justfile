@@ -22,7 +22,7 @@ build:
 
 # Build repository tool packages without linking outputs.
 build-tools:
-  nix build --no-link .#codexcfg .#codexSchemaRegistry .#codexConfigData .#codexConfigSite .#rulesync
+  nix build --no-link .#codexcfg .#codexSchemaRegistry .#codexConfigData .#codexConfigSite
 
 # Fetch an upstream Codex checkout for a ref.
 codex-fetch ref:
@@ -71,35 +71,3 @@ codexcfg-diff-defaults from to:
 # Generate Codex config TOML for a version and mode.
 codexcfg-gen-toml version mode="reference":
   nix run .#codexcfg -- gen-toml --schemas codex/schemas --version {{version}} --mode {{mode}}
-
-# Build the jailed Rulesync package.
-rulesync-build:
-  nix build --no-link .#rulesync
-
-# Print the packaged Rulesync version.
-rulesync-version:
-  nix run .#rulesync -- --version
-
-# Initialize Rulesync files in the current project.
-rulesync-init:
-  nix run .#rulesync -- init
-
-# Generate Rulesync target files.
-rulesync-generate:
-  nix run .#rulesync -- generate
-
-# Check whether Rulesync generated files are current.
-rulesync-generate-check:
-  nix run .#rulesync -- generate --check
-
-# Update Rulesync ignore files.
-rulesync-gitignore:
-  nix run .#rulesync -- gitignore
-
-# Import rules into Rulesync format.
-rulesync-import target="codexcli" features="rules":
-  nix run .#rulesync -- import -t {{target}} -f {{features}}
-
-# Convert Rulesync content between targets.
-rulesync-convert from="codexcli" to="opencode" features="rules":
-  nix run .#rulesync -- convert --from {{from}} --to {{to}} -f {{features}}

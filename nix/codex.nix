@@ -81,20 +81,11 @@ let
       minVersion = "0.129.0";
     };
 
-  rulesyncFor =
-    system:
-    let
-      pkgs = pkgsFor system;
-    in
-    import ../rulesync/nix {
-      inherit lib pkgs;
-    };
 in
 {
   inherit
     codexConfigFor
     codexFor
-    rulesyncFor
     supportedSystems
     ;
 }

@@ -3,7 +3,6 @@
   supportedSystems,
   codexFor,
   codexConfigFor,
-  rulesyncFor,
 }:
 
 lib.genAttrs supportedSystems (
@@ -11,7 +10,6 @@ lib.genAttrs supportedSystems (
   let
     codex = codexFor system;
     codexConfig = codexConfigFor system;
-    rulesyncConfig = rulesyncFor system;
   in
   {
     inherit codex;
@@ -21,7 +19,6 @@ lib.genAttrs supportedSystems (
       codexConfigData
       codexConfigSite
       ;
-    inherit (rulesyncConfig) rulesync;
 
     default = codex;
   }

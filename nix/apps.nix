@@ -3,7 +3,6 @@
   supportedSystems,
   codexFor,
   codexConfigFor,
-  rulesyncFor,
 }:
 
 lib.genAttrs supportedSystems (
@@ -11,7 +10,6 @@ lib.genAttrs supportedSystems (
   let
     codexPackage = codexFor system;
     codexConfig = codexConfigFor system;
-    rulesyncConfig = rulesyncFor system;
   in
   rec {
     codex = {
@@ -29,14 +27,6 @@ lib.genAttrs supportedSystems (
       program = "${codexConfig.codexcfgApp}/bin/codexcfg";
       meta = {
         description = "Codex config schema tooling wrapper";
-      };
-    };
-
-    rulesync = {
-      type = "app";
-      program = "${rulesyncConfig.rulesync}/bin/rulesync";
-      meta = {
-        description = "Strict Rulesync wrapper";
       };
     };
   }
