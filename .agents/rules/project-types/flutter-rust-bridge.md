@@ -2,10 +2,10 @@
 id: project-type.flutter-rust-bridge
 kind: project-type
 triggers:
-  - 'Flutter Rust bridge'
-  - 'cross-platform client'
-  - 'flutter_rust_bridge'
-  - 'mobile desktop'
+  - "Flutter Rust bridge"
+  - "cross-platform client"
+  - "flutter_rust_bridge"
+  - "mobile desktop"
 summary: Apply defaults for Flutter clients with Rust core or bridge layers.
 load_with: []
 ---

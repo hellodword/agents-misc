@@ -2,12 +2,12 @@
 id: toolchain.nix-just
 kind: toolchain
 triggers:
-  - 'Nix'
-  - 'Just'
-  - 'justfile'
-  - 'flake.nix'
-  - 'dev shell'
-  - 'nixpkgs'
+  - "Nix"
+  - "Just"
+  - "justfile"
+  - "flake.nix"
+  - "dev shell"
+  - "nixpkgs"
 summary: Use Nix for reproducible environments and Just for documented project commands.
 load_with:
   rules:

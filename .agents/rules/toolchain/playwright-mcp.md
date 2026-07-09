@@ -2,11 +2,11 @@
 id: toolchain.playwright-mcp
 kind: toolchain
 triggers:
-  - 'Playwright MCP'
-  - 'MCP config'
-  - 'browser automation'
-  - 'isolated profile'
-  - 'browser verification'
+  - "Playwright MCP"
+  - "MCP config"
+  - "browser automation"
+  - "isolated profile"
+  - "browser verification"
 summary: Use Playwright MCP for exploratory browser checks when useful and available.
 load_with: []
 ---

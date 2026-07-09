@@ -2,16 +2,17 @@
 id: stack.nodejs-cli
 kind: stack
 triggers:
-  - 'Node.js CLI'
-  - 'npm CLI'
-  - 'TypeScript CLI'
-  - 'package-lock'
-  - 'bundled JavaScript'
+  - "Node.js CLI"
+  - "npm CLI"
+  - "TypeScript CLI"
+  - "package-lock"
+  - "bundled JavaScript"
 summary: Apply Node.js CLI defaults when npm, frontend, or browser tooling fit best.
 load_with: []
 ---
 
 # Node.js CLI Rules
+
 ## Applicability
 
 Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.

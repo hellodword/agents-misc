@@ -2,12 +2,12 @@
 id: stack.database-sqlite
 kind: stack
 triggers:
-  - 'SQLite'
-  - 'database'
-  - 'DSN'
-  - 'WAL'
-  - 'foreign keys'
-  - 'SQL migrations'
+  - "SQLite"
+  - "database"
+  - "DSN"
+  - "WAL"
+  - "foreign keys"
+  - "SQL migrations"
 summary: Apply SQLite defaults for native SQL, migrations, local database files, and validation.
 load_with:
   rules:

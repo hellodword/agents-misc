@@ -2,10 +2,10 @@
 id: core.licensing
 kind: core
 triggers:
-  - 'license'
-  - 'copyright'
-  - 'third-party code'
-  - 'SPDX'
+  - "license"
+  - "copyright"
+  - "third-party code"
+  - "SPDX"
 summary: Handle licenses deliberately for new projects and added third-party assets.
 load_with: []
 ---

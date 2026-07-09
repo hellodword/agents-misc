@@ -2,12 +2,12 @@
 id: core.data-privacy
 kind: core
 triggers:
-  - 'privacy'
-  - 'user data'
-  - 'uploads'
-  - 'analytics'
-  - 'telemetry'
-  - 'fixtures'
+  - "privacy"
+  - "user data"
+  - "uploads"
+  - "analytics"
+  - "telemetry"
+  - "fixtures"
 summary: Minimize, protect, and avoid exposing personal or sensitive data.
 load_with: []
 ---

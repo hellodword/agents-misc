@@ -2,11 +2,11 @@
 id: core.compatibility
 kind: core
 triggers:
-  - 'compatibility'
-  - 'breaking change'
-  - 'deprecation'
-  - 'migration path'
-  - 'contract stage'
+  - "compatibility"
+  - "breaking change"
+  - "deprecation"
+  - "migration path"
+  - "contract stage"
 summary: Preserve durable contracts unless aggressive early-stage behavior is explicit.
 load_with: []
 ---

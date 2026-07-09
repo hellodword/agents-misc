@@ -26,12 +26,7 @@
           },
           "severity": {
             "type": "string",
-            "enum": [
-              "P0",
-              "P1",
-              "P2",
-              "P3"
-            ]
+            "enum": ["P0", "P1", "P2", "P3"]
           },
           "category": {
             "type": "string",
@@ -65,11 +60,7 @@
           },
           "confidence": {
             "type": "string",
-            "enum": [
-              "low",
-              "medium",
-              "high"
-            ]
+            "enum": ["low", "medium", "high"]
           }
         },
         "required": [

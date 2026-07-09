@@ -2,11 +2,11 @@
 id: project-type.fullstack-go-web
 kind: project-type
 triggers:
-  - 'full-stack'
-  - 'Go backend'
-  - 'TypeScript frontend'
-  - 'SQLite web app'
-  - 'API frontend'
+  - "full-stack"
+  - "Go backend"
+  - "TypeScript frontend"
+  - "SQLite web app"
+  - "API frontend"
 summary: Apply defaults for full-stack Go backend and TypeScript frontend products.
 load_with: []
 ---

@@ -2,11 +2,11 @@
 id: project-type.cli
 kind: project-type
 triggers:
-  - 'CLI project'
-  - 'command line tool'
-  - 'subcommands'
-  - 'flags'
-  - 'terminal app'
+  - "CLI project"
+  - "command line tool"
+  - "subcommands"
+  - "flags"
+  - "terminal app"
 summary: Apply defaults for durable command-line tools and CLI contracts.
 load_with: []
 ---

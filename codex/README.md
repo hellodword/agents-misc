@@ -138,17 +138,17 @@ Codex accepts root-level `terminal_wait.commands` entries for command-specific
 unified exec wait behavior. Profile-scoped `terminal_wait` is not supported in
 this patch series.
 
-| Field | Required | Default | Notes |
-| --- | --- | --- | --- |
-| `pattern` | yes | none | `regex-lite` pattern matched against the original `exec_command.cmd`. |
-| `mode` | yes | none | `wait_until_exit` or `long_poll`. |
-| `name` | no | none | Human-readable label for the rule. |
-| `enabled` | no | `true` | Disabled rules are skipped. |
-| `cwd_pattern` | no | none | `regex-lite` pattern matched against the effective cwd string. |
-| `allow_tty` | no | `false` | TTY commands match only when this is `true`. |
-| `max_output_tokens` | no | request/default | Positive model-visible output token cap for this command. |
-| `wait_timeout_ms` | mode-specific | none | Positive timeout for `wait_until_exit`; forbidden for `long_poll`. |
-| `poll_interval_ms` | mode-specific | none | Positive poll interval for `long_poll`; forbidden for `wait_until_exit`. |
+| Field               | Required      | Default         | Notes                                                                    |
+| ------------------- | ------------- | --------------- | ------------------------------------------------------------------------ |
+| `pattern`           | yes           | none            | `regex-lite` pattern matched against the original `exec_command.cmd`.    |
+| `mode`              | yes           | none            | `wait_until_exit` or `long_poll`.                                        |
+| `name`              | no            | none            | Human-readable label for the rule.                                       |
+| `enabled`           | no            | `true`          | Disabled rules are skipped.                                              |
+| `cwd_pattern`       | no            | none            | `regex-lite` pattern matched against the effective cwd string.           |
+| `allow_tty`         | no            | `false`         | TTY commands match only when this is `true`.                             |
+| `max_output_tokens` | no            | request/default | Positive model-visible output token cap for this command.                |
+| `wait_timeout_ms`   | mode-specific | none            | Positive timeout for `wait_until_exit`; forbidden for `long_poll`.       |
+| `poll_interval_ms`  | mode-specific | none            | Positive poll interval for `long_poll`; forbidden for `wait_until_exit`. |
 
 Rules are evaluated in TOML order and the first enabled match wins. `pattern`
 matches the raw command string from the tool request. `cwd_pattern` matches the

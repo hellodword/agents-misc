@@ -2,12 +2,12 @@
 id: core.dependencies
 kind: core
 triggers:
-  - 'dependency'
-  - 'package'
-  - 'library'
-  - 'license risk'
-  - 'supply chain'
-  - 'new dependency'
+  - "dependency"
+  - "package"
+  - "library"
+  - "license risk"
+  - "supply chain"
+  - "new dependency"
 summary: Add dependencies only when justified and through project-local tooling.
 load_with: []
 ---

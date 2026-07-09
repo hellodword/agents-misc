@@ -2,12 +2,12 @@
 id: core.backup-import-export
 kind: core
 triggers:
-  - 'backup'
-  - 'restore'
-  - 'import'
-  - 'export'
-  - 'destructive migration'
-  - 'SQLite backup'
+  - "backup"
+  - "restore"
+  - "import"
+  - "export"
+  - "destructive migration"
+  - "SQLite backup"
 summary: Protect user data through backup, import, export, and restore discipline.
 load_with: []
 ---

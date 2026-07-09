@@ -2,11 +2,11 @@
 id: toolchain.command-discovery
 kind: toolchain
 triggers:
-  - 'command discovery'
-  - 'just --list'
-  - 'README commands'
-  - 'available scripts'
-  - 'validation command'
+  - "command discovery"
+  - "just --list"
+  - "README commands"
+  - "available scripts"
+  - "validation command"
 summary: Discover project commands safely before inventing new workflows.
 load_with: []
 ---

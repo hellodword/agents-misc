@@ -2,11 +2,11 @@
 id: toolchain.ai-visual-review
 kind: toolchain
 triggers:
-  - 'AI visual review'
-  - 'screenshot review'
-  - 'visual QA'
-  - 'design critique'
-  - 'image editing'
+  - "AI visual review"
+  - "screenshot review"
+  - "visual QA"
+  - "design critique"
+  - "image editing"
 summary: Orchestrate explicit screenshot-based AI visual review with structured findings and synthesis.
 load_with:
   rules:

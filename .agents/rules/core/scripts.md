@@ -2,12 +2,12 @@
 id: core.scripts
 kind: core
 triggers:
-  - 'script'
-  - 'automation'
-  - 'shell'
-  - 'Python script'
-  - 'just recipe'
-  - 'idempotent'
+  - "script"
+  - "automation"
+  - "shell"
+  - "Python script"
+  - "just recipe"
+  - "idempotent"
 summary: Keep repository scripts documented, narrow, reproducible, and project-local.
 load_with: []
 ---

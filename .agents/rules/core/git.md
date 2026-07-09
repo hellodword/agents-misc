@@ -2,12 +2,12 @@
 id: core.git
 kind: core
 triggers:
-  - 'git'
-  - 'commit'
-  - 'staging'
-  - 'branch'
-  - 'status'
-  - 'Conventional Commit'
+  - "git"
+  - "commit"
+  - "staging"
+  - "branch"
+  - "status"
+  - "Conventional Commit"
 summary: Keep commits atomic, explicit, and safe around unrelated user changes.
 load_with:
   rules:

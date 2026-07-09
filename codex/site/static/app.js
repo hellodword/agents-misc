@@ -191,9 +191,9 @@ function buildSchemaDiff(fromVersion, toVersion, fromPayload, toPayload) {
   const before = fromPayload.fieldIndex;
   const after = toPayload.fieldIndex;
   const changes = [];
-  const allPaths = Array.from(new Set([...before.keys(), ...after.keys()])).sort(
-    (left, right) => left.localeCompare(right),
-  );
+  const allPaths = Array.from(
+    new Set([...before.keys(), ...after.keys()]),
+  ).sort((left, right) => left.localeCompare(right));
 
   for (const path of allPaths) {
     const left = before.get(path);

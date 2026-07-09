@@ -2,12 +2,12 @@
 id: toolchain.formatting
 kind: toolchain
 triggers:
-  - 'formatting'
-  - 'formatter'
-  - 'Prettier'
-  - 'gofmt'
-  - 'nix fmt'
-  - 'touched files'
+  - "formatting"
+  - "formatter"
+  - "Prettier"
+  - "gofmt"
+  - "nix fmt"
+  - "touched files"
 summary: Use project formatting narrowly and avoid unrelated repository-wide churn.
 load_with: []
 ---

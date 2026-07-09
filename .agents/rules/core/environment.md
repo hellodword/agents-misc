@@ -2,11 +2,11 @@
 id: core.environment
 kind: core
 triggers:
-  - 'environment'
-  - 'devcontainer'
-  - 'host tool'
-  - 'global install'
-  - 'system dependency'
+  - "environment"
+  - "devcontainer"
+  - "host tool"
+  - "global install"
+  - "system dependency"
 summary: Respect local environment limits, devcontainer boundaries, and available capabilities.
 load_with: []
 ---

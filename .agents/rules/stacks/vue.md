@@ -2,16 +2,17 @@
 id: stack.vue
 kind: stack
 triggers:
-  - 'Vue'
-  - 'vue-i18n'
-  - 'Vite'
-  - 'shadcn-vue'
-  - 'Vue components'
+  - "Vue"
+  - "vue-i18n"
+  - "Vite"
+  - "shadcn-vue"
+  - "Vue components"
 summary: Apply Vue defaults for TypeScript, i18n, Vite, and local component conventions.
 load_with: []
 ---
 
 # Vue Rules
+
 ## Applicability
 
 Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.

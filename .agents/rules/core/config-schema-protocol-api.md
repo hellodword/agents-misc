@@ -2,11 +2,11 @@
 id: core.config-schema-protocol-api
 kind: core
 triggers:
-  - 'config'
-  - 'schema'
-  - 'protocol'
-  - 'API contract'
-  - 'FFI contract'
+  - "config"
+  - "schema"
+  - "protocol"
+  - "API contract"
+  - "FFI contract"
 summary: Define and preserve config, schema, protocol, and API contracts.
 load_with:
   rules:

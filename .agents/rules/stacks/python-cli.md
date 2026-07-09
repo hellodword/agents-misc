@@ -2,16 +2,17 @@
 id: stack.python-cli
 kind: stack
 triggers:
-  - 'Python CLI'
-  - 'uv'
-  - 'pyproject.toml'
-  - 'argparse'
-  - 'virtual environment'
+  - "Python CLI"
+  - "uv"
+  - "pyproject.toml"
+  - "argparse"
+  - "virtual environment"
 summary: Apply Python CLI defaults when Python is the best ecosystem fit.
 load_with: []
 ---
 
 # Python CLI Rules
+
 ## Applicability
 
 Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.

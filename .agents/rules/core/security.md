@@ -2,12 +2,12 @@
 id: core.security
 kind: core
 triggers:
-  - 'security'
-  - 'secret'
-  - 'auth'
-  - 'token'
-  - 'permission'
-  - 'untrusted input'
+  - "security"
+  - "secret"
+  - "auth"
+  - "token"
+  - "permission"
+  - "untrusted input"
 summary: Avoid unsafe secret handling, injection risks, and insecure defaults.
 load_with: []
 ---

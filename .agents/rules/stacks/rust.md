@@ -2,17 +2,18 @@
 id: stack.rust
 kind: stack
 triggers:
-  - 'Rust'
-  - 'Cargo'
-  - 'cargo fmt'
-  - 'cargo clippy'
-  - 'SQLx'
-  - 'tracing'
+  - "Rust"
+  - "Cargo"
+  - "cargo fmt"
+  - "cargo clippy"
+  - "SQLx"
+  - "tracing"
 summary: Apply Rust defaults for Cargo, linting, logging, errors, SQLite, and lockfiles.
 load_with: []
 ---
 
 # Rust Rules
+
 ## Applicability
 
 Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.

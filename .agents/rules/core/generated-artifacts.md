@@ -2,11 +2,11 @@
 id: core.generated-artifacts
 kind: core
 triggers:
-  - 'generated artifact'
-  - 'codegen'
-  - 'snapshot'
-  - 'generated docs'
-  - 'reproducibility'
+  - "generated artifact"
+  - "codegen"
+  - "snapshot"
+  - "generated docs"
+  - "reproducibility"
 summary: Classify generated artifacts and commit only reproducible durable outputs.
 load_with:
   skills:

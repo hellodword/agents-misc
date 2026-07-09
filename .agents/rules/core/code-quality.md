@@ -2,11 +2,11 @@
 id: core.code-quality
 kind: core
 triggers:
-  - 'code quality'
-  - 'refactor'
-  - 'error handling'
-  - 'pure logic'
-  - 'maintainability'
+  - "code quality"
+  - "refactor"
+  - "error handling"
+  - "pure logic"
+  - "maintainability"
 summary: Keep code readable, local, boring, and aligned with existing conventions.
 load_with: []
 ---

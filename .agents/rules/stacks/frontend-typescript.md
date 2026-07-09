@@ -2,17 +2,18 @@
 id: stack.frontend-typescript
 kind: stack
 triggers:
-  - 'TypeScript frontend'
-  - 'React'
-  - 'Vite'
-  - 'Next.js'
-  - 'frontend state'
-  - 'locales'
+  - "TypeScript frontend"
+  - "React"
+  - "Vite"
+  - "Next.js"
+  - "frontend state"
+  - "locales"
 summary: Apply TypeScript frontend defaults for framework choice, state, i18n, and validation.
 load_with: []
 ---
 
 # Frontend TypeScript Rules
+
 ## Applicability
 
 Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.

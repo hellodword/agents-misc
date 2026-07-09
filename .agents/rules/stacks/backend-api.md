@@ -2,12 +2,12 @@
 id: stack.backend-api
 kind: stack
 triggers:
-  - 'backend API'
-  - 'HTTP API'
-  - 'handlers'
-  - 'authorization'
-  - 'pagination'
-  - 'error shape'
+  - "backend API"
+  - "HTTP API"
+  - "handlers"
+  - "authorization"
+  - "pagination"
+  - "error shape"
 summary: Apply backend API defaults for contracts, validation, authorization, and handlers.
 load_with: []
 ---

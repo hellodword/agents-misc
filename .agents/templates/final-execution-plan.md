@@ -35,8 +35,8 @@ Describe the implementation design, boundaries, contracts, data flow, and import
 
 ## Files and Directories
 
-| Path | Purpose |
-| --- | --- |
+| Path           | Purpose                   |
+| -------------- | ------------------------- |
 | `path/to/file` | Why this file is involved |
 
 ## Workload Estimate

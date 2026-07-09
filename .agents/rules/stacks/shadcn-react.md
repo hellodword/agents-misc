@@ -2,11 +2,11 @@
 id: stack.shadcn-react
 kind: stack
 triggers:
-  - 'shadcn'
-  - 'React components'
-  - 'components.json'
-  - 'Tailwind'
-  - 'design tokens'
+  - "shadcn"
+  - "React components"
+  - "components.json"
+  - "Tailwind"
+  - "design tokens"
 summary: Apply shadcn React defaults for components, registries, tokens, and accessibility.
 load_with: []
 ---

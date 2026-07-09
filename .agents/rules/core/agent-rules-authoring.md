@@ -2,11 +2,11 @@
 id: core.agent-rules-authoring
 kind: core
 triggers:
-  - 'AGENTS.md'
-  - 'agent rules'
-  - 'route-map'
-  - 'ruleset'
-  - 'SKILL.md'
+  - "AGENTS.md"
+  - "agent rules"
+  - "route-map"
+  - "ruleset"
+  - "SKILL.md"
 summary: Maintain the agent rules kit without bloating the root entrypoint or duplicating rules.
 load_with:
   rules:

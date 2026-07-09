@@ -2,11 +2,11 @@
 id: core.observability
 kind: core
 triggers:
-  - 'logging'
-  - 'metrics'
-  - 'tracing'
-  - 'observability'
-  - 'diagnostics'
+  - "logging"
+  - "metrics"
+  - "tracing"
+  - "observability"
+  - "diagnostics"
 summary: Add useful logs and diagnostics without leaking sensitive information.
 load_with: []
 ---

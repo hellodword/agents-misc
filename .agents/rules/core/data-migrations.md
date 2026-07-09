@@ -2,11 +2,11 @@
 id: core.data-migrations
 kind: core
 triggers:
-  - 'migration'
-  - 'schema change'
-  - 'SQLite migration'
-  - 'data reset'
-  - 'schema version'
+  - "migration"
+  - "schema change"
+  - "SQLite migration"
+  - "data reset"
+  - "schema version"
 summary: Make schema and persisted data changes explicit, validated, and recoverable.
 load_with:
   rules:

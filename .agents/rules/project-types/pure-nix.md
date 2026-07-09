@@ -2,12 +2,12 @@
 id: project-type.pure-nix
 kind: project-type
 triggers:
-  - 'pure Nix'
-  - 'flake outputs'
-  - 'NixOS module'
-  - 'Home Manager module'
-  - 'overlay'
-  - 'template'
+  - "pure Nix"
+  - "flake outputs"
+  - "NixOS module"
+  - "Home Manager module"
+  - "overlay"
+  - "template"
 summary: Apply defaults for projects whose primary product is Nix outputs.
 load_with:
   rules:
@@ -19,6 +19,7 @@ load_with:
 ---
 
 # Pure Nix Project Rules
+
 ## Applicability
 
 Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.

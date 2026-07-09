@@ -2,12 +2,12 @@
 id: toolchain.agent-tool-adapters
 kind: toolchain
 triggers:
-  - 'Codex'
-  - 'OpenCode'
-  - 'codex exec'
-  - 'opencode run'
-  - 'subagent'
-  - 'one-shot review'
+  - "Codex"
+  - "OpenCode"
+  - "codex exec"
+  - "opencode run"
+  - "subagent"
+  - "one-shot review"
 summary: Probe available agent CLIs before using Codex, OpenCode, or generic one-shot review workflows.
 load_with:
   references:

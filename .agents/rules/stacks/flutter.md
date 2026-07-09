@@ -2,11 +2,11 @@
 id: stack.flutter
 kind: stack
 triggers:
-  - 'Flutter'
-  - 'Dart'
-  - 'widget test'
-  - 'flutter analyze'
-  - 'mobile UI'
+  - "Flutter"
+  - "Dart"
+  - "widget test"
+  - "flutter analyze"
+  - "mobile UI"
 summary: Apply Flutter defaults for formatting, analysis, state management, and tests.
 load_with: []
 ---

@@ -2,12 +2,12 @@
 id: core.cli-stability
 kind: core
 triggers:
-  - 'CLI contract'
-  - 'flags'
-  - 'exit codes'
-  - 'stdout'
-  - 'stderr'
-  - 'machine-readable output'
+  - "CLI contract"
+  - "flags"
+  - "exit codes"
+  - "stdout"
+  - "stderr"
+  - "machine-readable output"
 summary: Keep CLI commands, flags, output, and exit behavior stable and scriptable.
 load_with:
   rules:

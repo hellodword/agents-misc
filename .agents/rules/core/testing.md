@@ -2,12 +2,12 @@
 id: core.testing
 kind: core
 triggers:
-  - 'test'
-  - 'validation'
-  - 'regression'
-  - 'race detector'
-  - 'coverage'
-  - 'flaky test'
+  - "test"
+  - "validation"
+  - "regression"
+  - "race detector"
+  - "coverage"
+  - "flaky test"
 summary: Choose narrow validation and avoid weakening tests to hide failures.
 load_with:
   skills:

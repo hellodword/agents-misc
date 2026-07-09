@@ -2,11 +2,11 @@
 id: core.working-model
 kind: core
 triggers:
-  - 'planning'
-  - 'task slicing'
-  - 'incremental work'
-  - 'handoff'
-  - 'scope'
+  - "planning"
+  - "task slicing"
+  - "incremental work"
+  - "handoff"
+  - "scope"
 summary: Plan work in small, verifiable slices and keep progress reports actionable.
 load_with: []
 ---

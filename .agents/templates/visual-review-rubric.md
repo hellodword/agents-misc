@@ -1,4 +1,3 @@
-
 # Visual Review Rubric
 
 ## Product context

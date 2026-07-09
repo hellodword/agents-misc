@@ -26,12 +26,7 @@
           },
           "severity": {
             "type": "string",
-            "enum": [
-              "P0",
-              "P1",
-              "P2",
-              "P3"
-            ]
+            "enum": ["P0", "P1", "P2", "P3"]
           },
           "category": {
             "type": "string",
@@ -61,18 +56,11 @@
             "type": "string"
           },
           "duplicate_candidate_id": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": ["string", "null"]
           },
           "confidence": {
             "type": "string",
-            "enum": [
-              "low",
-              "medium",
-              "high"
-            ]
+            "enum": ["low", "medium", "high"]
           },
           "needs_human_decision": {
             "type": "boolean"
@@ -94,9 +82,5 @@
       }
     }
   },
-  "required": [
-    "schema_version",
-    "batch_id",
-    "findings"
-  ]
+  "required": ["schema_version", "batch_id", "findings"]
 }

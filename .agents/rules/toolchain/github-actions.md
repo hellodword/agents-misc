@@ -2,11 +2,11 @@
 id: toolchain.github-actions
 kind: toolchain
 triggers:
-  - 'GitHub Actions'
-  - 'workflow'
-  - 'CI'
-  - 'action pinning'
-  - 'permissions'
+  - "GitHub Actions"
+  - "workflow"
+  - "CI"
+  - "action pinning"
+  - "permissions"
 summary: Add GitHub Actions only on request and keep workflows minimal and explicit.
 load_with: []
 ---

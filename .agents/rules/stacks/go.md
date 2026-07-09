@@ -2,12 +2,12 @@
 id: stack.go
 kind: stack
 triggers:
-  - 'Go'
-  - 'gofmt'
-  - 'go test'
-  - 'go-sqlite3'
-  - 'slog'
-  - 'race detector'
+  - "Go"
+  - "gofmt"
+  - "go test"
+  - "go-sqlite3"
+  - "slog"
+  - "race detector"
 summary: Apply Go defaults for modules, formatting, SQLite, logging, and race validation.
 load_with:
   rules:

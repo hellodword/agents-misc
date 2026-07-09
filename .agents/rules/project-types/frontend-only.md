@@ -2,12 +2,12 @@
 id: project-type.frontend-only
 kind: project-type
 triggers:
-  - 'frontend-only'
-  - 'SPA'
-  - 'Next.js'
-  - 'React'
-  - 'Vue'
-  - 'browser app'
+  - "frontend-only"
+  - "SPA"
+  - "Next.js"
+  - "React"
+  - "Vue"
+  - "browser app"
 summary: Apply defaults for standalone frontend applications and browser UI behavior.
 load_with: []
 ---

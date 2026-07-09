@@ -2,12 +2,12 @@
 id: toolchain.flake-organization
 kind: toolchain
 triggers:
-  - 'flake organization'
-  - 'nix directory'
-  - 'flake outputs'
-  - 'apps'
-  - 'checks'
-  - 'devShells'
+  - "flake organization"
+  - "nix directory"
+  - "flake outputs"
+  - "apps"
+  - "checks"
+  - "devShells"
 summary: Organize flake inputs, outputs, packages, apps, checks, and dev shells consistently.
 load_with:
   references:

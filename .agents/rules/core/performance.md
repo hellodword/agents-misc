@@ -2,11 +2,11 @@
 id: core.performance
 kind: core
 triggers:
-  - 'performance'
-  - 'benchmark'
-  - 'cache'
-  - 'latency'
-  - 'memory'
+  - "performance"
+  - "benchmark"
+  - "cache"
+  - "latency"
+  - "memory"
 summary: Measure and scope performance changes before adding complexity.
 load_with: []
 ---

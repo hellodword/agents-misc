@@ -24,7 +24,9 @@ import {
 const policy = JSON.parse(fs.readFileSync("@rulesyncPolicy@", "utf8"));
 const neverWritableFiles = new Set(policy.neverWritableFiles ?? []);
 const neverWritableDirs = new Set(policy.neverWritableDirs ?? []);
-const dynamicFileAlternatives = new Map(Object.entries(policy.dynamicFileAlternatives ?? {}));
+const dynamicFileAlternatives = new Map(
+  Object.entries(policy.dynamicFileAlternatives ?? {}),
+);
 
 const logger = {
   debug() {},
@@ -99,12 +101,16 @@ function parseCommonOptions(args, allowed) {
     }
     if (arg.startsWith("--targets=")) {
       if (allowed.targets) {
-        options.targets = parseCommaSeparatedList(arg.slice("--targets=".length), "--targets");
+        options.targets = parseCommaSeparatedList(
+          arg.slice("--targets=".length),
+          "--targets",
+        );
       }
       continue;
     }
     if (arg.startsWith("-t") && arg.length > 2) {
-      if (allowed.targets) options.targets = parseCommaSeparatedList(arg.slice(2), "-t");
+      if (allowed.targets)
+        options.targets = parseCommaSeparatedList(arg.slice(2), "-t");
       continue;
     }
 
@@ -116,12 +122,16 @@ function parseCommonOptions(args, allowed) {
     }
     if (arg.startsWith("--features=")) {
       if (allowed.features) {
-        options.features = parseCommaSeparatedList(arg.slice("--features=".length), "--features");
+        options.features = parseCommaSeparatedList(
+          arg.slice("--features=".length),
+          "--features",
+        );
       }
       continue;
     }
     if (arg.startsWith("-f") && arg.length > 2) {
-      if (allowed.features) options.features = parseCommaSeparatedList(arg.slice(2), "-f");
+      if (allowed.features)
+        options.features = parseCommaSeparatedList(arg.slice(2), "-f");
       continue;
     }
 
@@ -141,7 +151,8 @@ function parseCommonOptions(args, allowed) {
       continue;
     }
     if (arg.startsWith("-o") && arg.length > 2) {
-      if (allowed.outputRoots) options.outputRoots = parseCommaSeparatedList(arg.slice(2), "-o");
+      if (allowed.outputRoots)
+        options.outputRoots = parseCommaSeparatedList(arg.slice(2), "-o");
       continue;
     }
 
@@ -152,7 +163,8 @@ function parseCommonOptions(args, allowed) {
       continue;
     }
     if (arg.startsWith("--config=")) {
-      if (allowed.configPath) options.configPath = arg.slice("--config=".length);
+      if (allowed.configPath)
+        options.configPath = arg.slice("--config=".length);
       continue;
     }
     if (arg.startsWith("-c") && arg.length > 2) {
@@ -242,7 +254,8 @@ function validateRelativePath(relativePath, label) {
 
   const posix = toPosix(relativePath);
   if (posix.trim() === "") die(label + " cannot be empty");
-  if (path.posix.isAbsolute(posix)) die(label + " must not be absolute: " + posix);
+  if (path.posix.isAbsolute(posix))
+    die(label + " must not be absolute: " + posix);
 
   const parts = posix.split("/");
   if (parts.includes("..")) die(label + " must not contain '..': " + posix);
@@ -258,7 +271,8 @@ function validateRelativePath(relativePath, label) {
 
 function joinRelative(...parts) {
   const filtered = parts.filter(
-    (part) => part !== undefined && part !== null && part !== "" && part !== ".",
+    (part) =>
+      part !== undefined && part !== null && part !== "" && part !== ".",
   );
   if (filtered.length === 0) return ".";
   return validateRelativePath(
@@ -326,7 +340,10 @@ function addMountParents(scope, relativePath) {
 }
 
 function checkNeverWritable(relativePath, label) {
-  if (neverWritableFiles.has(relativePath) || neverWritableDirs.has(relativePath)) {
+  if (
+    neverWritableFiles.has(relativePath) ||
+    neverWritableDirs.has(relativePath)
+  ) {
     die("refusing never-writable " + label + ": " + relativePath);
   }
   for (const deniedDir of neverWritableDirs) {
@@ -337,7 +354,10 @@ function checkNeverWritable(relativePath, label) {
 }
 
 function addDir(scope, relativeDirPath) {
-  const normalized = validateRelativePath(relativeDirPath, "writable directory");
+  const normalized = validateRelativePath(
+    relativeDirPath,
+    "writable directory",
+  );
   if (normalized === ".") return;
   checkNeverWritable(normalized, "output directory");
 
@@ -374,17 +394,27 @@ function dynamicAlternatives(relativeDirPath, relativeFilePath) {
   const dir = validateRelativePath(relativeDirPath, "relativeDirPath");
   const file = validateRelativePath(relativeFilePath, "relativeFilePath");
   const key = joinRelative(dir, file);
-  const alternatives = dynamicFileAlternatives.get(key) ?? dynamicFileAlternatives.get(file);
+  const alternatives =
+    dynamicFileAlternatives.get(key) ?? dynamicFileAlternatives.get(file);
   if (!alternatives) return [joinRelative(dir, file)];
   return alternatives.map((alternative) => joinRelative(dir, alternative));
 }
 
-function selectWritableFile(projectRoot, outputRootRelative, relativeDirPath, relativeFilePath) {
+function selectWritableFile(
+  projectRoot,
+  outputRootRelative,
+  relativeDirPath,
+  relativeFilePath,
+) {
   const alternatives = dynamicAlternatives(relativeDirPath, relativeFilePath);
   if (alternatives.length === 1) return alternatives[0];
 
   for (const candidate of alternatives) {
-    if (fs.existsSync(path.join(projectRoot, withOutputRoot(outputRootRelative, candidate)))) {
+    if (
+      fs.existsSync(
+        path.join(projectRoot, withOutputRoot(outputRootRelative, candidate)),
+      )
+    ) {
       return candidate;
     }
   }
@@ -392,15 +422,27 @@ function selectWritableFile(projectRoot, outputRootRelative, relativeDirPath, re
   return alternatives[0];
 }
 
-function addDescriptor(scope, projectRoot, outputRootRelative, descriptor, access) {
+function addDescriptor(
+  scope,
+  projectRoot,
+  outputRootRelative,
+  descriptor,
+  access,
+) {
   if (!descriptor || typeof descriptor !== "object") return;
   if (typeof descriptor.relativeDirPath !== "string") return;
 
-  const relativeDirPath = validateRelativePath(descriptor.relativeDirPath, "relativeDirPath");
+  const relativeDirPath = validateRelativePath(
+    descriptor.relativeDirPath,
+    "relativeDirPath",
+  );
 
   if (typeof descriptor.relativeFilePath === "string") {
     if (access === "read") {
-      for (const file of dynamicAlternatives(relativeDirPath, descriptor.relativeFilePath)) {
+      for (const file of dynamicAlternatives(
+        relativeDirPath,
+        descriptor.relativeFilePath,
+      )) {
         addReadFile(scope, withOutputRoot(outputRootRelative, file));
       }
       return;
@@ -420,18 +462,33 @@ function addDescriptor(scope, projectRoot, outputRootRelative, descriptor, acces
   }
 }
 
-function addSettablePaths(scope, projectRoot, outputRootRelative, paths, access) {
+function addSettablePaths(
+  scope,
+  projectRoot,
+  outputRootRelative,
+  paths,
+  access,
+) {
   if (!paths || typeof paths !== "object") return;
 
   addDescriptor(scope, projectRoot, outputRootRelative, paths, access);
   addDescriptor(scope, projectRoot, outputRootRelative, paths.root, access);
   addDescriptor(scope, projectRoot, outputRootRelative, paths.nonRoot, access);
-  addDescriptor(scope, projectRoot, outputRootRelative, paths.recommended, access);
+  addDescriptor(
+    scope,
+    projectRoot,
+    outputRootRelative,
+    paths.recommended,
+    access,
+  );
   addDescriptor(scope, projectRoot, outputRootRelative, paths.legacy, access);
 
   if (Array.isArray(paths.alternativeSkillRoots)) {
     for (const relativeDirPath of paths.alternativeSkillRoots) {
-      const normalized = validateRelativePath(relativeDirPath, "alternative skill root");
+      const normalized = validateRelativePath(
+        relativeDirPath,
+        "alternative skill root",
+      );
       if (access === "read") {
         addReadDir(scope, withOutputRoot(outputRootRelative, normalized));
       } else {
@@ -445,10 +502,14 @@ function addPolicyWrites(scope, feature) {
   const writes = policy.rulesyncWrites?.[feature];
   if (!writes) return;
 
-  for (const relativePath of writes.emptyFiles ?? []) addFile(scope, relativePath);
-  for (const relativePath of writes.jsonFiles ?? []) addFile(scope, relativePath);
-  for (const relativePath of writes.tomlFiles ?? []) addFile(scope, relativePath);
-  for (const relativePath of writes.yamlFiles ?? []) addFile(scope, relativePath);
+  for (const relativePath of writes.emptyFiles ?? [])
+    addFile(scope, relativePath);
+  for (const relativePath of writes.jsonFiles ?? [])
+    addFile(scope, relativePath);
+  for (const relativePath of writes.tomlFiles ?? [])
+    addFile(scope, relativePath);
+  for (const relativePath of writes.yamlFiles ?? [])
+    addFile(scope, relativePath);
   for (const relativePath of writes.dirs ?? []) addDir(scope, relativePath);
 }
 
@@ -497,7 +558,10 @@ function getFeatureDescriptors(config, mode) {
     },
     permissions: {
       factories: toolPermissionsFactories,
-      supportedTargets: PermissionsProcessor.getToolTargets({ global, importOnly }),
+      supportedTargets: PermissionsProcessor.getToolTargets({
+        global,
+        importOnly,
+      }),
     },
   };
 }
@@ -526,7 +590,13 @@ function addToolScope({
     excludeToolDir: false,
   });
 
-  addSettablePaths(scope, projectRoot, outputRootRelative, settablePaths, access);
+  addSettablePaths(
+    scope,
+    projectRoot,
+    outputRootRelative,
+    settablePaths,
+    access,
+  );
 }
 
 function sorted(set) {
@@ -549,16 +619,21 @@ function scopeResult(scope) {
 }
 
 function validateConfig(config, projectRoot) {
-  if (config.getGlobal()) die("global output is intentionally disabled in this jail");
+  if (config.getGlobal())
+    die("global output is intentionally disabled in this jail");
 
   const inputRoot = path.resolve(config.getInputRoot());
   if (inputRoot !== projectRoot) {
-    die("input root outside project root is intentionally disabled: " + inputRoot);
+    die(
+      "input root outside project root is intentionally disabled: " + inputRoot,
+    );
   }
 
-  return config.getOutputRoots().map((outputRoot) =>
-    projectRelative(projectRoot, outputRoot, "output root"),
-  );
+  return config
+    .getOutputRoots()
+    .map((outputRoot) =>
+      projectRelative(projectRoot, outputRoot, "output root"),
+    );
 }
 
 async function buildGenerateScope(projectRoot, args) {
@@ -607,7 +682,8 @@ async function buildGitignoreScope(projectRoot, args) {
   validateConfig(config, projectRoot);
 
   const scope = createScope("gitignore", false);
-  for (const relativePath of policy.vcsManagedFiles ?? []) addFile(scope, relativePath);
+  for (const relativePath of policy.vcsManagedFiles ?? [])
+    addFile(scope, relativePath);
   return scope;
 }
 
@@ -617,7 +693,8 @@ async function buildImportScope(projectRoot, args) {
     features: true,
   });
   if (!options.targets) die("import requires --targets");
-  if (options.targets.length !== 1) die("import requires exactly one --targets entry");
+  if (options.targets.length !== 1)
+    die("import requires exactly one --targets entry");
 
   const config = await ConfigResolver.resolve(options, { logger });
   const outputRootRelative = validateConfig(config, projectRoot)[0] ?? ".";

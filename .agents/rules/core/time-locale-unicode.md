@@ -2,12 +2,12 @@
 id: core.time-locale-unicode
 kind: core
 triggers:
-  - 'time'
-  - 'timezone'
-  - 'locale'
-  - 'Unicode'
-  - 'encoding'
-  - 'i18n text'
+  - "time"
+  - "timezone"
+  - "locale"
+  - "Unicode"
+  - "encoding"
+  - "i18n text"
 summary: Handle time, locale, Unicode, and formatting consistently.
 load_with: []
 ---

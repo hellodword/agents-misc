@@ -2,11 +2,11 @@
 id: project-type.pure-patch
 kind: project-type
 triggers:
-  - 'pure patch'
-  - 'upstream patch'
-  - 'patch series'
-  - 'refresh patch'
-  - 'apply patch'
+  - "pure patch"
+  - "upstream patch"
+  - "patch series"
+  - "refresh patch"
+  - "apply patch"
 summary: Maintain reproducible patch sets against upstream projects without committing worktrees.
 load_with:
   rules:
@@ -19,6 +19,7 @@ load_with:
 ---
 
 # Pure Patch Project Rules
+
 ## Applicability
 
 Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.

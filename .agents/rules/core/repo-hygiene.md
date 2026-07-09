@@ -2,12 +2,12 @@
 id: core.repo-hygiene
 kind: core
 triggers:
-  - 'repo hygiene'
-  - 'temporary files'
-  - 'ignored paths'
-  - 'large files'
-  - 'fixtures'
-  - 'snapshots'
+  - "repo hygiene"
+  - "temporary files"
+  - "ignored paths"
+  - "large files"
+  - "fixtures"
+  - "snapshots"
 summary: Keep temporary, generated, local, and sensitive artifacts out of durable changes.
 load_with: []
 ---
