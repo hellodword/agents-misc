@@ -9,7 +9,7 @@ triggers:
   - "permission"
   - "untrusted input"
 summary: Avoid unsafe secret handling, injection risks, and insecure defaults.
-load_with: []
+companions: []
 ---
 
 # Security Rules

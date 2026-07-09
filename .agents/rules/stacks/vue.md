@@ -8,16 +8,10 @@ triggers:
   - "shadcn-vue"
   - "Vue components"
 summary: Apply Vue defaults for TypeScript, i18n, Vite, and local component conventions.
-load_with: []
+companions: []
 ---
 
 # Vue Rules
-
-## Applicability
-
-Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.
-
-Prefer coherent local conventions.
 
 - Use Vue when the project already uses Vue, the user asks for Vue, or Vue is clearly a better product fit.
 - Use TypeScript.

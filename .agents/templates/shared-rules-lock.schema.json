@@ -17,6 +17,12 @@
     },
     "expected_overlay_discovery_version": {
       "type": "string"
+    },
+    "expected_companion_metadata_version": {
+      "type": "string"
+    },
+    "expected_evals_version": {
+      "type": "string"
     }
   },
   "required": [

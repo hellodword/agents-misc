@@ -8,16 +8,10 @@ triggers:
   - "argparse"
   - "virtual environment"
 summary: Apply Python CLI defaults when Python is the best ecosystem fit.
-load_with: []
+companions: []
 ---
 
 # Python CLI Rules
-
-## Applicability
-
-Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.
-
-Prefer coherent local conventions.
 
 Use Python for CLI projects only when ecosystem fit justifies it.
 

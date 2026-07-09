@@ -8,16 +8,10 @@ triggers:
   - "SQLite web app"
   - "API frontend"
 summary: Apply defaults for full-stack Go backend and TypeScript frontend products.
-load_with: []
+companions: []
 ---
 
 # Full-stack Go + Web Project Rules
-
-## Applicability
-
-Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.
-
-Prefer coherent local conventions.
 
 ## Default stack
 

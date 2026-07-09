@@ -9,18 +9,22 @@ triggers:
   - "foreign keys"
   - "SQL migrations"
 summary: Apply SQLite defaults for native SQL, migrations, local database files, and validation.
-load_with:
-  rules:
-    - core.data-migrations
-    - core.backup-import-export
-    - core.testing
+companions:
+  conditional_rules:
+    - id: core.data-migrations
+      when: schema, migration, or persisted data shape changes
+    - id: core.backup-import-export
+      when: backup, restore, import, export, reset, or destructive behavior is involved
+    - id: core.compatibility
+      when: durable schema or file format changes
+    - id: core.testing
+      when: validation is needed
   skills:
-    - sqlite-migration-backup
+    - id: sqlite-migration-backup
+      when: migration, backup, restore, import, or export workflow guidance is needed
 ---
 
 # SQLite Rules
-
-Use SQLite as the default persistence choice only for new projects, local-first projects, prototypes, CLIs, small services, or repositories with no clear persistence convention.
 
 Do not introduce SQLite into an existing project that already has a clear storage strategy unless the user asks or the task requires a local embedded database.
 

@@ -8,16 +8,10 @@ triggers:
   - "Tailwind"
   - "design tokens"
 summary: Apply shadcn React defaults for components, registries, tokens, and accessibility.
-load_with: []
+companions: []
 ---
 
 # shadcn React Rules
-
-## Applicability
-
-Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.
-
-Prefer coherent local conventions.
 
 ## Rules
 

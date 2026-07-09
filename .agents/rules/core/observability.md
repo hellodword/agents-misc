@@ -8,7 +8,7 @@ triggers:
   - "observability"
   - "diagnostics"
 summary: Add useful logs and diagnostics without leaking sensitive information.
-load_with: []
+companions: []
 ---
 
 # Observability Rules

@@ -7,16 +7,10 @@ triggers:
   - "flutter_rust_bridge"
   - "mobile desktop"
 summary: Apply defaults for Flutter clients with Rust core or bridge layers.
-load_with: []
+companions: []
 ---
 
 # Flutter + Rust Bridge Project Rules
-
-## Applicability
-
-Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.
-
-Prefer coherent local conventions.
 
 ## Default stack
 

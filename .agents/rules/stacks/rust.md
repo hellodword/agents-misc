@@ -9,16 +9,10 @@ triggers:
   - "SQLx"
   - "tracing"
 summary: Apply Rust defaults for Cargo, linting, logging, errors, SQLite, and lockfiles.
-load_with: []
+companions: []
 ---
 
 # Rust Rules
-
-## Applicability
-
-Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.
-
-Prefer coherent local conventions.
 
 - Use Cargo.
 - Use `cargo fmt`.

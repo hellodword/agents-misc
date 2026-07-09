@@ -9,16 +9,10 @@ triggers:
   - "frontend state"
   - "locales"
 summary: Apply TypeScript frontend defaults for framework choice, state, i18n, and validation.
-load_with: []
+companions: []
 ---
 
 # Frontend TypeScript Rules
-
-## Applicability
-
-Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.
-
-Prefer coherent local conventions.
 
 - Prefer TypeScript for durable frontend work.
 - Do not force a specific framework when the current shadcn ecosystem provides a better fit.

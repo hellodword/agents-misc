@@ -7,12 +7,13 @@ triggers:
   - "third-party code"
   - "SPDX"
 summary: Handle licenses deliberately for new projects and added third-party assets.
-load_with: []
+companions: []
 ---
 
 # Licensing Rules
 
-- Default license for new non-patch projects: MIT.
+- MIT is the default permissive license suggestion for new non-patch projects.
+- Do not add or change a `LICENSE` file unless the user asks or project policy says to do so.
 - Pure patch projects follow upstream license and contribution conventions.
 - Do not copy substantial third-party code into the repository without checking license compatibility.
 - Prefer permissive dependencies for solo projects unless project constraints differ.

@@ -8,7 +8,7 @@ triggers:
   - "global install"
   - "system dependency"
 summary: Respect local environment limits, devcontainer boundaries, and available capabilities.
-load_with: []
+companions: []
 ---
 
 # Environment Rules

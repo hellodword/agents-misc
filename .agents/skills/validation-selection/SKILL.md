@@ -32,7 +32,9 @@ Choose the smallest useful validation set for the touched behavior, then escalat
 4. Run package-level, file-level, or focused tests before broad repository checks.
 5. Escalate to broader validation only when the touched behavior affects shared contracts, public APIs, database migrations, generated artifacts, security boundaries, FFI boundaries, or important user workflows.
 6. Do not weaken, split, or delete tests to hide failures.
-7. Report environment blockers separately from implementation failures.
+7. Re-run the narrowest failing command when cheap and useful.
+8. Attribute failures as introduced, pre-existing, or environment-caused.
+9. Report unrelated failures separately from implementation failures.
 
 ## Go race branch
 

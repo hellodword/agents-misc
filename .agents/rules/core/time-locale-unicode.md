@@ -9,7 +9,7 @@ triggers:
   - "encoding"
   - "i18n text"
 summary: Handle time, locale, Unicode, and formatting consistently.
-load_with: []
+companions: []
 ---
 
 # Time, Locale, and Unicode Rules

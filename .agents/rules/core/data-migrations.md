@@ -8,29 +8,35 @@ triggers:
   - "data reset"
   - "schema version"
 summary: Make schema and persisted data changes explicit, validated, and recoverable.
-load_with:
-  rules:
-    - core.backup-import-export
-    - stack.database-sqlite
+companions:
+  required_rules:
+    - core.compatibility
     - core.testing
+  conditional_rules:
+    - id: core.backup-import-export
+      when: backup, restore, import, export, reset, destructive behavior, or user-owned data recovery is involved
+    - id: core.data-privacy
+      when: user data or PII is involved
   skills:
-    - sqlite-migration-backup
+    - id: sqlite-migration-backup
+      when: migration, backup, restore, import, or export workflow guidance is needed
   templates:
-    - migration-plan
+    - id: migration-plan
+      when: producing a migration plan artifact
 ---
 
 # Data Migration Rules
 
 ## Default migration strategy
 
-Use explicit migrations for durable SQLite schemas.
+Use explicit migrations for durable schemas.
 
 A migration should have:
 
 - stable filename ordering;
 - clear purpose;
-- transaction where SQLite supports it;
-- forward migration SQL;
+- transaction where the database supports it;
+- forward migration SQL or equivalent durable migration step;
 - rollback or recovery note when practical;
 - compatibility note when existing data shape changes.
 
@@ -52,13 +58,15 @@ Before destructive changes:
 - write a preserving migration; or
 - document backup/restore steps.
 
-Ask the user only when the operation is destructive, irreversible, affects real user data, or cannot be proven to target disposable data.
+Ask the user when the operation is destructive, irreversible, affects real user data, or cannot be proven to target disposable data.
 
 Use transactions for multi-step writes.
 
 Make migrations idempotent only when the migration tool or style supports it cleanly. Do not hide partial failure.
 
 ## Default SQLite connection behavior
+
+For new SQLite-backed projects:
 
 - local database path: `tmp/app.sqlite`;
 - foreign keys: enabled;

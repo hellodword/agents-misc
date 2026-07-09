@@ -8,7 +8,7 @@ triggers:
   - "latency"
   - "memory"
 summary: Measure and scope performance changes before adding complexity.
-load_with: []
+companions: []
 ---
 
 # Performance Rules

@@ -9,9 +9,10 @@ triggers:
   - "subagent"
   - "one-shot review"
 summary: Probe available agent CLIs before using Codex, OpenCode, or generic one-shot review workflows.
-load_with:
+companions:
   references:
-    - agent-tool-adapter-examples
+    - id: agent-tool-adapter-examples
+      when: adapter command shapes are needed
 ---
 
 # Agent Tool Adapter Rules

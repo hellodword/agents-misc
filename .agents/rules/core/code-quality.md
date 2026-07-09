@@ -8,7 +8,7 @@ triggers:
   - "pure logic"
   - "maintainability"
 summary: Keep code readable, local, boring, and aligned with existing conventions.
-load_with: []
+companions: []
 ---
 
 # Code Quality

@@ -8,7 +8,7 @@ triggers:
   - "handoff"
   - "scope"
 summary: Plan work in small, verifiable slices and keep progress reports actionable.
-load_with: []
+companions: []
 ---
 
 # Working Model

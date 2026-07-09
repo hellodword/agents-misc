@@ -9,7 +9,7 @@ triggers:
   - "destructive migration"
   - "SQLite backup"
 summary: Protect user data through backup, import, export, and restore discipline.
-load_with: []
+companions: []
 ---
 
 # Backup, Import, and Export Rules

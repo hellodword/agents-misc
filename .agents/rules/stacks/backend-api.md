@@ -9,7 +9,7 @@ triggers:
   - "pagination"
   - "error shape"
 summary: Apply backend API defaults for contracts, validation, authorization, and handlers.
-load_with: []
+companions: []
 ---
 
 # Backend API Rules

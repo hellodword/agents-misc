@@ -8,7 +8,7 @@ triggers:
   - "screenshot"
   - "web verification"
 summary: Choose minimal browser validation with safe artifact and profile handling.
-load_with: []
+companions: []
 ---
 
 # Browser E2E Rules

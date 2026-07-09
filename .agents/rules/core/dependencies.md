@@ -9,7 +9,12 @@ triggers:
   - "supply chain"
   - "new dependency"
 summary: Add dependencies only when justified and through project-local tooling.
-load_with: []
+companions:
+  conditional_rules:
+    - id: core.licensing
+      when: adding third-party code or packages
+    - id: core.security
+      when: install scripts, telemetry, binary downloads, network fetches, or supply-chain risk exist
 ---
 
 # Dependency Rules
@@ -17,6 +22,10 @@ load_with: []
 Prefer no new dependency when the standard library or an existing project dependency is enough.
 
 Add a dependency only when it clearly improves correctness, security, maintainability, interoperability, or implementation scope.
+
+Before adding or changing a dependency, verify current facts through project lockfiles, the package manager, registry metadata, official documentation, or current tool help.
+
+Do not rely on model memory for package names, versions, maintenance status, security advisories, install scripts, binary downloads, telemetry behavior, license metadata, or package manager command syntax.
 
 Prefer dependencies with:
 

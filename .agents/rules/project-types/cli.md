@@ -8,16 +8,10 @@ triggers:
   - "flags"
   - "terminal app"
 summary: Apply defaults for durable command-line tools and CLI contracts.
-load_with: []
+companions: []
 ---
 
 # CLI Project Rules
-
-## Applicability
-
-Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.
-
-Prefer coherent local conventions.
 
 ## Default languages
 

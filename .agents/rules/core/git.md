@@ -9,12 +9,14 @@ triggers:
   - "status"
   - "Conventional Commit"
 summary: Keep commits atomic, explicit, and safe around unrelated user changes.
-load_with:
-  rules:
+companions:
+  required_rules:
     - core.repo-hygiene
   skills:
-    - atomic-commit
-    - repo-hygiene-review
+    - id: atomic-commit
+      when: commit workflow guidance is needed
+    - id: repo-hygiene-review
+      when: staging or artifact boundaries are non-trivial
 ---
 
 # Git Rules
@@ -52,12 +54,7 @@ Commit mode is active only when one of these is true:
 
 Do not create commits automatically merely because a plan has multiple steps.
 
-For multi-step implementation without explicit commit permission, after each verified step report:
-
-- changed files;
-- validation run;
-- suggested commit message;
-- exact files that would be staged.
+For multi-step implementation without explicit commit permission, after each verified step report changed files, validation run, suggested commit message, and exact files that would be staged.
 
 When commit mode is active:
 
@@ -67,13 +64,7 @@ When commit mode is active:
 - run `git status --short` before committing;
 - if unrelated user changes are present and cannot be cleanly separated, do not commit automatically. Report the intended staging paths and defer.
 
-If commits are forbidden by mode, user instruction, execution environment, or repository state, provide:
-
-- changed file list;
-- explicit files to stage;
-- verification performed;
-- suggested commit message;
-- reason the commit is deferred.
+If commits are forbidden by mode, user instruction, execution environment, or repository state, provide changed file list, explicit files to stage, verification performed, suggested commit message, and reason the commit is deferred.
 
 ## Staging
 
@@ -93,16 +84,21 @@ Never use force-add for ignored files unless the ignore policy is explicitly cha
 
 ## Commit message
 
-Use non-interactive commits.
+Use the repository's existing Conventional Commit type set when available.
 
-Allowed commit types:
+Default allowed types:
 
 - `feat`
 - `fix`
-- `chore`
 - `docs`
-- `refactor`
 - `test`
+- `refactor`
+- `chore`
+- `build`
+- `ci`
+- `perf`
+- `style`
+- `revert`
 
 Header format:
 

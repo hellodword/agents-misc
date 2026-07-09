@@ -9,15 +9,19 @@ triggers:
   - "stderr"
   - "machine-readable output"
 summary: Keep CLI commands, flags, output, and exit behavior stable and scriptable.
-load_with:
-  rules:
-    - project-type.cli
+companions:
+  required_rules:
     - core.compatibility
     - core.testing
+  conditional_rules:
+    - id: project-type.cli
+      when: the repository or task is CLI-focused
   skills:
-    - cli-contract
+    - id: cli-contract
+      when: producing or updating a CLI contract workflow is needed
   templates:
-    - cli-contract
+    - id: cli-contract
+      when: producing or updating a CLI contract artifact
 ---
 
 # CLI Stability Rules

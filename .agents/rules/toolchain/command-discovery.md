@@ -8,7 +8,7 @@ triggers:
   - "available scripts"
   - "validation command"
 summary: Discover project commands safely before inventing new workflows.
-load_with: []
+companions: []
 ---
 
 # Command Discovery Rules

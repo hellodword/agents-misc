@@ -8,9 +8,10 @@ triggers:
   - "generated docs"
   - "reproducibility"
 summary: Classify generated artifacts and commit only reproducible durable outputs.
-load_with:
+companions:
   skills:
-    - generated-artifacts-review
+    - id: generated-artifacts-review
+      when: generated artifacts require review or classification
 ---
 
 # Generated Artifact Rules

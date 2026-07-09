@@ -29,9 +29,11 @@ docs/
   adr/
 ```
 
+Agents discover overlay entrypoints by listing path existence only. They read only routed or otherwise relevant files, not the full overlay tree.
+
 ## `.project-agent/project.md`
 
-Keep this short. Include only information that is broadly useful for most tasks.
+Keep this short. Include only information broadly useful for most tasks.
 
 Suggested sections:
 
@@ -65,7 +67,7 @@ Example:
 ```md
 # Project Route Map
 
-Project routes override shared default routes.
+Project routes override shared default routes only within their declared scope and below safety invariants.
 
 ## Always load for product code changes
 
@@ -83,6 +85,8 @@ When touching `internal/http/**`, `internal/api/**`, or `contracts/api/**`, load
 - `.agents/rules/stacks/backend-api.md`
 - `.agents/rules/core/config-schema-protocol-api.md`
 - `.agents/rules/core/compatibility.md`
+- `.agents/rules/core/security.md` when auth, permissions, untrusted input, external access, or security boundaries are involved
+- `.agents/rules/core/data-privacy.md` when PII, user data, telemetry, retention, export, deletion, or privacy-sensitive behavior is involved
 - `.agents/rules/core/testing.md`
 
 ## SQLite and persistence
@@ -92,9 +96,20 @@ When touching `internal/storage/**`, `internal/db/**`, `migrations/**`, or `cont
 - `.project-agent/rules/database.md`
 - `contracts/db/schema.md`
 - `contracts/db/migrations.md`
-- `.agents/rules/stacks/database-sqlite.md`
 - `.agents/rules/core/data-migrations.md`
-- `.agents/rules/core/backup-import-export.md`
+- `.agents/rules/core/compatibility.md`
+- `.agents/rules/stacks/database-sqlite.md`
+- `.agents/rules/core/backup-import-export.md` when backup, restore, import, export, or user-owned data recovery is involved
+- `.agents/rules/core/testing.md`
+
+## Dependencies
+
+When touching package manager files, lockfiles, vendored code, or third-party assets, load:
+
+- `.agents/rules/core/dependencies.md`
+- `.agents/rules/core/licensing.md`
+- `.agents/rules/core/security.md` when install scripts, telemetry, binary downloads, native extensions, or supply-chain risk are involved
+- relevant stack or toolchain rule
 
 ## CLI behavior
 
@@ -106,6 +121,7 @@ When touching `cmd/**`, `internal/cli/**`, or `contracts/cli/**`, load:
 - `.agents/rules/project-types/cli.md`
 - `.agents/rules/core/cli-stability.md`
 - `.agents/rules/core/compatibility.md`
+- `.agents/rules/core/testing.md`
 
 ## Architecture-sensitive changes
 
@@ -125,10 +141,12 @@ Use this lock to record the expected shared rules kit identity.
 {
   "schema_version": "1",
   "expected_name": "agent-rules-kit",
-  "expected_version": "0.2.0",
-  "expected_rules_schema_version": "1",
-  "expected_overlay_discovery_version": "1"
+  "expected_version": "0.3.0",
+  "expected_rules_schema_version": "2",
+  "expected_overlay_discovery_version": "2",
+  "expected_companion_metadata_version": "1",
+  "expected_evals_version": "1"
 }
 ```
 
-Agents should compare this file with `.agents/manifest.json` and report mismatches.
+Agents compare this file with `.agents/manifest.json` and report mismatches.

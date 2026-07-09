@@ -9,7 +9,7 @@ triggers:
   - "telemetry"
   - "fixtures"
 summary: Minimize, protect, and avoid exposing personal or sensitive data.
-load_with: []
+companions: []
 ---
 
 # Data and Privacy Rules

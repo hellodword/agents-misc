@@ -8,10 +8,11 @@ triggers:
   - "race detector"
   - "coverage"
   - "flaky test"
-summary: Choose narrow validation and avoid weakening tests to hide failures.
-load_with:
+summary: Choose narrow validation, attribute failures, and avoid weakening tests to hide failures.
+companions:
   skills:
-    - validation-selection
+    - id: validation-selection
+      when: validation choice is not obvious
 ---
 
 # Testing Rules
@@ -35,6 +36,15 @@ load_with:
 - Reuse existing helpers before adding new helpers.
 - Keep low-reuse helpers near their tests.
 - Cross-domain helpers must expose clear inputs/outputs and must not hide fixture, permission, time, locale, or auth semantics.
+
+## Failure attribution
+
+When validation fails:
+
+1. Re-run the narrowest failing command when cheap.
+2. Determine whether the failure is pre-existing, environment-caused, or introduced by the current changes.
+3. Do not fix unrelated pre-existing failures unless required for the task.
+4. Report unrelated failures separately with command, evidence, and likely category.
 
 ## Go race validation
 

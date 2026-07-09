@@ -8,7 +8,7 @@ triggers:
   - "action pinning"
   - "permissions"
 summary: Add GitHub Actions only on request and keep workflows minimal and explicit.
-load_with: []
+companions: []
 ---
 
 # GitHub Actions Rules

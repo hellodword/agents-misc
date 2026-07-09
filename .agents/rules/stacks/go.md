@@ -9,20 +9,16 @@ triggers:
   - "slog"
   - "race detector"
 summary: Apply Go defaults for modules, formatting, SQLite, logging, and race validation.
-load_with:
-  rules:
-    - core.testing
+companions:
+  conditional_rules:
+    - id: core.testing
+      when: Go validation or race testing is involved
   skills:
-    - validation-selection
+    - id: validation-selection
+      when: selecting Go validation commands is non-obvious
 ---
 
 # Go Rules
-
-## Applicability
-
-Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.
-
-Prefer coherent local conventions.
 
 - Use Go modules.
 - Use `gofmt`.

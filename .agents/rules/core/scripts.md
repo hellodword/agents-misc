@@ -9,7 +9,7 @@ triggers:
   - "just recipe"
   - "idempotent"
 summary: Keep repository scripts documented, narrow, reproducible, and project-local.
-load_with: []
+companions: []
 ---
 
 # Repository Script Rules

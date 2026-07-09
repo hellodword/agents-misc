@@ -1,7 +1,9 @@
 {
   "schema_version": "1",
   "name": "agent-rules-kit",
-  "version": "0.2.0",
-  "rules_schema_version": "1",
-  "overlay_discovery_version": "1"
+  "version": "0.3.0",
+  "rules_schema_version": "2",
+  "overlay_discovery_version": "2",
+  "companion_metadata_version": "1",
+  "evals_version": "1"
 }

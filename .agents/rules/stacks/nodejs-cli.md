@@ -8,16 +8,10 @@ triggers:
   - "package-lock"
   - "bundled JavaScript"
 summary: Apply Node.js CLI defaults when npm, frontend, or browser tooling fit best.
-load_with: []
+companions: []
 ---
 
 # Node.js CLI Rules
-
-## Applicability
-
-Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.
-
-Prefer coherent local conventions.
 
 Use Node.js for CLI projects when ecosystem fit justifies it, especially frontend/tooling/npm/browser automation workflows.
 

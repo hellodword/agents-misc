@@ -8,17 +8,29 @@ triggers:
   - "API contract"
   - "FFI contract"
 summary: Define and preserve config, schema, protocol, and API contracts.
-load_with:
-  rules:
+companions:
+  required_rules:
     - core.compatibility
     - core.testing
+  conditional_rules:
+    - id: stack.backend-api
+      when: HTTP or server behavior is involved
+    - id: core.security
+      when: auth, authorization, untrusted input, user data, or external access is involved
+    - id: core.data-privacy
+      when: PII or user data is involved
   skills:
-    - compatibility-review
+    - id: compatibility-review
+      when: compatibility risk is non-trivial
   templates:
-    - api-contract
-    - config-contract
-    - protocol
-    - schema
+    - id: api-contract
+      when: producing or updating an API contract
+    - id: config-contract
+      when: producing or updating a config contract
+    - id: protocol
+      when: producing or updating a protocol contract
+    - id: schema
+      when: producing or updating a schema artifact
 ---
 
 # Config, Schema, Protocol, and API Rules
@@ -27,6 +39,7 @@ load_with:
 - YAML preference applies only to project-developed application configuration files when multiple formats are equally valid.
 - For tool-defined config files, use the tool's required or conventional format.
 - Default API documentation format: Markdown contract first.
+- Consider auth, authorization, input validation, privacy, and error-shape leakage for HTTP/API changes.
 
 ## Config contracts
 

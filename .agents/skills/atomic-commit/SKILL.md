@@ -48,13 +48,18 @@ The following do not create multiple normal steps by themselves:
 8. Stage only explicit file paths.
 9. Never run `git add .`, `git add -A`, or `git add --all`.
 10. Never stage ignored files.
-11. Write a Conventional Commit header using only:
+11. Use the repository's existing Conventional Commit type set when available. Otherwise use one of:
     - `feat`
     - `fix`
-    - `chore`
     - `docs`
-    - `refactor`
     - `test`
+    - `refactor`
+    - `chore`
+    - `build`
+    - `ci`
+    - `perf`
+    - `style`
+    - `revert`
 12. Use an English imperative subject with no trailing period.
 13. Add a body only when it clarifies key changes, migrations, generated artifacts, flake lock alignment, or documentation sync.
 14. If `$AI_COMMIT_COAUTHOR` is non-blank, append `Co-authored-by: $AI_COMMIT_COAUTHOR` as the final line.

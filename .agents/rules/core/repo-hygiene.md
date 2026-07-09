@@ -9,7 +9,7 @@ triggers:
   - "fixtures"
   - "snapshots"
 summary: Keep temporary, generated, local, and sensitive artifacts out of durable changes.
-load_with: []
+companions: []
 ---
 
 # Repository Hygiene

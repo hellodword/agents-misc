@@ -8,137 +8,70 @@ triggers:
   - "refresh patch"
   - "apply patch"
 summary: Maintain reproducible patch sets against upstream projects without committing worktrees.
-load_with:
-  rules:
-    - toolchain.nix-just
+companions:
+  required_rules:
+    - toolchain.nix
     - core.repo-hygiene
+  conditional_rules:
+    - id: core.scripts
+      when: patch helper scripts change
   skills:
-    - pure-patch-workflow
+    - id: pure-patch-workflow
+      when: fetching, applying, refreshing, or validating patch series
   references:
-    - nixpkgs-devcontainer-alignment
+    - id: nixpkgs-devcontainer-alignment
+      when: initializing, updating, or aligning nixpkgs inputs
 ---
 
 # Pure Patch Project Rules
 
 ## Applicability
 
-Use these defaults only for new projects, greenfield scaffolding, or repositories without a clear existing convention.
+Use this for repositories that maintain patches against upstream projects such as Chromium, Firefox, codex_rs, dnsmasq, or similar projects.
 
-Prefer coherent local conventions.
+A pure patch repository commits patch files, series metadata, upstream revision metadata, documentation, Nix environment, just recipes, and patch helper scripts.
 
-Use this for maintaining patches against upstream projects such as Chromium, Firefox, codex_rs, dnsmasq, and similar projects.
-
-A pure patch repository commits:
-
-- patch files;
-- patch series metadata;
-- upstream revision metadata;
-- documentation;
-- Nix development environment;
-- just recipes;
-- patch apply/refresh scripts;
-- minimal build/test helper scripts.
-
-A pure patch repository does not commit the patched upstream source tree.
+It does not commit the patched upstream source tree.
 
 ## Directory convention
 
-Use:
+```text
+<upstream-name>/
+  upstream.yaml
+  README.md
+  patches/
+    <upstream-version-or-tag>/
+      series
+      0001-*.patch
+      0002-*.patch
+  scripts/
+    fetch-upstream.py
+    apply-patches.py
+    refresh-patches.py
+    build.py
+    test.py
+.work/
+  <upstream-name>/
+    <upstream-version-or-tag>/
+      src/
+```
 
-    <upstream-name>/
-      upstream.yaml
-      README.md
-      patches/
-        <upstream-version-or-tag>/
-          series
-          0001-*.patch
-          0002-*.patch
-      scripts/
-        fetch-upstream.py
-        apply-patches.py
-        refresh-patches.py
-        build.py
-        test.py
+Keep `.work/**` ignored.
 
-Use ignored worktrees:
+## Upstream source
 
-    .work/
-      <upstream-name>/
-        <upstream-version-or-tag>/
-          src/
+- Record the exact upstream revision in `upstream.yaml`.
+- Use the smallest reliable source acquisition method.
+- Prefer shallow clone of a specific tag or revision when Git metadata is useful.
+- Use upstream-native fetch tooling for complex projects when required.
+- Avoid full-history clones unless upstream tooling requires them or the user explicitly asks.
+- Do not rely on floating branches for patch directories.
 
-## Initial flow
+## Patch sets
 
-Before editing patches:
+Use versioned patch directories and do not overwrite older sets during upstream upgrades.
 
-1. Determine upstream project name, URL, and exact revision/tag.
-2. If the user did not request full history, do not clone all history.
-3. Fetch only what is needed for the selected revision/tag when possible.
-4. Place upstream checkout under `.work/<upstream>/<rev>/src`.
-5. Create or update Nix dev shell for the patch workspace.
-6. Before initializing or updating `nixpkgs`, read `.agents/references/nixpkgs-devcontainer-alignment.md`; keep `flake.nix` on `github:NixOS/nixpkgs/nixos-unstable` and use `--override-input` only through `nix flake update`.
-7. Add just recipes that call Nix and then upstream-native commands.
-8. Verify the narrowest build/test command that can compile or validate the unpatched upstream checkout.
-9. Apply existing patches.
-10. Verify the narrowest build/test command after patches.
-
-## Fetch strategy
-
-Use the smallest reliable source acquisition method required by the upstream project.
-
-Default choices:
-
-- shallow clone a specific tag/revision when Git metadata is useful;
-- use upstream-native fetch tooling for complex projects such as Chromium or Firefox;
-- avoid full-history clones unless upstream tooling requires them or the user explicitly asks.
-
-Record the exact upstream revision in `upstream.yaml`.
-
-Do not rely on floating branches for patch directories.
-
-## Build jobs
-
-Build jobs must never exceed:
-
-    max(1, nproc - 1)
-
-When `nproc` is unavailable, use a portable fallback such as Python or `getconf`.
-
-Example Python expression:
-
-    max(1, (os.cpu_count() or 2) - 1)
-
-## Long builds
-
-If the first full upstream build is likely to take a very long time, do not babysit it for hours.
-
-Instead:
-
-- provide the exact command;
-- explain expected cache/output directories;
-- ask the user to run the first full build manually;
-- continue later using the populated build cache.
-
-## Avoid invalidating build cache
-
-When modifying patches:
-
-- do not delete build caches;
-- do not clean the whole upstream tree unless necessary;
-- avoid commands that force full rebuilds;
-- prefer narrow build/test targets;
-- preserve generated build directories unless the build system requires cleanup.
-
-## Patch version directories
-
-Do not overwrite older patch sets during upstream upgrades.
-
-Use versioned directories:
-
-    <upstream-name>/patches/<old-version>/
-    <upstream-name>/patches/<new-version>/
-
-When upgrading upstream from version A to version B:
+When upgrading from version A to version B:
 
 1. create a new patch directory for B;
 2. copy or regenerate the patch series from A;
@@ -148,31 +81,20 @@ When upgrading upstream from version A to version B:
 6. run narrow validation;
 7. keep A unless explicitly retired.
 
-## Patch format
+Prefer `git format-patch` style patches when upstream is Git-based. Maintain a `series` file for ordering.
 
-Prefer `git format-patch` style patches when upstream is Git-based.
+## Build cache
 
-Maintain a `series` file for ordering.
+- Do not delete build caches by default.
+- Do not clean the whole upstream tree unless necessary.
+- Avoid commands that force full rebuilds.
+- Prefer narrow build/test targets.
+- Preserve generated build directories unless the build system requires cleanup.
 
-Patch filenames should be stable and reviewable.
-
-## Git
-
-Environment scaffolding and patch files may be committed to the pure patch repository.
-
-Patched upstream source under `.work/` must not be committed.
-
-Use one semantic commit for one patch management change.
+Build jobs must not exceed `max(1, nproc - 1)`. When `nproc` is unavailable, use a portable fallback such as Python or `getconf`.
 
 ## Validation
 
 Prefer upstream-native validation inside Nix.
 
-Record:
-
-- upstream revision;
-- patch series path;
-- command run;
-- jobs setting;
-- cache reuse status;
-- limitations.
+Record upstream revision, patch series path, command run, jobs setting, cache reuse status, and limitations.
