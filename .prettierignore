@@ -1,0 +1,2 @@
+# These files are checked against upstream byte hashes in metadata.json.
+codex/schemas/rust-v*/config.schema.json
