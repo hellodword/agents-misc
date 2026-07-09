@@ -2,25 +2,14 @@
   lib,
   nixpkgs,
   supportedSystems,
+  treefmt-nix,
 }:
 
 lib.genAttrs supportedSystems (
   system:
   let
     pkgs = import nixpkgs { inherit system; };
+    treefmtEval = treefmt-nix.lib.evalModule pkgs ../treefmt.nix;
   in
-  pkgs.writeShellApplication {
-    name = "agents-misc-fmt";
-    runtimeInputs = [
-      pkgs.findutils
-      pkgs.nixfmt
-    ];
-    text = ''
-      find flake.nix nix \
-        -type f \
-        -name '*.nix' \
-        -print0 |
-        xargs -0 nixfmt
-    '';
-  }
+  treefmtEval.config.build.wrapper
 )

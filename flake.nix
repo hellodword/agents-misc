@@ -16,12 +16,15 @@
     llm-agents = {
       url = "github:numtide/llm-agents.nix";
     };
+
+    treefmt-nix.follows = "llm-agents/treefmt-nix";
   };
 
   outputs =
     {
       nixpkgs,
       llm-agents,
+      treefmt-nix,
       ...
     }:
     let
@@ -73,7 +76,12 @@
       };
 
       formatter = import ./nix/formatter.nix {
-        inherit lib nixpkgs supportedSystems;
+        inherit
+          lib
+          nixpkgs
+          supportedSystems
+          treefmt-nix
+          ;
       };
 
       overlays.default = final: _prev: {

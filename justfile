@@ -8,7 +8,7 @@ dev:
 show:
   nix flake show
 
-# Format root flake Nix files through the flake formatter.
+# Format configured project files through the flake formatter.
 fmt:
   nix fmt
 

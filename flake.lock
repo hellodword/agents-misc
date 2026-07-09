@@ -137,7 +137,11 @@
     "root": {
       "inputs": {
         "llm-agents": "llm-agents",
-        "nixpkgs": "nixpkgs_2"
+        "nixpkgs": "nixpkgs_2",
+        "treefmt-nix": [
+          "llm-agents",
+          "treefmt-nix"
+        ]
       }
     },
     "systems": {
