@@ -21,6 +21,7 @@ Use this skill when working on:
 - Nix devShells;
 - Nix checks;
 - Nix formatter output;
+- treefmt-nix configuration;
 - project build/test/lint/format/codegen commands;
 - pure patch apply/refresh/build commands.
 
@@ -40,9 +41,11 @@ Use this skill when working on:
 9. Keep just recipes thin.
 10. Move complex logic into checked-in scripts.
 11. Keep `flake.nix` thin and move reusable Nix output definitions into `./nix/`.
-12. If a project tool is missing and edits are allowed, update `flake.nix`.
-13. If edits are not allowed, report the missing package.
-14. Do not install global tools.
+12. For multi-language formatting in Nix projects, prefer `treefmt-nix`, root `treefmt.nix`, and a flake `formatter` output.
+13. When seeding shared formatter defaults, use `.agents/templates/treefmt.nix`, `.agents/templates/.prettierrc.json`, and `.agents/templates/.editorconfig`.
+14. If a project tool is missing and edits are allowed, update `flake.nix`.
+15. If edits are not allowed, report the missing package.
+16. Do not install global tools.
 
 ## Flake organization
 
@@ -57,6 +60,9 @@ Use this default structure when it is useful:
       checks.nix
       formatter.nix
     scripts/
+    treefmt.nix
+    .prettierrc.json
+    .editorconfig
 
 Do not create empty files just to match the structure.
 
@@ -66,7 +72,7 @@ Output responsibilities:
 - `apps`: runnable wrappers for `nix run`.
 - `devShells`: development environments.
 - `checks`: stable `nix flake check` validations.
-- `formatter`: stable `nix fmt` formatter when useful.
+- `formatter`: stable `nix fmt` formatter, preferably backed by `treefmt-nix` for multi-language projects.
 
 ## Validation
 
@@ -76,6 +82,7 @@ Report:
 - command used;
 - Nix shell used;
 - nixpkgs source decision;
+- formatter entrypoint and treefmt config used, when formatting was touched;
 - whether devcontainer nixpkgs rev was found;
 - whether `.nodes.nixpkgs.locked.rev` in `flake.lock` matches the intended rev;
 - just recipes added or changed;

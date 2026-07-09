@@ -6,6 +6,7 @@ triggers:
   - "Just"
   - "justfile"
   - "flake.nix"
+  - "treefmt"
   - "dev shell"
   - "nixpkgs"
 summary: Use Nix for reproducible environments and Just for documented project commands.
@@ -33,6 +34,8 @@ Prefer coherent local conventions.
 - Default `nixpkgs` input in `flake.nix`: `github:NixOS/nixpkgs/nixos-unstable`.
 - Prefer `flake.nix` and `flake.lock`.
 - Prefer a default dev shell named `dev`.
+- Prefer `treefmt-nix` for multi-language formatters when a project already uses Nix.
+- Prefer a root `treefmt.nix` and expose it through the flake `formatter` output.
 
 ## Ordinary projects and pure Nix projects
 
@@ -77,6 +80,28 @@ Summary requirements:
 - when no devcontainer revision is available, let `flake.lock` resolve from `github:NixOS/nixpkgs/nixos-unstable`;
 - do not rewrite `flake.nix` to `github:NixOS/nixpkgs/<rev>` merely because `--override-input` was used;
 - do not install `jq` or other helpers globally.
+
+## Treefmt and formatter defaults
+
+For new or unconstrained Nix projects that need formatting across multiple file types:
+
+- use `treefmt-nix` as the flake formatter integration;
+- keep formatter configuration in root `treefmt.nix`;
+- set `projectRootFile = "flake.nix"` unless local convention has a better root marker;
+- enable `programs.nixfmt` for Nix files;
+- enable `programs.prettier` for JSON, JSONC, Markdown, HTML, CSS, JavaScript, TypeScript, JSX, TSX, Vue, and adjacent web formats;
+- keep Prettier options in root `.prettierrc.json` when project style needs explicit defaults;
+- keep editor baseline whitespace behavior in root `.editorconfig`;
+- for ordinary projects, expose a commented `fmt` recipe that calls `nix fmt`;
+- for pure Nix projects, make `nix fmt` first-class even when no `justfile` exists.
+
+When seeding a shared default, use:
+
+- `.agents/templates/treefmt.nix`;
+- `.agents/templates/.prettierrc.json`;
+- `.agents/templates/.editorconfig`.
+
+Do not add independent formatter commands that bypass the flake formatter unless the project already has that convention or the command is intentionally narrower than `nix fmt`.
 
 ## Command classes
 
@@ -169,9 +194,9 @@ Good ordinary-project recipe shape:
     test-race:
       nix develop .#dev --command go test -race ./...
 
-    # Format Go source files.
+    # Format configured project files through the flake formatter.
     fmt:
-      nix develop .#dev --command gofmt -w ./cmd ./internal
+      nix fmt
 
     # Run stable flake checks.
     check:

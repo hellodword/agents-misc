@@ -5,6 +5,7 @@ triggers:
   - "formatting"
   - "formatter"
   - "Prettier"
+  - "treefmt"
   - "gofmt"
   - "nix fmt"
   - "touched files"
@@ -18,9 +19,12 @@ load_with: []
 - Rust: `cargo fmt`.
 - Dart/Flutter: `dart format`.
 - JSON, JSONC, Markdown, HTML, YAML, JavaScript, TypeScript, Vue: Prettier.
+- Nix projects with a flake formatter: prefer `nix fmt`.
+- Nix projects with multi-language formatting needs: prefer `treefmt-nix` through the flake `formatter` output.
 - Format only touched files by default.
 - Do not run repository-wide formatting unless:
   - the task is formatting-focused;
   - the repo already requires it;
   - the change generated many files that must be consistently formatted.
 - Do not mix formatting-only changes with semantic changes unless formatting is limited to touched files.
+- When seeding shared formatter defaults, use `.agents/templates/treefmt.nix`, `.agents/templates/.prettierrc.json`, and `.agents/templates/.editorconfig`.
