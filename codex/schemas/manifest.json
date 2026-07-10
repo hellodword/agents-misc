@@ -102,6 +102,12 @@
       "schemaPath": "rust-v0.144.0/config.schema.json",
       "tag": "rust-v0.144.0",
       "version": "0.144.0"
+    },
+    {
+      "metadataPath": "rust-v0.144.1/metadata.json",
+      "schemaPath": "rust-v0.144.1/config.schema.json",
+      "tag": "rust-v0.144.1",
+      "version": "0.144.1"
     }
   ]
 }
