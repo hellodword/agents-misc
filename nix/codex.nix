@@ -5,6 +5,11 @@
 }:
 
 let
+  codeModeHostOverlayVersions = [
+    "0.144.0"
+    "0.144.1"
+  ];
+
   patchesForVersion =
     version:
     let
@@ -36,7 +41,8 @@ let
         version = old.version or (builtins.parseDrvName old.name).version;
         cargoBuildFlags = old.cargoBuildFlags or [ ];
         needsCodeModeHostOverlay =
-          version == "0.144.0" && !(builtins.elem "codex-code-mode-host" cargoBuildFlags);
+          (builtins.elem version codeModeHostOverlayVersions)
+          && !(builtins.elem "codex-code-mode-host" cargoBuildFlags);
         localPatches =
           let
             patches = patchesForVersion version;
