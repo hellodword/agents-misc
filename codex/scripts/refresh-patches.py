@@ -84,6 +84,7 @@ TERMINAL_WAIT_PATCH_PATHS = frozenset(
 
 SHARED_CONFIG_TOML_PATH = "codex-rs/config/src/config_toml.rs"
 SHARED_CONFIG_SCHEMA_PATH = "codex-rs/core/config.schema.json"
+CODE_MODE_TEST_PATH = "codex-rs/core/tests/suite/code_mode.rs"
 DIFF_EXCLUDE_PATHS = (
     ":(exclude)codex-rs/Cargo.lock",
 )
@@ -168,6 +169,13 @@ def _config_schema_patch_name(hunk: list[str]) -> str:
     return SPLIT_PATCH_NAMES[1]
 
 
+def _code_mode_test_patch_name(hunk: list[str]) -> str:
+    text = "".join(hunk)
+    if "terminal_wait" in text or "TerminalWait" in text:
+        return TERMINAL_WAIT_PATCH_NAME
+    return SPLIT_PATCH_NAMES[1]
+
+
 def _split_patch_texts(diff: str) -> dict[str, str]:
     patch_blocks: dict[str, list[list[str]]] = {name: [] for name in SPLIT_PATCH_NAMES}
     for block in _diff_blocks(diff):
@@ -184,6 +192,13 @@ def _split_patch_texts(diff: str) -> dict[str, str]:
             grouped_hunks: dict[str, list[list[str]]] = {name: [] for name in SPLIT_PATCH_NAMES}
             for hunk in hunks:
                 grouped_hunks[_config_schema_patch_name(hunk)].append(hunk)
+            for patch_name, patch_hunks in grouped_hunks.items():
+                _append_hunks(patch_blocks, patch_name, header, patch_hunks)
+        elif path == CODE_MODE_TEST_PATH:
+            header, hunks = _split_hunks(block)
+            grouped_hunks: dict[str, list[list[str]]] = {name: [] for name in SPLIT_PATCH_NAMES}
+            for hunk in hunks:
+                grouped_hunks[_code_mode_test_patch_name(hunk)].append(hunk)
             for patch_name, patch_hunks in grouped_hunks.items():
                 _append_hunks(patch_blocks, patch_name, header, patch_hunks)
         elif path in MODEL_PROVIDER_PATCH_PATHS:

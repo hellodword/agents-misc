@@ -1410,6 +1410,72 @@ index 20a930b..516911f 100644
  #[tokio::test]
  async fn network_denial_fallback_message_names_sandbox_network_proxy() {
      let message = network_denial_message_for_session(/*session*/ None, /*deferred*/ None).await;
+diff --git a/codex-rs/core/tests/suite/code_mode.rs b/codex-rs/core/tests/suite/code_mode.rs
+index f5b0dcc..b215738 100644
+--- a/codex-rs/core/tests/suite/code_mode.rs
++++ b/codex-rs/core/tests/suite/code_mode.rs
+@@ -3,6 +3,9 @@
+ use anyhow::Result;
+ use base64::Engine;
+ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
++use codex_config::terminal_wait::TerminalWaitCommandToml;
++use codex_config::terminal_wait::TerminalWaitModeToml;
++use codex_config::terminal_wait::TerminalWaitToml;
+ use codex_config::types::McpServerConfig;
+ use codex_config::types::McpServerTransportConfig;
+ use codex_core::config::Config;
+@@ -1144,6 +1147,51 @@ text(result.output);
+     Ok(())
+ }
+ 
++#[cfg_attr(windows, ignore = "no exec_command on Windows")]
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn code_mode_exec_nested_uses_terminal_wait_max_output_tokens() -> Result<()> {
++    skip_if_no_network!(Ok(()));
++
++    let server = responses::start_mock_server().await;
++    let (_test, second_mock) = run_code_mode_turn_with_config(
++        &server,
++        "use exec_command from code mode",
++        r#"
++const result = await tools.exec_command({
++  cmd: "printf '0123456789012345678901234567890123456789'",
++  max_output_tokens: 20000
++});
++text(result.output);
++"#,
++        |config| {
++            config.terminal_wait = Some(TerminalWaitToml {
++                commands: vec![TerminalWaitCommandToml {
++                    pattern: "^printf ".to_string(),
++                    mode: TerminalWaitModeToml::WaitUntilExit,
++                    name: Some("printf".to_string()),
++                    enabled: true,
++                    cwd_pattern: None,
++                    allow_tty: false,
++                    max_output_tokens: Some(5),
++                    wait_timeout_ms: None,
++                    poll_interval_ms: None,
++                }],
++            });
++        },
++    )
++    .await?;
++
++    assert_eq!(
++        text_item(
++            &custom_tool_output_items(&second_mock.single_request(), "call-1"),
++            /*index*/ 1
++        ),
++        "Warning: truncated output (original token count: 10)\nTotal output lines: 1\n\n0123456789…5 tokens truncated…0123456789"
++    );
++
++    Ok(())
++}
++
+ #[cfg_attr(windows, ignore = "no exec_command on Windows")]
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+ async fn code_mode_exec_nested_limit_preserves_result_variable_before_default_history_truncation()
 diff --git a/codex-rs/thread-manager-sample/src/main.rs b/codex-rs/thread-manager-sample/src/main.rs
 index c35daaa..2c385cb 100644
 --- a/codex-rs/thread-manager-sample/src/main.rs
