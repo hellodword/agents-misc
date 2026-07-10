@@ -1,0 +1,1424 @@
+diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
+index 823d59c..5572695 100644
+--- a/codex-rs/config/src/config_toml.rs
++++ b/codex-rs/config/src/config_toml.rs
+@@ -7,6 +7,7 @@ use std::path::Path;
+ use crate::HooksToml;
+ use crate::permissions_toml::PermissionsToml;
+ use crate::profile_toml::ConfigProfile;
++use crate::terminal_wait::TerminalWaitToml;
+ use crate::types::AnalyticsConfigToml;
+ use crate::types::ApprovalsReviewer;
+ use crate::types::AppsConfigToml;
+@@ -302,6 +303,10 @@ pub struct ConfigToml {
+     /// Default: `300000` (5 minutes).
+     pub background_terminal_max_timeout: Option<u64>,
+ 
++    /// Command-specific unified exec wait and polling rules.
++    #[serde(default)]
++    pub terminal_wait: Option<TerminalWaitToml>,
++
+     /// Deprecated: ignored.
+     #[schemars(skip)]
+     pub js_repl_node_path: Option<AbsolutePathBuf>,
+diff --git a/codex-rs/config/src/lib.rs b/codex-rs/config/src/lib.rs
+index df3e45d..5a224cc 100644
+--- a/codex-rs/config/src/lib.rs
++++ b/codex-rs/config/src/lib.rs
+@@ -26,6 +26,7 @@ pub mod schema;
+ mod skills_config;
+ mod state;
+ mod strict_config;
++pub mod terminal_wait;
+ pub mod test_support;
+ mod thread_config;
+ mod tui_keymap;
+diff --git a/codex-rs/config/src/terminal_wait.rs b/codex-rs/config/src/terminal_wait.rs
+new file mode 100644
+index 0000000..bacb09a
+--- /dev/null
++++ b/codex-rs/config/src/terminal_wait.rs
+@@ -0,0 +1,290 @@
++use regex_lite::Regex;
++use schemars::JsonSchema;
++use serde::Deserialize;
++use serde::Deserializer;
++use serde::Serialize;
++use serde::de::Error as SerdeError;
++
++#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
++#[serde(deny_unknown_fields)]
++#[schemars(deny_unknown_fields)]
++pub struct TerminalWaitToml {
++    #[serde(default)]
++    pub commands: Vec<TerminalWaitCommandToml>,
++}
++
++#[derive(Serialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
++#[schemars(deny_unknown_fields)]
++pub struct TerminalWaitCommandToml {
++    pub pattern: String,
++    pub mode: TerminalWaitModeToml,
++    pub name: Option<String>,
++    #[serde(default = "default_true")]
++    pub enabled: bool,
++    pub cwd_pattern: Option<String>,
++    #[serde(default)]
++    pub allow_tty: bool,
++    pub max_output_tokens: Option<usize>,
++    pub wait_timeout_ms: Option<u64>,
++    pub poll_interval_ms: Option<u64>,
++}
++
++#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]
++#[serde(rename_all = "snake_case")]
++pub enum TerminalWaitModeToml {
++    WaitUntilExit,
++    LongPoll,
++}
++
++const fn default_true() -> bool {
++    true
++}
++
++impl<'de> Deserialize<'de> for TerminalWaitCommandToml {
++    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
++    where
++        D: Deserializer<'de>,
++    {
++        #[derive(Deserialize)]
++        #[serde(deny_unknown_fields)]
++        struct RawTerminalWaitCommandToml {
++            pattern: String,
++            mode: TerminalWaitModeToml,
++            name: Option<String>,
++            #[serde(default = "default_true")]
++            enabled: bool,
++            cwd_pattern: Option<String>,
++            #[serde(default)]
++            allow_tty: bool,
++            max_output_tokens: Option<usize>,
++            wait_timeout_ms: Option<u64>,
++            poll_interval_ms: Option<u64>,
++        }
++
++        let raw = RawTerminalWaitCommandToml::deserialize(deserializer)?;
++        validate_regex("pattern", &raw.pattern).map_err(D::Error::custom)?;
++        if let Some(cwd_pattern) = raw.cwd_pattern.as_deref() {
++            validate_regex("cwd_pattern", cwd_pattern).map_err(D::Error::custom)?;
++        }
++        if raw.max_output_tokens == Some(0) {
++            return Err(D::Error::custom("max_output_tokens must be greater than 0"));
++        }
++
++        match raw.mode {
++            TerminalWaitModeToml::WaitUntilExit => {
++                if raw.wait_timeout_ms == Some(0) {
++                    return Err(D::Error::custom("wait_timeout_ms must be greater than 0"));
++                }
++                if raw.poll_interval_ms.is_some() {
++                    return Err(D::Error::custom(
++                        "poll_interval_ms is not supported when mode is wait_until_exit",
++                    ));
++                }
++            }
++            TerminalWaitModeToml::LongPoll => {
++                let Some(poll_interval_ms) = raw.poll_interval_ms else {
++                    return Err(D::Error::custom(
++                        "poll_interval_ms is required when mode is long_poll",
++                    ));
++                };
++                if poll_interval_ms == 0 {
++                    return Err(D::Error::custom("poll_interval_ms must be greater than 0"));
++                }
++                if raw.wait_timeout_ms.is_some() {
++                    return Err(D::Error::custom(
++                        "wait_timeout_ms is not supported when mode is long_poll",
++                    ));
++                }
++            }
++        }
++
++        Ok(Self {
++            pattern: raw.pattern,
++            mode: raw.mode,
++            name: raw.name,
++            enabled: raw.enabled,
++            cwd_pattern: raw.cwd_pattern,
++            allow_tty: raw.allow_tty,
++            max_output_tokens: raw.max_output_tokens,
++            wait_timeout_ms: raw.wait_timeout_ms,
++            poll_interval_ms: raw.poll_interval_ms,
++        })
++    }
++}
++
++fn validate_regex(field: &str, pattern: &str) -> Result<(), String> {
++    Regex::new(pattern)
++        .map(|_| ())
++        .map_err(|err| format!("{field} is not a valid regex-lite pattern: {err}"))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::config_toml::ConfigToml;
++
++    #[test]
++    fn terminal_wait_deserializes_command_defaults() {
++        let config: ConfigToml = toml::from_str(
++            r#"
++            [terminal_wait]
++
++            [[terminal_wait.commands]]
++            pattern = "cargo test"
++            mode = "wait_until_exit"
++            "#,
++        )
++        .expect("terminal_wait should parse");
++
++        let command = &config
++            .terminal_wait
++            .expect("terminal_wait should be set")
++            .commands[0];
++        assert_eq!(command.pattern, "cargo test");
++        assert_eq!(command.mode, TerminalWaitModeToml::WaitUntilExit);
++        assert!(command.enabled);
++        assert!(!command.allow_tty);
++        assert_eq!(command.wait_timeout_ms, None);
++    }
++
++    #[test]
++    fn terminal_wait_deserializes_long_poll_command() {
++        let config: ConfigToml = toml::from_str(
++            r#"
++            [terminal_wait]
++
++            [[terminal_wait.commands]]
++            name = "cargo"
++            pattern = "cargo test"
++            mode = "long_poll"
++            cwd_pattern = "/repo"
++            enabled = false
++            allow_tty = true
++            poll_interval_ms = 60000
++            max_output_tokens = 2000
++            "#,
++        )
++        .expect("terminal_wait should parse");
++
++        let command = &config
++            .terminal_wait
++            .expect("terminal_wait should be set")
++            .commands[0];
++        assert_eq!(command.name.as_deref(), Some("cargo"));
++        assert_eq!(command.mode, TerminalWaitModeToml::LongPoll);
++        assert_eq!(command.cwd_pattern.as_deref(), Some("/repo"));
++        assert!(!command.enabled);
++        assert!(command.allow_tty);
++        assert_eq!(command.poll_interval_ms, Some(60000));
++        assert_eq!(command.max_output_tokens, Some(2000));
++    }
++
++    #[test]
++    fn terminal_wait_rejects_invalid_regex() {
++        let err = toml::from_str::<ConfigToml>(
++            r#"
++            [terminal_wait]
++
++            [[terminal_wait.commands]]
++            pattern = "["
++            mode = "wait_until_exit"
++            "#,
++        )
++        .expect_err("invalid regex should fail");
++
++        assert!(
++            err.to_string()
++                .contains("pattern is not a valid regex-lite pattern")
++        );
++    }
++
++    #[test]
++    fn terminal_wait_rejects_invalid_mode_fields() {
++        for (toml, expected) in [
++            (
++                r#"
++                [terminal_wait]
++
++                [[terminal_wait.commands]]
++                pattern = "cargo"
++                mode = "wait_until_exit"
++                poll_interval_ms = 1000
++                "#,
++                "poll_interval_ms is not supported",
++            ),
++            (
++                r#"
++                [terminal_wait]
++
++                [[terminal_wait.commands]]
++                pattern = "cargo"
++                mode = "long_poll"
++                "#,
++                "poll_interval_ms is required",
++            ),
++            (
++                r#"
++                [terminal_wait]
++
++                [[terminal_wait.commands]]
++                pattern = "cargo"
++                mode = "long_poll"
++                poll_interval_ms = 1000
++                wait_timeout_ms = 1000
++                "#,
++                "wait_timeout_ms is not supported",
++            ),
++        ] {
++            let err = toml::from_str::<ConfigToml>(toml).expect_err("config should fail");
++            assert!(
++                err.to_string().contains(expected),
++                "expected {expected:?} in {err}"
++            );
++        }
++    }
++
++    #[test]
++    fn terminal_wait_rejects_non_positive_limits() {
++        for (toml, expected) in [
++            (
++                r#"
++                [terminal_wait]
++
++                [[terminal_wait.commands]]
++                pattern = "cargo"
++                mode = "wait_until_exit"
++                wait_timeout_ms = 0
++                "#,
++                "wait_timeout_ms must be greater than 0",
++            ),
++            (
++                r#"
++                [terminal_wait]
++
++                [[terminal_wait.commands]]
++                pattern = "cargo"
++                mode = "long_poll"
++                poll_interval_ms = 0
++                "#,
++                "poll_interval_ms must be greater than 0",
++            ),
++            (
++                r#"
++                [terminal_wait]
++
++                [[terminal_wait.commands]]
++                pattern = "cargo"
++                mode = "wait_until_exit"
++                max_output_tokens = 0
++                "#,
++                "max_output_tokens must be greater than 0",
++            ),
++        ] {
++            let err = toml::from_str::<ConfigToml>(toml).expect_err("config should fail");
++            assert!(
++                err.to_string().contains(expected),
++                "expected {expected:?} in {err}"
++            );
++        }
++    }
++}
+diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
+index fb4d874..f1a4ee4 100644
+--- a/codex-rs/core/config.schema.json
++++ b/codex-rs/core/config.schema.json
+@@ -2895,6 +2915,71 @@
+       },
+       "type": "object"
+     },
++    "TerminalWaitCommandToml": {
++      "additionalProperties": false,
++      "properties": {
++        "allow_tty": {
++          "default": false,
++          "type": "boolean"
++        },
++        "cwd_pattern": {
++          "type": "string"
++        },
++        "enabled": {
++          "default": true,
++          "type": "boolean"
++        },
++        "max_output_tokens": {
++          "format": "uint",
++          "minimum": 0.0,
++          "type": "integer"
++        },
++        "mode": {
++          "$ref": "#/definitions/TerminalWaitModeToml"
++        },
++        "name": {
++          "type": "string"
++        },
++        "pattern": {
++          "type": "string"
++        },
++        "poll_interval_ms": {
++          "format": "uint64",
++          "minimum": 0.0,
++          "type": "integer"
++        },
++        "wait_timeout_ms": {
++          "format": "uint64",
++          "minimum": 0.0,
++          "type": "integer"
++        }
++      },
++      "required": [
++        "mode",
++        "pattern"
++      ],
++      "type": "object"
++    },
++    "TerminalWaitModeToml": {
++      "enum": [
++        "wait_until_exit",
++        "long_poll"
++      ],
++      "type": "string"
++    },
++    "TerminalWaitToml": {
++      "additionalProperties": false,
++      "properties": {
++        "commands": {
++          "default": [],
++          "items": {
++            "$ref": "#/definitions/TerminalWaitCommandToml"
++          },
++          "type": "array"
++        }
++      },
++      "type": "object"
++    },
+     "ThreadStoreToml": {
+       "oneOf": [
+         {
+@@ -5485,6 +5570,15 @@
+       "description": "Suppress warnings about unstable (under development) features.",
+       "type": "boolean"
+     },
++    "terminal_wait": {
++      "allOf": [
++        {
++          "$ref": "#/definitions/TerminalWaitToml"
++        }
++      ],
++      "default": null,
++      "description": "Command-specific unified exec wait and polling rules."
++    },
+     "tool_output_token_limit": {
+       "description": "Token budget applied when storing tool/function outputs in the context manager.",
+       "format": "uint",
+diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
+index 6348f14..519a586 100644
+--- a/codex-rs/core/src/config/mod.rs
++++ b/codex-rs/core/src/config/mod.rs
+@@ -33,6 +33,7 @@ use codex_config::loader::load_config_layers_state;
+ use codex_config::loader::project_trust_key;
+ use codex_config::permissions_toml::PermissionsToml;
+ use codex_config::sandbox_mode_requirement_for_permission_profile;
++use codex_config::terminal_wait::TerminalWaitToml;
+ use codex_config::types::ApprovalsReviewer;
+ use codex_config::types::AuthCredentialsStoreMode;
+ use codex_config::types::AuthKeyringBackendKind;
+@@ -1031,6 +1032,9 @@ pub struct Config {
+     /// Default: `300000` (5 minutes).
+     pub background_terminal_max_timeout: u64,
+ 
++    /// Command-specific unified exec wait and polling rules.
++    pub terminal_wait: Option<TerminalWaitToml>,
++
+     /// Compatibility-only settings retained for legacy `ghost_snapshot`
+     /// config loading.
+     pub ghost_snapshot: GhostSnapshotConfig,
+@@ -3945,6 +3949,7 @@ impl Config {
+             code_mode,
+             use_experimental_unified_exec_tool,
+             background_terminal_max_timeout,
++            terminal_wait: cfg.terminal_wait,
+             ghost_snapshot,
+             multi_agent_v2,
+             token_budget,
+diff --git a/codex-rs/core/src/session/config_lock.rs b/codex-rs/core/src/session/config_lock.rs
+index 606d9d2..5b8c875 100644
+--- a/codex-rs/core/src/session/config_lock.rs
++++ b/codex-rs/core/src/session/config_lock.rs
+@@ -141,6 +141,7 @@ fn save_config_resolved_fields(
+         Some(config.include_collaboration_mode_instructions);
+     lock_config.include_environment_context = Some(config.include_environment_context);
+     lock_config.background_terminal_max_timeout = Some(config.background_terminal_max_timeout);
++    lock_config.terminal_wait = config.terminal_wait.clone();
+ 
+     // Feature aliases and feature configs need to be written in their resolved
+     // form; otherwise replay can drift when a legacy key maps to the same
+diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
+index 32be481..2cb9e42 100644
+--- a/codex-rs/core/src/session/session.rs
++++ b/codex-rs/core/src/session/session.rs
+@@ -1058,8 +1058,9 @@ impl Session {
+                 mcp_runtime: arc_swap::ArcSwapOption::empty(),
+                 mcp_projection_lock: Mutex::new(()),
+                 mcp_startup_cancellation_token: Mutex::new(CancellationToken::new()),
+-                unified_exec_manager: UnifiedExecProcessManager::new(
++                unified_exec_manager: UnifiedExecProcessManager::new_with_terminal_wait(
+                     config.background_terminal_max_timeout,
++                    config.terminal_wait.clone(),
+                 ),
+                 elicitations: crate::elicitation::ElicitationService::new(),
+                 shell_zsh_path: config.zsh_path.clone(),
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 5c6d3d7..d7e75dd 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -5465,8 +5465,9 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+         mcp_runtime: arc_swap::ArcSwapOption::from(Some(mcp_runtime)),
+         mcp_projection_lock: Mutex::new(()),
+         mcp_startup_cancellation_token: Mutex::new(CancellationToken::new()),
+-        unified_exec_manager: UnifiedExecProcessManager::new(
++        unified_exec_manager: UnifiedExecProcessManager::new_with_terminal_wait(
+             config.background_terminal_max_timeout,
++            config.terminal_wait.clone(),
+         ),
+         elicitations: crate::elicitation::ElicitationService::new(),
+         shell_zsh_path: None,
+@@ -7596,8 +7597,9 @@ where
+         mcp_runtime: arc_swap::ArcSwapOption::from(Some(mcp_runtime)),
+         mcp_projection_lock: Mutex::new(()),
+         mcp_startup_cancellation_token: Mutex::new(CancellationToken::new()),
+-        unified_exec_manager: UnifiedExecProcessManager::new(
++        unified_exec_manager: UnifiedExecProcessManager::new_with_terminal_wait(
+             config.background_terminal_max_timeout,
++            config.terminal_wait.clone(),
+         ),
+         elicitations: crate::elicitation::ElicitationService::new(),
+         shell_zsh_path: None,
+diff --git a/codex-rs/core/src/unified_exec/mod.rs b/codex-rs/core/src/unified_exec/mod.rs
+index 34d88c8..559fd66 100644
+--- a/codex-rs/core/src/unified_exec/mod.rs
++++ b/codex-rs/core/src/unified_exec/mod.rs
+@@ -27,6 +27,8 @@ use std::collections::HashSet;
+ use std::sync::Arc;
+ use std::sync::Weak;
+ 
++use codex_config::terminal_wait::TerminalWaitModeToml;
++use codex_config::terminal_wait::TerminalWaitToml;
+ use codex_network_proxy::NetworkProxy;
+ use codex_protocol::models::AdditionalPermissionProfile;
+ use codex_tools::UnifiedExecShellMode;
+@@ -34,6 +36,7 @@ use codex_utils_output_truncation::TruncationPolicy;
+ use codex_utils_path_uri::PathUri;
+ use rand::Rng;
+ use rand::rng;
++use regex_lite::Regex;
+ use tokio::sync::Mutex;
+ 
+ use crate::sandboxing::SandboxPermissions;
+@@ -134,14 +137,23 @@ impl ProcessStore {
+ pub(crate) struct UnifiedExecProcessManager {
+     process_store: Mutex<ProcessStore>,
+     max_write_stdin_yield_time_ms: u64,
++    terminal_wait_rules: TerminalWaitRules,
+ }
+ 
+ impl UnifiedExecProcessManager {
+     pub(crate) fn new(max_write_stdin_yield_time_ms: u64) -> Self {
++        Self::new_with_terminal_wait(max_write_stdin_yield_time_ms, None)
++    }
++
++    pub(crate) fn new_with_terminal_wait(
++        max_write_stdin_yield_time_ms: u64,
++        terminal_wait: Option<TerminalWaitToml>,
++    ) -> Self {
+         Self {
+             process_store: Mutex::new(ProcessStore::default()),
+             max_write_stdin_yield_time_ms: max_write_stdin_yield_time_ms
+                 .max(MIN_EMPTY_YIELD_TIME_MS),
++            terminal_wait_rules: TerminalWaitRules::compile(terminal_wait),
+         }
+     }
+ }
+@@ -160,11 +172,93 @@ struct ProcessEntry {
+     initial_exec_command_active: Arc<std::sync::atomic::AtomicBool>,
+     hook_command: String,
+     tty: bool,
++    terminal_wait_rule: Option<Arc<TerminalWaitCommandRule>>,
+     network_approval: Option<DeferredNetworkApproval>,
+     session: Weak<Session>,
+     last_used: tokio::time::Instant,
+ }
+ 
++#[derive(Default)]
++struct TerminalWaitRules {
++    commands: Vec<Arc<TerminalWaitCommandRule>>,
++}
++
++struct TerminalWaitCommandRule {
++    pattern: Regex,
++    cwd_pattern: Option<Regex>,
++    mode: TerminalWaitMode,
++    allow_tty: bool,
++    max_output_tokens: Option<usize>,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum TerminalWaitMode {
++    WaitUntilExit { wait_timeout_ms: Option<u64> },
++    LongPoll { poll_interval_ms: u64 },
++}
++
++impl TerminalWaitRules {
++    fn compile(config: Option<TerminalWaitToml>) -> Self {
++        let Some(config) = config else {
++            return Self::default();
++        };
++
++        let commands = config
++            .commands
++            .into_iter()
++            .filter(|command| command.enabled)
++            .map(|command| {
++                let mode = match command.mode {
++                    TerminalWaitModeToml::WaitUntilExit => TerminalWaitMode::WaitUntilExit {
++                        wait_timeout_ms: command.wait_timeout_ms,
++                    },
++                    TerminalWaitModeToml::LongPoll => TerminalWaitMode::LongPoll {
++                        poll_interval_ms: command
++                            .poll_interval_ms
++                            .expect("long_poll config should include poll_interval_ms"),
++                    },
++                };
++                Arc::new(TerminalWaitCommandRule {
++                    pattern: Regex::new(&command.pattern)
++                        .expect("terminal_wait pattern should be validated during config load"),
++                    cwd_pattern: command.cwd_pattern.map(|pattern| {
++                        Regex::new(&pattern).expect(
++                            "terminal_wait cwd_pattern should be validated during config load",
++                        )
++                    }),
++                    mode,
++                    allow_tty: command.allow_tty,
++                    max_output_tokens: command.max_output_tokens,
++                })
++            })
++            .collect();
++
++        Self { commands }
++    }
++
++    fn matching_rule(
++        &self,
++        command: &str,
++        cwd: &str,
++        tty: bool,
++    ) -> Option<Arc<TerminalWaitCommandRule>> {
++        self.commands.iter().find_map(|rule| {
++            if tty && !rule.allow_tty {
++                return None;
++            }
++            if !rule.pattern.is_match(command) {
++                return None;
++            }
++            if let Some(cwd_pattern) = rule.cwd_pattern.as_ref()
++                && !cwd_pattern.is_match(cwd)
++            {
++                return None;
++            }
++            Some(Arc::clone(rule))
++        })
++    }
++}
++
+ pub(crate) fn clamp_yield_time(yield_time_ms: u64) -> u64 {
+     let yield_time_ms = if cfg!(windows) {
+         yield_time_ms.max(WINDOWS_INITIAL_EXEC_YIELD_TIME_FLOOR_MS)
+diff --git a/codex-rs/core/src/unified_exec/mod_tests.rs b/codex-rs/core/src/unified_exec/mod_tests.rs
+index 81403c8..9a55279 100644
+--- a/codex-rs/core/src/unified_exec/mod_tests.rs
++++ b/codex-rs/core/src/unified_exec/mod_tests.rs
+@@ -134,6 +134,7 @@ async fn exec_command_with_tty(
+             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+             hook_command: cmd.to_string(),
+             tty,
++            terminal_wait_rule: None,
+             network_approval: None,
+             session: Arc::downgrade(session),
+             last_used: started_at,
+@@ -154,14 +155,14 @@ async fn exec_command_with_tty(
+         cancellation_token,
+     } = process.output_handles();
+     let deadline = started_at + Duration::from_millis(yield_time_ms);
+-    let collected = UnifiedExecProcessManager::collect_output_until_deadline(
++    let collected = UnifiedExecProcessManager::collect_output_until_wait_limit(
+         &output_buffer,
+         &output_notify,
+         &output_closed,
+         &output_closed_notify,
+         &cancellation_token,
+         Some(session.subscribe_elicitation_pause_state()),
+-        deadline,
++        process_manager::OutputWaitLimit::Until(deadline),
+     )
+     .await;
+     let wall_time = Instant::now().saturating_duration_since(started_at);
+@@ -677,6 +678,7 @@ async fn terminating_initial_exec_command_rechecks_initial_response_state() -> a
+             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+             hook_command: "sleep 60".to_string(),
+             tty: true,
++            terminal_wait_rule: None,
+             network_approval: None,
+             session: Arc::downgrade(&session),
+             last_used: Instant::now(),
+@@ -750,6 +752,7 @@ async fn terminating_during_stdin_poll_returns_exited_response() -> anyhow::Resu
+             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+             hook_command: "sleep 60".to_string(),
+             tty: true,
++            terminal_wait_rule: None,
+             network_approval: None,
+             session: Arc::downgrade(&session),
+             last_used,
+@@ -867,14 +870,14 @@ async fn unified_exec_uses_remote_exec_server_when_configured() -> anyhow::Resul
+         output_closed_notify,
+         cancellation_token,
+     } = process.output_handles();
+-    let collected = UnifiedExecProcessManager::collect_output_until_deadline(
++    let collected = UnifiedExecProcessManager::collect_output_until_wait_limit(
+         &output_buffer,
+         &output_notify,
+         &output_closed,
+         &output_closed_notify,
+         &cancellation_token,
+         /*pause_state*/ None,
+-        Instant::now() + Duration::from_millis(2_500),
++        process_manager::OutputWaitLimit::Until(Instant::now() + Duration::from_millis(2_500)),
+     )
+     .await;
+ 
+diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
+index fe3ec45..909ed04 100644
+--- a/codex-rs/core/src/unified_exec/process_manager.rs
++++ b/codex-rs/core/src/unified_exec/process_manager.rs
+@@ -41,6 +41,8 @@ use crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS;
+ use crate::unified_exec::MIN_YIELD_TIME_MS;
+ use crate::unified_exec::ProcessEntry;
+ use crate::unified_exec::ProcessStore;
++use crate::unified_exec::TerminalWaitCommandRule;
++use crate::unified_exec::TerminalWaitMode;
+ use crate::unified_exec::UnifiedExecContext;
+ use crate::unified_exec::UnifiedExecError;
+ use crate::unified_exec::UnifiedExecProcessManager;
+@@ -64,6 +66,7 @@ use codex_protocol::protocol::ExecCommandSource;
+ use codex_sandboxing::SandboxCommand;
+ use codex_tools::ToolName;
+ use codex_utils_output_truncation::approx_token_count;
++use codex_utils_path_uri::PathConvention;
+ use codex_utils_path_uri::PathUri;
+ 
+ const UNIFIED_EXEC_ENV: [(&str, &str); 10] = [
+@@ -195,6 +198,62 @@ fn exec_server_params_for_request(
+     }
+ }
+ 
++fn terminal_wait_cwd_string(cwd: &PathUri) -> String {
++    if cwd.infer_path_convention() == Some(PathConvention::native())
++        && let Ok(path) = cwd.to_abs_path()
++    {
++        return path.to_string_lossy().into_owned();
++    }
++    cwd.to_string()
++}
++
++fn terminal_wait_max_output_tokens(
++    rule: Option<&TerminalWaitCommandRule>,
++    request_max_output_tokens: Option<usize>,
++) -> Option<usize> {
++    rule.and_then(|rule| rule.max_output_tokens)
++        .or(request_max_output_tokens)
++}
++
++fn initial_exec_wait_limit(
++    start: Instant,
++    request_yield_time_ms: u64,
++    rule: Option<&TerminalWaitCommandRule>,
++) -> OutputWaitLimit {
++    match rule.map(|rule| rule.mode) {
++        Some(TerminalWaitMode::WaitUntilExit { wait_timeout_ms }) => {
++            wait_until_exit_limit(start, wait_timeout_ms)
++        }
++        Some(TerminalWaitMode::LongPoll { .. }) | None => OutputWaitLimit::Until(
++            start + Duration::from_millis(clamp_yield_time(request_yield_time_ms)),
++        ),
++    }
++}
++
++fn wait_until_exit_limit(start: Instant, wait_timeout_ms: Option<u64>) -> OutputWaitLimit {
++    match wait_timeout_ms {
++        Some(wait_timeout_ms) => {
++            OutputWaitLimit::Until(start + Duration::from_millis(wait_timeout_ms))
++        }
++        None => OutputWaitLimit::Infinite,
++    }
++}
++
++fn default_write_stdin_wait_limit(
++    start: Instant,
++    request_yield_time_ms: u64,
++    input_is_empty: bool,
++    max_write_stdin_yield_time_ms: u64,
++) -> OutputWaitLimit {
++    let time_ms = request_yield_time_ms.max(MIN_YIELD_TIME_MS);
++    let yield_time_ms = if input_is_empty {
++        time_ms.clamp(MIN_EMPTY_YIELD_TIME_MS, max_write_stdin_yield_time_ms)
++    } else {
++        time_ms.min(MAX_YIELD_TIME_MS)
++    };
++    OutputWaitLimit::Until(start + Duration::from_millis(yield_time_ms))
++}
++
+ /// Borrowed process state prepared for a `write_stdin` or poll operation.
+ struct PreparedProcessHandles {
+     process: Arc<UnifiedExecProcess>,
+@@ -210,6 +269,28 @@ struct PreparedProcessHandles {
+     hook_command: String,
+     process_id: i32,
+     tty: bool,
++    terminal_wait_rule: Option<Arc<TerminalWaitCommandRule>>,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(super) enum OutputWaitLimit {
++    Until(Instant),
++    Infinite,
++}
++
++impl OutputWaitLimit {
++    fn remaining(self, now: Instant) -> Option<Duration> {
++        match self {
++            Self::Until(deadline) => Some(deadline.saturating_duration_since(now)),
++            Self::Infinite => None,
++        }
++    }
++
++    fn extend(&mut self, duration: Duration) {
++        if let Self::Until(deadline) = self {
++            *deadline += duration;
++        }
++    }
+ }
+ 
+ struct InitialExecCommandGuard {
+@@ -411,6 +492,12 @@ impl UnifiedExecProcessManager {
+         context: &UnifiedExecContext,
+     ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
+         let cwd = request.cwd.clone();
++        let terminal_wait_cwd = terminal_wait_cwd_string(&cwd);
++        let terminal_wait_rule = self.terminal_wait_rules.matching_rule(
++            &request.hook_command,
++            &terminal_wait_cwd,
++            request.tty,
++        );
+         let process = self
+             .open_session_with_sandbox(&request, cwd.clone(), context)
+             .await;
+@@ -463,6 +550,7 @@ impl UnifiedExecProcessManager {
+                 start,
+                 request.process_id,
+                 request.tty,
++                terminal_wait_rule.clone(),
+                 deferred_network_approval.clone(),
+                 Arc::clone(&transcript),
+                 Arc::clone(&initial_exec_command_active),
+@@ -475,7 +563,6 @@ impl UnifiedExecProcessManager {
+             None
+         };
+ 
+-        let yield_time_ms = clamp_yield_time(request.yield_time_ms);
+         // For the initial exec_command call, we both stream output to events
+         // (via start_streaming_output above) and collect a snapshot here for
+         // the tool response body.
+@@ -486,15 +573,16 @@ impl UnifiedExecProcessManager {
+             output_closed_notify,
+             cancellation_token,
+         } = process.output_handles();
+-        let deadline = start + Duration::from_millis(yield_time_ms);
+-        let collected = Self::collect_output_until_deadline(
++        let wait_limit =
++            initial_exec_wait_limit(start, request.yield_time_ms, terminal_wait_rule.as_deref());
++        let collected = Self::collect_output_until_wait_limit(
+             &output_buffer,
+             &output_notify,
+             &output_closed,
+             &output_closed_notify,
+             &cancellation_token,
+             Some(context.session.subscribe_elicitation_pause_state()),
+-            deadline,
++            wait_limit,
+         )
+         .await;
+         let wall_time = Instant::now().saturating_duration_since(start);
+@@ -623,7 +711,10 @@ impl UnifiedExecProcessManager {
+             wall_time,
+             raw_output: collected,
+             truncation_policy: context.turn.model_info.truncation_policy.into(),
+-            max_output_tokens: request.max_output_tokens,
++            max_output_tokens: terminal_wait_max_output_tokens(
++                terminal_wait_rule.as_deref(),
++                request.max_output_tokens,
++            ),
+             process_id: response_process_id,
+             exit_code,
+             original_token_count: Some(original_token_count),
+@@ -653,6 +744,7 @@ impl UnifiedExecProcessManager {
+             hook_command,
+             process_id,
+             tty,
++            terminal_wait_rule,
+             ..
+         } = self.prepare_process_handles(process_id).await?;
+         let mut status_after_write = None;
+@@ -687,26 +779,21 @@ impl UnifiedExecProcessManager {
+             }
+         }
+ 
+-        let yield_time_ms = {
+-            // Empty polls use configurable background timeout bounds. Non-empty
+-            // writes keep a fixed max cap so interactive stdin remains responsive.
+-            let time_ms = request.yield_time_ms.max(MIN_YIELD_TIME_MS);
+-            if request.input.is_empty() {
+-                time_ms.clamp(MIN_EMPTY_YIELD_TIME_MS, self.max_write_stdin_yield_time_ms)
+-            } else {
+-                time_ms.min(MAX_YIELD_TIME_MS)
+-            }
+-        };
+         let start = Instant::now();
+-        let deadline = start + Duration::from_millis(yield_time_ms);
+-        let collected = Self::collect_output_until_deadline(
++        let wait_limit = self.write_stdin_wait_limit(
++            start,
++            request.yield_time_ms,
++            request.input.is_empty(),
++            terminal_wait_rule.as_deref(),
++        );
++        let collected = Self::collect_output_until_wait_limit(
+             &output_buffer,
+             &output_notify,
+             &output_closed,
+             &output_closed_notify,
+             &cancellation_token,
+             pause_state,
+-            deadline,
++            wait_limit,
+         )
+         .await;
+         let wall_time = Instant::now().saturating_duration_since(start);
+@@ -778,7 +865,10 @@ impl UnifiedExecProcessManager {
+             wall_time,
+             raw_output: collected,
+             truncation_policy: request.truncation_policy,
+-            max_output_tokens: request.max_output_tokens,
++            max_output_tokens: terminal_wait_max_output_tokens(
++                terminal_wait_rule.as_deref(),
++                request.max_output_tokens,
++            ),
+             process_id,
+             exit_code,
+             original_token_count: Some(original_token_count),
+@@ -788,6 +878,38 @@ impl UnifiedExecProcessManager {
+         Ok(response)
+     }
+ 
++    fn write_stdin_wait_limit(
++        &self,
++        start: Instant,
++        request_yield_time_ms: u64,
++        input_is_empty: bool,
++        rule: Option<&TerminalWaitCommandRule>,
++    ) -> OutputWaitLimit {
++        if !input_is_empty {
++            return default_write_stdin_wait_limit(
++                start,
++                request_yield_time_ms,
++                /*input_is_empty*/ false,
++                self.max_write_stdin_yield_time_ms,
++            );
++        }
++
++        match rule.map(|rule| rule.mode) {
++            Some(TerminalWaitMode::WaitUntilExit { wait_timeout_ms }) => {
++                wait_until_exit_limit(start, wait_timeout_ms)
++            }
++            Some(TerminalWaitMode::LongPoll { poll_interval_ms }) => {
++                OutputWaitLimit::Until(start + Duration::from_millis(poll_interval_ms))
++            }
++            None => default_write_stdin_wait_limit(
++                start,
++                request_yield_time_ms,
++                /*input_is_empty*/ true,
++                self.max_write_stdin_yield_time_ms,
++            ),
++        }
++    }
++
+     async fn refresh_process_state(&self, process_id: i32) -> ProcessStatus {
+         let mut store = self.process_store.lock().await;
+         let Some(entry) = store.processes.get_mut(&process_id) else {
+@@ -851,6 +973,7 @@ impl UnifiedExecProcessManager {
+             hook_command: entry.hook_command.clone(),
+             process_id: entry.process_id,
+             tty: entry.tty,
++            terminal_wait_rule: entry.terminal_wait_rule.clone(),
+         })
+     }
+ 
+@@ -865,6 +988,7 @@ impl UnifiedExecProcessManager {
+         started_at: Instant,
+         process_id: i32,
+         tty: bool,
++        terminal_wait_rule: Option<Arc<TerminalWaitCommandRule>>,
+         network_approval: Option<DeferredNetworkApproval>,
+         transcript: Arc<tokio::sync::Mutex<HeadTailBuffer>>,
+         initial_exec_command_active: Arc<AtomicBool>,
+@@ -877,6 +1001,7 @@ impl UnifiedExecProcessManager {
+             initial_exec_command_active,
+             hook_command,
+             tty,
++            terminal_wait_rule,
+             network_approval,
+             session: Arc::downgrade(&context.session),
+             last_used: started_at,
+@@ -1199,14 +1324,14 @@ impl UnifiedExecProcessManager {
+             })
+     }
+ 
+-    pub(super) async fn collect_output_until_deadline(
++    pub(super) async fn collect_output_until_wait_limit(
+         output_buffer: &OutputBuffer,
+         output_notify: &Arc<Notify>,
+         output_closed: &Arc<AtomicBool>,
+         output_closed_notify: &Arc<Notify>,
+         cancellation_token: &CancellationToken,
+         mut pause_state: Option<watch::Receiver<bool>>,
+-        mut deadline: Instant,
++        mut wait_limit: OutputWaitLimit,
+     ) -> Vec<u8> {
+         const POST_EXIT_CLOSE_WAIT_CAP: Duration = Duration::from_millis(50);
+ 
+@@ -1214,9 +1339,9 @@ impl UnifiedExecProcessManager {
+         let mut exit_signal_received = cancellation_token.is_cancelled();
+         let mut post_exit_deadline: Option<Instant> = None;
+         loop {
+-            Self::extend_deadlines_while_paused(
++            Self::extend_wait_limits_while_paused(
+                 &mut pause_state,
+-                &mut deadline,
++                &mut wait_limit,
+                 &mut post_exit_deadline,
+             )
+             .await;
+@@ -1236,15 +1361,18 @@ impl UnifiedExecProcessManager {
+                 {
+                     break;
+                 }
+-                let remaining = deadline.saturating_duration_since(Instant::now());
+-                if remaining == Duration::ZERO {
++                let now = Instant::now();
++                let remaining = wait_limit.remaining(now);
++                if remaining == Some(Duration::ZERO) {
+                     break;
+                 }
+ 
+                 if exit_signal_received {
+-                    let now = Instant::now();
+-                    let close_wait_deadline = *post_exit_deadline
+-                        .get_or_insert_with(|| now + remaining.min(POST_EXIT_CLOSE_WAIT_CAP));
++                    let post_exit_wait = remaining.map_or(POST_EXIT_CLOSE_WAIT_CAP, |remaining| {
++                        remaining.min(POST_EXIT_CLOSE_WAIT_CAP)
++                    });
++                    let close_wait_deadline =
++                        *post_exit_deadline.get_or_insert_with(|| now + post_exit_wait);
+                     let close_wait_remaining = close_wait_deadline.saturating_duration_since(now);
+                     if close_wait_remaining == Duration::ZERO {
+                         break;
+@@ -1266,11 +1394,19 @@ impl UnifiedExecProcessManager {
+                 tokio::pin!(notified);
+                 let exit_notified = cancellation_token.cancelled();
+                 tokio::pin!(exit_notified);
+-                tokio::select! {
+-                    _ = &mut notified => {}
+-                    _ = &mut exit_notified => exit_signal_received = true,
+-                    _ = tokio::time::sleep(remaining) => break,
+-                    _ = Self::wait_for_pause_change(pause_state.as_ref()) => {}
++                if let Some(remaining) = remaining {
++                    tokio::select! {
++                        _ = &mut notified => {}
++                        _ = &mut exit_notified => exit_signal_received = true,
++                        _ = tokio::time::sleep(remaining) => break,
++                        _ = Self::wait_for_pause_change(pause_state.as_ref()) => {}
++                    }
++                } else {
++                    tokio::select! {
++                        _ = &mut notified => {}
++                        _ = &mut exit_notified => exit_signal_received = true,
++                        _ = Self::wait_for_pause_change(pause_state.as_ref()) => {}
++                    }
+                 }
+                 continue;
+             }
+@@ -1280,7 +1416,7 @@ impl UnifiedExecProcessManager {
+             }
+ 
+             exit_signal_received |= cancellation_token.is_cancelled();
+-            if Instant::now() >= deadline {
++            if wait_limit.remaining(Instant::now()) == Some(Duration::ZERO) {
+                 break;
+             }
+         }
+@@ -1288,9 +1424,9 @@ impl UnifiedExecProcessManager {
+         collected
+     }
+ 
+-    async fn extend_deadlines_while_paused(
++    async fn extend_wait_limits_while_paused(
+         pause_state: &mut Option<watch::Receiver<bool>>,
+-        deadline: &mut Instant,
++        wait_limit: &mut OutputWaitLimit,
+         post_exit_deadline: &mut Option<Instant>,
+     ) {
+         let Some(receiver) = pause_state.as_mut() else {
+@@ -1308,7 +1444,7 @@ impl UnifiedExecProcessManager {
+         }
+ 
+         let paused_for = paused_at.elapsed();
+-        *deadline += paused_for;
++        wait_limit.extend(paused_for);
+         if let Some(post_exit_deadline) = post_exit_deadline.as_mut() {
+             *post_exit_deadline += paused_for;
+         }
+diff --git a/codex-rs/core/src/unified_exec/process_manager_tests.rs b/codex-rs/core/src/unified_exec/process_manager_tests.rs
+index 20a930b..516911f 100644
+--- a/codex-rs/core/src/unified_exec/process_manager_tests.rs
++++ b/codex-rs/core/src/unified_exec/process_manager_tests.rs
+@@ -1,7 +1,10 @@
+ use super::*;
+ use crate::unified_exec::clamp_yield_time;
++use codex_config::config_toml::ConfigToml;
+ use codex_network_proxy::ManagedNetworkSandboxContext;
+ use pretty_assertions::assert_eq;
++use std::sync::atomic::AtomicBool;
++use std::sync::atomic::Ordering;
+ use tokio::time::Duration;
+ use tokio::time::Instant;
+ 
+@@ -234,6 +237,289 @@ fn initial_exec_yield_time_has_no_platform_floor() {
+     );
+ }
+ 
++fn terminal_wait_manager(toml: &str) -> UnifiedExecProcessManager {
++    let config: ConfigToml = toml::from_str(toml).expect("terminal_wait config should parse");
++    UnifiedExecProcessManager::new_with_terminal_wait(
++        crate::unified_exec::DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS,
++        config.terminal_wait,
++    )
++}
++
++fn terminal_wait_rule(
++    manager: &UnifiedExecProcessManager,
++    command: &str,
++    cwd: &str,
++    tty: bool,
++) -> Arc<TerminalWaitCommandRule> {
++    manager
++        .terminal_wait_rules
++        .matching_rule(command, cwd, tty)
++        .expect("rule should match")
++}
++
++fn terminal_wait_limit_ms(start: Instant, limit: OutputWaitLimit) -> Option<u64> {
++    match limit {
++        OutputWaitLimit::Until(deadline) => Some(deadline.duration_since(start).as_millis() as u64),
++        OutputWaitLimit::Infinite => None,
++    }
++}
++
++#[test]
++fn terminal_wait_rules_match_first_enabled_command_and_cwd() {
++    let manager = terminal_wait_manager(
++        r#"
++        [terminal_wait]
++
++        [[terminal_wait.commands]]
++        pattern = "cargo"
++        mode = "long_poll"
++        enabled = false
++        poll_interval_ms = 999
++        max_output_tokens = 999
++
++        [[terminal_wait.commands]]
++        pattern = "cargo"
++        cwd_pattern = "/repo"
++        mode = "long_poll"
++        poll_interval_ms = 111
++        max_output_tokens = 111
++
++        [[terminal_wait.commands]]
++        pattern = "cargo"
++        mode = "long_poll"
++        poll_interval_ms = 222
++        max_output_tokens = 222
++        "#,
++    );
++
++    let rule = terminal_wait_rule(&manager, "cargo test", "/repo/project", /*tty*/ false);
++    assert_eq!(
++        rule.mode,
++        TerminalWaitMode::LongPoll {
++            poll_interval_ms: 111
++        }
++    );
++    assert_eq!(rule.max_output_tokens, Some(111));
++}
++
++#[test]
++fn terminal_wait_rules_skip_tty_unless_allowed() {
++    let manager = terminal_wait_manager(
++        r#"
++        [terminal_wait]
++
++        [[terminal_wait.commands]]
++        pattern = "npm"
++        mode = "long_poll"
++        poll_interval_ms = 111
++
++        [[terminal_wait.commands]]
++        pattern = "npm"
++        mode = "long_poll"
++        allow_tty = true
++        poll_interval_ms = 222
++        "#,
++    );
++
++    let rule = terminal_wait_rule(&manager, "npm run dev", "/repo", /*tty*/ true);
++    assert_eq!(
++        rule.mode,
++        TerminalWaitMode::LongPoll {
++            poll_interval_ms: 222
++        }
++    );
++}
++
++#[test]
++fn terminal_wait_no_match_keeps_default_wait_limits() {
++    let start = Instant::now();
++
++    assert_eq!(
++        terminal_wait_limit_ms(start, initial_exec_wait_limit(start, 1, None)),
++        Some(crate::unified_exec::MIN_YIELD_TIME_MS)
++    );
++    assert_eq!(
++        terminal_wait_limit_ms(
++            start,
++            default_write_stdin_wait_limit(
++                start,
++                1,
++                /*input_is_empty*/ true,
++                crate::unified_exec::DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS,
++            )
++        ),
++        Some(crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS)
++    );
++    assert_eq!(
++        terminal_wait_limit_ms(
++            start,
++            default_write_stdin_wait_limit(
++                start,
++                120_000,
++                /*input_is_empty*/ false,
++                crate::unified_exec::DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS,
++            )
++        ),
++        Some(crate::unified_exec::MAX_YIELD_TIME_MS)
++    );
++}
++
++#[test]
++fn terminal_wait_wait_until_exit_can_exceed_initial_exec_clamp() {
++    let manager = terminal_wait_manager(
++        r#"
++        [terminal_wait]
++
++        [[terminal_wait.commands]]
++        pattern = "cargo"
++        mode = "wait_until_exit"
++        wait_timeout_ms = 60000
++        "#,
++    );
++    let rule = terminal_wait_rule(&manager, "cargo test", "/repo", /*tty*/ false);
++    let start = Instant::now();
++
++    assert_eq!(
++        terminal_wait_limit_ms(start, initial_exec_wait_limit(start, 1, Some(&rule))),
++        Some(60_000)
++    );
++}
++
++#[test]
++fn terminal_wait_wait_until_exit_can_wait_without_deadline() {
++    let manager = terminal_wait_manager(
++        r#"
++        [terminal_wait]
++
++        [[terminal_wait.commands]]
++        pattern = "cargo"
++        mode = "wait_until_exit"
++        "#,
++    );
++    let rule = terminal_wait_rule(&manager, "cargo test", "/repo", /*tty*/ false);
++
++    assert_eq!(
++        initial_exec_wait_limit(Instant::now(), 1, Some(&rule)),
++        OutputWaitLimit::Infinite
++    );
++}
++
++#[test]
++fn terminal_wait_empty_write_stdin_uses_stored_rule() {
++    let manager = terminal_wait_manager(
++        r#"
++        [terminal_wait]
++
++        [[terminal_wait.commands]]
++        pattern = "cargo"
++        mode = "wait_until_exit"
++        wait_timeout_ms = 65000
++        "#,
++    );
++    let rule = terminal_wait_rule(&manager, "cargo test", "/repo", /*tty*/ false);
++    let start = Instant::now();
++
++    assert_eq!(
++        terminal_wait_limit_ms(
++            start,
++            manager.write_stdin_wait_limit(start, 1, /*input_is_empty*/ true, Some(&rule))
++        ),
++        Some(65_000)
++    );
++}
++
++#[test]
++fn terminal_wait_long_poll_only_changes_empty_write_stdin() {
++    let manager = terminal_wait_manager(
++        r#"
++        [terminal_wait]
++
++        [[terminal_wait.commands]]
++        pattern = "cargo"
++        mode = "long_poll"
++        poll_interval_ms = 45000
++        "#,
++    );
++    let rule = terminal_wait_rule(&manager, "cargo test", "/repo", /*tty*/ false);
++    let start = Instant::now();
++
++    assert_eq!(
++        terminal_wait_limit_ms(
++            start,
++            manager.write_stdin_wait_limit(start, 1, /*input_is_empty*/ true, Some(&rule))
++        ),
++        Some(45_000)
++    );
++    assert_eq!(
++        terminal_wait_limit_ms(
++            start,
++            manager.write_stdin_wait_limit(
++                start,
++                120_000,
++                /*input_is_empty*/ false,
++                Some(&rule)
++            )
++        ),
++        Some(crate::unified_exec::MAX_YIELD_TIME_MS)
++    );
++}
++
++#[test]
++fn terminal_wait_max_output_tokens_overrides_tool_request() {
++    let manager = terminal_wait_manager(
++        r#"
++        [terminal_wait]
++
++        [[terminal_wait.commands]]
++        pattern = "cargo"
++        mode = "long_poll"
++        poll_interval_ms = 45000
++        max_output_tokens = 123
++        "#,
++    );
++    let rule = terminal_wait_rule(&manager, "cargo test", "/repo", /*tty*/ false);
++
++    assert_eq!(
++        terminal_wait_max_output_tokens(Some(&rule), Some(456)),
++        Some(123)
++    );
++    assert_eq!(terminal_wait_max_output_tokens(None, Some(456)), Some(456));
++}
++
++#[tokio::test]
++async fn terminal_wait_infinite_collect_exits_on_cancellation() {
++    let output_buffer = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
++    let output_notify = Arc::new(Notify::new());
++    let output_closed = Arc::new(AtomicBool::new(false));
++    let output_closed_notify = Arc::new(Notify::new());
++    let cancellation_token = CancellationToken::new();
++
++    tokio::spawn({
++        let output_closed = Arc::clone(&output_closed);
++        let output_closed_notify = Arc::clone(&output_closed_notify);
++        let cancellation_token = cancellation_token.clone();
++        async move {
++            tokio::time::sleep(Duration::from_millis(10)).await;
++            output_closed.store(true, Ordering::Release);
++            output_closed_notify.notify_waiters();
++            cancellation_token.cancel();
++        }
++    });
++
++    let collected = UnifiedExecProcessManager::collect_output_until_wait_limit(
++        &output_buffer,
++        &output_notify,
++        &output_closed,
++        &output_closed_notify,
++        &cancellation_token,
++        /*pause_state*/ None,
++        OutputWaitLimit::Infinite,
++    )
++    .await;
++
++    assert!(collected.is_empty());
++}
++
+ #[tokio::test]
+ async fn network_denial_fallback_message_names_sandbox_network_proxy() {
+     let message = network_denial_message_for_session(/*session*/ None, /*deferred*/ None).await;
+diff --git a/codex-rs/thread-manager-sample/src/main.rs b/codex-rs/thread-manager-sample/src/main.rs
+index c35daaa..2c385cb 100644
+--- a/codex-rs/thread-manager-sample/src/main.rs
++++ b/codex-rs/thread-manager-sample/src/main.rs
+@@ -284,6 +284,7 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
+         code_mode: Default::default(),
+         use_experimental_unified_exec_tool: false,
+         background_terminal_max_timeout: 300_000,
++        terminal_wait: None,
+         ghost_snapshot: GhostSnapshotConfig::default(),
+         multi_agent_v2: MultiAgentV2Config::default(),
+         token_budget: None,
