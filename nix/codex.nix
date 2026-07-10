@@ -34,6 +34,9 @@ let
       old:
       let
         version = old.version or (builtins.parseDrvName old.name).version;
+        cargoBuildFlags = old.cargoBuildFlags or [ ];
+        needsCodeModeHostOverlay =
+          version == "0.144.0" && !(builtins.elem "codex-code-mode-host" cargoBuildFlags);
         localPatches =
           let
             patches = patchesForVersion version;
@@ -58,6 +61,12 @@ let
           agentsMiscPatch = builtins.head localPatches;
           agentsMiscPatches = localPatches;
         };
+      }
+      // lib.optionalAttrs needsCodeModeHostOverlay {
+        cargoBuildFlags = cargoBuildFlags ++ [
+          "--package"
+          "codex-code-mode-host"
+        ];
       }
     );
 
