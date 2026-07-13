@@ -23,9 +23,11 @@ coverage/
 dist/
 playwright-report/
 test-results/
+tools/agents-viewer/web/e2e.config.json
 
 node_modules/
 target/
+*.tsbuildinfo
 build/
 .dart_tool/
 .flutter-plugins

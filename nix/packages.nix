@@ -3,6 +3,7 @@
   supportedSystems,
   codexFor,
   codexConfigFor,
+  agentsViewerFor,
 }:
 
 lib.genAttrs supportedSystems (
@@ -10,9 +11,11 @@ lib.genAttrs supportedSystems (
   let
     codex = codexFor system;
     codexConfig = codexConfigFor system;
+    agentsViewer = agentsViewerFor system;
   in
   {
     inherit codex;
+    agents-viewer = agentsViewer;
     inherit (codexConfig)
       codexcfg
       codexSchemaRegistry

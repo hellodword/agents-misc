@@ -3,6 +3,7 @@
   supportedSystems,
   codexFor,
   codexConfigFor,
+  agentsViewerFor,
 }:
 
 lib.genAttrs supportedSystems (
@@ -10,6 +11,7 @@ lib.genAttrs supportedSystems (
   let
     codexPackage = codexFor system;
     codexConfig = codexConfigFor system;
+    agentsViewer = agentsViewerFor system;
   in
   rec {
     codex = {
@@ -28,6 +30,12 @@ lib.genAttrs supportedSystems (
       meta = {
         description = "Codex config schema tooling wrapper";
       };
+    };
+
+    agents-viewer = {
+      type = "app";
+      program = "${agentsViewer}/bin/agents-viewer";
+      meta.description = "Read-only local Codex conversation viewer";
     };
   }
 )

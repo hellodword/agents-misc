@@ -39,6 +39,13 @@
         codexFor
         supportedSystems
         ;
+
+      agentsViewerFor =
+        system:
+        import ./nix/agents-viewer.nix {
+          inherit lib;
+          pkgs = import nixpkgs { inherit system; };
+        };
     in
     {
       packages = import ./nix/packages.nix {
@@ -46,6 +53,7 @@
           lib
           codexConfigFor
           codexFor
+          agentsViewerFor
           supportedSystems
           ;
       };
@@ -55,6 +63,7 @@
           lib
           codexConfigFor
           codexFor
+          agentsViewerFor
           supportedSystems
           ;
       };
@@ -63,6 +72,7 @@
         inherit
           lib
           codexConfigFor
+          agentsViewerFor
           supportedSystems
           ;
       };
@@ -83,6 +93,10 @@
       overlays.default = final: _prev: {
         agents-misc = {
           codex = codexFor final.stdenv.hostPlatform.system;
+          agents-viewer = import ./nix/agents-viewer.nix {
+            inherit (final) lib;
+            pkgs = final;
+          };
         };
       };
     };

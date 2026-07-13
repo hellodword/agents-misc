@@ -27,9 +27,25 @@ lib.genAttrs supportedSystems (
       OPENSSL_LIB_DIR = "${lib.getLib pkgs.openssl}/lib";
       PKG_CONFIG_PATH = "${lib.getDev pkgs.openssl}/lib/pkgconfig";
     };
+    agentsViewerShell = pkgs.mkShell {
+      packages =
+        with pkgs;
+        [
+          cargo
+          clippy
+          just
+          nodejs_24
+          pkg-config
+          rustc
+          rustfmt
+          sqlite
+        ]
+        ++ lib.optionals stdenv.isLinux [ strace ];
+    };
   in
   {
     dev = devShell;
     default = devShell;
+    agents-viewer = agentsViewerShell;
   }
 )

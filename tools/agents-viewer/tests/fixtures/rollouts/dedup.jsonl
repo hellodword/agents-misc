@@ -1,0 +1,7 @@
+{"timestamp":"2026-06-01T00:00:00.000Z","type":"session_meta","payload":{"id":"33333333-3333-4333-8333-333333333333","timestamp":"2026-06-01T00:00:00.000Z","cwd":"/synthetic/dedup","originator":"codex_cli_rs","cli_version":"0.144.1","source":"cli"}}
+{"timestamp":"2026-06-01T00:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Duplicate message  \r\n"}]}}
+{"timestamp":"2026-06-01T00:00:01.100Z","type":"event_msg","payload":{"type":"user_message","message":"Duplicate message"}}
+{"timestamp":"2026-06-01T00:00:02.000Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Final"}]}}
+{"timestamp":"2026-06-01T00:00:02.100Z","type":"event_msg","payload":{"type":"agent_message","message":"Final answer","phase":"final"}}
+{"timestamp":"2026-06-01T00:00:03.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-missing-begin","output":"synthetic output"}}
+{"timestamp":"2026-06-01T00:00:03.100Z","type":"event_msg","payload":{"type":"exec_command_end","call_id":"call-missing-begin","status":"completed","stdout":"synthetic output"}}

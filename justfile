@@ -1,5 +1,8 @@
 set positional-arguments
 
+# Nix owns the complete viewer toolchain; Just only exposes human-facing commands.
+viewer_nix := "nix develop .#agents-viewer --command"
+
 # Enter the default development shell.
 dev:
   nix develop .#dev
@@ -71,3 +74,79 @@ codexcfg-diff-defaults from to:
 # Generate Codex config TOML for a version and mode.
 codexcfg-gen-toml version mode="reference":
   nix run .#codexcfg -- gen-toml --schemas codex/schemas --version {{version}} --mode {{mode}}
+
+# Run the viewer API with the non-embedded development shell.
+agents-viewer-api-dev *args:
+  {{viewer_nix}} cargo run --manifest-path tools/agents-viewer/Cargo.toml --bin agents-viewer -- {{args}}
+
+# Run the packaged viewer. Viewer settings come from config.toml.
+agents-viewer-run *args:
+  nix run .#agents-viewer -- {{args}}
+
+# Run the Vite development server; proxy API requests to the default viewer port.
+agents-viewer-web-dev:
+  {{viewer_nix}} just _agents-viewer-web-dev
+
+[private]
+_agents-viewer-web-dev:
+  npm --prefix tools/agents-viewer/web ci
+  npm --prefix tools/agents-viewer/web run dev
+
+# Build the web bundle and the single embedded release executable.
+agents-viewer-build:
+  nix build .#agents-viewer
+
+# Run fast Rust and browserless Web tests.
+agents-viewer-test:
+  {{viewer_nix}} just _agents-viewer-test
+
+[private]
+_agents-viewer-test:
+  cargo test --manifest-path tools/agents-viewer/Cargo.toml
+  npm --prefix tools/agents-viewer/web ci
+  npm --prefix tools/agents-viewer/web run test
+
+# Build the embedded debug binary and run host-browser E2E tests.
+agents-viewer-e2e:
+  {{viewer_nix}} just _agents-viewer-e2e
+
+[private]
+_agents-viewer-e2e:
+  npm --prefix tools/agents-viewer/web ci
+  npm --prefix tools/agents-viewer/web run build
+  cargo build --manifest-path tools/agents-viewer/Cargo.toml --bin agents-viewer --features embedded-ui
+  npm --prefix tools/agents-viewer/web run e2e
+
+# Export TypeScript API bindings from Rust DTOs.
+agents-viewer-generate:
+  {{viewer_nix}} cargo run --manifest-path tools/agents-viewer/Cargo.toml --bin export_types -- --write
+
+# Confirm checked-in TypeScript bindings match Rust DTOs.
+agents-viewer-generate-check:
+  {{viewer_nix}} cargo run --manifest-path tools/agents-viewer/Cargo.toml --bin export_types -- --check
+
+# Run ignored large gates plus Linux syscall read-only validation.
+agents-viewer-acceptance-large:
+  {{viewer_nix}} just _agents-viewer-acceptance-large
+
+[private]
+_agents-viewer-acceptance-large:
+  cargo test --manifest-path tools/agents-viewer/Cargo.toml --test performance -- --ignored --nocapture --test-threads=1
+  cargo test --manifest-path tools/agents-viewer/Cargo.toml --test read_only_strace -- --ignored --nocapture
+
+# Browser-independent generation, format, static, unit, integration, and Nix gates.
+agents-viewer-verify:
+  {{viewer_nix}} just _agents-viewer-verify
+
+[private]
+_agents-viewer-verify:
+  cargo run --manifest-path tools/agents-viewer/Cargo.toml --bin export_types -- --check
+  cargo fmt --manifest-path tools/agents-viewer/Cargo.toml --all -- --check
+  cargo clippy --manifest-path tools/agents-viewer/Cargo.toml --all-targets -- -D warnings
+  cargo test --manifest-path tools/agents-viewer/Cargo.toml
+  npm --prefix tools/agents-viewer/web ci
+  npm --prefix tools/agents-viewer/web run typecheck
+  npm --prefix tools/agents-viewer/web run test
+  npm --prefix tools/agents-viewer/web run build
+  cargo clippy --manifest-path tools/agents-viewer/Cargo.toml --bin agents-viewer --features embedded-ui -- -D warnings
+  nix build --no-link .#agents-viewer
