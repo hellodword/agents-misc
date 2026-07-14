@@ -1,20 +1,20 @@
 {
   lib,
   supportedSystems,
-  codexConfigFor,
+  codexConfigAtlasFor,
   agentsViewerFor,
 }:
 
 lib.genAttrs supportedSystems (
   system:
   let
-    codexConfig = codexConfigFor system;
+    codexConfigAtlas = codexConfigAtlasFor system;
     agentsViewer = agentsViewerFor system;
   in
   {
-    codex-schema-registry = codexConfig.checkSchemaRegistry;
-    codex-config-data = codexConfig.checkConfigData;
-    codex-config-site = codexConfig.checkConfigSite;
+    codex-config-atlas-registry = codexConfigAtlas.checkConfigAtlasRegistry;
+    codex-config-atlas-data = codexConfigAtlas.checkConfigAtlasData;
+    codex-config-atlas-site = codexConfigAtlas.checkConfigAtlasSite;
     agents-viewer = agentsViewer;
     agents-viewer-web = agentsViewer.frontend;
   }

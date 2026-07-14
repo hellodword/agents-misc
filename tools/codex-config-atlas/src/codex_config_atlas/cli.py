@@ -83,12 +83,19 @@ def _schemas_dir_from_args(args: argparse.Namespace) -> Path:
     if getattr(args, "schemas", None):
         return Path(args.schemas).resolve()
     if getattr(args, "repo", None):
-        return (Path(args.repo).resolve() / "codex" / "schemas").resolve()
+        return (
+            Path(args.repo).resolve()
+            / "tools"
+            / "codex-config-atlas"
+            / "schemas"
+        ).resolve()
     raise ValueError("either --schemas or --repo is required")
 
 
 def _fetch_schema(url: str) -> bytes:
-    request = urllib.request.Request(url, headers={"User-Agent": "codexcfg/0.1.0"})
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "codex-config-atlas/0.1.0"}
+    )
     with urllib.request.urlopen(request) as response:  # noqa: S310
         return response.read()
 
@@ -234,7 +241,7 @@ def _handle_build_site(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="codexcfg")
+    parser = argparse.ArgumentParser(prog="codex-config-atlas")
     _add_shared_options(parser)
 
     subparsers = parser.add_subparsers(dest="command", required=True)

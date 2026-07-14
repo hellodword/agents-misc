@@ -2,7 +2,7 @@
   lib,
   supportedSystems,
   codexFor,
-  codexConfigFor,
+  codexConfigAtlasFor,
   agentsViewerFor,
 }:
 
@@ -10,18 +10,16 @@ lib.genAttrs supportedSystems (
   system:
   let
     codex = codexFor system;
-    codexConfig = codexConfigFor system;
+    codexConfigAtlas = codexConfigAtlasFor system;
     agentsViewer = agentsViewerFor system;
   in
   {
     inherit codex;
     agents-viewer = agentsViewer;
-    inherit (codexConfig)
-      codexcfg
-      codexSchemaRegistry
-      codexConfigData
-      codexConfigSite
-      ;
+    codex-config-atlas = codexConfigAtlas.codexConfigAtlas;
+    codex-config-atlas-registry = codexConfigAtlas.codexConfigAtlasRegistry;
+    codex-config-atlas-data = codexConfigAtlas.codexConfigAtlasData;
+    codex-config-atlas-site = codexConfigAtlas.codexConfigAtlasSite;
 
     default = codex;
   }

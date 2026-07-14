@@ -25,7 +25,7 @@ build:
 
 # Build repository tool packages without linking outputs.
 build-tools:
-  nix build --no-link .#codexcfg .#codexSchemaRegistry .#codexConfigData .#codexConfigSite
+  nix build --no-link .#codex-config-atlas .#codex-config-atlas-registry .#codex-config-atlas-data .#codex-config-atlas-site
 
 # Fetch an upstream Codex checkout for a ref.
 codex-fetch ref:
@@ -52,28 +52,28 @@ codex-build ref:
   nix develop .#dev --command python3 codex/scripts/build.py --ref {{ref}}
 
 # Print current Codex config schema metadata.
-codexcfg-current:
-  nix run .#codexcfg -- current
+codex-config-atlas-current:
+  nix run .#codex-config-atlas -- current
 
 # Validate the checked-in Codex schema registry.
-codexcfg-check-registry:
-  nix run .#codexcfg -- check-registry --schemas codex/schemas
+codex-config-atlas-check-registry:
+  nix run .#codex-config-atlas -- check-registry --schemas tools/codex-config-atlas/schemas
 
 # Sync an upstream Codex config schema into the registry.
-codexcfg-sync-schema version:
-  nix run .#codexcfg -- sync-schema --schemas codex/schemas --version {{version}}
+codex-config-atlas-sync-schema version:
+  nix run .#codex-config-atlas -- sync-schema --schemas tools/codex-config-atlas/schemas --version {{version}}
 
 # Diff Codex config schemas between two versions.
-codexcfg-diff from to:
-  nix run .#codexcfg -- diff --schemas codex/schemas --from {{from}} --to {{to}}
+codex-config-atlas-diff from to:
+  nix run .#codex-config-atlas -- diff --schemas tools/codex-config-atlas/schemas --from {{from}} --to {{to}}
 
 # Diff Codex config defaults between two versions.
-codexcfg-diff-defaults from to:
-  nix run .#codexcfg -- diff-defaults --schemas codex/schemas --from {{from}} --to {{to}}
+codex-config-atlas-diff-defaults from to:
+  nix run .#codex-config-atlas -- diff-defaults --schemas tools/codex-config-atlas/schemas --from {{from}} --to {{to}}
 
 # Generate Codex config TOML for a version and mode.
-codexcfg-gen-toml version mode="reference":
-  nix run .#codexcfg -- gen-toml --schemas codex/schemas --version {{version}} --mode {{mode}}
+codex-config-atlas-gen-toml version mode="reference":
+  nix run .#codex-config-atlas -- gen-toml --schemas tools/codex-config-atlas/schemas --version {{version}} --mode {{mode}}
 
 # Run the viewer API with the non-embedded development shell.
 agents-viewer-api-dev *args:

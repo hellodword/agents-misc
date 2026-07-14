@@ -30,15 +30,25 @@
     let
       inherit (nixpkgs) lib;
 
-      project = import ./nix/codex.nix {
-        inherit lib nixpkgs llm-agents;
+      codexProject = import ./nix/codex.nix {
+        inherit lib llm-agents;
       };
 
-      inherit (project)
-        codexConfigFor
+      inherit (codexProject)
         codexFor
         supportedSystems
         ;
+
+      codexConfigAtlasFor =
+        system:
+        let
+          codex = codexFor system;
+          codexVersion = codex.version or (builtins.parseDrvName codex.name).version;
+        in
+        import ./nix/codex-config-atlas.nix {
+          inherit codexVersion;
+          pkgs = import nixpkgs { inherit system; };
+        };
 
       agentsViewerFor =
         system:
@@ -51,7 +61,7 @@
       packages = import ./nix/packages.nix {
         inherit
           lib
-          codexConfigFor
+          codexConfigAtlasFor
           codexFor
           agentsViewerFor
           supportedSystems
@@ -61,7 +71,7 @@
       apps = import ./nix/apps.nix {
         inherit
           lib
-          codexConfigFor
+          codexConfigAtlasFor
           codexFor
           agentsViewerFor
           supportedSystems
@@ -71,7 +81,7 @@
       checks = import ./nix/checks.nix {
         inherit
           lib
-          codexConfigFor
+          codexConfigAtlasFor
           agentsViewerFor
           supportedSystems
           ;

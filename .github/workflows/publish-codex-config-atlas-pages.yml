@@ -1,4 +1,4 @@
-name: Publish Codex config site
+name: Publish Codex Config Atlas
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: agents-misc-codex-github-pages
+  group: agents-misc-codex-config-atlas-pages
   cancel-in-progress: true
 
 jobs:
@@ -21,7 +21,7 @@ jobs:
     env:
       CACHIX_CACHE_NAME: hellodword-codex
       CACHIX_PUBLIC_KEY: hellodword-codex.cachix.org-1:0URmcnC9aynWh9+FJ2tf+HQloylGgZzPtrz3sttTTiQ=
-      FLAKE_PACKAGE: .#codex
+      FLAKE_PACKAGE: .#codex-config-atlas-site
 
     steps:
       - uses: actions/checkout@v7
@@ -128,7 +128,7 @@ jobs:
           nix config show trusted-users
 
       - name: Build site
-        run: nix build .#codexConfigSite
+        run: nix build .#codex-config-atlas-site
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5

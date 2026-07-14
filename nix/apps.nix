@@ -2,7 +2,7 @@
   lib,
   supportedSystems,
   codexFor,
-  codexConfigFor,
+  codexConfigAtlasFor,
   agentsViewerFor,
 }:
 
@@ -10,7 +10,7 @@ lib.genAttrs supportedSystems (
   system:
   let
     codexPackage = codexFor system;
-    codexConfig = codexConfigFor system;
+    codexConfigAtlas = codexConfigAtlasFor system;
     agentsViewer = agentsViewerFor system;
   in
   rec {
@@ -24,11 +24,11 @@ lib.genAttrs supportedSystems (
 
     default = codex;
 
-    codexcfg = {
+    codex-config-atlas = {
       type = "app";
-      program = "${codexConfig.codexcfgApp}/bin/codexcfg";
+      program = "${codexConfigAtlas.codexConfigAtlas}/bin/codex-config-atlas";
       meta = {
-        description = "Codex config schema tooling wrapper";
+        description = "Codex configuration schema explorer and generator";
       };
     };
 

@@ -27,10 +27,6 @@ that directory. `config.schema.json` is generated from the patched upstream
 tree by running `just write-config-schema` in the upstream checkout.
 Build caches are kept under `.work/codex/<tag>/target/`.
 
-`codex/schemas/` is the unpatched upstream config schema registry used by
-`codexcfg`. It is separate from the patched schema artifact stored beside each
-patch series.
-
 ## Common Commands
 
 Fetch or update a shallow upstream checkout:
@@ -63,16 +59,9 @@ Run the narrow patch validation:
 just codex-test <tag>
 ```
 
-Run the Codex config schema tooling:
-
-```sh
-just codexcfg-current
-just codexcfg-check-registry
-just codexcfg-sync-schema <version>
-just codexcfg-diff <from-version> <to-version>
-just codexcfg-diff-defaults <from-version> <to-version>
-just codexcfg-gen-toml <version> reference
-```
+The unpatched upstream schema registry, diff site, and configuration generator
+are maintained separately in
+[`tools/codex-config-atlas`](../tools/codex-config-atlas/README.md).
 
 ## Maintained Codex Behavior
 
@@ -349,14 +338,14 @@ the client.
 
 ## Local Hook Helper Scripts
 
-`codex/config` contains two optional helper scripts for forwarding Codex hook
-events to local desktop or webhook notifications.
+`tools/codex-hooks` contains two optional helper scripts for forwarding Codex
+hook events to local desktop or webhook notifications.
 
 Copy them into `~/.codex`:
 
 ```sh
-cp codex/config/codex_hook_forwarder.py ~/.codex/
-cp codex/config/codex_hook_notify_server.py ~/.codex/
+cp tools/codex-hooks/codex_hook_forwarder.py ~/.codex/
+cp tools/codex-hooks/codex_hook_notify_server.py ~/.codex/
 ```
 
 Start the receiver server:

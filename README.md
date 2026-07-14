@@ -12,6 +12,10 @@ The kit is intended for project-scoped use. A project opts in by making this kit
 - `.agents/skills/`: reusable shared workflows loaded only when needed.
 - `.agents/templates/`: artifact templates and JSON schemas.
 - `.agents/references/`: examples, command shapes, and longer reference material.
+- `codex/`: pure patch workspace for the upstream OpenAI Codex project.
+- `tools/agents-viewer/`: local read-only Codex rollout viewer.
+- `tools/codex-config-atlas/`: versioned Codex config registry, CLI, and diff site.
+- `tools/codex-hooks/`: directly copyable Codex hook notification helpers.
 
 ## Project overlay
 

@@ -1,6 +1,5 @@
 {
   lib,
-  nixpkgs,
   llm-agents,
 }:
 
@@ -63,28 +62,10 @@ let
 
   supportedSystems = builtins.attrNames llm-agents.packages;
 
-  pkgsFor = system: import nixpkgs { inherit system; };
-
   codexFor = system: patchCodex llm-agents.packages.${system}.codex;
-
-  codexConfigFor =
-    system:
-    let
-      pkgs = pkgsFor system;
-      codex = codexFor system;
-      codexVersion = codex.version or (builtins.parseDrvName codex.name).version;
-    in
-    import ../codex/nix {
-      inherit lib pkgs codexVersion;
-      repoSchemas = ../codex/schemas;
-      repoSiteStatic = ../codex/site/static;
-      minVersion = "0.129.0";
-    };
-
 in
 {
   inherit
-    codexConfigFor
     codexFor
     supportedSystems
     ;
