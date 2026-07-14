@@ -70,7 +70,7 @@ pub fn open_source_read_only(root: &Path, path: &Path) -> Result<OpenedSource> {
     if !canonical_path.starts_with(root) {
         return Err(ViewerError::SourceOutsideRoot(canonical_path));
     }
-    let before = file_identity(&symlink_metadata, &canonical_path);
+    let before = file_identity_before_open(&symlink_metadata, &canonical_path)?;
     let file = File::open(&canonical_path).map_err(|source| ViewerError::Io {
         path: canonical_path.clone(),
         source,
@@ -79,7 +79,7 @@ pub fn open_source_read_only(root: &Path, path: &Path) -> Result<OpenedSource> {
         path: canonical_path.clone(),
         source,
     })?;
-    let after = file_identity(&after_metadata, &canonical_path);
+    let after = opened_file_identity(&file, &after_metadata, &canonical_path);
     if before != after {
         return Err(ViewerError::SourceChanged(canonical_path));
     }
@@ -91,8 +91,28 @@ pub fn open_source_read_only(root: &Path, path: &Path) -> Result<OpenedSource> {
 }
 
 pub fn file_identity(metadata: &Metadata, canonical_path: &Path) -> FileIdentity {
+    build_file_identity(platform_file_key(metadata), metadata, canonical_path)
+}
+
+pub(crate) fn opened_file_identity(
+    file: &File,
+    metadata: &Metadata,
+    canonical_path: &Path,
+) -> FileIdentity {
+    build_file_identity(
+        opened_platform_file_key(file, metadata),
+        metadata,
+        canonical_path,
+    )
+}
+
+fn build_file_identity(
+    platform_file_key: Option<String>,
+    metadata: &Metadata,
+    canonical_path: &Path,
+) -> FileIdentity {
     FileIdentity {
-        file_key: platform_file_key(metadata).unwrap_or_else(|| {
+        file_key: platform_file_key.unwrap_or_else(|| {
             format!(
                 "path:{}",
                 sha256_hex(canonical_path.as_os_str().as_encoded_bytes())
@@ -101,6 +121,24 @@ pub fn file_identity(metadata: &Metadata, canonical_path: &Path) -> FileIdentity
         size: metadata.len(),
         modified: metadata.modified().ok(),
     }
+}
+
+#[cfg(windows)]
+fn file_identity_before_open(_metadata: &Metadata, canonical_path: &Path) -> Result<FileIdentity> {
+    let file = File::open(canonical_path).map_err(|source| ViewerError::Io {
+        path: canonical_path.to_path_buf(),
+        source,
+    })?;
+    let metadata = file.metadata().map_err(|source| ViewerError::Io {
+        path: canonical_path.to_path_buf(),
+        source,
+    })?;
+    Ok(opened_file_identity(&file, &metadata, canonical_path))
+}
+
+#[cfg(not(windows))]
+fn file_identity_before_open(metadata: &Metadata, canonical_path: &Path) -> Result<FileIdentity> {
+    Ok(file_identity(metadata, canonical_path))
 }
 
 #[cfg(unix)]
@@ -211,18 +249,51 @@ fn platform_file_key(metadata: &Metadata) -> Option<String> {
 }
 
 #[cfg(windows)]
-fn platform_file_key(metadata: &Metadata) -> Option<String> {
-    use std::os::windows::fs::MetadataExt as _;
-    Some(format!(
-        "windows:{}:{}",
-        metadata.volume_serial_number()?,
-        metadata.file_index()?
-    ))
+fn platform_file_key(_metadata: &Metadata) -> Option<String> {
+    None
 }
 
 #[cfg(not(any(unix, windows)))]
 fn platform_file_key(_metadata: &Metadata) -> Option<String> {
     None
+}
+
+#[cfg(unix)]
+fn opened_platform_file_key(_file: &File, metadata: &Metadata) -> Option<String> {
+    platform_file_key(metadata)
+}
+
+#[cfg(windows)]
+fn opened_platform_file_key(file: &File, _metadata: &Metadata) -> Option<String> {
+    use std::os::windows::io::AsRawHandle as _;
+
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: File owns a valid handle for the duration of the call and information is a valid
+    // writable output structure.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut information) } == 0
+    {
+        return None;
+    }
+    Some(format!(
+        "windows:{}:{}",
+        information.dwVolumeSerialNumber,
+        windows_file_index(information.nFileIndexHigh, information.nFileIndexLow)
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn opened_platform_file_key(_file: &File, _metadata: &Metadata) -> Option<String> {
+    None
+}
+
+#[cfg(any(windows, test))]
+fn windows_file_index(high: u32, low: u32) -> u64 {
+    (u64::from(high) << 32) | u64::from(low)
 }
 
 fn unsafe_permissions(path: &Path, reason: &str) -> ViewerError {
@@ -372,12 +443,52 @@ mod windows_acl {
 
 #[cfg(test)]
 mod tests {
-    use super::broad_principal_has_unsafe_rights;
+    use super::{broad_principal_has_unsafe_rights, windows_file_index};
 
     #[test]
     fn synthetic_broad_principal_rights_fail_closed() {
         assert!(broad_principal_has_unsafe_rights(&[0, 1, 0]));
         assert!(broad_principal_has_unsafe_rights(&[0x4000_0000]));
         assert!(!broad_principal_has_unsafe_rights(&[0, 0, 0]));
+    }
+
+    #[test]
+    fn windows_file_index_combines_high_and_low_words() {
+        assert_eq!(
+            windows_file_index(0x0123_4567, 0x89ab_cdef),
+            0x0123_4567_89ab_cdef
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_open_file_identity_tracks_the_underlying_file() {
+        use std::fs::File;
+
+        use tempfile::TempDir;
+
+        use super::opened_file_identity;
+
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("source.jsonl");
+        let linked = temp.path().join("linked.jsonl");
+        let other = temp.path().join("other.jsonl");
+        std::fs::write(&source, b"source\n").unwrap();
+        std::fs::hard_link(&source, &linked).unwrap();
+        std::fs::write(&other, b"other\n").unwrap();
+
+        let source_file = File::open(&source).unwrap();
+        let linked_file = File::open(&linked).unwrap();
+        let other_file = File::open(&other).unwrap();
+        let source_identity =
+            opened_file_identity(&source_file, &source_file.metadata().unwrap(), &source);
+        let linked_identity =
+            opened_file_identity(&linked_file, &linked_file.metadata().unwrap(), &linked);
+        let other_identity =
+            opened_file_identity(&other_file, &other_file.metadata().unwrap(), &other);
+
+        assert!(source_identity.file_key.starts_with("windows:"));
+        assert_eq!(source_identity.file_key, linked_identity.file_key);
+        assert_ne!(source_identity.file_key, other_identity.file_key);
     }
 }

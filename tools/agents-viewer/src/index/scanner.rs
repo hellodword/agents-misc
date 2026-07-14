@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::model::{Completeness, DiagnosticSeverity, IndexState, SourceKind};
 use crate::paths::SourceRoots;
-use crate::permissions::{file_identity, open_source_read_only};
+use crate::permissions::{open_source_read_only, opened_file_identity};
 use crate::rollout::{
     BoundedJsonlReader, CollectingSink, EntryOrigin, LineReadStatus, NormalizedEntry, ParseContext,
     ParseSeed, ParseSink as _, ParserDiagnostic, ParserOutput, RootKind, SessionRecord,
@@ -280,7 +280,8 @@ fn discover_file(
     };
     let placeholder = metadata_placeholder(&mut opened.file, &context)?;
     if !policy.includes(placeholder.created_at_micros) {
-        let after = file_identity(
+        let after = opened_file_identity(
+            &opened.file,
             &opened.file.metadata().context("re-stat excluded source")?,
             &opened.canonical_path,
         );
@@ -290,7 +291,8 @@ fn discover_file(
         return Ok(FileDiscovery::Excluded(after.size));
     }
     let (head_hash, tail_hash) = head_tail_hash(&mut opened.file, opened.identity.size)?;
-    let after = file_identity(
+    let after = opened_file_identity(
+        &opened.file,
         &opened
             .file
             .metadata()
@@ -399,7 +401,8 @@ fn parse_source_blocking(
         )?,
     };
     sink.finish()?;
-    let after = file_identity(
+    let after = opened_file_identity(
+        &opened.file,
         &opened.file.metadata().context("re-stat parsed source")?,
         &opened.canonical_path,
     );
