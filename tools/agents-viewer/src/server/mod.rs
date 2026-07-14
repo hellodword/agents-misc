@@ -96,7 +96,7 @@ impl AppState {
     }
 }
 
-pub fn router(state: AppState, bound: SocketAddr) -> Router {
+pub fn router(state: AppState, bound: SocketAddr, password: &str) -> Router {
     let api =
         api::router()
             .fallback(api::unknown_api)
@@ -110,7 +110,7 @@ pub fn router(state: AppState, bound: SocketAddr) -> Router {
         .route("/{*path}", axum::routing::get(assets::fallback))
         .with_state(state)
         .layer(axum_middleware::from_fn_with_state(
-            middleware::SecurityConfig::new(bound),
+            middleware::SecurityConfig::new(bound, password),
             middleware::secure_request,
         ))
 }

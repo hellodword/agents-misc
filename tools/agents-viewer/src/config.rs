@@ -33,6 +33,9 @@ initial_index_days = 7
 # HTTP must bind to an IPv4 or IPv6 loopback address. Port 0 selects a free port.
 listen = "127.0.0.1:4747"
 
+# HTTP Basic Auth password. Empty disables authentication.
+password = ""
+
 # Maximum complete JSONL record size. Units: B, KiB, MiB, or GiB.
 max_event_bytes = "32MiB"
 
@@ -66,7 +69,7 @@ impl LogLevel {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+#[derive(Clone, Deserialize, JsonSchema, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FileConfig {
     /// Codex data source. Only sessions/ and archived_sessions/ are read.
@@ -77,6 +80,8 @@ pub struct FileConfig {
     pub initial_index_days: i64,
     /// IPv4 or IPv6 loopback listen address. Port 0 selects a free port.
     pub listen: String,
+    /// HTTP Basic Auth password. Empty disables authentication.
+    pub password: String,
     /// Maximum complete JSONL record size using B, KiB, MiB, or GiB.
     pub max_event_bytes: String,
     /// Diagnostic verbosity.
@@ -90,18 +95,20 @@ impl Default for FileConfig {
             data_dir: "~/.agents-viewer".into(),
             initial_index_days: 7,
             listen: "127.0.0.1:4747".into(),
+            password: String::new(),
             max_event_bytes: "32MiB".into(),
             log_level: LogLevel::Warn,
         }
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Config {
     pub config_path: PathBuf,
     pub roots: SourceRoots,
     pub cache: CachePaths,
     pub listen: SocketAddr,
+    pub password: String,
     pub rebuild_index: bool,
     pub initial_index_days: i64,
     pub max_event_bytes: usize,
@@ -158,6 +165,7 @@ impl Config {
             roots,
             cache,
             listen,
+            password: file.password,
             rebuild_index: cli.rebuild_index,
             initial_index_days: file.initial_index_days,
             max_event_bytes,
@@ -370,6 +378,7 @@ mod tests {
             "data_dir",
             "initial_index_days",
             "listen",
+            "password",
             "max_event_bytes",
             "log_level",
         ] {
@@ -393,6 +402,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["properties"]["password"]["default"], "");
     }
 
     #[test]

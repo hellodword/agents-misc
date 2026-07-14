@@ -51,7 +51,15 @@ impl TestApp {
     }
 
     pub fn router(&self) -> axum::Router {
-        router(self.state.clone(), "127.0.0.1:4747".parse().unwrap())
+        self.router_with_password("")
+    }
+
+    pub fn router_with_password(&self, password: &str) -> axum::Router {
+        router(
+            self.state.clone(),
+            "127.0.0.1:4747".parse().unwrap(),
+            password,
+        )
     }
 }
 

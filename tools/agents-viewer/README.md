@@ -27,11 +27,14 @@ source_dir = "~/.codex"
 data_dir = "~/.agents-viewer"
 initial_index_days = 7
 listen = "127.0.0.1:4747"
+password = ""
 max_event_bytes = "32MiB"
 log_level = "warn"
 ```
 
 The generated schema is refreshed on startup; an existing TOML file is never rewritten during upgrades. Relative paths are resolved from the config directory, and `~` means the current user's home. Hostnames, wildcard/non-loopback listeners, decimal units such as `MB`, and out-of-range event sizes are rejected. Exit codes are `0` for help/version or graceful shutdown, `1` for configuration/source/data/lock/permission/bind/runtime failure, and `2` for invalid CLI syntax.
+
+`password` enables HTTP Basic authentication when it is non-empty. The username is always `agents-viewer`. Authentication covers the page, embedded assets, API, raw content, and event stream, so an unauthenticated browser receives its native credential prompt before the UI loads. Browsers decide how long Basic credentials remain cached and provide no reliable application-controlled logout. Direct clients can use `curl --user agents-viewer URL` and enter the password at curl's prompt.
 
 ## Read-only boundary and threat model
 
@@ -44,7 +47,7 @@ Files are opened read-only, file symlinks are not followed, canonical paths must
 
 These are application-level guards, not an operating-system sandbox. They reduce accidental writes by this program; they do not confine a compromised process. Use an OS sandbox as an additional boundary when that threat matters.
 
-The viewer does **not** open Codex state SQLite databases, `history.jsonl`, authentication data, config, skills, plugins, logs, or other Codex-home files. It never sends content to a network service; HTTP is loopback-only and the UI has a restrictive CSP.
+The viewer does **not** open Codex state SQLite databases, `history.jsonl`, authentication data, config, skills, plugins, logs, or other Codex-home files. It never sends content to a network service; HTTP is loopback-only and the UI has a restrictive CSP. Optional Basic authentication is access control, not encryption: HTTP sends the configured credentials with requests.
 
 The SQLite cache is plaintext and contains message text and searchable derived data. Cache directories/files are restricted to the current user, but this is not encryption. The threat model trusts the signed-in user and host and does not defend against a malicious process already running as the same account.
 

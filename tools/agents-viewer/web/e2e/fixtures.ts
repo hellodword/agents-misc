@@ -18,16 +18,20 @@ type Runtime = {
   sourceHome: string
 }
 
+type Options = {
+  password: string
+}
+
 const here = dirname(fileURLToPath(import.meta.url))
 const fixturePath = resolve(here, "../../tests/fixtures/rollouts/v0_120.jsonl")
 const viewerRoot = resolve(here, "../..")
 const execFileAsync = promisify(execFile)
 
-async function startServer(sourceHome: string, dataDir: string) {
+async function startServer(sourceHome: string, dataDir: string, password: string) {
   const metadata = JSON.parse((await execFileAsync("cargo", ["metadata", "--format-version", "1", "--no-deps", "--manifest-path", resolve(viewerRoot, "Cargo.toml")])).stdout) as { target_directory: string }
   const binary = resolve(metadata.target_directory, "debug/agents-viewer")
   const configPath = resolve(sourceHome, "../config.toml")
-  await writeFile(configPath, `source_dir = ${JSON.stringify(sourceHome)}\ndata_dir = ${JSON.stringify(dataDir)}\ninitial_index_days = -1\nlisten = "127.0.0.1:0"\nmax_event_bytes = "32MiB"\nlog_level = "warn"\n`, { mode: 0o600 })
+  await writeFile(configPath, `source_dir = ${JSON.stringify(sourceHome)}\ndata_dir = ${JSON.stringify(dataDir)}\ninitial_index_days = -1\nlisten = "127.0.0.1:0"\npassword = ${JSON.stringify(password)}\nmax_event_bytes = "32MiB"\nlog_level = "warn"\n`, { mode: 0o600 })
   const child = spawn(binary, ["--config", configPath], {
     stdio: ["ignore", "pipe", "pipe"],
   })
@@ -46,7 +50,8 @@ async function startServer(sourceHome: string, dataDir: string) {
   return { child, baseURL }
 }
 
-export const test = base.extend<Runtime>({
+export const test = base.extend<Runtime & Options>({
+  password: ["", { option: true }],
   browser: [async ({}, use) => {
     const target = await resolveBrowserTarget()
     const browser = "cdpEndpoint" in target ? await chromium.connectOverCDP(target.cdpEndpoint) : await chromium.launch({ executablePath: target.executablePath, headless: true, args: process.platform === "linux" ? ["--no-sandbox", "--disable-dev-shm-usage"] : [] })
@@ -75,8 +80,8 @@ export const test = base.extend<Runtime>({
     await writeFile(rollout, `${base.trimEnd()}\n${pagination}\n`)
     await use(rollout)
   },
-  process: async ({ sourceHome, cacheDir, rollout: _rollout }, use) => {
-    const server = await startServer(sourceHome, cacheDir)
+  process: async ({ sourceHome, cacheDir, rollout: _rollout, password }, use) => {
+    const server = await startServer(sourceHome, cacheDir, password)
     Object.assign(server.child, { baseURL: server.baseURL })
     await use(server.child)
     server.child.kill("SIGTERM")
@@ -85,8 +90,8 @@ export const test = base.extend<Runtime>({
   baseURL: async ({ process: child }, use) => {
     await use((child as ChildProcess & { baseURL: string }).baseURL)
   },
-  context: async ({ browser, baseURL }, use) => {
-    const context = await browser.newContext({ baseURL, locale: "en-US", viewport: { width: 1440, height: 900 }, permissions: ["clipboard-read", "clipboard-write"] })
+  context: async ({ browser, baseURL, password }, use) => {
+    const context = await browser.newContext({ baseURL, locale: "en-US", viewport: { width: 1440, height: 900 }, permissions: ["clipboard-read", "clipboard-write"], httpCredentials: password ? { username: "agents-viewer", password } : undefined })
     await context.route("**/*", route => {
       const url = new URL(route.request().url())
       if ((url.protocol === "http:" || url.protocol === "https:") && !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) return route.abort("blockedbyclient")

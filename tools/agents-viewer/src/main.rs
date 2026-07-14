@@ -113,8 +113,11 @@ async fn run(config: Config) -> Result<()> {
     ));
     let heartbeat_task = tokio::spawn(heartbeat(state.clone(), shutdown.clone()));
     let server_shutdown = shutdown.clone();
-    let server = axum::serve(listener, server::router(state.clone(), bound))
-        .with_graceful_shutdown(async move { server_shutdown.cancelled().await });
+    let server = axum::serve(
+        listener,
+        server::router(state.clone(), bound, &config.password),
+    )
+    .with_graceful_shutdown(async move { server_shutdown.cancelled().await });
     let server_task = tokio::spawn(async move { server.await.context("HTTP server failed") });
 
     let url = format!("http://{bound}");
