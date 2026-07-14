@@ -1,2 +1,2 @@
 # These files are checked against upstream byte hashes in metadata.json.
-tools/codex-config-atlas/schemas/rust-v*/config.schema.json
+**/rust-v*/config.schema.json
