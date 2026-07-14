@@ -9,7 +9,7 @@ triggers:
   - "fixtures"
   - "snapshots"
 summary: Keep temporary, generated, local, and sensitive artifacts out of durable changes.
-companions: []
+companions: {}
 ---
 
 # Repository Hygiene
@@ -22,5 +22,5 @@ companions: []
 - Keep generated code clearly separated and documented.
 - Do not create broad helper layers for one-off migrations or temporary compatibility code.
 - Do not add root-level transient files such as `PLAN.md`, `IMPLEMENTATION.md`, or `NOTES.md`.
-- Durable agent rules belong under `.agents/`.
+- In consuming projects, durable project-specific agent rules belong under `.project-agent/`; treat the shared `AGENTS.md` and `.agents/**` payload as centrally maintained and read-only.
 - Pure patch upstream source trees belong under `.work/` and must not be staged.

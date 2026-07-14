@@ -8,66 +8,34 @@ triggers:
   - "cargo clippy"
   - "SQLx"
   - "tracing"
-summary: Apply Rust defaults for Cargo, linting, logging, errors, SQLite, and lockfiles.
-companions: []
+summary: Apply Rust defaults for stable toolchains, Cargo, linting, errors, logging, SQLite, and lockfiles.
+companions: {}
 ---
 
 # Rust Rules
 
-- Use Cargo.
-- Use `cargo fmt`.
-- Use `cargo clippy` for linting when available.
-- Run commands through Nix/Just.
+- Use Cargo, `cargo fmt`, and `cargo clippy` when available.
+- Run project commands through the established project workflow; use Nix/Just only when the project adopts it.
 - Do not use global `cargo install`.
-- Prefer standard library first.
-- Prefer `thiserror` for library/domain error types.
-- Prefer `anyhow` for application/CLI top-level errors.
-- Prefer `serde` and `serde_json` when serialization is needed.
-- Prefer `tracing` and `tracing-subscriber` for service/application logging.
+- Prefer the standard library first; use `thiserror` for library/domain errors, `anyhow` at application/CLI boundaries, `serde` for serialization, and `tracing` for application logging when needed.
 - Avoid `unsafe` unless required, isolated, and documented.
 
-## Nix toolchain
+## Toolchain
 
-Default Rust flake input:
+Preserve `rust-toolchain.toml`, an existing flake pin, project documentation, or an upstream/dependency requirement. For a greenfield Nix project, use rust-overlay with stable Rust:
 
-    rust-overlay.url = "github:oxalica/rust-overlay";
+```nix
+rust-bin.stable.latest.default
+```
 
-When this rule applies and the project has no explicit Rust toolchain convention, the default Rust toolchain MUST be nightly from rust-overlay.
-
-Use this exact default expression:
-
-    rust-bin.selectLatestNightlyWith (toolchain: toolchain.default)
-
-Default means required fallback, not preference. Do not replace this with `rust-bin.stable.*` merely because the project is a normal CLI, uses Cargo, or does not obviously require nightly.
-
-Existing project convention overrides this default only when one of these exists:
-
-- `rust-toolchain.toml` or `rust-toolchain`;
-- an existing `flake.nix` pinning a Rust toolchain;
-- project documentation that explicitly requires stable, beta, nightly, or a specific Rust version;
-- dependency or upstream build documentation that requires a specific compiler.
-
-Cargo edition, including edition 2024, is not by itself a project toolchain convention.
-
-If latest nightly fails to build because of compiler or dependency incompatibility, do not silently switch to stable. First prefer pinning a known-working nightly toolchain. Switch to stable only when the project explicitly requires stable or the user approves that deviation, and report the reason.
-
-Add components or targets only when the project needs them.
+A `rust-toolchain.toml`, existing flake pin, project documentation, or dependency/upstream requirement is toolchain evidence. Use nightly only when such evidence requires it or the user explicitly requests it. Pin a dated nightly rather than a moving latest-nightly selector. Add components and targets only when needed.
 
 ## SQLite
 
-- Default Rust SQLite stack: `sqlx` + SQLite.
-- Use native SQL.
-- Do not introduce ORM by default.
-- Service and long-term projects:
-  - prefer SQLx checked macros;
-  - provide schema access through `DATABASE_URL` or SQLx offline metadata;
-  - commit required SQLx offline metadata when used.
-- Small CLI/prototype projects:
-  - SQLx runtime queries are acceptable when checked macros add too much setup.
-- Keep migrations explicit.
-- Prefer transactions for multi-step writes.
-- Do not commit local database files.
+- Default Rust SQLite stack: SQLx with native SQL, not an ORM.
+- Use checked SQLx macros and committed offline metadata when the project requires compile-time query verification or offline builds. Otherwise use runtime queries and validate them with integration tests.
+- Keep migrations explicit, use transactions for multi-step writes, and never commit local database files.
 
 ## Cargo.lock
 
-Commit `Cargo.lock` by default.
+Commit `Cargo.lock` for applications and binaries. For libraries, follow the repository's publishing and lockfile convention; if none exists, decide based on whether the lockfile is part of the tested/released artifact rather than applying an application default.

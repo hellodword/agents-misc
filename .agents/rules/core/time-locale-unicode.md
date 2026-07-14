@@ -9,7 +9,7 @@ triggers:
   - "encoding"
   - "i18n text"
 summary: Handle time, locale, Unicode, and formatting consistently.
-companions: []
+companions: {}
 ---
 
 # Time, Locale, and Unicode Rules
@@ -39,7 +39,7 @@ companions: []
 ## Unicode
 
 - Preserve user-facing text.
-- Normalize identifiers and filenames only when needed and documented.
+- Normalize identifiers or filenames only when the applicable contract defines the normalization and comparison/storage behavior.
 - Prefer NFC normalization for durable identifiers when normalization is required.
 - Avoid byte-length limits for user-facing text; use character or display-aware limits where appropriate.
 - Treat user-controlled filenames as untrusted paths.

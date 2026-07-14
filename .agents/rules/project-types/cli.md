@@ -5,19 +5,21 @@ triggers:
   - "CLI project"
   - "command line tool"
   - "subcommands"
-  - "flags"
+  - "CLI flags"
   - "terminal app"
 summary: Apply defaults for durable command-line tools and CLI contracts.
-companions: []
+companions: {}
 ---
 
 # CLI Project Rules
 
-## Default languages
+Preserve the language and CLI framework of an existing project.
 
-- Prefer Go or Rust.
-- Use Python when the ecosystem strongly favors it.
-- Use Node.js when the CLI is tightly coupled to frontend, npm, browser automation, or Node tooling ecosystems.
+## Greenfield language choice
+
+- Go and Rust are both supported defaults. If their tradeoff changes distribution, interoperability, performance, or long-term maintenance and the user has not chosen, ask before selecting one.
+- Select Python only when the user asks or ecosystem/project evidence favors it.
+- Select Node.js only when the user asks or the CLI is coupled to frontend, npm, browser automation, or Node tooling.
 
 ## CLI contract
 
@@ -32,8 +34,7 @@ companions: []
 
 ## General CLI rules
 
-- Send machine-readable output to stdout.
-- Send human diagnostics to stderr.
+- Send the command's primary result to stdout and diagnostics to stderr; keep stdout pure in structured-output mode.
 - Support `--help`.
 - Use useful error messages.
 - Avoid hidden network access.

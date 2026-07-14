@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "conditionalCompanion": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9.-]*$" },
+        "when": { "type": "string", "minLength": 1 }
+      },
+      "required": ["id", "when"]
+    },
+    "assetCompanion": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^(?:[a-z0-9][a-z0-9.-]*|\\.[a-z0-9][a-z0-9.-]*)$"
+        },
+        "when": { "type": "string", "minLength": 1 }
+      },
+      "required": ["id", "when"]
+    }
+  },
+  "title": "Agent Rules Kit rule frontmatter",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9.-]*$" },
+    "kind": { "enum": ["index", "core", "project-type", "stack", "toolchain"] },
+    "triggers": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "summary": { "type": "string", "minLength": 1 },
+    "companions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "required_rules": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9.-]*$" }
+        },
+        "conditional_rules": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/conditionalCompanion" }
+        },
+        "skills": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/conditionalCompanion" }
+        },
+        "templates": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/assetCompanion" }
+        },
+        "references": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/assetCompanion" }
+        }
+      }
+    }
+  },
+  "required": ["id", "kind", "triggers", "summary", "companions"]
+}

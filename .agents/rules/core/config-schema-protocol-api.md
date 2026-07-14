@@ -3,7 +3,8 @@ id: core.config-schema-protocol-api
 kind: core
 triggers:
   - "config"
-  - "schema"
+  - "JSON Schema"
+  - "public schema"
   - "protocol"
   - "API contract"
   - "FFI contract"

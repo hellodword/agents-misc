@@ -10,16 +10,15 @@ triggers:
   - "nix fmt"
   - "touched files"
 summary: Use project formatting narrowly and avoid unrelated repository-wide churn.
-companions: []
+companions: {}
 ---
 
 # Formatting Rules
 
-- Go: `gofmt`.
-- Rust: `cargo fmt`.
-- Dart/Flutter: `dart format`.
-- JSON, JSONC, Markdown, HTML, YAML, JavaScript, TypeScript, Vue: Prettier.
-- Nix projects with multi-language formatting needs: prefer `treefmt-nix` through the flake `formatter` output; this may format more than Nix files.
+Use the formatter and invocation already established for the touched file type. Do not add Prettier, treefmt, Nix, or another formatter merely to format one change.
+
+For greenfield formatter setup, use `gofmt` for Go, `cargo fmt` for Rust, `dart format` for Dart/Flutter, and Prettier for JSON/JSONC/Markdown/HTML/YAML/JavaScript/TypeScript/Vue. In an already adopted Nix project with multi-language formatting, treefmt-nix through the flake `formatter` is available.
+
 - Treat `nix fmt` as a mutating formatter entrypoint unless the project exposes a separate check-only command.
 - For validation, prefer formatter check commands or flake checks when available.
 - Format only touched files by default when the formatter supports it.
@@ -28,4 +27,4 @@ companions: []
   - the repo already requires it;
   - the change generated many files that must be consistently formatted.
 - Do not mix formatting-only changes with semantic changes unless formatting is limited to touched files.
-- When seeding shared formatter defaults, use `.agents/templates/treefmt.nix`, `.agents/templates/.prettierrc.json`, and `.agents/templates/.editorconfig`.
+- When a greenfield task explicitly seeds those tools, the matching `.agents/templates/` files are available.

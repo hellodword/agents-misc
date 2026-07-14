@@ -3,7 +3,7 @@ id: stack.database-sqlite
 kind: stack
 triggers:
   - "SQLite"
-  - "database"
+  - "SQLite database"
   - "DSN"
   - "WAL"
   - "foreign keys"
@@ -28,13 +28,12 @@ companions:
 
 Do not introduce SQLite into an existing project that already has a clear storage strategy unless the user asks or the task requires a local embedded database.
 
-- Prefer SQLite for local/default persistence.
-- Use native SQL by default.
-- Avoid introducing an ORM by default.
+Preserve an existing project's storage and query strategy. For greenfield local/default persistence after SQLite is selected, prefer native SQL and do not introduce an ORM without a concrete need.
+
 - Keep migrations explicit.
 - Store durable schema/migration files in a stable directory such as `migrations/` or the existing project location.
 - Do not commit local database files.
-- Put disposable local databases under ignored paths such as `tmp/`, `.work/`, or another project-ignored state directory.
+- Put a database under an ignored project temp path only after project evidence identifies it as disposable development/test state. Ignored status alone does not prove disposability.
 - Use transactions for multi-step writes.
 - Enable foreign key enforcement where the driver requires it.
 - Prefer integer primary keys or stable text ids based on product needs.
@@ -42,7 +41,7 @@ Do not introduce SQLite into an existing project that already has a clear storag
 
 ## Go
 
-Default Go SQLite stack:
+Greenfield Go SQLite stack:
 
 - `database/sql`;
 - `github.com/mattn/go-sqlite3`;
@@ -51,12 +50,12 @@ Default Go SQLite stack:
 
 ## Rust
 
-Default Rust SQLite stack:
+Greenfield Rust SQLite stack:
 
 - `sqlx` + SQLite;
 - native SQL;
-- checked macros for service or long-term projects when setup is worthwhile;
-- runtime queries for small CLI/prototype projects when checked macros add too much setup.
+- checked macros with committed offline metadata when compile-time query verification or offline builds are required;
+- runtime queries with integration coverage otherwise.
 
 ## Validation
 

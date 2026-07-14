@@ -35,4 +35,4 @@ Default Assumptions:
 
 - The existing package manager remains unchanged.
 - Existing local project conventions take precedence over greenfield defaults.
-- Database files under ignored local paths are disposable unless the user states otherwise.
+- Reversible local implementation details use the smallest convention-aligned choice; persisted data is treated as real unless project evidence proves it disposable.

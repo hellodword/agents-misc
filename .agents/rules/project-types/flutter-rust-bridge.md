@@ -7,16 +7,18 @@ triggers:
   - "flutter_rust_bridge"
   - "mobile desktop"
 summary: Apply defaults for Flutter clients with Rust core or bridge layers.
-companions: []
+companions: {}
 ---
 
 # Flutter + Rust Bridge Project Rules
 
-## Default stack
+Use this rule when the project already has a Flutter/Rust bridge or the user selects that architecture. Preserve its existing bridge and targets.
+
+## Greenfield defaults
 
 - UI/client shell: Flutter.
 - Native/system/performance logic: Rust.
-- Bridge: flutter_rust_bridge unless the project already uses another bridge.
+- Bridge: flutter_rust_bridge.
 - State management: follow existing project; if none exists, use `setState` for simple local widget state.
 - Default targets: mobile and desktop as required by the project.
 - Web is not included by default.

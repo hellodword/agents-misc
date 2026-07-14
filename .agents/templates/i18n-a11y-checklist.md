@@ -2,8 +2,8 @@
 
 ## i18n
 
-- [ ] English copy exists.
-- [ ] Simplified Chinese copy exists.
+- [ ] Existing project locales are preserved; for greenfield user-facing UI, `en` copy exists.
+- [ ] For greenfield user-facing UI, `zh-CN` copy exists.
 - [ ] User-facing strings are localizable.
 - [ ] Variables use interpolation.
 - [ ] Dates, times, numbers, and plurals are locale-aware.

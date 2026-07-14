@@ -7,7 +7,7 @@ triggers:
   - "NixOS module"
   - "Home Manager module"
   - "overlay"
-  - "template"
+  - "flake template"
 summary: Apply defaults for projects whose primary product is Nix outputs.
 companions:
   required_rules:

@@ -21,6 +21,10 @@ companions:
 
 # Git Rules
 
+## Branch convention
+
+Use `master` for a new repository unless the project establishes another convention. For an existing repository, detect and preserve its current default branch. The shared GitHub Actions rule intentionally fixes generated workflow push triggers to `master`; that is a workflow-policy exception, not permission to rename an existing repository branch.
+
 ## Commit boundary
 
 Commit is the smallest unit of agent progress only when commit mode allows commits.

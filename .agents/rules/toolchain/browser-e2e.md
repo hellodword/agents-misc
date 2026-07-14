@@ -4,77 +4,55 @@ kind: toolchain
 triggers:
   - "browser E2E"
   - "Playwright"
-  - "critical flow"
-  - "screenshot"
-  - "web verification"
-summary: Choose minimal browser validation with safe artifact and profile handling.
-companions: []
+  - "Playwright E2E"
+  - "browser regression"
+summary: Keep meaningful Playwright E2E tests project-owned, locked, system-browser-based, and explicit about environment failures.
+companions:
+  conditional_rules:
+    - id: core.testing
+      when: durable browser regression coverage is added or changed
+    - id: core.environment
+      when: browser, display, container, PATH, or shared-memory capability blocks execution
+  skills:
+    - id: browser-e2e
+      when: choosing or implementing browser validation
+  references:
+    - id: playwright-system-browser.ts
+      when: a project needs a Playwright system-browser selection helper
 ---
 
 # Browser E2E Rules
 
-## Tool choice
+## Project ownership
 
-Use Playwright MCP for exploratory agent-driven browser verification.
+Meaningful browser validation belongs in durable project files such as `e2e/*.spec.ts` and a package script. Do not use agent-only browser exploration or temporary agent-authored Playwright programs as the substitute for regression-worthy E2E coverage.
 
-Use temporary Playwright scripts under `tmp/` for one-off deterministic checks that should not be committed.
+Preserve an existing project's browser runner, Playwright configuration, browser policy, package manager, and lockfile. The system-browser policy below applies when adding Playwright to a greenfield project or when the project has explicitly adopted this policy.
 
-Use committed Playwright tests for durable regression coverage.
+Use the project's locked, local `@playwright/test` dev dependency. Greenfield projects use npm. Do not use a global Playwright installation, a floating `npx` download, or `playwright install`.
 
-Use AI visual review only when the user explicitly asks for screenshot-based visual review or image editing.
+## System browser selection
 
-## Browser choice
-
-For project-owned Playwright scripts, first read `PLAYWRIGHT_CDP_ENDPOINT`.
-
-If `PLAYWRIGHT_CDP_ENDPOINT` exists, connect to that CDP endpoint.
-
-CDP connection applies to Chromium-family browsers.
-
-If no endpoint exists, probe `PATH` in this order:
+Browser selection is implemented by the project's Playwright configuration or helper, never by agent probing. Search `PATH` in exactly this order:
 
 1. `google-chrome`
-2. `microsoft-edge`
-3. `chromium`
+2. `chromium`
+3. `microsoft-edge`
 
-Use the first available Chromium-family browser.
+Use the first executable as Playwright's `executablePath`. The reference `.agents/references/playwright-system-browser.ts` is copyable guidance; projects own their copied helper and do not import runtime code from `.agents/`.
 
-Do not install browsers automatically.
+Do not install a browser automatically. A missing browser must produce a clear nonzero failure.
 
-## Headed/headless
+## Launch behavior
 
-Default local browser launch is headful.
+Default to headful execution. If a Linux display is unavailable, fail clearly; do not silently fall back to headless. A project may deliberately define a separate headless workflow when its contract requires one.
 
-Add headless mode only when explicitly requested or when a durable test runner already defines headless behavior.
-
-## Container flags
-
-Detect container mode using `/.dockerenv` first. If absent, cgroup/container markers may be used as fallback diagnostics.
-
-When launching a local Chromium-family browser inside a container/devcontainer, add:
-
-    --no-sandbox
-
-Outside containers/devcontainers, do not add `--no-sandbox` by default.
-
-Check `/dev/shm` before launching Chromium-family browsers.
-
-Default threshold:
-
-    1 GiB
-
-If inside a container/devcontainer and `/dev/shm` total size is less than 1 GiB, add:
-
-    --disable-dev-shm-usage
-
-If `/dev/shm` is 1 GiB or larger, do not add `--disable-dev-shm-usage` by default.
-
-When container startup flags are under user control, prefer increasing shared memory or using `--ipc=host` over relying on `--disable-dev-shm-usage`.
+When launching inside a container or devcontainer, always add `--no-sandbox`; this kit knowingly accepts that risk. If container `/dev/shm` is smaller than 1 GiB, also add `--disable-dev-shm-usage`.
 
 ## Artifacts
 
-Put browser profiles, traces, screenshots, videos, downloads, and temporary scripts under `tmp/`.
+Preserve every artifact root already configured by the project's Playwright configuration, scripts, or documented convention. If the project has no configured artifact root, use `tmp/playwright/`.
 
-Do not commit browser artifacts.
+For each selected root inside the worktree, confirm that Git ignore rules cover it. An existing broader ignore rule is sufficient. If an existing configured root is not ignored, add the narrowest ignore entry for that root instead of silently moving the output. A configured root outside the worktree needs no ignore entry; report that boundary explicitly.
 
-If no browser, display, or CDP endpoint is available, report the environment blocker instead of installing system packages.
+Keep profiles, traces, screenshots, videos, and downloads under the selected roots. Do not commit them as ordinary artifacts. Use accessibility-first locators and assert observable behavior rather than implementation details.

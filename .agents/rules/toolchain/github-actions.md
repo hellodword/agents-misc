@@ -3,55 +3,29 @@ id: toolchain.github-actions
 kind: toolchain
 triggers:
   - "GitHub Actions"
-  - "workflow"
-  - "CI"
+  - ".github/workflows"
+  - "GitHub workflow"
   - "action pinning"
   - "permissions"
-summary: Add GitHub Actions only on request and keep workflows minimal and explicit.
-companions: []
+summary: Add GitHub Actions only on request and restrict default dependencies to official actions with least privilege.
+companions: {}
 ---
 
 # GitHub Actions Rules
 
-Do not create or modify GitHub Actions unless the user explicitly asks.
+Do not create or modify GitHub Actions unless the user explicitly asks. Keep requested workflows minimal and non-deploying by default.
 
-If a workflow is required, keep it minimal and non-deploying by default.
+For a new requested workflow, use this baseline unless the user explicitly requests additional events:
 
-Default triggers:
+```yaml
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+```
 
-    on:
-      push:
-        branches: [master]
-      workflow_dispatch:
+Use `permissions: {}` when no repository read is needed. Use `contents: read` when the workflow checks out repository contents, and add only the exact additional permissions required by requested jobs.
 
-Use least-privilege permissions by default:
+Preserve existing action versions unless the task upgrades them. For new dependencies, use only GitHub's official `actions/*` actions by default. Any other owner, including `github/codeql-action`, requires an explicit user request plus review of ownership, maintenance status, requested permissions, input handling, network/secret access, and release-tag policy. Verify the current latest stable major and use a major tag such as `actions/checkout@vN`. This policy accepts the mutability risk of official major tags and does not require a full commit SHA. Never use `@main`.
 
-    permissions:
-      contents: read
-
-Allowed action owners:
-
-- `actions/*`
-- `github/codeql-action/*`
-
-Use latest stable major tags, such as:
-
-- `actions/checkout@vN`
-- `actions/setup-node@vN`
-- `github/codeql-action/analyze@vN`
-
-Never use `uses: owner/action@main`.
-
-Do not actively add GitHub Actions cache implementation by default.
-
-This means:
-
-- do not add `actions/cache` steps;
-- do not add custom cache keys or restore/save logic;
-- do not add cache-specific setup-action inputs solely for speed.
-
-This rule does not require overriding the default behavior of a referenced official action. Only add explicit cache configuration when the user asks or the workflow requirement clearly needs it.
-
-Do not add release, package publish, deployment, cloud auth, or secret-dependent behavior unless explicitly requested.
-
-When generating a workflow, verify the current latest stable major tag for every used official action.
+Do not add cache steps, custom cache keys, or cache-only setup inputs by default. Do not add release, publishing, deployment, cloud authentication, or secret-dependent behavior unless explicitly requested.

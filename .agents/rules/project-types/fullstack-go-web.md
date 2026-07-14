@@ -8,21 +8,23 @@ triggers:
   - "SQLite web app"
   - "API frontend"
 summary: Apply defaults for full-stack Go backend and TypeScript frontend products.
-companions: []
+companions: {}
 ---
 
 # Full-stack Go + Web Project Rules
 
-## Default stack
+Preserve an existing project's stack, package manager, locale set, persistence, config format, and command workflow. The following are greenfield defaults only:
+
+## Greenfield defaults
 
 - Backend: Go.
 - Frontend: TypeScript.
 - Frontend framework:
   - React + Vite + shadcn/ui for SPA-style product UI;
   - Next.js + shadcn/ui for SSR, SEO, App Router, or server-integrated React apps;
-  - Vue only when the project already uses Vue, the user asks for Vue, or Vue is clearly a better product fit.
+  - Vue when the user selects it.
 - Frontend package manager for new projects: npm.
-- UI locales: English and Simplified Chinese.
+- UI locale resources: `en` and `zh-CN`.
 - Persistence: SQLite.
 - API docs: Markdown contract first.
 - Project-developed application config files: YAML when format is optional.
@@ -42,6 +44,6 @@ companions: []
 - Backend unit tests for domain logic.
 - Backend integration tests for database/API boundaries.
 - Go race validation for concurrency-sensitive changes.
-- Frontend component tests where useful.
-- Browser E2E only for critical user flows or browser-specific behavior.
+- Frontend component tests for changed UI state or interaction behavior.
+- Browser E2E only for a primary browser flow, browser-specific behavior, or a browser-only regression.
 - AI visual review only when explicitly requested.

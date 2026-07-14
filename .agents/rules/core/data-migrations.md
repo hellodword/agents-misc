@@ -3,7 +3,7 @@ id: core.data-migrations
 kind: core
 triggers:
   - "migration"
-  - "schema change"
+  - "database schema change"
   - "SQLite migration"
   - "data reset"
   - "schema version"
@@ -27,77 +27,32 @@ companions:
 
 # Data Migration Rules
 
-## Default migration strategy
+## Durable schemas
 
-Use explicit migrations for durable schemas.
+Use explicit, stably ordered migrations. Each migration needs a clear purpose, an atomic transaction where supported, a forward step, a compatibility note, and either rollback instructions or an explicit recovery path.
 
-A migration should have:
+Use the project's migration ledger. When none exists, record at least a stable migration identifier and applied timestamp; add a checksum when the chosen migration design verifies immutable migration contents.
 
-- stable filename ordering;
-- clear purpose;
-- transaction where the database supports it;
-- forward migration SQL or equivalent durable migration step;
-- rollback or recovery note when practical;
-- compatibility note when existing data shape changes.
+## Data classification and destructive changes
 
-## Migration table
+Ignored status, a `tmp/` path, or a local filename does not prove a database disposable. Require explicit project documentation, a test fixture/setup contract, or equivalent evidence that the target is development/test state. Otherwise treat it as real data.
 
-Use a schema version table when the project does not already have a migration tool.
+Before a destructive operation:
 
-Minimum table intent:
+- preserve data with a migration; or
+- for proven-disposable development/test state, use a recorded specific exception or confirmed aggressive scope; or
+- for real data, load `core.backup-import-export`, verify recovery, and obtain explicit authorization for the exact destructive operation.
 
-- migration identifier;
-- applied timestamp;
-- checksum when practical.
+Use transactions for multi-step writes. Use idempotent migrations only when the project migration mechanism defines that behavior; do not mask partial failure.
 
-## Migration safety
+## Greenfield SQLite connection defaults
 
-Before destructive changes:
+When SQLite is already chosen for a greenfield project:
 
-- verify the data is disposable dev/test data; or
-- write a preserving migration; or
-- document backup/restore steps.
+- use an ignored project state path such as `tmp/app.sqlite` for explicitly disposable local development data;
+- enable foreign-key enforcement;
+- use a 5000 ms busy timeout unless product requirements differ;
+- use WAL only when concurrent reads/writes need it and the target filesystem supports it; otherwise retain SQLite's default journal mode;
+- never commit database files.
 
-Ask the user when the operation is destructive, irreversible, affects real user data, or cannot be proven to target disposable data.
-
-Use transactions for multi-step writes.
-
-Make migrations idempotent only when the migration tool or style supports it cleanly. Do not hide partial failure.
-
-## Default SQLite connection behavior
-
-For new SQLite-backed projects:
-
-- local database path: `tmp/app.sqlite`;
-- foreign keys: enabled;
-- busy timeout: 5000 ms;
-- WAL: enabled when useful and verified;
-- local DB files: ignored;
-- real DB files: never committed.
-
-## Aggressive early-stage mode
-
-Use only when the user explicitly says one of:
-
-- aggressive mode;
-- early-stage aggressive mode;
-- 可以破坏兼容;
-- 可以重置数据;
-- 可以不保留历史包袱;
-- 早期激进更新.
-
-Allowed in aggressive mode:
-
-- delete and recreate local dev database;
-- squash migrations;
-- rewrite seed data;
-- replace schema with no backward compatibility;
-- drop legacy columns/tables without preserving data.
-
-Still required:
-
-- document reset command;
-- keep generated schema/docs/tests synchronized;
-- do not touch real user data;
-- do not commit database files;
-- do not perform unrelated rewrites.
+Any non-durable compatibility mode must record its exact scope and authorization evidence. Synchronize schema docs, tests, examples, and reset or recovery instructions.

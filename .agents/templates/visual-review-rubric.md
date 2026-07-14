@@ -44,9 +44,10 @@ Use exactly these category values:
 
 ## Review instructions
 
-- Include top-level `schema_version` with value `1` in structured JSON outputs.
+- Use `schema_version` `1` for per-finding output and `2` for synthesis output.
 - Cite screenshot ids.
 - Provide visual evidence.
 - Avoid subjective preference without evidence.
 - Prefer issues that reproduce across multiple viewports/locales.
 - Mark conflicts or ambiguous trade-offs as `needs-human-decision`.
+- Treat synthesis results as proposed findings; review alone does not authorize implementation.

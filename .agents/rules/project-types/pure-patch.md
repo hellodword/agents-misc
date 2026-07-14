@@ -62,7 +62,8 @@ Keep `.work/**` ignored.
 
 - Record the exact upstream revision in `upstream.yaml`.
 - Use the smallest reliable source acquisition method.
-- Prefer shallow clone of a specific tag or revision when Git metadata is useful.
+- Use a shallow clone of a specific tag or revision when patch generation, history inspection, submodules, or other Git metadata is required.
+- Use an immutable source archive when Git metadata is not required and the archive's revision/integrity can be recorded.
 - Use upstream-native fetch tooling for complex projects when required.
 - Avoid full-history clones unless upstream tooling requires them or the user explicitly asks.
 - Do not rely on floating branches for patch directories.
@@ -91,7 +92,7 @@ Prefer `git format-patch` style patches when upstream is Git-based. Maintain a `
 - Prefer narrow build/test targets.
 - Preserve generated build directories unless the build system requires cleanup.
 
-Build jobs must not exceed `max(1, nproc - 1)`. When `nproc` is unavailable, use a portable fallback such as Python or `getconf`.
+Default build jobs to `max(1, nproc - 1)`. Lower the value only for an upstream/project limit or after an observed resource or stability failure. When `nproc` is unavailable, use a portable fallback such as `getconf`.
 
 ## Validation
 

@@ -8,17 +8,15 @@ triggers:
   - "argparse"
   - "virtual environment"
 summary: Apply Python CLI defaults when Python is the best ecosystem fit.
-companions: []
+companions: {}
 ---
 
 # Python CLI Rules
 
 Use Python for CLI projects only when ecosystem fit justifies it.
 
-- Default package/environment manager: uv.
-- Default virtual environment path: `./.venv`.
-- Commit `pyproject.toml`.
-- Commit `uv.lock`.
+Preserve an existing Python package/environment manager and lockfile workflow. For greenfield Python CLI work, use uv, `./.venv`, `pyproject.toml`, and a committed `uv.lock`.
+
 - Do not commit `.venv/`.
 - Do not install packages globally.
 - Prefer `uv run` for project commands.

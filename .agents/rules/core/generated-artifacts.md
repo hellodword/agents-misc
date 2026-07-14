@@ -16,16 +16,13 @@ companions:
 
 # Generated Artifact Rules
 
-## Commit generated artifacts when all are true
+This rule covers code generation, metadata, snapshots, generated documentation, bindings, and comparable outputs from project-owned generation workflows.
 
-- The generated files are durable project assets.
-- The generated files are required by build, tests, runtime, packaging, or downstream users.
-- The generator input files are tracked.
-- The generator toolchain is pinned through `flake.nix`, lockfiles, or both.
-- The generation command is documented through `justfile` or project docs.
-- The output is deterministic enough to review.
-- The generated files are not excessively large for the repository.
-- The project or upstream convention expects them to be committed.
+## Commit generated artifacts
+
+Commit a generated file when it is a durable project asset required by build, tests, runtime, packaging, or downstream users and the generation flow is reproducible and reviewable. An existing project/upstream convention is supporting evidence, not a mandatory extra condition.
+
+Require tracked inputs, a pinned project toolchain or lockfile, a documented project command, stable output paths, and output without unexplained timestamps, absolute paths, random identifiers, or machine-specific data. Confirm the size is appropriate for the repository.
 
 Examples usually committed:
 
@@ -34,7 +31,6 @@ Examples usually committed:
 - Generated API clients/types that are imported by source code.
 - Protobuf/OpenAPI/GraphQL bindings when the project convention is to commit generated bindings.
 - Parser/lexer output when the project convention expects generated sources.
-- Lockfiles for application projects.
 
 ## Do not commit generated artifacts when they are runtime/build outputs
 
@@ -48,7 +44,7 @@ Examples not committed:
 - `node_modules/`
 - coverage output
 - browser traces
-- screenshots
+- visual-review screenshots and preview captures
 - videos
 - Playwright reports
 - local SQLite databases
@@ -59,9 +55,7 @@ Examples not committed:
 
 ## Generation commands
 
-Durable generation commands belong in `justfile`.
-
-Recipes should call Nix.
+Durable generation commands belong in the project's established command system. Use `justfile` recipes that call Nix only when that workflow is already adopted.
 
 Example:
 

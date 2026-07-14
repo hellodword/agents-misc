@@ -8,7 +8,7 @@ triggers:
   - "opencode run"
   - "subagent"
   - "one-shot review"
-summary: Probe available agent CLIs before using Codex, OpenCode, or generic one-shot review workflows.
+summary: Use external Codex/OpenCode adapters only when explicitly requested or required by the active platform workflow.
 companions:
   references:
     - id: agent-tool-adapter-examples
@@ -17,7 +17,7 @@ companions:
 
 # Agent Tool Adapter Rules
 
-Use this rule when a workflow needs a one-shot sub-agent, structured review, sandboxed review, or tool-specific command invocation.
+Use an external Codex/OpenCode adapter only when the user explicitly requests an additional-agent workflow or the active platform requires that adapter. Otherwise perform the work in the main agent context. A desire for independent review or isolated context does not by itself authorize launching an external adapter.
 
 ## Probe before use
 
@@ -70,7 +70,7 @@ When using the fallback:
 
 Use non-mutating execution for review tasks.
 
-Use workspace-write only when the task intentionally writes generated mockups, image edits, reports, or other outputs under an ignored temporary path.
+Use workspace-write only when the task intentionally writes visual-review mockups, exploratory review edits, reports, or other outputs under an ignored temporary path.
 
 Do not assume Codex CLI flags work in OpenCode.
 

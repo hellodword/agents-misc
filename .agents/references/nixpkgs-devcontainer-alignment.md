@@ -4,7 +4,7 @@ Use this reference before initializing or updating a repository `nixpkgs` input 
 
 ## Goal
 
-Keep the durable `flake.nix` `nixpkgs` input on `github:NixOS/nixpkgs/nixos-unstable` for unconstrained work. When the development container exposes an exact nixpkgs revision, use the update command below.
+For greenfield Nix work, keep the durable `flake.nix` `nixpkgs` input on `github:NixOS/nixpkgs/nixos-unstable`. Preserve an existing project's input policy. When the development container exposes an exact nixpkgs revision and the project policy calls for alignment, use the update command below.
 
 `--override-input` belongs on the `nix flake update` command in this workflow. It is not a reason to rewrite `flake.nix` to `github:NixOS/nixpkgs/<rev>`.
 
@@ -53,7 +53,7 @@ github:NixOS/nixpkgs/nixos-unstable
 
 ## Tool availability
 
-Do not install `jq` globally.
+Use an existing `jq` from `PATH` for this read-only environment inspection; do not install it globally.
 
 If `jq` is unavailable before the dev shell exists, use an already available `python3` fallback only if it is present. Otherwise report an environment blocker.
 

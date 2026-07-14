@@ -7,7 +7,7 @@ triggers:
   - module boundaries
   - system design
 summary: Prefer simple local architecture with clear boundaries and minimal abstraction.
-companions: []
+companions: {}
 ---
 
 # Architecture Rules
@@ -25,6 +25,6 @@ companions: []
 - Use ADRs only for durable decisions with meaningful trade-offs.
 - Prefer boring, debuggable interfaces over clever abstractions.
 - Avoid circular dependencies.
-- Keep data migrations explicit and reversible when practical.
+- Keep data migrations explicit and provide rollback or a defined recovery path.
 - Design for local reproducibility first.
 - Keep the first working vertical slice small.

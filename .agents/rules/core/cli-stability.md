@@ -3,7 +3,7 @@ id: core.cli-stability
 kind: core
 triggers:
   - "CLI contract"
-  - "flags"
+  - "CLI flags"
   - "exit codes"
   - "stdout"
   - "stderr"
@@ -30,41 +30,29 @@ CLI behavior is a contract.
 
 ## Output
 
-- stdout is for machine-readable command output.
-- stderr is for diagnostics, progress, warnings, and human-readable errors.
-- Do not mix progress logs into stdout when stdout may be piped.
-- Offer JSON output for durable automation when practical.
-- Keep JSON fields additive by default.
+- Put the command's primary result on stdout.
+- Put diagnostics, progress, warnings, and human-readable errors on stderr.
+- When a structured-output mode is selected, keep stdout exclusively in that format; never mix progress or commentary into it.
+- Add JSON or another structured mode only when the existing project contract, user request, or durable automation consumer requires it. Keep structured fields additive by default.
 
 ## Exit codes
 
-- `0`: success.
-- Non-zero: failure.
-- Keep exit code meanings stable once documented.
-- Document special exit codes when used.
+- `0` means success; nonzero means failure.
+- Keep documented meanings stable and document any special codes.
 
 ## Flags and arguments
 
-- Keep documented flags compatible by default.
-- Prefer additive flags.
-- For renamed flags, provide deprecated aliases when practical.
-- In aggressive early-stage mode, incompatible flag changes are allowed but must update docs/tests.
+- Preserve documented flags by default and prefer additive flags.
+- A renamed flag needs a durable migration path, such as a deprecated alias, unless the exact break is covered by a specific exception or confirmed aggressive scope under `core.compatibility`.
+- Update docs and tests for every renamed or removed flag.
 
-## Config and env
+## Config and environment
 
-- Document precedence:
-  1. CLI flags;
-  2. environment variables;
-  3. config file;
-  4. defaults.
-- Avoid hidden network access.
-- Avoid interactive prompts unless command is explicitly interactive.
-- Provide `--yes` or equivalent only when safe.
+- Preserve the existing precedence contract. For greenfield work without another requirement, use flags, then environment variables, then config file, then defaults.
+- Avoid hidden network access and interactive prompts unless the command contract calls for them.
+- Provide `--yes` or equivalent only when the underlying operation is safe to authorize that way.
 
 ## Testing
 
-- Test parsing.
-- Test stdout/stderr separation.
-- Test exit codes.
-- Test config/env precedence.
-- Use golden tests only when output is intentionally stable.
+- Test parsing, stdout/stderr separation, exit codes, and config/environment precedence.
+- Use golden tests only when exact output is intentionally durable.

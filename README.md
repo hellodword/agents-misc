@@ -1,27 +1,22 @@
 # Agent Rules Kit
 
-This repository provides a reusable `AGENTS.md`-based rule system for coding agents.
-
-The kit is intended for project-scoped use. A project opts in by making this kit's `AGENTS.md` and `.agents/` available at the project root. Do not install these instructions as global defaults unless every project should inherit them.
+This repository provides a reusable, project-scoped `AGENTS.md` rule system for coding agents. A project opts in by making `AGENTS.md` and `.agents/` available at its root; these instructions are not intended as universal global defaults.
 
 ## Structure
 
-- `AGENTS.md`: shared agent entrypoint and overlay discovery protocol.
-- `.agents/manifest.json`: shared kit identity and schema metadata.
-- `.agents/rules/`: durable shared task rules loaded on demand.
-- `.agents/skills/`: reusable shared workflows loaded only when needed.
-- `.agents/templates/`: artifact templates and JSON schemas.
-- `.agents/references/`: examples, command shapes, and longer reference material.
-- `codex/`: pure patch workspace for the upstream OpenAI Codex project.
-- `tools/agents-viewer/`: local read-only Codex rollout viewer.
-- `tools/codex-config-atlas/`: versioned Codex config registry, CLI, and diff site.
-- `tools/codex-hooks/`: directly copyable Codex hook notification helpers.
+- `AGENTS.md`: compact entrypoint, priority, safety, and overlay discovery protocol.
+- `.agents/manifest.json`: kit identity and versioned metadata dimensions.
+- `.agents/rules/`: focused shared rules loaded on demand.
+- `.agents/skills/`: reusable workflows loaded only when routed or relevant.
+- `.agents/templates/`: consumer-facing artifact templates and output schemas, including the shared-rules lock schema.
+- `.agents/references/`: examples and longer reference material.
+- `.project-agent/`: this repository's maintenance overlay; it is not part of the distributed kit.
+- `schemas/agent-rules/`: central-maintenance schemas for kit metadata.
+- `scripts/check-agent-rules.py`: structural validator for the rules kit.
 
 ## Project overlay
 
-Project-specific facts do not belong in the shared rules kit.
-
-Use this project-local layout when a project has its own architecture, contracts, validation rules, or mandatory constraints:
+Project facts, architecture, contracts, mandatory constraints, and project-specific workflows belong in a local overlay rather than shared defaults:
 
 ```text
 .project-agent/
@@ -30,111 +25,56 @@ Use this project-local layout when a project has its own architecture, contracts
   shared-rules.lock
   rules/
     mandatory.md
-    architecture-boundaries.md
-    validation.md
-    backend.md
-    frontend.md
-    database.md
   workflows/
-    regenerate-api-client.md
-    refresh-fixtures.md
 contracts/
-  api/
-  cli/
-  config/
-  db/
 docs/
   architecture/
   adr/
 ```
 
-Recommended responsibilities:
+Agents read `AGENTS.md` first, discover overlay entrypoints by path existence, prefer project routing, and load only the rules and documents relevant to the current task. If no overlay exists, shared defaults still apply.
 
-- `.project-agent/project.md`: short project summary, non-negotiable rules, and default validation entrypoints.
-- `.project-agent/route-map.md`: project-specific task/path routing to rules, contracts, architecture docs, and validation commands.
-- `.project-agent/rules/mandatory.md`: constraints that must be loaded before product code changes.
-- `.project-agent/rules/**`: focused project rules.
-- `.project-agent/workflows/**`: project-specific reusable procedures.
-- `.project-agent/shared-rules.lock`: expected shared kit identity and version.
-- `contracts/**`: durable product contracts.
-- `docs/architecture/**`: architecture facts and boundaries.
-- `docs/adr/**`: accepted architecture decisions.
+## Shared-rules lock
 
-## Overlay discovery
-
-Agents should read `AGENTS.md` first.
-
-For each task, agents should:
-
-1. Check whether `.project-agent/project.md` exists.
-2. Check whether `.project-agent/rules/mandatory.md` exists before product code changes.
-3. Check whether `.project-agent/route-map.md` exists and use it before shared routing.
-4. Compare `.project-agent/shared-rules.lock` with `.agents/manifest.json` when both exist.
-5. Load shared rules from `.agents/rules/route-map.md` only after project-local routing has been considered.
-6. Load contracts and architecture docs only when the route or touched files require them.
-
-If no project overlay exists, agents continue with shared defaults.
-
-## Shared rules version lock
-
-The kit identity lives in `.agents/manifest.json`.
-
-A project can declare the expected kit in `.project-agent/shared-rules.lock`:
+The kit identity and version dimensions live in `.agents/manifest.json`. A consuming project records its expected values in `.project-agent/shared-rules.lock`:
 
 ```json
 {
-  "schema_version": "1",
-  "expected_name": "agent-rules-kit",
-  "expected_version": "0.2.0",
-  "expected_rules_schema_version": "1",
-  "expected_overlay_discovery_version": "1"
+  "schema_version": "<lock-schema-version>",
+  "expected_name": "<kit-name>",
+  "expected_version": "<kit-version>",
+  "expected_manifest_schema_version": "<manifest-schema-version>",
+  "expected_rules_schema_version": "<rules-schema-version>",
+  "expected_skills_schema_version": "<skills-schema-version>",
+  "expected_overlay_discovery_version": "<overlay-discovery-version>",
+  "expected_companion_metadata_version": "<companion-metadata-version>"
 }
 ```
 
-Agents should compare the lock with `.agents/manifest.json` and report mismatches. The comparison is advisory; it should not block safe local work by itself.
+Replace every placeholder before validating or using the lock. Validate it against `.agents/templates/shared-rules-lock.schema.json` when a validator is available. A missing, malformed, or mismatched lock is advisory: agents report the exact issue, continue otherwise safe local work, and never rewrite the lock automatically.
 
-## Rule loading
+## Loading model
 
-Prefer a small rule set for each task:
+Use `.project-agent/route-map.md` first when present, then `.agents/rules/route-map.md`. Keep each task's rule set small. `required_rules` are mandatory one-hop imports. Conditional rules, skills, templates, and references load only when their `when` condition applies. Companion loading never recurses.
 
-- zero or one project-type rule;
-- zero to two stack rules;
-- one to three core concern rules;
-- zero to two toolchain rules;
-- project overlay files only when the touched area or overlay route requires them;
-- contracts and architecture docs only when changing or relying on their behavior;
-- skills only for reusable shared workflows;
-- templates only when producing that artifact.
+## Validation
 
-For unclear shared tasks, use `.agents/rules/route-map.md` to choose the smallest relevant rule set.
+Run the structural checker after changing rules, skills, schemas, references, routing, or manifest metadata:
 
-## Toolchain defaults
-
-Shared Nix rules use this default `nixpkgs` input in `flake.nix`:
-
-```text
-github:NixOS/nixpkgs/nixos-unstable
+```sh
+just check-agent-rules
 ```
 
-When a workflow needs an exact nixpkgs revision, run `nix flake update nixpkgs --override-input nixpkgs "github:NixOS/nixpkgs/<rev>"`. Do not replace the durable `flake.nix` input with `github:NixOS/nixpkgs/<rev>` unless an existing project convention requires it.
-
-Shared Rust rules treat nightly from rust-overlay as the required fallback when no local toolchain evidence exists:
-
-```nix
-rust-bin.selectLatestNightlyWith (toolchain: toolchain.default)
-```
-
-Stable Rust is used only when the project already pins or documents stable, or when the user approves a documented deviation.
+The checker validates frontmatter, identities, companion references, route coverage, the manifest, and JSON Schema dialects and structure.
 
 ## Maintenance
 
-When adding or changing a shared rule:
+When changing the kit:
 
-1. Keep `AGENTS.md` small and actionable.
-2. Add frontmatter with `id`, `kind`, `triggers`, `summary`, and `load_with`.
-3. Use `load_with` only for meaningful companion rules, skills, templates, or references.
-4. Add the rule to `.agents/rules/route-map.md`.
-5. Put reusable shared workflows under `.agents/skills/`.
-6. Put artifact structures under `.agents/templates/`.
-7. Put examples, command shapes, and longer guidance under `.agents/references/`.
-8. Keep task-specific defaults narrow and defer to project overlay and local conventions.
+1. Follow this repository's `.project-agent/` maintenance overlay; do not place checker or schema-maintenance instructions in the distributed payload.
+2. Give every rule frontmatter fields `id`, `kind`, `triggers`, `summary`, and `companions`.
+3. Give every skill frontmatter fields `name` and `description`.
+4. Add rules and skills to `.agents/rules/route-map.md`.
+5. Put reusable workflows under `.agents/skills/`, consumer-facing artifact structures under `.agents/templates/`, central metadata schemas under `schemas/agent-rules/`, and longer consumer guidance under `.agents/references/`.
+6. Update `.agents/manifest.json` and lock documentation when versioned contracts change.
+7. Run the structural checker and the narrow validation relevant to the change.

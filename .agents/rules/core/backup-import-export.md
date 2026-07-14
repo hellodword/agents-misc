@@ -4,71 +4,50 @@ kind: core
 triggers:
   - "backup"
   - "restore"
-  - "import"
-  - "export"
+  - "data import"
+  - "data export"
   - "destructive migration"
   - "SQLite backup"
-summary: Protect user data through backup, import, export, and restore discipline.
-companions: []
+summary: Protect user data through explicit backup, import, export, restore, and destructive-operation authorization.
+companions:
+  conditional_rules:
+    - id: core.compatibility
+      when: incompatible backup, import, export, restore, reset, or migration behavior is proposed
 ---
 
 # Backup, Import, and Export Rules
 
+Treat data as real unless project evidence proves it is disposable development/test state. An ignored or temporary-looking path is not proof.
+
 ## Backup
 
-For SQLite apps with real user data, provide a backup/export path before destructive migrations.
+Before a destructive operation on real data, require both:
 
-Preferred backup techniques:
+1. a verified backup or recovery path; and
+2. explicit user authorization for the exact destructive operation.
 
-- SQLite Online Backup API for live app-managed backup;
-- `VACUUM INTO` for compact backup snapshots when appropriate;
-- sqlite CLI `.backup` when using CLI workflows.
+A backup is not authorization. Authorization without a viable recovery path is not sufficient.
 
-Do not rely on plain file copy for live WAL-mode databases unless the app is stopped and all related files are handled correctly.
+Choose the SQLite technique by operating conditions:
 
-Default backup location:
+- Online Backup API for a live, app-managed backup;
+- `VACUUM INTO` for an application-requested compact snapshot when its locking and disk-space behavior is acceptable;
+- sqlite CLI `.backup` for an explicit operator or CLI workflow.
 
-    tmp/backups/
+Do not plain-copy a live WAL-mode database unless the application is stopped and every required database file is handled correctly.
 
-Do not commit backups.
+Use an ignored `tmp/backups/`-style location only for proven-disposable development/test backups. Put real backups in a user-controlled location outside the data path that the operation may overwrite. Never commit backups.
 
 ## Export
 
-Exports should be explicit user-facing artifacts, not accidental DB copies.
-
-Document:
-
-- export format;
-- schema/version;
-- encoding;
-- timezone behavior;
-- locale behavior;
-- included/excluded fields;
-- sensitive data handling.
+Exports are explicit user-facing artifacts, not accidental database copies. Document format and version, encoding, timezone and locale behavior, included/excluded fields, and sensitive-data handling.
 
 ## Import
 
-Imports must validate:
-
-- file type;
-- version;
-- required fields;
-- constraints;
-- duplicates;
-- size limits;
-- text encoding;
-- timezone and locale assumptions.
-
-Use transactions for imports.
-
-Prefer dry-run validation for destructive imports.
+Validate file type, version, required fields, constraints, duplicates, size limits, encoding, and timezone/locale assumptions. Normalize only when the import contract defines normalization. Use transactions and provide dry-run validation when an import may overwrite or delete data.
 
 ## Restore
 
-Restore commands must say whether they overwrite current data.
+State whether restore overwrites current data. For real data, verify the source backup and require explicit authorization for the exact overwrite. Do not infer authorization from the existence of a backup or from a general request to inspect recovery behavior.
 
-For real user data, require an existing backup or explicit confirmation outside the agent's assumptions.
-
-## Aggressive early-stage mode
-
-In explicitly requested aggressive mode, dev/test data may be reset, but the reset command must be documented and real user data must not be silently overwritten.
+Compatibility authorization under `core.compatibility` may cover a proven-disposable development/test reset only when its exact scope is recorded. It never implicitly covers real data.

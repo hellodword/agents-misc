@@ -1,6 +1,6 @@
 ---
 name: ai-visual-review
-description: Use this only when the user explicitly asks for AI visual review, screenshot review, visual QA, design critique from screenshots, or AI image editing. This is high cost and must not run automatically.
+description: Use this only when the user explicitly asks for AI visual review, screenshot review, visual QA, design critique from screenshots, or a screenshot-based review mockup or edit. This is high cost and must not run automatically.
 ---
 
 # AI Visual Review Workflow
@@ -11,7 +11,7 @@ Run high-cost screenshot-based review without overloading the main context and w
 
 ## Preconditions
 
-- The user explicitly requested visual review, screenshot review, visual QA, design critique, visual alternatives, mockups, or image edits.
+- The user explicitly requested visual review, screenshot review, visual QA, design critique, or visual alternatives, mockups, or exploratory edits for screenshots under review.
 - The relevant UI/frontend rule has been loaded.
 - `.agents/rules/toolchain/agent-tool-adapters.md` has been loaded before any one-shot review task is launched.
 - Temporary output goes under `tmp/visual-review/<run-id>/`.
@@ -27,7 +27,7 @@ Create this structure when screenshots are captured:
       batches/
       findings/
       synthesis.json
-      approved-issues.md
+      proposed-issues.md
       final-report.md
 
 Do not commit these artifacts by default.
@@ -84,11 +84,13 @@ The rubric must define:
 - known acceptable trade-offs;
 - output schema.
 
-## Structured findings
+## Per-batch structured findings
 
 Sub-agent output must be structured.
 
-Top-level JSON outputs must include `schema_version` with value `1`.
+Per-batch findings validated by `.agents/templates/visual-review-finding.schema.json` must use top-level `schema_version` value `1`.
+
+Cross-batch synthesis validated by `.agents/templates/visual-review-synthesis.schema.json` must use top-level `schema_version` value `2`.
 
 Each finding must include:
 
@@ -132,8 +134,8 @@ Use exactly these category values:
 8. Do not implement fixes from per-screenshot findings directly.
 9. Prefer issues reproduced across multiple viewports/locales over one-off subjective impressions.
 10. If two findings conflict, keep both as `needs-human-decision` unless synthesis can resolve with evidence.
-11. Maintain a final approved issue list.
-12. Apply code changes only from the approved issue list.
+11. Maintain a final proposed issue list.
+12. For a review-only request, stop after reporting proposals. Apply code changes only when the user requested review and implementation together or later confirms the exact proposed findings.
 
 ## Adapter use
 
@@ -146,17 +148,17 @@ Before using adapter-specific commands or flags:
 
 Review-only tasks must stay non-mutating.
 
-Workspace-write is allowed only for image editing or generated mockups that intentionally write under `tmp/visual-review/<run-id>/`.
+Workspace-write is allowed only for review mockups or exploratory review edits that intentionally write under `tmp/visual-review/<run-id>/`.
 
 Command shapes for Codex, OpenCode, and generic fallback workflows live in `.agents/references/agent-tool-adapter-examples.md`.
 
-## AI image editing
+## Review mockups and exploratory edits
 
-Use AI image editing only when the user explicitly asks for visual alternatives, mockups, or image edits.
+Use image editing only when the user explicitly asks to create a visual alternative, mockup, or exploratory edit for screenshots under review.
 
 Do not use image editing as the default way to fix UI.
 
-Image editing output belongs under:
+Review mockups and exploratory image edits belong under:
 
     tmp/visual-review/<run-id>/image-edits/
 
@@ -170,9 +172,9 @@ Report:
 
 - screenshots reviewed;
 - batches run;
-- approved findings;
+- proposed findings;
 - duplicate or rejected findings;
 - conflicts needing user decision;
-- implementation plan;
+- proposed implementation plan;
 - files changed;
 - validation performed.

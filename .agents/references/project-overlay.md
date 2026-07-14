@@ -67,7 +67,7 @@ Example:
 ```md
 # Project Route Map
 
-Project routes override shared default routes only within their declared scope and below safety invariants.
+Project routes override shared defaults only within their declared scope and below absolute safety rules.
 
 ## Always load for product code changes
 
@@ -139,14 +139,15 @@ Use this lock to record the expected shared rules kit identity.
 
 ```json
 {
-  "schema_version": "1",
-  "expected_name": "agent-rules-kit",
-  "expected_version": "0.3.0",
-  "expected_rules_schema_version": "2",
-  "expected_overlay_discovery_version": "2",
-  "expected_companion_metadata_version": "1",
-  "expected_evals_version": "1"
+  "schema_version": "<lock-schema-version>",
+  "expected_name": "<kit-name>",
+  "expected_version": "<kit-version>",
+  "expected_manifest_schema_version": "<manifest-schema-version>",
+  "expected_rules_schema_version": "<rules-schema-version>",
+  "expected_skills_schema_version": "<skills-schema-version>",
+  "expected_overlay_discovery_version": "<overlay-discovery-version>",
+  "expected_companion_metadata_version": "<companion-metadata-version>"
 }
 ```
 
-Agents compare this file with `.agents/manifest.json` and report mismatches.
+Replace every placeholder before validating or using the lock. Validate it against `.agents/templates/shared-rules-lock.schema.json` when a validator is available. Agents compare it with `.agents/manifest.json`. A missing, malformed, or mismatched lock is reported with its exact path, fields, and values, does not block otherwise safe work, and is never created or rewritten automatically.

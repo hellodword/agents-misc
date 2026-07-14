@@ -7,9 +7,9 @@ triggers:
   - "uploads"
   - "analytics"
   - "telemetry"
-  - "fixtures"
+  - "user-derived fixtures"
 summary: Minimize, protect, and avoid exposing personal or sensitive data.
-companions: []
+companions: {}
 ---
 
 # Data and Privacy Rules

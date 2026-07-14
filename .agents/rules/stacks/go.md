@@ -23,23 +23,23 @@ companions:
 - Use Go modules.
 - Use `gofmt`.
 - Prefer the standard library first.
-- SQLite default:
+- When SQLite is already selected, the greenfield Go SQLite default is:
   - use `database/sql`;
   - use `github.com/mattn/go-sqlite3`;
   - use native SQL;
   - do not use ORM by default.
-- YAML default for project-developed application config files: `github.com/goccy/go-yaml`.
-- Logging default:
+- When YAML is selected for a greenfield project-developed application config, use `github.com/goccy/go-yaml`.
+- Preserve existing logging. For greenfield applications:
   - use `log/slog`;
   - use JSON logs for services and machine-consumed CLIs;
   - use `gopkg.in/natefinch/lumberjack.v2` when file log rotation is required.
 - Use `context.Context` for request-scoped and cancelable work.
 - Keep migrations as SQL files for non-trivial persistence.
 - Do not install Go tools globally.
-- Add tools through Nix or project-local commands.
+- Add tools through the established reproducible project workflow or project-local commands; introduce Nix only when separately selected.
 
 ## Race detector
 
-- Add a `test-race` just recipe for non-trivial Go projects.
+- Add a durable race-test entrypoint using the project's existing command system when the project needs one.
 - Run `go test -race` on touched packages when concurrency or shared mutable state is involved.
 - Keep race tests narrow by default.

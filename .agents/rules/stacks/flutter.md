@@ -8,7 +8,7 @@ triggers:
   - "flutter analyze"
   - "mobile UI"
 summary: Apply Flutter defaults for formatting, analysis, state management, and tests.
-companions: []
+companions: {}
 ---
 
 # Flutter Rules
@@ -22,7 +22,7 @@ companions: []
 - Do not run Android emulators by default.
 - Do not edit Android/iOS/macOS/Windows/Linux platform folders unless the task requires platform integration.
 - Do not add signing, release, store, Firebase, deployment, or cloud config unless explicitly requested.
-- Commit `pubspec.lock` by default.
+- Commit `pubspec.lock` for Flutter applications. For a published Dart package, follow its established release and lockfile convention.
 
 ## State Management
 

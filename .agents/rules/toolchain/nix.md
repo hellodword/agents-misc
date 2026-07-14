@@ -7,9 +7,9 @@ triggers:
   - "flake.nix"
   - "flake outputs"
   - "devShells"
-  - "checks"
+  - "flake checks"
   - "treefmt"
-summary: Use Nix as the reproducible command environment and Just as a thin command menu for ordinary projects.
+summary: Preserve and evolve Nix/Just workflows when already adopted or explicitly requested, with greenfield defaults for new projects.
 companions:
   conditional_rules:
     - id: toolchain.formatting
@@ -29,7 +29,7 @@ companions:
   templates:
     - id: treefmt.nix
       when: seeding treefmt-nix formatting
-    - id: .prettierrc.json
+    - id: .prettierrc
       when: seeding Prettier formatting
     - id: .editorconfig
       when: seeding editor formatting defaults
@@ -37,11 +37,12 @@ companions:
 
 # Nix Toolchain Rules
 
-Use this rule for `flake.nix`, `flake.lock`, `nix/**`, `justfile`, Nix apps/packages/dev shells/checks/formatters, treefmt-nix, and durable project command workflow.
+Use this rule only when the project already adopts Nix/Just or the user explicitly asks to add or change them. Do not introduce Nix or Just as a side effect of unrelated work.
 
 ## Roles
 
-- Ordinary projects: Nix provides the reproducible environment; Just provides the human-friendly command menu.
+- Existing projects: preserve the public flake outputs, shell names, Just recipes, and command entrypoints unless the task changes them.
+- Greenfield ordinary projects: Nix provides the reproducible environment; Just provides the human-friendly command menu.
 - Pure Nix projects: flake outputs are the public interface; a `justfile` is optional.
 - Scripts hold durable imperative orchestration that is too large or stateful for `flake.nix` or `justfile`.
 
@@ -51,13 +52,13 @@ Use this rule for `flake.nix`, `flake.lock`, `nix/**`, `justfile`, Nix apps/pack
 - Keep `flake.nix` thin: inputs, supported systems, small wiring, and imports from `./nix/`.
 - Put reusable Nix logic under `./nix/`.
 - Do not create empty `nix/**` modules just to match a layout.
-- Default `nixpkgs` input: `github:NixOS/nixpkgs/nixos-unstable`.
+- Greenfield `nixpkgs` input: `github:NixOS/nixpkgs/nixos-unstable`.
 - Before initializing or updating `nixpkgs`, read `.agents/references/nixpkgs-devcontainer-alignment.md`.
 - When a devcontainer-provided revision must be used, prefer `nix flake update nixpkgs --override-input nixpkgs "github:NixOS/nixpkgs/<rev>"` instead of rewriting the durable input URL to a revision URL.
 
 ## Command classes
 
-Bootstrap commands may run directly when needed to enter or inspect the project environment: `git`, `nix`, `just`, `pwd`, `env`, `command`, `type`, `test`, `df`, `stat`, `nproc`, minimal shell builtins, and `jq` only when reading `$DEVCONTAINER_FLAKE_INPUTS`.
+Bootstrap commands may run directly when needed to enter or inspect the project environment: `git`, `nix`, `just`, `pwd`, `env`, `command`, `type`, `test`, `df`, `stat`, `nproc`, minimal shell builtins, and `jq` for read-only environment or flake JSON inspection.
 
 Project commands should run through Nix, usually with:
 
@@ -65,17 +66,19 @@ Project commands should run through Nix, usually with:
 nix develop .#dev --command <command> ...
 ```
 
-Use a named shell when appropriate:
+Use the named shell declared for the affected subsystem or command:
 
 ```sh
 nix develop .#<env> --command <command> ...
 ```
 
-When Git-tracked flake source behavior hides newly created files, use:
+Do not use `nix ... path:.#...` or another `path:` reference to bypass Git source filtering in a Git worktree. If a durable task-scoped file is required by the flake but untracked, first verify that it is not secret, temporary, or ignored, then use the exact intent-to-add operation:
 
 ```sh
-nix develop path:$PWD#<env> --command <command> ...
+git add -N -- <file>
 ```
+
+This exposes the path to the Git-backed flake without staging its contents. Leave the intent-to-add entry in place and report it. Never use `-f`, bulk staging, or a broader path set. A `path:` reference is legitimate only when the intended flake source is genuinely a non-Git local source, not a Git worktree-filtering workaround.
 
 Environment capability commands are discovered from the current environment and are not automatically added to `flake.nix`.
 

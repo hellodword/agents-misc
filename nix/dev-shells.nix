@@ -8,6 +8,10 @@ lib.genAttrs supportedSystems (
   system:
   let
     pkgs = import nixpkgs { inherit system; };
+    agentRulesPython = pkgs.python3.withPackages (pythonPackages: [
+      pythonPackages.jsonschema
+      pythonPackages.pyyaml
+    ]);
     devShell = pkgs.mkShell {
       packages = with pkgs; [
         cargo
@@ -19,7 +23,7 @@ lib.genAttrs supportedSystems (
         just
         nixfmt
         pkg-config
-        python3
+        agentRulesPython
         rustc
       ];
 

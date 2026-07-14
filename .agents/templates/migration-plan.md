@@ -2,7 +2,8 @@
 
 ## Status
 
-- Compatibility mode: durable | aggressive
+- Compatibility mode: durable | specific-exception | aggressive
+- Authorization scope/evidence: none | <exact user-authorized exception or aggressive-mode confirmation>
 - Data risk: none | low | medium | high
 
 ## Current state
@@ -23,7 +24,7 @@ Describe backup, restore, or recovery strategy.
 
 ## Rollback
 
-Describe rollback strategy when practical.
+Describe the rollback strategy, or state why recovery rather than rollback is required.
 
 ## Validation
 

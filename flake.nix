@@ -81,6 +81,7 @@
       checks = import ./nix/checks.nix {
         inherit
           lib
+          nixpkgs
           codexConfigAtlasFor
           agentsViewerFor
           supportedSystems

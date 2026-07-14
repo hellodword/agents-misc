@@ -19,6 +19,11 @@ fmt:
 check:
   nix flake check
 
+# Validate shared agent-rules metadata, routing, schemas, and checker tests.
+check-agent-rules:
+  nix develop .#dev --command python3 scripts/check-agent-rules.py --root .
+  nix develop .#dev --command python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+
 # Build the default patched Codex package.
 build:
   nix build .#default

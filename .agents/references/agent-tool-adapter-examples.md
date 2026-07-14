@@ -28,7 +28,7 @@ If structured output flags are unavailable, redirect stdout to a file under `tmp
     codex exec \
       <verified-non-mutating-or-sandbox-flags> \
       <verified-output-flags> \
-      "Merge findings, deduplicate, resolve conflicts, and produce one approved implementation plan."
+      "Merge findings, deduplicate, resolve conflicts, and produce one proposed implementation plan."
 
 ## OpenCode review shape
 
@@ -39,7 +39,7 @@ If structured output flags are unavailable, redirect stdout to a file under `tmp
 ## OpenCode synthesis shape
 
     opencode run \
-      "Merge findings, deduplicate, resolve conflicts, and produce one approved implementation plan as JSON." \
+      "Merge findings, deduplicate, resolve conflicts, and produce one proposed implementation plan as JSON." \
       > tmp/<workflow>/<run-id>/<output>.json
 
 ## Generic fallback shape

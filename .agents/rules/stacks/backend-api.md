@@ -9,7 +9,7 @@ triggers:
   - "pagination"
   - "error shape"
 summary: Apply backend API defaults for contracts, validation, authorization, and handlers.
-companions: []
+companions: {}
 ---
 
 # Backend API Rules
@@ -18,7 +18,7 @@ companions: []
 - Prefer stable error shapes.
 - Validate request input at the boundary.
 - Keep authorization server-side.
-- Use idempotency for retryable mutation endpoints when practical.
+- For mutation endpoints the contract permits clients to retry, define and test an idempotency-key or equivalent deduplication contract.
 - Use pagination for list endpoints that can grow.
 - Avoid leaking internal errors to clients.
 - Log internal errors with safe context.

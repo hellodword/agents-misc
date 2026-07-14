@@ -1,195 +1,106 @@
 # Agent Rules
 
-## Purpose
+## Purpose and distribution
 
-This is the default project entrypoint for coding agents. Detailed shared rules live under `.agents/` and are loaded only when relevant. Project-specific facts, contracts, architecture, and mandatory constraints belong in the project overlay, not in shared rules.
+This is the shared entrypoint for coding agents. Detailed reusable rules live under `.agents/`; project facts and mandatory product constraints belong in `.project-agent/**`.
+
+`AGENTS.md` and `.agents/**` are a centrally maintained, read-only rules payload in consuming projects. Do not edit them there. Extend or override shared defaults through the project overlay. Only an overlay that explicitly identifies its repository as the upstream Agent Rules Kit maintenance source may authorize shared-payload maintenance.
 
 ## Priority
 
-Use this order, highest first:
+Apply instructions in this order:
 
 1. Platform, system, and developer instructions.
-2. Explicit user instructions for the current task, except they cannot override safety invariants.
-3. Safety invariants in this file.
-4. Project overlay rules, only within their declared scope.
-5. Existing local repository conventions, when observed in the touched area.
-6. Task-specific shared rules, only within their declared scope.
-7. Generic shared defaults.
-8. New-project defaults, only for greenfield or unconstrained work.
+2. Explicit user instructions for the current task, subject to the absolute boundaries below.
+3. Absolute safety rules in this file.
+4. Project overlay rules within their declared scope.
+5. Established local repository conventions in the touched area.
+6. Routed shared rules, then generic shared defaults.
+7. Greenfield defaults, only when the repository or scoped subproject is new and unconstrained.
 
-Safety invariants are not defaults. Treat them as non-overridable boundaries unless the invariant itself says it can be relaxed by explicit user authorization.
+Higher priority always wins. Within the same priority, prefer the rule with the narrower declared scope. If equally scoped rules remain incompatible and the choice affects public behavior, persistent data, dependencies, or a long-term technology decision, ask the user. Never infer unseen rule contents from a path or name.
 
-When lower-priority rules conflict, prefer the safer rule. If safety is equivalent, prefer the narrower and more local rule. Do not infer unseen rule contents from path or name alone.
+## Local convention and decision evidence
 
-## Local Convention Evidence
+A single authoritative, machine-enforced declaration can establish a convention, such as a package-manager declaration, lockfile, toolchain file, formatter config, CI config, or project command. Without an authoritative declaration, require two independent consistent signals from project docs, matching files, neighboring code, or validation commands. Ignore stale, generated, vendored, and unrelated evidence.
 
-A local convention is clear when at least two of these are true:
+Shared choices of language, framework, database, package manager, locale, test runner, formatter, or toolchain apply only to greenfield work or when the project already adopted that choice. Rules governing safe use of an already-selected tool still apply.
 
-- matching files exist in the touched area;
-- project docs or route maps mention it;
-- package, lock, tool, or CI config enforces it;
-- tests or validation commands rely on it;
-- neighboring code uses it consistently.
+When evidence cannot decide an important product or technology choice, ask the user. For a local, reversible implementation detail that does not alter a contract, data, dependency set, or long-term stack, use the smallest change consistent with local conventions and report the assumption when material.
 
-Do not infer a project-wide convention from a single stale, generated, vendored, or unrelated file.
+## Operating loop
 
-## Operating Loop
+1. Inspect the smallest file set needed to classify the task.
+2. Discover project overlay entrypoints by listing expected paths only.
+3. Select and read the smallest relevant project and shared rule set.
+4. Read routed contracts, architecture documents, workflows, templates, or references before relying on them.
+5. Make the smallest semantic change that satisfies the request.
+6. Run validation selected for the touched boundary.
+7. Report changed files, validation, limitations, and commit status.
 
-For each task:
+## Overlay discovery
 
-1. Restate the requested outcome in one sentence when useful.
-2. Inspect the smallest file set needed to classify the task.
-3. Discover project overlay entrypoints by listing paths only.
-4. Select the smallest relevant shared and project rule set.
-5. Read referenced rules, contracts, architecture docs, workflows, templates, or references before relying on them.
-6. Make the smallest semantic change that satisfies the task.
-7. Run narrow validation for the touched behavior.
-8. Report changed files, validation, limitations, and commit status.
+Read this file first. Do not preload `.agents/**`, `.project-agent/**`, `contracts/**`, or `docs/**`.
 
-Proceed with a safe local assumption when missing information does not change the product contract, data safety, security posture, cost, or external side effects.
+Discover these entrypoints without recursively reading their directories:
 
-Ask or defer before actions that are destructive, irreversible, security-sensitive, costly, externally visible, or beyond the requested public behavior. This includes deleting or resetting real data, changing public API/CLI/config/database compatibility, weakening auth or authorization, adding license-sensitive dependencies, publishing, deploying, pushing, releasing, creating external resources, or running unusually long or expensive commands.
+- `.project-agent/project.md`
+- `.project-agent/route-map.md`
+- `.project-agent/rules/mandatory.md`
+- `.project-agent/shared-rules.lock`
+- `contracts/**`, `docs/architecture/**`, and `docs/adr/**`
 
-## Project Overlay Discovery
+Load in this order when applicable:
 
-Check project-local overlay entrypoints before shared routing. Discover by listing expected paths only; do not recursively read overlay directories.
+1. `.project-agent/project.md` before changing or relying on project behavior.
+2. `.project-agent/rules/mandatory.md` before tracked product code or config changes.
+3. `.project-agent/route-map.md` before shared routing.
+4. When `.agents/manifest.json` exists, inspect `.project-agent/shared-rules.lock`: report its exact path when missing; otherwise validate and compare it with the manifest.
+5. Load only contracts and architecture documents selected by the project route or touched behavior.
 
-Preferred overlay layout:
+If the lock is missing, malformed, incomplete, or mismatched, report the exact path, fields, and values that apply and continue safe work; never create or rewrite it automatically.
 
-- `.project-agent/project.md`: short project summary, non-negotiable rules, and default validation entrypoints.
-- `.project-agent/route-map.md`: project-specific task/path routing.
-- `.project-agent/rules/mandatory.md`: constraints loaded before product code changes.
-- `.project-agent/rules/**`: focused project rules loaded only when routed or relevant.
-- `.project-agent/workflows/**`: project-specific procedures loaded only when relevant.
-- `.project-agent/shared-rules.lock`: expected shared rules kit identity and version.
-- `contracts/**`, `docs/architecture/**`, `docs/adr/**`: durable contracts, architecture facts, and accepted decisions.
+## Shared routing and companions
 
-Overlay loading order:
+Use `.agents/rules/route-map.md` when shared routing is needed. Frontmatter triggers are search hints, not sufficient routing decisions.
 
-1. Read `.project-agent/project.md` when it exists and the task may edit or rely on project behavior.
-2. Read `.project-agent/rules/mandatory.md` before product code changes when it exists.
-3. Read `.project-agent/route-map.md` before `.agents/rules/route-map.md` when routing is needed and it exists.
-4. Compare `.project-agent/shared-rules.lock` with `.agents/manifest.json` when both exist. Continue when they differ, but report the mismatch.
-5. Load contracts and architecture docs only when the overlay route or touched files make them relevant.
+After selecting a rule:
 
-Project overlay files are project facts. Shared `.agents/**` files are reusable defaults. Do not copy project-specific contracts, architecture decisions, or mandatory product rules into shared defaults.
+- load every `required_rules` entry before acting, exactly one hop deep;
+- load `conditional_rules` only when its `when` condition is true;
+- load a skill only when its condition is true and the task needs that workflow;
+- load a template only when producing that artifact;
+- load a reference only when its longer detail is needed;
+- never recursively follow companions of a companion;
+- keep a visited set and never load the same item twice.
 
-## Context Loading
+Required rules cannot be skipped to satisfy a loading budget. Otherwise prefer zero or one project-type rule, zero to two stack rules, one to three core rules, and zero to two toolchain rules. Load only rules for the touched area, not every technology present in a repository.
 
-Read this file first. Do not preload `.agents/rules/**`, `.agents/skills/**`, `.agents/templates/**`, `.agents/references/**`, `.project-agent/**`, `contracts/**`, or `docs/**`.
+## Absolute safety
 
-For each task:
+- Never expose or commit secrets, credentials, private keys, real user data, local databases, logs, coverage, browser profiles, or machine-specific files.
+- Screenshots, traces, and captures created for review are temporary artifacts and stay under confirmed ignored paths.
+- Never trust client-provided identity, roles, permissions, ownership, prices, or authorization decisions.
+- Never interpolate untrusted input into SQL or shell commands; use parameterized queries, structured argument APIs, or reject the operation.
+- Never silently overwrite, reset, or destroy real user data. A destructive operation requires explicit authorization for that operation and a verified recovery path.
+- Never weaken, split, or delete tests merely to hide failures.
+- Never use global installs, host package managers, curl/wget-to-shell installers, or system-level environment mutation.
+- Never use `git add .`, `git add -A`, `git add --all`, or equivalent bulk staging.
 
-1. Identify the task type and touched area.
-2. Apply project overlay discovery.
-3. Follow project routing first when available.
-4. If the shared route is obvious, read only the smallest matching shared rule files.
-5. If the shared route is unclear, read `.agents/rules/route-map.md`.
-6. Open referenced files only when relevant to the current task.
-7. Load skills only for reusable workflow guidance.
-8. Load templates only when producing that artifact.
-9. Load references only when a rule or skill points to them and long-form detail is needed.
+External input must be validated at its trust boundary. Normalize case, whitespace, Unicode, filenames, or paths only when the applicable contract defines that normalization.
 
-Companion entries in rule frontmatter are advisory and condition-driven, not recursive imports. Keep a visited set and never load the same rule, skill, template, or reference twice for the same routing pass.
+The following require explicit authorization for the specific operation: destructive or irreversible actions, breaking a public API/CLI/config/database or persisted-data contract, weakening authentication or authorization, deleting or resetting real data, adding a dependency with restrictive or incompatible license obligations, publishing, deploying, pushing, releasing, or creating external resources. A specific authorization applies only to the named operation; a routed broad mode may require a stricter protocol.
 
-## Rule Loading Budget
+Commits require an explicit user request, task-level auto-commit instruction, or repository auto-commit policy. Preserve unrelated work and use narrow staging.
 
-Prefer zero or one project-type rule, zero to two stack rules, one to three core concern rules, zero to two toolchain rules, and only relevant overlay files, contracts, architecture docs, skills, templates, and references. If more are needed, state why when it matters to reviewability.
+As a special non-content-staging operation, `git add -N -- <file>` is allowed for a durable, task-scoped file that a Git-backed Nix flake must see. First verify the file is not secret, temporary, or ignored; leave intent-to-add in place and report it. Never add `-f` or widen the path set.
 
-## Universal Safety
+Read tracked `.vscode/**` and `.devcontainer/**` configuration when relevant and preserve deliberately shared configuration. New or untracked machine-local editor/container configuration remains ignored unless the user explicitly requests sharing it.
 
-Do not commit secrets, user data, local databases, logs, coverage, screenshots, browser profiles, machine-specific files, or temporary artifacts.
+## External and time-sensitive facts
 
-Do not run global installs, host package managers, curl/wget-to-shell installers, or system-level environment changes.
+Verify changing facts through official documentation, package managers, registries, repository lockfiles, or current local tool output. Do not rely on memory for dependency versions, action versions, package names, advisories, CLI flags, registry metadata, or maintenance status.
 
-Do not use `git add .`, `git add -A`, `git add --all`, or equivalent bulk staging.
+## Final report
 
-Prefer narrow validation for the behavior touched by the task. Do not weaken, split, or delete tests just to hide failures.
-
-Verify that large docs, fixtures, tests, generated files, snapshots, or dependencies are the smallest useful scope before adding or rewriting them.
-
-## External and Time-Sensitive Facts
-
-For facts that may change over time, verify through package managers, registries, official documentation, current repository lockfiles, or project-local tool output before acting. Do not rely on model memory for dependency versions, action versions, package names, security advisories, current CLI flags, registry metadata, or maintenance status.
-
-## Validation Failure Attribution
-
-When validation fails:
-
-1. Re-run the narrowest failing command when cheap.
-2. Determine whether the failure is pre-existing, environment-caused, or introduced by current changes.
-3. Do not fix unrelated pre-existing failures unless required for the task.
-4. Report unrelated failures separately with the command and evidence.
-
-## Environment Defaults
-
-Assume development usually happens inside a VS Code devcontainer.
-
-Do not read or write `.vscode/**` or `.devcontainer/**` by default. If the user explicitly asks for editor or container diagnostics, inspect only the narrow files needed for the diagnosis.
-
-Treat `.vscode/**` and `.devcontainer/**` as local environment files and keep them ignored by Git.
-
-Do not rely on privileged containers, KVM, host browser policy, host package managers, systemd, Docker daemon access, GPU access, USB devices, Android emulator access, or extra kernel capabilities unless the project already proves they are available.
-
-## New Project Defaults
-
-All project-type and stack defaults are new-project defaults unless the rule explicitly says otherwise. Use them only for new projects, greenfield scaffolding, or repositories with no clear convention.
-
-Default preferences for new or unconstrained work:
-
-- Nix + Just for ordinary project commands.
-- SQLite for local/default persistence.
-- Go backend + TypeScript frontend for full-stack web products.
-- React + Vite + shadcn/ui for SPA-style product UI.
-- Next.js + shadcn/ui for SSR, SEO, App Router, or server-integrated React apps.
-- Go or Rust for CLI projects, with Python or Node.js when ecosystem fit strongly favors them.
-- Flutter + Rust bridge for cross-platform clients when native, system, or performance logic benefits from Rust.
-- MIT as the default permissive license suggestion for new non-patch projects.
-- English and Simplified Chinese UI for user-facing products.
-
-Do not add deployment, release, publishing, cloud auth, GitHub Actions, or a `LICENSE` file unless the user explicitly asks or project policy requires it.
-
-## Git Defaults
-
-The default branch for new repositories is `master`. For existing repositories, detect and preserve the current default branch.
-
-Automatic commit mode is active only when the user explicitly requests commits, the task prompt says auto-commit, or the repository has an explicit agent auto-commit policy.
-
-For multi-step implementation without explicit automatic commit permission, after each verified step report changed files, validation run, suggested commit message, and exact files that would be staged.
-
-Before committing, run `git status --short`. If unrelated user changes are present and cannot be cleanly separated, do not commit automatically; report the intended staging paths and defer.
-
-Use the repository's existing Conventional Commit type set when available. Default allowed types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`, `build`, `ci`, `perf`, `style`, and `revert`.
-
-## Toolchain Defaults
-
-Prefer `flake.nix`.
-
-Prefer `justfile` for ordinary projects, where Nix is the reproducible command environment and Just is the human-friendly command menu.
-
-Pure Nix projects are an explicit exception: flake outputs are the primary public interface, and a `justfile` is not required.
-
-For multi-language formatting in Nix projects, prefer `treefmt-nix` through the flake `formatter` output. Treat `nix fmt` as a mutating formatter entrypoint unless the project exposes a non-mutating formatter check.
-
-Use project formatting rules. Run narrow formatting on touched files when possible. Do not run repository-wide formatting unless the task is formatting-focused or the project already requires it.
-
-## Routes
-
-For project routing, prefer `.project-agent/route-map.md` when it exists. For shared routing, use `.agents/rules/route-map.md`.
-
-## Final Response Contract
-
-After changes, report minimally:
-
-- files changed;
-- validation run and result;
-- known limitations;
-- commit status.
-
-Also report when applicable:
-
-- project overlay files used;
-- shared rules version mismatch;
-- exact deferred staging paths;
-- suggested Conventional Commit message;
-- why the rule loading budget was exceeded.
+After changes, report files changed, validation and result, known limitations, and commit status. When applicable, also report overlay files used, lock mismatch, exact intent-to-add or deferred staging paths, a suggested Conventional Commit message, and a material rule-loading budget overrun.

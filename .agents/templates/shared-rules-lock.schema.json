@@ -1,35 +1,26 @@
 {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Agent Rules Kit shared-rules lock",
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "schema_version": {
-      "type": "string",
-      "const": "1"
-    },
-    "expected_name": {
-      "type": "string"
-    },
-    "expected_version": {
-      "type": "string"
-    },
-    "expected_rules_schema_version": {
-      "type": "string"
-    },
-    "expected_overlay_discovery_version": {
-      "type": "string"
-    },
-    "expected_companion_metadata_version": {
-      "type": "string"
-    },
-    "expected_evals_version": {
-      "type": "string"
-    }
+    "schema_version": { "const": "2" },
+    "expected_name": { "type": "string", "minLength": 1 },
+    "expected_version": { "type": "string", "minLength": 1 },
+    "expected_manifest_schema_version": { "type": "string", "minLength": 1 },
+    "expected_rules_schema_version": { "type": "string", "minLength": 1 },
+    "expected_skills_schema_version": { "type": "string", "minLength": 1 },
+    "expected_overlay_discovery_version": { "type": "string", "minLength": 1 },
+    "expected_companion_metadata_version": { "type": "string", "minLength": 1 }
   },
   "required": [
     "schema_version",
     "expected_name",
     "expected_version",
+    "expected_manifest_schema_version",
     "expected_rules_schema_version",
-    "expected_overlay_discovery_version"
+    "expected_skills_schema_version",
+    "expected_overlay_discovery_version",
+    "expected_companion_metadata_version"
   ]
 }

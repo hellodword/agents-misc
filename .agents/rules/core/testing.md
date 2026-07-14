@@ -8,7 +8,7 @@ triggers:
   - "race detector"
   - "coverage"
   - "flaky test"
-summary: Choose narrow validation, attribute failures, and avoid weakening tests to hide failures.
+summary: Map touched boundaries to deterministic validation, attribute failures, and never weaken tests to hide them.
 companions:
   skills:
     - id: validation-selection
@@ -17,53 +17,28 @@ companions:
 
 # Testing Rules
 
-- Prefer narrow tests for the current change.
-- Add regression tests for bug fixes.
-- Test behavior boundaries, not private implementation details.
-- Use unit tests for pure logic.
-- Use integration tests for database, filesystem, HTTP, process, and FFI boundaries.
-- Use contract/schema tests for protocols and APIs.
-- Use component/widget tests for UI behavior where useful.
-- Use browser E2E only for critical user flows or browser-specific behavior.
-- Use AI visual review only when explicitly requested by the user.
-- Keep tests deterministic:
-  - fixed time;
-  - seeded randomness;
-  - isolated temp dirs;
-  - no real network unless explicitly integration-scoped;
-  - no dependency on test order.
-- Do not split, weaken, or delete tests to hide failures.
-- Reuse existing helpers before adding new helpers.
-- Keep low-reuse helpers near their tests.
-- Cross-domain helpers must expose clear inputs/outputs and must not hide fixture, permission, time, locale, or auth semantics.
+Map the changed boundary to validation:
+
+- pure logic: unit tests;
+- database, filesystem, HTTP, process, or FFI: focused integration tests;
+- API, config, schema, protocol, CLI, or persisted format: contract tests and examples;
+- migration: empty-database migration and previous-schema migration when available;
+- generated artifact: generator plus a consuming build or test;
+- UI state or interaction: component/widget test;
+- browser-specific behavior, a primary browser user flow, or a regression reproducible only in a browser: project-owned E2E.
+
+Use AI visual review only when the user explicitly requests it. Do not use browser E2E merely because a screenshot or generic web page is involved.
+
+Run focused validation first. Broaden to full-repository validation only when the change affects build or CI wiring, a lockfile or dependency graph, a public/shared contract, migration infrastructure, generated infrastructure, or when project rules require the broader command.
+
+Keep tests deterministic with fixed time, seeded randomness, isolated temp directories, no real network outside an explicit integration scope, and no dependence on test order. Reuse existing helpers; keep low-reuse helpers near their tests and make cross-domain helper inputs, permissions, time, locale, auth, and fixture semantics explicit.
+
+Never split, weaken, or delete tests to hide failures. Add a regression test for a bug fix when the changed behavior can be reproduced deterministically.
 
 ## Failure attribution
 
-When validation fails:
-
-1. Re-run the narrowest failing command when cheap.
-2. Determine whether the failure is pre-existing, environment-caused, or introduced by the current changes.
-3. Do not fix unrelated pre-existing failures unless required for the task.
-4. Report unrelated failures separately with command, evidence, and likely category.
+When validation fails, re-run the narrowest failing command, classify the failure as introduced, pre-existing, or environment-caused, and report evidence. Do not fix an unrelated pre-existing failure unless the task requires it.
 
 ## Go race validation
 
-For Go changes involving any of the following, include `go test -race` on the narrowest relevant package set when practical:
-
-- goroutines;
-- channels;
-- mutexes;
-- atomics;
-- shared maps/slices;
-- caches;
-- background workers;
-- HTTP handlers;
-- database connection lifecycle;
-- context cancellation;
-- timers;
-- file watchers;
-- signal handling.
-
-Do not run broad race tests when they are known to be too slow for the task. Prefer narrow packages first.
-
-If race validation is skipped, report why.
+Run `go test -race` on affected packages when touched code involves goroutines, channels, mutexes, atomics, shared maps/slices, caches, background workers, HTTP handlers, database connection lifecycle, context cancellation, timers, file watchers, or signal handling. If the environment cannot run the race detector, report the exact limitation and the command that remains.

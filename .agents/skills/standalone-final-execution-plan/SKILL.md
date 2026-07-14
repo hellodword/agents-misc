@@ -44,15 +44,11 @@ Do not rely on:
 - implicit user preferences;
 - phrases such as "as mentioned above" or "previously".
 
-If important information is missing, make the safest reasonable assumption and state it under `Default Assumptions`.
-
-Do not block the final answer only because some details are missing unless the task would be unsafe, impossible, or fundamentally ambiguous.
+If missing information affects public behavior, persistent data, dependencies, security, external effects, or a long-term stack choice, ask the user before finalizing the plan. For reversible local implementation detail, use the smallest convention-aligned assumption and state it under `Default Assumptions`.
 
 ## Language
 
-Default final answer language is English.
-
-Use the user's requested language when specified.
+Use the language of the user's current request unless the user specifies another output language.
 
 Keep file paths, commands, package names, API names, protocol names, and configuration keys in their conventional form.
 
@@ -186,7 +182,7 @@ Every normal step must have its own validation and acceptance criteria.
 
 Prefer narrow validation that directly covers the touched behavior.
 
-Escalate validation when shared contracts, public APIs, database migrations, generated artifacts, security boundaries, FFI boundaries, or user workflows are affected.
+Escalate to full-repository validation only for build/CI wiring, lockfile or dependency-graph changes, public/shared contracts, migration infrastructure, generated infrastructure, or an explicit project requirement.
 
 Do not weaken tests to hide failures.
 

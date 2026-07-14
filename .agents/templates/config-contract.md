@@ -3,7 +3,8 @@
 ## Status
 
 - Stage: experimental | durable | public
-- Compatibility mode: durable | aggressive
+- Compatibility mode: durable | specific-exception | aggressive
+- Authorization scope/evidence: none | <exact user-authorized exception or aggressive-mode confirmation>
 
 ## File
 
@@ -12,6 +13,8 @@
 - Version field:
 
 ## Precedence
+
+Record the existing project contract. For greenfield work without another requirement, use:
 
 1. CLI flags
 2. Environment variables

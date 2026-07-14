@@ -3,7 +3,8 @@
 ## Status
 
 - Stage: experimental | durable | public
-- Compatibility mode: durable | aggressive
+- Compatibility mode: durable | specific-exception | aggressive
+- Authorization scope/evidence: none | <exact user-authorized exception or aggressive-mode confirmation>
 - Last updated: YYYY-MM-DD
 
 ## Overview

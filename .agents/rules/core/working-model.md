@@ -8,7 +8,7 @@ triggers:
   - "handoff"
   - "scope"
 summary: Plan work in small, verifiable slices and keep progress reports actionable.
-companions: []
+companions: {}
 ---
 
 # Working Model
@@ -16,9 +16,9 @@ companions: []
 - Work in small, verifiable, semantic increments.
 - Prefer understanding current repo conventions before introducing new ones.
 - Avoid broad rewrites unless the task requires them.
-- For ambiguous product behavior, list local alternatives and choose the least surprising default when progress is possible.
+- Ask before choosing among unresolved alternatives that affect public behavior, persistent data, dependencies, security, external effects, or a long-term stack. For reversible local implementation details, choose the smallest option consistent with local evidence and report the assumption.
 - Do not create root-level planning documents by default.
-- Temporary plans and scratch notes belong under `tmp/`.
+- Temporary plans and scratch notes belong under the project's confirmed ignored temp path.
 - Durable decisions belong in docs or ADRs only when the decision has long-term architectural impact.
 - For solo full-stack development, prefer simple, observable, locally reproducible solutions over distributed or enterprise-heavy patterns.
 - Prefer boring, debuggable architecture.
