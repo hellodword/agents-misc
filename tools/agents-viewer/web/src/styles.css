@@ -762,8 +762,8 @@ mark {
 }
 .notice-row {
   display: flex;
-  justify-content: center;
-  padding: 0 8%;
+  justify-content: flex-start;
+  padding: 0 0 0 6px;
   text-align: left;
 }
 .activity-notice {
@@ -771,7 +771,7 @@ mark {
   grid-template-columns: max-content minmax(0, 1fr);
   align-items: start;
   column-gap: 7px;
-  max-width: 760px;
+  width: min(100%, 760px);
   min-height: 26px;
   border: 0;
   border-radius: 8px;
@@ -792,14 +792,26 @@ mark {
 }
 .activity-body {
   min-width: 0;
+  overflow: hidden;
   color: var(--muted);
-  white-space: pre-wrap;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .activity-notice.notice-warning .activity-body {
   color: var(--warn);
 }
 .activity-notice.notice-error .activity-body {
   color: var(--danger);
+}
+.activity-tooltip {
+  max-width: min(640px, calc(100vw - 24px));
+  max-height: min(360px, 50vh);
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-align: left;
+  text-wrap: wrap;
+  line-height: 1.45;
 }
 .transcript-nav {
   position: absolute;
@@ -988,9 +1000,6 @@ mark {
     height: 28px !important;
     min-height: 28px !important;
     opacity: 0.8;
-  }
-  .notice-row {
-    padding-inline: 3%;
   }
   .transcript-nav {
     right: 10px;

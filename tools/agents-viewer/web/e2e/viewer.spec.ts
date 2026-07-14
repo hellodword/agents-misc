@@ -388,9 +388,31 @@ test("measures mixed-height transcript rows after updates, jumps, and responsive
   await expect(page.getByText("Geometry sentinel")).toBeVisible({
     timeout: 8_000,
   });
+  const multiLineActivity = page.getByRole("button", {
+    name: /Executing: printf first/,
+  });
+  await expect(multiLineActivity).toBeVisible();
+  const activityBody = multiLineActivity.locator(".activity-body");
+  await expect(activityBody).toHaveText("printf first…");
+  await expect(activityBody).toHaveCSS("white-space", "nowrap");
+  await expect(activityBody).toHaveCSS("text-overflow", "ellipsis");
+  await expect(activityBody).toHaveCSS("overflow", "hidden");
+  const [activityLabelBox, assistantBubbleBox] = await Promise.all([
+    multiLineActivity.locator(".activity-label").boundingBox(),
+    page
+      .getByText("Geometry sentinel")
+      .locator("xpath=ancestor::article")
+      .locator(".message-bubble")
+      .boundingBox(),
+  ]);
+  expect(activityLabelBox).not.toBeNull();
+  expect(assistantBubbleBox).not.toBeNull();
+  expect(activityLabelBox!.x).toBeGreaterThan(assistantBubbleBox!.x);
+  expect(activityLabelBox!.x - assistantBubbleBox!.x).toBeLessThan(32);
+  await multiLineActivity.hover();
   await expect(
-    page.getByRole("button", { name: /Executing: printf first/ }),
-  ).toBeVisible();
+    page.getByRole("tooltip", { name: /printf first/ }),
+  ).toContainText("printf second");
   await expectTranscriptRowsNotToOverlap(page);
 
   await page.setViewportSize({ width: 900, height: 800 });

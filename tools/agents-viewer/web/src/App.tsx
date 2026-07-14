@@ -1397,6 +1397,19 @@ function TranscriptEntryView({
     entry.kind === "message" &&
     (entry.presentation === "user" || entry.presentation === "response");
   const activity = activityParts(entry, t);
+  const activityPreview = firstActivityLine(activity.body);
+  const activityNotice = (
+    <button
+      className={`activity-notice notice-${entry.kind}`}
+      onClick={() => onInspect(entry.id)}
+      aria-label={`${activity.label} ${activity.body} · ${t("openInspector")}`.trim()}
+    >
+      <span className="activity-label">{activity.label}</span>
+      {activity.body && (
+        <span className="activity-body">{activityPreview.text}</span>
+      )}
+    </button>
+  );
   return (
     <>
       {dateLabel && (
@@ -1436,16 +1449,21 @@ function TranscriptEntryView({
           className="notice-row"
           aria-current={highlighted || undefined}
         >
-          <button
-            className={`activity-notice notice-${entry.kind}`}
-            onClick={() => onInspect(entry.id)}
-            aria-label={`${activity.label} ${activity.body} · ${t("openInspector")}`.trim()}
-          >
-            <span className="activity-label">{activity.label}</span>
-            {activity.body && (
-              <span className="activity-body">{activity.body}</span>
-            )}
-          </button>
+          {activityPreview.truncated ? (
+            <Tooltip>
+              <TooltipTrigger asChild>{activityNotice}</TooltipTrigger>
+              <TooltipContent
+                className="activity-tooltip"
+                side="top"
+                align="start"
+                sideOffset={6}
+              >
+                {activity.body}
+              </TooltipContent>
+            </Tooltip>
+          ) : (
+            activityNotice
+          )}
         </div>
       )}
     </>
@@ -2119,6 +2137,15 @@ function activityParts(entry: EntryListItem, t: Translate) {
   if (entry.kind === "error")
     return { label: `${t("errorLabel")}:`, body: primary };
   return { label: primary ? `${entry.title}:` : entry.title, body: primary };
+}
+function firstActivityLine(value: string) {
+  const lineBreak = value.search(/\r\n?|\n/);
+  if (lineBreak < 0) return { text: value, truncated: false };
+  const firstLine = value.slice(0, lineBreak);
+  return {
+    text: firstLine.endsWith("…") ? firstLine : `${firstLine}…`,
+    truncated: true,
+  };
 }
 export function executedContent(value: string) {
   if (!value) return "";
