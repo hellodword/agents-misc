@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read as _, Seek as _, SeekFrom};
 
 use axum::Json;
@@ -15,7 +15,7 @@ use crate::index::search::{ArchiveFilter, SearchFilters, SearchRequest, search a
 use crate::model::{
     ApiPage, ContentChunk, ContentField, Diagnostic, EntryKind, EntryListItem, GitMetadata,
     RawEncoding, RawRecord, RawRecordSummary, RawRefSummary, SearchHit, SessionDetail,
-    SessionSummary, SourceKind, TranscriptEntry,
+    SessionGroup, SessionSummary, SessionTreeNode, SourceKind, TranscriptEntry,
 };
 use crate::permissions::open_source_read_only;
 
@@ -29,6 +29,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/status", get(status))
         .route("/sessions", get(sessions))
+        .route("/session-groups", get(session_groups))
         .route("/sessions/{session_id}", get(session_detail))
         .route("/sessions/{session_id}/entries", get(entries))
         .route(
@@ -154,6 +155,254 @@ async fn sessions(
         previous_cursor,
         partial: false,
     }))
+}
+
+async fn session_groups(
+    State(state): State<AppState>,
+    RawQuery(raw_query): RawQuery,
+) -> Result<Json<ApiPage<SessionGroup>>, ApiFailure> {
+    let query = parse_sessions_query(raw_query.as_deref())?;
+    let limit = bounded_limit(query.limit, 50, 200)?;
+    let archived = parse_archive(query.archived.as_deref())?;
+    if let Some(parent) = query.parent.as_deref()
+        && parent != "root"
+    {
+        validate_id(parent)?;
+    }
+    let filters = canonical_session_filters(&query, archived);
+    let decoded = query
+        .cursor
+        .as_deref()
+        .map(|value| cursor::decode(value, "session-groups", &filters))
+        .transpose()?;
+    let previous = decoded
+        .as_ref()
+        .is_some_and(|(_, _, direction)| direction == "previous");
+    let sessions = sqlx::query("SELECT * FROM sessions")
+        .fetch_all(state.database.pool())
+        .await?
+        .iter()
+        .map(session_from_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut groups = build_session_groups(sessions);
+    groups.retain(|group| group_matches(group, &query, archived));
+    groups.sort_by(|left, right| {
+        micros(&right.updated_at)
+            .cmp(&micros(&left.updated_at))
+            .then_with(|| left.root.session.id.cmp(&right.root.session.id))
+    });
+
+    let mut candidates = match decoded.as_ref() {
+        Some((sort, id, _)) if previous => groups
+            .into_iter()
+            .filter(|group| {
+                let updated = micros(&group.updated_at);
+                updated > *sort || (updated == *sort && group.root.session.id < *id)
+            })
+            .collect::<Vec<_>>(),
+        Some((sort, id, _)) => groups
+            .into_iter()
+            .filter(|group| {
+                let updated = micros(&group.updated_at);
+                updated < *sort || (updated == *sort && group.root.session.id > *id)
+            })
+            .collect::<Vec<_>>(),
+        None => groups,
+    };
+    let has_more = candidates.len() > limit;
+    let data = if previous {
+        candidates.split_off(candidates.len().saturating_sub(limit))
+    } else {
+        candidates.truncate(limit);
+        candidates
+    };
+    let next_cursor = if previous || has_more {
+        data.last().map(|group| {
+            cursor::encode(
+                "session-groups",
+                &filters,
+                micros(&group.updated_at),
+                &group.root.session.id,
+                "next",
+            )
+        })
+    } else {
+        None
+    };
+    let previous_cursor = decoded.as_ref().and_then(|_| {
+        data.first().map(|group| {
+            cursor::encode(
+                "session-groups",
+                &filters,
+                micros(&group.updated_at),
+                &group.root.session.id,
+                "previous",
+            )
+        })
+    });
+    Ok(Json(ApiPage {
+        data,
+        next_cursor,
+        previous_cursor,
+        partial: false,
+    }))
+}
+
+struct BuiltTree {
+    node: SessionTreeNode,
+    updated_at_micros: i64,
+    latest_created_at_micros: i64,
+    latest_session_id: String,
+}
+
+fn build_session_groups(sessions: Vec<SessionSummary>) -> Vec<SessionGroup> {
+    let sessions = sessions
+        .into_iter()
+        .map(|session| (session.id.clone(), session))
+        .collect::<HashMap<_, _>>();
+    let mut parents = sessions
+        .iter()
+        .map(|(id, session)| {
+            let parent = session
+                .parent_thread_id
+                .as_ref()
+                .filter(|parent| *parent != id && sessions.contains_key(*parent))
+                .cloned();
+            (id.clone(), parent)
+        })
+        .collect::<HashMap<_, _>>();
+    break_parent_cycles(&mut parents);
+    let mut children = HashMap::<String, Vec<String>>::new();
+    for (id, parent) in &parents {
+        if let Some(parent) = parent {
+            children.entry(parent.clone()).or_default().push(id.clone());
+        }
+    }
+    let mut roots = parents
+        .iter()
+        .filter_map(|(id, parent)| parent.is_none().then_some(id.clone()))
+        .collect::<Vec<_>>();
+    roots.sort();
+    roots
+        .into_iter()
+        .map(|root| {
+            let built = build_session_tree(&root, &sessions, &children);
+            SessionGroup {
+                root: built.node,
+                latest_session_id: built.latest_session_id,
+                updated_at: format_time(built.updated_at_micros),
+            }
+        })
+        .collect()
+}
+
+fn break_parent_cycles(parents: &mut HashMap<String, Option<String>>) {
+    let mut starts = parents.keys().cloned().collect::<Vec<_>>();
+    starts.sort();
+    for start in starts {
+        let mut path = Vec::<String>::new();
+        let mut positions = HashMap::<String, usize>::new();
+        let mut current = start;
+        loop {
+            if let Some(position) = positions.get(&current).copied() {
+                if let Some(root) = path[position..].iter().min().cloned() {
+                    parents.insert(root, None);
+                }
+                break;
+            }
+            positions.insert(current.clone(), path.len());
+            path.push(current.clone());
+            let Some(parent) = parents.get(&current).and_then(Clone::clone) else {
+                break;
+            };
+            current = parent;
+        }
+    }
+}
+
+fn build_session_tree(
+    id: &str,
+    sessions: &HashMap<String, SessionSummary>,
+    children: &HashMap<String, Vec<String>>,
+) -> BuiltTree {
+    let session = sessions
+        .get(id)
+        .expect("tree IDs originate from the session map")
+        .clone();
+    let mut built_children = children
+        .get(id)
+        .into_iter()
+        .flatten()
+        .map(|child| build_session_tree(child, sessions, children))
+        .collect::<Vec<_>>();
+    built_children.sort_by(|left, right| {
+        right
+            .updated_at_micros
+            .cmp(&left.updated_at_micros)
+            .then_with(|| {
+                right
+                    .latest_created_at_micros
+                    .cmp(&left.latest_created_at_micros)
+            })
+            .then_with(|| left.node.session.id.cmp(&right.node.session.id))
+    });
+    let mut updated_at_micros = micros(&session.updated_at);
+    let mut latest_created_at_micros = micros(&session.created_at);
+    let mut latest_session_id = session.id.clone();
+    for child in &built_children {
+        if child.updated_at_micros > updated_at_micros
+            || (child.updated_at_micros == updated_at_micros
+                && (child.latest_created_at_micros > latest_created_at_micros
+                    || (child.latest_created_at_micros == latest_created_at_micros
+                        && child.latest_session_id < latest_session_id)))
+        {
+            updated_at_micros = child.updated_at_micros;
+            latest_created_at_micros = child.latest_created_at_micros;
+            latest_session_id.clone_from(&child.latest_session_id);
+        }
+    }
+    BuiltTree {
+        node: SessionTreeNode {
+            session,
+            children: built_children.into_iter().map(|child| child.node).collect(),
+        },
+        updated_at_micros,
+        latest_created_at_micros,
+        latest_session_id,
+    }
+}
+
+fn group_matches(group: &SessionGroup, query: &SessionsQuery, archived: ArchiveFilter) -> bool {
+    fn node_matches(
+        node: &SessionTreeNode,
+        query: &SessionsQuery,
+        archived: ArchiveFilter,
+    ) -> bool {
+        let session = &node.session;
+        let source_matches = query.source.is_empty() || query.source.contains(&session.source);
+        let archive_matches = match archived {
+            ArchiveFilter::Exclude => !session.archived,
+            ArchiveFilter::Only => session.archived,
+            ArchiveFilter::Include => true,
+        };
+        let cwd_matches = query
+            .cwd
+            .as_ref()
+            .is_none_or(|cwd| session.cwd.as_ref() == Some(cwd));
+        let parent_matches = query.parent.as_ref().is_none_or(|parent| {
+            if parent == "root" {
+                session.parent_thread_id.is_none()
+            } else {
+                session.parent_thread_id.as_ref() == Some(parent)
+            }
+        });
+        (source_matches && archive_matches && cwd_matches && parent_matches)
+            || node
+                .children
+                .iter()
+                .any(|child| node_matches(child, query, archived))
+    }
+    node_matches(&group.root, query, archived)
 }
 
 async fn session_detail(
@@ -660,6 +909,7 @@ fn session_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<SessionSummary, Api
         id: row.get("id"),
         source: decode(row, "source_kind")?,
         parent_thread_id: row.get("parent_thread_id"),
+        parent_relation: decode_optional(row, "parent_relation")?,
         cwd: row.get("cwd"),
         title: row.get("title"),
         preview: row.get("preview"),

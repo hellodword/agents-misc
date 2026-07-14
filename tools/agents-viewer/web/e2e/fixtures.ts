@@ -77,6 +77,21 @@ export const test = base.extend<Runtime & Options>({
       type: "event_msg",
       payload: { type: index % 2 === 0 ? "user_message" : "agent_message", message: `Pagination message ${index}`, phase: index % 2 === 0 ? undefined : "final" },
     })).join("\n")
+    await writeFile(
+      resolve(sourceHome, "sessions/2025/01/02/rollout-2025-01-01T00-00-00-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl"),
+      [
+        { timestamp: "2025-01-01T00:00:00Z", type: "session_meta", payload: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", cwd: "/work/plan", source: "cli" } },
+        { timestamp: "2025-01-01T00:00:30Z", type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "Plan session grouping" }] } },
+        { timestamp: "2025-01-01T00:01:00Z", type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "<proposed_plan>\n# Group sessions\nImplement the tree\n</proposed_plan>" }] } },
+      ].map(record => JSON.stringify(record)).join("\n") + "\n",
+    )
+    await writeFile(
+      resolve(sourceHome, "sessions/2025/01/02/rollout-2025-01-01T00-02-00-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl"),
+      [
+        { timestamp: "2025-01-01T00:02:00Z", type: "session_meta", payload: { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", cwd: "/work/plan", source: "exec" } },
+        { timestamp: "2025-01-01T00:02:30Z", type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "A previous agent produced the plan below to accomplish the user's task. Implement the plan in a fresh context. Treat the plan as the source of user intent, re-read files as needed, and carry the work through implementation and verification.\n\n# Group sessions\nImplement the tree" }] } },
+      ].map(record => JSON.stringify(record)).join("\n") + "\n",
+    )
     await writeFile(rollout, `${base.trimEnd()}\n${pagination}\n`)
     await use(rollout)
   },

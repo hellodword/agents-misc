@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::model::{
     Completeness, DiagnosticSeverity, EntryKind, EntryPresentation, IndexState, MessageRole, Phase,
-    SourceKind, ToolKind, ToolStatus,
+    SessionParentRelation, SourceKind, ToolKind, ToolStatus,
 };
 
 pub const PARSER_VERSION: u32 = 1;
@@ -98,6 +98,11 @@ pub struct SessionRecord {
     pub id: String,
     pub source: SourceKind,
     pub parent_thread_id: Option<String>,
+    pub parent_relation: Option<SessionParentRelation>,
+    pub proposed_plan_hash: Option<String>,
+    pub proposed_plan_at_micros: Option<i64>,
+    pub handoff_plan_hash: Option<String>,
+    pub handoff_at_micros: Option<i64>,
     pub cwd: Option<String>,
     pub title: String,
     pub preview: String,

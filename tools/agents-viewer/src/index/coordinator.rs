@@ -12,6 +12,7 @@ use crate::paths::SourceRoots;
 use crate::rollout::RootKind;
 use crate::watch::WatchEvent;
 
+use super::relationships::reconcile_plan_handoffs;
 use super::scanner::{discover_sources_cancellable, scan_source};
 use super::writer::WriterHandle;
 use super::{Database, InitialIndexPolicy};
@@ -249,6 +250,11 @@ impl IndexCoordinator {
         } else {
             report.reconcile_again = true;
         }
+        report
+            .updated_sessions
+            .extend(reconcile_plan_handoffs(&self.database).await?);
+        report.updated_sessions.sort();
+        report.updated_sessions.dedup();
         send_update(
             updates,
             IndexUpdate::Completed {

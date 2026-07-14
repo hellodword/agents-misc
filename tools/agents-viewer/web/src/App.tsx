@@ -84,7 +84,9 @@ import type {
   EntryListItem,
   RawRecord,
   SearchHit,
+  SessionGroup,
   SessionSummary,
+  SessionTreeNode,
   SourceKind,
   Status,
   TranscriptEntry,
@@ -94,7 +96,7 @@ import i18n, { setLanguage } from "@/lib/i18n";
 
 export function App() {
   const { t, i18n } = useTranslation();
-  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [sessionGroups, setSessionGroups] = useState<SessionGroup[]>([]);
   const [status, setStatus] = useState<Status>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -152,7 +154,7 @@ export function App() {
     async (signal?: AbortSignal) => {
       const request = ++sessionRequest.current;
       try {
-        const page = await api.sessions(
+        const page = await api.sessionGroups(
           {
             archived,
             source: source || undefined,
@@ -162,7 +164,7 @@ export function App() {
           signal,
         );
         if (request === sessionRequest.current) {
-          setSessions(page.data);
+          setSessionGroups(page.data);
           setError("");
         }
       } catch (failure) {
@@ -351,7 +353,7 @@ export function App() {
   const effectiveTechnical = showTechnical || forcedTechnical;
   const sidebar = (
     <SessionSidebar
-      sessions={sessions}
+      groups={sessionGroups}
       loading={loading}
       error={error}
       onNavigate={() => setNavOpen(false)}
@@ -512,8 +514,11 @@ export function App() {
                   element={
                     loading ? (
                       <Empty text={t("loading")} />
-                    ) : sessions[0] ? (
-                      <Navigate replace to={`/sessions/${sessions[0].id}`} />
+                    ) : sessionGroups[0] ? (
+                      <Navigate
+                        replace
+                        to={`/sessions/${sessionGroups[0].latestSessionId}`}
+                      />
                     ) : (
                       <Empty text={t("noSessions")} />
                     )
@@ -802,7 +807,7 @@ function FilterControl(
 }
 
 function SessionSidebar(props: {
-  sessions: SessionSummary[];
+  groups: SessionGroup[];
   loading: boolean;
   error: string;
   onNavigate: () => void;
@@ -818,53 +823,96 @@ function SessionSidebar(props: {
       </div>
     );
   if (props.error) return <Empty text={props.error} />;
-  if (props.sessions.length === 0) return <Empty text={t("noSessions")} />;
+  if (props.groups.length === 0) return <Empty text={t("noSessions")} />;
   return (
     <nav className="session-list" aria-label={t("sessions")}>
-      {props.sessions.map((session) => {
-        const source = sourceLabel(session.source, t);
-        return (
-          <Link
-            onClick={props.onNavigate}
-            className={`session-item ${location.pathname === `/sessions/${session.id}` ? "active" : ""}`}
-            aria-current={
-              location.pathname === `/sessions/${session.id}`
-                ? "page"
-                : undefined
-            }
-            to={`/sessions/${session.id}`}
-            key={session.id}
-          >
-            <span
-              className={`session-avatar source-${session.source}`}
-              title={source}
-              aria-hidden="true"
-            >
-              {sourceAvatar(session.source)}
-            </span>
-            <span className="session-copy">
-              <span className="session-heading">
-                <strong className="session-title">
-                  {localizedTitle(session)}
-                </strong>
-                <time dateTime={session.updatedAt}>
-                  {friendlySessionTime(session.updatedAt, i18n.language, t)}
-                </time>
-              </span>
-              <span className="session-preview">
-                {session.preview || t("noPreview")}
-              </span>
-              {session.cwd && (
-                <span className="session-cwd" title={session.cwd}>
-                  {session.cwd}
-                </span>
-              )}
-              <span className="sr-only">{source}</span>
-            </span>
-          </Link>
-        );
-      })}
+      <ul className="session-tree-list">
+        {props.groups.map((group) => (
+          <SessionTreeItem
+            key={group.root.session.id}
+            node={group.root}
+            locationPath={location.pathname}
+            language={i18n.language}
+            onNavigate={props.onNavigate}
+          />
+        ))}
+      </ul>
     </nav>
+  );
+}
+
+function SessionTreeItem({
+  node,
+  parentTitle,
+  locationPath,
+  language,
+  onNavigate,
+}: {
+  node: SessionTreeNode;
+  parentTitle?: string;
+  locationPath: string;
+  language: string;
+  onNavigate: () => void;
+}) {
+  const { t } = useTranslation();
+  const session = node.session;
+  const source = sourceLabel(session.source, t);
+  const ownTitle = localizedTitle(session);
+  const displayTitle =
+    session.parentRelation === "planHandoff"
+      ? parentTitle
+        ? t("implementTitle", { title: parentTitle })
+        : t("implementPlan")
+      : ownTitle;
+  const active = locationPath === `/sessions/${session.id}`;
+  return (
+    <li className="session-tree-node">
+      <Link
+        onClick={onNavigate}
+        className={`session-item ${active ? "active" : ""}`}
+        aria-current={active ? "page" : undefined}
+        to={`/sessions/${session.id}`}
+      >
+        <span
+          className={`session-avatar source-${session.source}`}
+          title={source}
+          aria-hidden="true"
+        >
+          {sourceAvatar(session.source)}
+        </span>
+        <span className="session-copy">
+          <span className="session-heading">
+            <strong className="session-title">{displayTitle}</strong>
+            <time dateTime={session.updatedAt}>
+              {friendlySessionTime(session.updatedAt, language, t)}
+            </time>
+          </span>
+          <span className="session-preview">
+            {session.preview || t("noPreview")}
+          </span>
+          {session.cwd && (
+            <span className="session-cwd" title={session.cwd}>
+              {session.cwd}
+            </span>
+          )}
+          <span className="sr-only">{source}</span>
+        </span>
+      </Link>
+      {node.children.length > 0 && (
+        <ul className="session-children">
+          {node.children.map((child) => (
+            <SessionTreeItem
+              key={child.session.id}
+              node={child}
+              parentTitle={ownTitle}
+              locationPath={locationPath}
+              language={language}
+              onNavigate={onNavigate}
+            />
+          ))}
+        </ul>
+      )}
+    </li>
   );
 }
 

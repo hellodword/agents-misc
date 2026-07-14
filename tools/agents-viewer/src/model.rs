@@ -23,6 +23,11 @@ contract_enum!(SourceKind {
     AppServer,
     Unknown,
 });
+contract_enum!(SessionParentRelation {
+    Parent,
+    Fork,
+    PlanHandoff,
+});
 contract_enum!(IndexState {
     Pending,
     Indexing,
@@ -189,6 +194,9 @@ pub struct SessionSummary {
     pub parent_thread_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
+    pub parent_relation: Option<SessionParentRelation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub cwd: Option<String>,
     pub title: String,
     pub preview: String,
@@ -210,6 +218,23 @@ pub struct SessionSummary {
     pub diagnostic_count: u64,
     pub index_state: IndexState,
     pub completeness: Completeness,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct SessionTreeNode {
+    pub session: SessionSummary,
+    pub children: Vec<SessionTreeNode>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct SessionGroup {
+    pub root: SessionTreeNode,
+    pub latest_session_id: String,
+    pub updated_at: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
@@ -434,6 +459,7 @@ pub struct SseEvent {
 pub fn typescript_contract() -> String {
     let declarations = [
         SourceKind::decl(),
+        SessionParentRelation::decl(),
         IndexState::decl(),
         Completeness::decl(),
         EntryKind::decl(),
@@ -453,6 +479,8 @@ pub fn typescript_contract() -> String {
         Status::decl(),
         GitMetadata::decl(),
         SessionSummary::decl(),
+        SessionTreeNode::decl(),
+        SessionGroup::decl(),
         Diagnostic::decl(),
         SessionDetail::decl(),
         EntryListItem::decl(),

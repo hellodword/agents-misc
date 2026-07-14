@@ -1,7 +1,8 @@
 use std::io::{BufReader, Cursor, Write};
 
 use agents_viewer::model::{
-    Completeness, EntryKind, EntryPresentation, MessageRole, SourceKind, ToolStatus,
+    Completeness, EntryKind, EntryPresentation, MessageRole, SessionParentRelation, SourceKind,
+    ToolStatus,
 };
 use agents_viewer::rollout::{
     CollectingSink, ParseContext, RootKind, checkpoint_for_file, parse_rollout, verify_checkpoint,
@@ -204,6 +205,52 @@ fn maps_review_source_and_parent_relation() {
         parsed.summary.session.parent_thread_id.as_deref(),
         Some("66666666-6666-4666-8666-666666666666")
     );
+    assert_eq!(
+        parsed.summary.session.parent_relation,
+        Some(SessionParentRelation::Parent)
+    );
+}
+
+#[test]
+fn maps_forks_and_hashes_exact_plan_handoffs() {
+    let fork = br##"{"timestamp":"2026-07-01T00:00:00Z","type":"session_meta","payload":{"id":"99999999-9999-4999-8999-999999999999","cwd":"/work/example","forked_from_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}}
+"##;
+    let parsed_fork = parse(
+        fork,
+        "rollout-2026-07-01T00-00-00-99999999-9999-4999-8999-999999999999.jsonl",
+        1024 * 1024,
+    );
+    assert_eq!(
+        parsed_fork.summary.session.parent_thread_id.as_deref(),
+        Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    );
+    assert_eq!(
+        parsed_fork.summary.session.parent_relation,
+        Some(SessionParentRelation::Fork)
+    );
+
+    let parent = br##"{"timestamp":"2026-07-01T00:00:00Z","type":"session_meta","payload":{"id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","cwd":"/work/example"}}
+{"timestamp":"2026-07-01T00:01:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"before\n<proposed_plan>\r\n# Exact plan\r\nImplement it\r\n</proposed_plan>\nafter"}]}}
+"##;
+    let child = br##"{"timestamp":"2026-07-01T00:02:00Z","type":"session_meta","payload":{"id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","cwd":"/work/example"}}
+{"timestamp":"2026-07-01T00:03:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"A previous agent produced the plan below to accomplish the user's task. Implement the plan in a fresh context. Treat the plan as the source of user intent, re-read files as needed, and carry the work through implementation and verification.\n\n# Exact plan\nImplement it"}]}}
+"##;
+    let parsed_parent = parse(
+        parent,
+        "rollout-2026-07-01T00-00-00-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl",
+        1024 * 1024,
+    );
+    let parsed_child = parse(
+        child,
+        "rollout-2026-07-01T00-02-00-cccccccc-cccc-4ccc-8ccc-cccccccccccc.jsonl",
+        1024 * 1024,
+    );
+    assert_eq!(
+        parsed_parent.summary.session.proposed_plan_hash,
+        parsed_child.summary.session.handoff_plan_hash
+    );
+    assert!(parsed_parent.summary.session.proposed_plan_hash.is_some());
+    assert!(parsed_child.summary.session.parent_thread_id.is_none());
 }
 
 #[test]

@@ -63,6 +63,29 @@ test("indexes an empty cache, searches content, reloads a deep link, and exposes
 }) => {
   const status = await page.request.get(`${baseURL}/api/v1/status`);
   expect(status.ok()).toBeTruthy();
+  const planParent = page.locator(
+    'a[href="/sessions/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]',
+  );
+  const planChild = page.locator(
+    'a[href="/sessions/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"]',
+  );
+  await expect(planParent).toBeVisible();
+  await expect(planChild).toBeVisible();
+  await expect(planParent).toContainText("Plan session grouping");
+  await expect(planChild).toContainText("Implement · Plan session grouping");
+  await expect(
+    planParent
+      .locator("xpath=../ul")
+      .locator('a[href="/sessions/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"]'),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Filter" }).click();
+  await page.getByLabel("Source").selectOption("exec");
+  await page.getByRole("button", { name: "Apply" }).click();
+  await expect(planParent).toBeVisible();
+  await expect(planChild).toBeVisible();
+  await page.getByRole("button", { name: "Filter" }).click();
+  await page.getByRole("button", { name: "Reset" }).click();
+  await page.getByRole("button", { name: "Apply" }).click();
   await expect(page.getByText("Pagination message 109").first()).toBeVisible();
   await page.getByRole("button", { name: "Go to first message" }).click();
   await expect(

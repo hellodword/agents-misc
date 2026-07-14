@@ -374,10 +374,12 @@ async fn insert_placeholder(
 ) -> Result<()> {
     sqlx::query(
         "INSERT INTO sessions( \
-            id, source_file_id, source_kind, parent_thread_id, cwd, title, preview, \
+            id, source_file_id, source_kind, parent_thread_id, parent_relation, \
+            proposed_plan_hash, proposed_plan_at_micros, handoff_plan_hash, handoff_at_micros, \
+            cwd, title, preview, \
             created_at_micros, updated_at_micros, archived, cli_version, provider, history_line, \
             git_branch, git_commit, entry_count, index_state, completeness, diagnostic_count \
-         ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending', ?, ? \
+         ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending', ?, ? \
          WHERE NOT EXISTS (SELECT 1 FROM sessions WHERE source_file_id = ?) \
            AND NOT EXISTS (SELECT 1 FROM sessions WHERE id = ?)",
     )
@@ -385,6 +387,11 @@ async fn insert_placeholder(
     .bind(source_file_id)
     .bind(enum_value(&session.source)?)
     .bind(&session.parent_thread_id)
+    .bind(optional_enum(session.parent_relation.as_ref())?)
+    .bind(&session.proposed_plan_hash)
+    .bind(session.proposed_plan_at_micros)
+    .bind(&session.handoff_plan_hash)
+    .bind(session.handoff_at_micros)
     .bind(&session.cwd)
     .bind(&session.title)
     .bind(&session.preview)
@@ -524,16 +531,23 @@ async fn finish_scan(
     let mut transaction = database.pool().begin().await?;
     sqlx::query(
         "INSERT INTO staged_sessions( \
-            scan_token, id, source_file_id, source_kind, parent_thread_id, cwd, title, preview, \
+            scan_token, id, source_file_id, source_kind, parent_thread_id, parent_relation, \
+            proposed_plan_hash, proposed_plan_at_micros, handoff_plan_hash, handoff_at_micros, \
+            cwd, title, preview, \
             created_at_micros, updated_at_micros, archived, cli_version, provider, history_line, \
             git_branch, git_commit, entry_count, index_state, completeness, diagnostic_count \
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(scan_token)
     .bind(&session.id)
     .bind(source_file_id)
     .bind(enum_value(&session.source)?)
     .bind(&session.parent_thread_id)
+    .bind(optional_enum(session.parent_relation.as_ref())?)
+    .bind(&session.proposed_plan_hash)
+    .bind(session.proposed_plan_at_micros)
+    .bind(&session.handoff_plan_hash)
+    .bind(session.handoff_at_micros)
     .bind(&session.cwd)
     .bind(&session.title)
     .bind(&session.preview)
@@ -565,15 +579,22 @@ async fn finish_scan(
     }
     sqlx::query(
         "INSERT INTO sessions( \
-            id, source_file_id, source_kind, parent_thread_id, cwd, title, preview, \
+            id, source_file_id, source_kind, parent_thread_id, parent_relation, \
+            proposed_plan_hash, proposed_plan_at_micros, handoff_plan_hash, handoff_at_micros, \
+            cwd, title, preview, \
             created_at_micros, updated_at_micros, archived, cli_version, provider, history_line, \
             git_branch, git_commit, entry_count, index_state, completeness, diagnostic_count \
-         ) SELECT id, source_file_id, source_kind, parent_thread_id, cwd, title, preview, \
+         ) SELECT id, source_file_id, source_kind, parent_thread_id, parent_relation, \
+            proposed_plan_hash, proposed_plan_at_micros, handoff_plan_hash, handoff_at_micros, \
+            cwd, title, preview, \
             created_at_micros, updated_at_micros, archived, cli_version, provider, history_line, \
             git_branch, git_commit, entry_count, index_state, completeness, diagnostic_count \
          FROM staged_sessions WHERE scan_token = ? \
          ON CONFLICT(id) DO UPDATE SET \
             source_kind = excluded.source_kind, parent_thread_id = excluded.parent_thread_id, \
+            parent_relation = excluded.parent_relation, proposed_plan_hash = excluded.proposed_plan_hash, \
+            proposed_plan_at_micros = excluded.proposed_plan_at_micros, \
+            handoff_plan_hash = excluded.handoff_plan_hash, handoff_at_micros = excluded.handoff_at_micros, \
             cwd = excluded.cwd, title = excluded.title, preview = excluded.preview, \
             created_at_micros = excluded.created_at_micros, updated_at_micros = excluded.updated_at_micros, \
             archived = excluded.archived, cli_version = excluded.cli_version, provider = excluded.provider, \

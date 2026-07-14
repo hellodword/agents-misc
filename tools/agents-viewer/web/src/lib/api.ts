@@ -1,4 +1,4 @@
-import type { ApiErrorEnvelope, ContentChunk, EntryListItem, RawRecord, RawRecordSummary, SearchHit, SessionDetail, SessionSummary, SseEventPayload, SseEventType, Status, TranscriptEntry } from "@/generated/api"
+import type { ApiErrorEnvelope, ContentChunk, EntryListItem, RawRecord, RawRecordSummary, SearchHit, SessionDetail, SessionGroup, SessionSummary, SseEventPayload, SseEventType, Status, TranscriptEntry } from "@/generated/api"
 
 export type Page<T> = { data: T[]; nextCursor?: string; previousCursor?: string; partial: boolean }
 
@@ -26,6 +26,7 @@ const query = (values: Record<string, string | number | boolean | undefined>) =>
 export const api = {
   status: (signal?: AbortSignal) => get<Status>("/api/v1/status", signal),
   sessions: (options: { archived?: string; source?: string; cwd?: string; cursor?: string; limit?: number }, signal?: AbortSignal) => get<Page<SessionSummary>>(`/api/v1/sessions${query(options)}`, signal),
+  sessionGroups: (options: { archived?: string; source?: string; cwd?: string; cursor?: string; limit?: number }, signal?: AbortSignal) => get<Page<SessionGroup>>(`/api/v1/session-groups${query(options)}`, signal),
   session: (id: string, signal?: AbortSignal) => get<SessionDetail>(`/api/v1/sessions/${encodeURIComponent(id)}`, signal),
   entries: (id: string, options: { cursor?: string; aroundEntryId?: string; direction?: string; limit?: number; includeTechnical?: boolean }, signal?: AbortSignal) => get<Page<EntryListItem>>(`/api/v1/sessions/${encodeURIComponent(id)}/entries${query(options)}`, signal),
   entry: (sessionId: string, entryId: string, signal?: AbortSignal) => get<TranscriptEntry>(`/api/v1/sessions/${encodeURIComponent(sessionId)}/entries/${encodeURIComponent(entryId)}`, signal),

@@ -28,6 +28,11 @@ CREATE TABLE sessions (
     source_file_id INTEGER NOT NULL UNIQUE REFERENCES source_files(id) ON DELETE CASCADE,
     source_kind TEXT NOT NULL,
     parent_thread_id TEXT,
+    parent_relation TEXT CHECK (parent_relation IN ('parent', 'fork', 'planHandoff')),
+    proposed_plan_hash TEXT,
+    proposed_plan_at_micros INTEGER,
+    handoff_plan_hash TEXT,
+    handoff_at_micros INTEGER,
     cwd TEXT,
     title TEXT NOT NULL,
     preview TEXT NOT NULL,
@@ -49,6 +54,8 @@ CREATE INDEX sessions_updated_at_idx ON sessions(updated_at_micros DESC, id);
 CREATE INDEX sessions_source_kind_idx ON sessions(source_kind);
 CREATE INDEX sessions_archived_idx ON sessions(archived);
 CREATE INDEX sessions_parent_thread_id_idx ON sessions(parent_thread_id);
+CREATE INDEX sessions_proposed_plan_idx ON sessions(proposed_plan_hash, cwd, proposed_plan_at_micros)
+    WHERE proposed_plan_hash IS NOT NULL;
 
 CREATE TABLE entries (
     rowid INTEGER PRIMARY KEY,
@@ -126,6 +133,11 @@ CREATE TABLE staged_sessions (
     source_file_id INTEGER NOT NULL,
     source_kind TEXT NOT NULL,
     parent_thread_id TEXT,
+    parent_relation TEXT,
+    proposed_plan_hash TEXT,
+    proposed_plan_at_micros INTEGER,
+    handoff_plan_hash TEXT,
+    handoff_at_micros INTEGER,
     cwd TEXT,
     title TEXT NOT NULL,
     preview TEXT NOT NULL,

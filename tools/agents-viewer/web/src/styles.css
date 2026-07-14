@@ -423,9 +423,46 @@ mark {
   line-height: 1.4;
 }
 .session-list {
-  display: grid;
-  gap: 2px;
   padding: 6px;
+}
+.session-tree-list,
+.session-children {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.session-tree-list {
+  gap: 4px;
+}
+.session-tree-node {
+  position: relative;
+  min-width: 0;
+}
+.session-children {
+  position: relative;
+  margin-left: 24px;
+  padding-left: 12px;
+  border-left: 1px solid color-mix(in srgb, var(--muted) 42%, transparent);
+}
+.session-children > .session-tree-node::before {
+  position: absolute;
+  top: 34px;
+  left: -12px;
+  width: 12px;
+  border-top: 1px solid color-mix(in srgb, var(--muted) 42%, transparent);
+  content: "";
+}
+.session-children > .session-tree-node:last-child::after {
+  position: absolute;
+  top: 35px;
+  bottom: 0;
+  left: -13px;
+  width: 2px;
+  background: var(--panel);
+  content: "";
 }
 .session-item {
   display: grid;
@@ -461,6 +498,16 @@ mark {
     700 14px/1 ui-monospace,
     SFMono-Regular,
     monospace;
+}
+.session-children .session-item {
+  grid-template-columns: 36px minmax(0, 1fr);
+  min-height: 60px;
+  gap: 8px;
+}
+.session-children .session-avatar {
+  width: 34px;
+  height: 34px;
+  font-size: 12px;
 }
 .source-vscode {
   background: color-mix(in srgb, #7c3aed 18%, var(--soft));

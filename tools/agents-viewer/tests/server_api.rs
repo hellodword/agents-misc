@@ -45,6 +45,44 @@ async fn status_sessions_entries_content_raw_and_search_follow_contract() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
+    let groups = support::json(
+        router
+            .clone()
+            .oneshot(support::request("/api/v1/session-groups?limit=10"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let plan_group = groups["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|group| group["root"]["session"]["id"] == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        .expect("plan group");
+    assert_eq!(
+        plan_group["latestSessionId"],
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    );
+    assert_eq!(
+        plan_group["root"]["children"][0]["session"]["parentRelation"],
+        "planHandoff"
+    );
+    let exec_groups = support::json(
+        router
+            .clone()
+            .oneshot(support::request(
+                "/api/v1/session-groups?source=exec&limit=10",
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(exec_groups["data"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        exec_groups["data"][0]["root"]["session"]["id"], "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "a child match keeps its complete group visible"
+    );
+
     let response = router
         .clone()
         .oneshot(support::request(&format!("/api/v1/sessions/{session_id}")))
@@ -274,4 +312,104 @@ async fn pagination_cursor_validation_and_api_errors_are_stable() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert_eq!(support::json(response).await["error"]["code"], "not_found");
+}
+
+#[tokio::test]
+async fn session_group_pagination_and_cycle_guard_keep_every_session_browsable() {
+    let app = support::TestApp::new().await;
+    let router = app.router();
+    let first = support::json(
+        router
+            .clone()
+            .oneshot(support::request("/api/v1/session-groups?limit=1"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let cursor = first["nextCursor"].as_str().expect("second group cursor");
+    let second = support::json(
+        router
+            .clone()
+            .oneshot(support::request(&format!(
+                "/api/v1/session-groups?limit=1&cursor={cursor}"
+            )))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_ne!(
+        first["data"][0]["root"]["session"]["id"],
+        second["data"][0]["root"]["session"]["id"]
+    );
+    assert!(second["previousCursor"].is_string());
+
+    sqlx::query(
+        "UPDATE sessions SET parent_thread_id = CASE id \
+            WHEN 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' THEN 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' \
+            WHEN 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' THEN 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' \
+            ELSE parent_thread_id END \
+         WHERE id IN ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb')",
+    )
+    .execute(app.state.database.pool())
+    .await
+    .unwrap();
+    let groups = support::json(
+        router
+            .oneshot(support::request("/api/v1/session-groups?limit=10"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    fn collect_ids(node: &serde_json::Value, ids: &mut Vec<String>) {
+        ids.push(node["session"]["id"].as_str().unwrap().to_owned());
+        for child in node["children"].as_array().unwrap() {
+            collect_ids(child, ids);
+        }
+    }
+    let mut ids = Vec::new();
+    for group in groups["data"].as_array().unwrap() {
+        collect_ids(&group["root"], &mut ids);
+    }
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 3);
+}
+
+#[tokio::test]
+async fn removing_a_plan_parent_clears_the_derived_handoff_relation() {
+    use agents_viewer::index::coordinator::IndexCoordinator;
+    use agents_viewer::index::writer::spawn_writer;
+
+    let app = support::TestApp::new().await;
+    let parent =
+        app.state.roots.active.as_ref().unwrap().join(
+            "2025/01/02/rollout-2024-01-01T00-00-00-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl",
+        );
+    std::fs::remove_file(parent).unwrap();
+    let (writer, task) = spawn_writer(app.state.database.clone());
+    let coordinator = IndexCoordinator::new(
+        app.state.database.clone(),
+        writer.clone(),
+        app.state.roots.clone(),
+        1024 * 1024,
+        agents_viewer::index::InitialIndexPolicy::all(),
+    );
+    coordinator.reconcile().await.unwrap();
+    let report = coordinator.reconcile().await.unwrap();
+    writer.shutdown().await.unwrap();
+    task.wait().await.unwrap();
+    let row = sqlx::query(
+        "SELECT parent_thread_id, parent_relation FROM sessions WHERE id = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'",
+    )
+    .fetch_one(app.state.database.pool())
+    .await
+    .unwrap();
+    use sqlx::Row as _;
+    assert_eq!(row.get::<Option<String>, _>("parent_thread_id"), None);
+    assert_eq!(row.get::<Option<String>, _>("parent_relation"), None);
+    assert!(
+        report
+            .updated_sessions
+            .contains(&"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".to_owned())
+    );
 }

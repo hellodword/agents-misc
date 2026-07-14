@@ -1,7 +1,7 @@
 use agents_viewer::model::{
     Completeness, ContentField, DiagnosticSeverity, EntryKind, IndexState, MessageRole, Phase,
-    RawEncoding, RawParseStatus, ServicePhase, SessionSummary, SourceKind, SseEventType, ToolKind,
-    ToolStatus, typescript_contract,
+    RawEncoding, RawParseStatus, ServicePhase, SessionParentRelation, SessionSummary, SourceKind,
+    SseEventType, ToolKind, ToolStatus, typescript_contract,
 };
 use pretty_assertions::assert_eq;
 
@@ -11,6 +11,7 @@ fn session_summary_round_trips_and_omits_absent_optional_fields() {
         id: "s_fixture".into(),
         source: SourceKind::AppServer,
         parent_thread_id: None,
+        parent_relation: None,
         cwd: Some("/synthetic/workspace".into()),
         title: "Synthetic session".into(),
         preview: "Fixture preview".into(),
@@ -54,6 +55,9 @@ fn fixed_enums_use_contract_json_values() {
         SourceKind::Subagent => "subagent",
         SourceKind::AppServer => "appServer",
         SourceKind::Unknown => "unknown",
+        SessionParentRelation::Parent => "parent",
+        SessionParentRelation::Fork => "fork",
+        SessionParentRelation::PlanHandoff => "planHandoff",
         IndexState::Pending => "pending",
         IndexState::Indexing => "indexing",
         IndexState::Ready => "ready",

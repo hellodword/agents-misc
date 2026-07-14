@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::model::{
     Completeness, DiagnosticSeverity, EntryKind, EntryPresentation, IndexState, MessageRole, Phase,
-    SourceKind, ToolKind, ToolStatus,
+    SessionParentRelation, SourceKind, ToolKind, ToolStatus,
 };
 
 use super::dedup::Deduper;
@@ -954,6 +954,11 @@ struct SessionBuilder {
     id: String,
     source: SourceKind,
     parent_thread_id: Option<String>,
+    parent_relation: Option<SessionParentRelation>,
+    proposed_plan_hash: Option<String>,
+    proposed_plan_at_micros: Option<i64>,
+    handoff_plan_hash: Option<String>,
+    handoff_at_micros: Option<i64>,
     cwd: Option<String>,
     title: Option<String>,
     preview: Option<String>,
@@ -977,6 +982,11 @@ impl SessionBuilder {
             id,
             source: SourceKind::Unknown,
             parent_thread_id: None,
+            parent_relation: None,
+            proposed_plan_hash: None,
+            proposed_plan_at_micros: None,
+            handoff_plan_hash: None,
+            handoff_at_micros: None,
             cwd: None,
             title: None,
             preview: None,
@@ -999,6 +1009,11 @@ impl SessionBuilder {
             id: record.id,
             source: record.source,
             parent_thread_id: record.parent_thread_id,
+            parent_relation: record.parent_relation,
+            proposed_plan_hash: record.proposed_plan_hash,
+            proposed_plan_at_micros: record.proposed_plan_at_micros,
+            handoff_plan_hash: record.handoff_plan_hash,
+            handoff_at_micros: record.handoff_at_micros,
             cwd: record.cwd,
             title: saw_user.then_some(record.title),
             preview: saw_user.then_some(record.preview),
@@ -1020,9 +1035,17 @@ impl SessionBuilder {
             self.id = id;
         }
         self.cwd = string_option(payload, "cwd").or_else(|| self.cwd.take());
-        self.parent_thread_id = string_option(payload, "parent_thread_id")
+        if let Some(parent) = string_option(payload, "parent_thread_id")
             .or_else(|| source_parent(payload.get("source")))
-            .or_else(|| self.parent_thread_id.take());
+        {
+            self.parent_thread_id = Some(parent);
+            self.parent_relation = Some(SessionParentRelation::Parent);
+        } else if self.parent_relation != Some(SessionParentRelation::Parent)
+            && let Some(parent) = string_option(payload, "forked_from_id")
+        {
+            self.parent_thread_id = Some(parent);
+            self.parent_relation = Some(SessionParentRelation::Fork);
+        }
         self.cli_version =
             string_option(payload, "cli_version").or_else(|| self.cli_version.take());
         self.provider = string_option(payload, "model_provider").or_else(|| self.provider.take());
@@ -1049,10 +1072,23 @@ impl SessionBuilder {
     }
 
     fn observe_entry(&mut self, entry: &NormalizedEntry) {
+        if entry.presentation == EntryPresentation::Response
+            && entry.role == Some(MessageRole::Assistant)
+            && let Some(hash) = proposed_plan_hash(&entry.primary_text)
+        {
+            self.proposed_plan_hash = Some(hash);
+            self.proposed_plan_at_micros =
+                Some(entry.timestamp_micros.unwrap_or(self.updated_at_micros));
+        }
         if !self.saw_user
             && entry.presentation == EntryPresentation::User
             && !entry.primary_text.trim().is_empty()
         {
+            if let Some(hash) = handoff_plan_hash(&entry.primary_text) {
+                self.handoff_plan_hash = Some(hash);
+                self.handoff_at_micros =
+                    Some(entry.timestamp_micros.unwrap_or(self.updated_at_micros));
+            }
             self.saw_user = true;
             self.title = Some(title_from_user_message(&entry.primary_text));
             self.preview = Some(truncate_graphemes(&entry.primary_text, 160));
@@ -1087,6 +1123,11 @@ impl SessionBuilder {
             id: self.id,
             source: self.source,
             parent_thread_id: self.parent_thread_id,
+            parent_relation: self.parent_relation,
+            proposed_plan_hash: self.proposed_plan_hash,
+            proposed_plan_at_micros: self.proposed_plan_at_micros,
+            handoff_plan_hash: self.handoff_plan_hash,
+            handoff_at_micros: self.handoff_at_micros,
             cwd: self.cwd,
             title: self.title.unwrap_or(fallback_title),
             preview: self.preview.unwrap_or_default(),
@@ -1108,6 +1149,35 @@ impl SessionBuilder {
             diagnostic_count: self.diagnostic_count,
         }
     }
+}
+
+const PLAN_HANDOFF_PREFIX: &str = "A previous agent produced the plan below to accomplish the user's task. Implement the plan in a fresh context. Treat the plan as the source of user intent, re-read files as needed, and carry the work through implementation and verification.";
+
+fn proposed_plan_hash(text: &str) -> Option<String> {
+    let normalized = normalize_plan_text(text);
+    let close = normalized.rfind("</proposed_plan>")?;
+    let before_close = &normalized[..close];
+    let open = before_close.rfind("<proposed_plan>")? + "<proposed_plan>".len();
+    normalized_plan_hash(&before_close[open..])
+}
+
+fn handoff_plan_hash(text: &str) -> Option<String> {
+    let normalized = normalize_plan_text(text);
+    let plan = normalized
+        .trim()
+        .strip_prefix(PLAN_HANDOFF_PREFIX)?
+        .strip_prefix("\n\n")?;
+    normalized_plan_hash(plan)
+}
+
+fn normalized_plan_hash(text: &str) -> Option<String> {
+    let normalized = normalize_plan_text(text);
+    let plan = normalized.trim();
+    (!plan.is_empty()).then(|| sha256(plan.as_bytes()))
+}
+
+fn normalize_plan_text(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 fn title_from_user_message(text: &str) -> String {

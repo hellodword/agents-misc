@@ -2,6 +2,8 @@
 
 export type SourceKind = "cli" | "vscode" | "exec" | "review" | "subagent" | "appServer" | "unknown";
 
+export type SessionParentRelation = "parent" | "fork" | "planHandoff";
+
 export type IndexState = "pending" | "indexing" | "ready" | "partial" | "error";
 
 export type Completeness = "live" | "complete" | "partial" | "unsupported";
@@ -38,7 +40,11 @@ export type Status = { appVersion: string, sourceHome: string, cacheDir: string,
 
 export type GitMetadata = { branch?: string, commit?: string, };
 
-export type SessionSummary = { id: string, source: SourceKind, parentThreadId?: string, cwd?: string, title: string, preview: string, createdAt: string, updatedAt: string, archived: boolean, cliVersion?: string, provider?: string, git?: GitMetadata, entryCount: number, diagnosticCount: number, indexState: IndexState, completeness: Completeness, };
+export type SessionSummary = { id: string, source: SourceKind, parentThreadId?: string, parentRelation?: SessionParentRelation, cwd?: string, title: string, preview: string, createdAt: string, updatedAt: string, archived: boolean, cliVersion?: string, provider?: string, git?: GitMetadata, entryCount: number, diagnosticCount: number, indexState: IndexState, completeness: Completeness, };
+
+export type SessionTreeNode = { session: SessionSummary, children: Array<SessionTreeNode>, };
+
+export type SessionGroup = { root: SessionTreeNode, latestSessionId: string, updatedAt: string, };
 
 export type Diagnostic = { id: number, severity: DiagnosticSeverity, code: string, message: string, firstSeenAt: string, lastSeenAt: string, count: number, };
 
