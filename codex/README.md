@@ -166,6 +166,13 @@ empty `write_stdin` polls, which wait for `poll_interval_ms`; a smaller
 tool-request `yield_time_ms` does not shorten that interval. Non-empty stdin
 writes keep the existing interactive response cap.
 
+The same rule semantics apply when unified exec is called from code mode. A
+matching `wait_until_exit` call, or a matching empty `write_stdin` poll using
+either mode, also defers code mode's outer timer-generated `exec`/`wait` yield
+until the rule-controlled wait returns. Explicit JavaScript `yield_control()`,
+termination, and cancellation still take precedence. No separate
+`codex-code-mode-host` configuration is required.
+
 `max_output_tokens` affects only the model-visible tool result. UI streaming and
 terminal transcript events are not truncated by this setting.
 
