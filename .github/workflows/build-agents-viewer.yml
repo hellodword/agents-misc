@@ -1,0 +1,73 @@
+name: build agents viewer
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact: agents-viewer-linux-amd64
+            runner: ubuntu-24.04
+            executable: tools/agents-viewer/target/release/agents-viewer
+          - artifact: agents-viewer-linux-aarch64
+            runner: ubuntu-24.04-arm
+            executable: tools/agents-viewer/target/release/agents-viewer
+          - artifact: agents-viewer-windows-amd64
+            runner: windows-2025
+            executable: tools/agents-viewer/target/release/agents-viewer.exe
+          - artifact: agents-viewer-windows-aarch64
+            runner: windows-11-arm
+            executable: tools/agents-viewer/target/release/agents-viewer.exe
+          - artifact: agents-viewer-darwin-aarch64
+            runner: macos-15
+            executable: tools/agents-viewer/target/release/agents-viewer
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.95 --profile minimal --no-self-update
+          rustup default 1.95
+
+      - name: Build embedded Web UI
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm --prefix tools/agents-viewer/web ci
+          npm --prefix tools/agents-viewer/web run build
+
+      - name: Build executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build \
+            --locked \
+            --manifest-path tools/agents-viewer/Cargo.toml \
+            --release \
+            --bin agents-viewer \
+            --features embedded-ui
+
+      - name: Upload ${{ matrix.artifact }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.executable }}
+          if-no-files-found: error
