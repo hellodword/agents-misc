@@ -63,16 +63,16 @@ The viewer reads only:
 
 The compatibility promise is for Codex CLI rollout records. Source metadata produced inside the Codex ecosystem is also classified as interactive CLI, VS Code, `codex exec`, review, subagent, app-server/integration, or unknown so mixed Codex homes remain understandable. This classification is not a compatibility promise for unrelated agent products.
 
-| Persisted concept | Viewer behavior |
-| --- | --- |
-| `session_meta` | Stable session ID, source, cwd, parent/fork, version, provider, and Git metadata |
-| `turn_context`, `world_state` | Collapsed technical context, excluded from default search |
-| known `event_msg` payloads | Messages, reasoning, tool lifecycle, plans, and diagnostics |
-| known `response_item` payloads | Messages, reasoning summaries, tool calls/results, and attachments |
-| compacted history | Ordered technical/context entry with raw provenance |
-| unknown envelope or payload | Browsable raw reference plus diagnostic; the session continues |
-| malformed JSON, invalid UTF-8, incomplete tail | Partial-session diagnostic while stable records remain available |
-| oversized complete record | Bounded metadata/raw reference; the content API refuses an oversized read |
+| Persisted concept                              | Viewer behavior                                                                  |
+| ---------------------------------------------- | -------------------------------------------------------------------------------- |
+| `session_meta`                                 | Stable session ID, source, cwd, parent/fork, version, provider, and Git metadata |
+| `turn_context`, `world_state`                  | Collapsed technical context, excluded from default search                        |
+| known `event_msg` payloads                     | Messages, reasoning, tool lifecycle, plans, and diagnostics                      |
+| known `response_item` payloads                 | Messages, reasoning summaries, tool calls/results, and attachments               |
+| compacted history                              | Ordered technical/context entry with raw provenance                              |
+| unknown envelope or payload                    | Browsable raw reference plus diagnostic; the session continues                   |
+| malformed JSON, invalid UTF-8, incomplete tail | Partial-session diagnostic while stable records remain available                 |
+| oversized complete record                      | Bounded metadata/raw reference; the content API refuses an oversized read        |
 
 Fixtures cover Codex 0.120, the 0.144 compatibility baseline, deduplication, malformed input, source classification, parent/fork metadata, and plan handoff grouping.
 

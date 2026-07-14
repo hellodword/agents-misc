@@ -1191,13 +1191,11 @@ export function VirtualTranscript({
   const rows =
     measuredRows.length > 0
       ? measuredRows
-      : entries
-          .slice(0, 12)
-          .map((_, index) => ({
-            index,
-            start: index * 64,
-            key: entries[index].id,
-          }));
+      : entries.slice(0, 12).map((_, index) => ({
+          index,
+          start: index * 64,
+          key: entries[index].id,
+        }));
 
   const reportViewport = useCallback(() => {
     const element = parent.current;
