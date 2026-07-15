@@ -13,9 +13,19 @@ async fn watcher_debounces_source_changes_without_losing_reconcile_signal() {
     let temp = TempDir::new().unwrap();
     let source_home = temp.path().join("codex-home");
     std::fs::create_dir_all(source_home.join("sessions")).unwrap();
+    let existing = source_home.join("sessions/existing.jsonl");
+    std::fs::write(&existing, b"{}\n").unwrap();
     let roots = agents_viewer::paths::resolve_source_roots(&source_home).unwrap();
     let (sender, mut receiver) = mpsc::channel(8);
     let watcher = start_watcher(&roots, sender).unwrap();
+
+    std::fs::read(&existing).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(750), receiver.recv())
+            .await
+            .is_err(),
+        "read-only access must not trigger a source update"
+    );
 
     std::fs::write(source_home.join("sessions/new.jsonl"), b"{}\n").unwrap();
     let event = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
@@ -55,6 +65,12 @@ async fn appended_complete_line_reaches_sqlite_within_two_seconds() {
     let (sender, mut receiver) = mpsc::channel(8);
     let watcher = start_watcher(&roots, sender).unwrap();
     coordinator.reconcile().await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(750), receiver.recv())
+            .await
+            .is_err(),
+        "index reads must not schedule another reconcile"
+    );
     let before = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM entries")
         .fetch_one(database.pool())
         .await

@@ -47,7 +47,8 @@ pub fn start_watcher(
     let callback_overflowed = Arc::clone(&overflowed);
     let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
         let event = match result {
-            Ok(event) => RawWatchEvent::Event(event),
+            Ok(event) if should_forward_event(&event) => RawWatchEvent::Event(event),
+            Ok(_) => return,
             Err(error) => RawWatchEvent::Error(error.to_string()),
         };
         if let Err(mpsc::error::TrySendError::Full(_)) = sender.try_send(event) {
@@ -68,6 +69,11 @@ pub fn start_watcher(
         _watcher: watcher,
         task,
     })
+}
+
+fn should_forward_event(event: &notify::Event) -> bool {
+    // Index discovery opens every rollout; forwarding read access would schedule another scan.
+    event.need_rescan() || !event.kind.is_access()
 }
 
 async fn debounce_loop(
@@ -115,6 +121,30 @@ fn collect_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use notify::event::{AccessKind, AccessMode, Flag, ModifyKind};
+
+    #[test]
+    fn access_events_are_ignored_unless_they_request_a_rescan() {
+        for kind in [
+            AccessKind::Read,
+            AccessKind::Open(AccessMode::Read),
+            AccessKind::Close(AccessMode::Read),
+            AccessKind::Close(AccessMode::Write),
+        ] {
+            let access = notify::Event::new(notify::EventKind::Access(kind));
+            assert!(!should_forward_event(&access));
+        }
+
+        let rescan =
+            notify::Event::new(notify::EventKind::Access(AccessKind::Read)).set_flag(Flag::Rescan);
+        assert!(should_forward_event(&rescan));
+    }
+
+    #[test]
+    fn mutation_events_are_forwarded() {
+        let event = notify::Event::new(notify::EventKind::Modify(ModifyKind::Any));
+        assert!(should_forward_event(&event));
+    }
 
     #[tokio::test]
     async fn queue_overflow_requests_full_reconcile() {
