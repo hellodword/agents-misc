@@ -1,27 +1,16 @@
 ---
 name: environment-troubleshooting
-description: Use this when work is blocked by a devcontainer, Nix, browser, SQLite, filesystem, PATH, permissions, or a missing local tool.
+description: Diagnose blockers involving devcontainers, Nix, browsers, SQLite, filesystems, PATH, permissions, or missing local tools and retry the narrow command. Use when environment failure blocks work; do not use to mutate the host, globally install tools, or redesign a working project environment.
 ---
 
 # Environment Troubleshooting
 
-## Purpose
-
-Diagnose local environment blockers without global installation or system mutation.
-
-## Workflow
-
-1. Capture the failing command and exact error.
-2. Classify the blocker: missing project tool, missing environment capability, container limitation, PATH issue, browser/display issue, SQLite/filesystem permission, or upstream build issue.
-3. Inspect relevant tracked `.devcontainer/**` or `.vscode/**` configuration when it can explain the environment.
-4. Check project-provided commands and locked dependencies first.
-5. Use the project's declared toolchain for project tools and ordinary PATH lookup for environment capabilities; do not introduce Nix as a diagnostic side effect.
-6. Do not use global installs, host package managers, or system mutation.
-7. Put temporary diagnostic output under the project's confirmed ignored temp path.
-8. If a durable project tool is missing and edits are authorized, add it through the existing project environment.
-9. If resolution requires a user-controlled host or container change, report the exact requirement.
-10. Re-run the narrow failing command.
-
-## Output
-
-Report the blocker class, evidence, change or user action needed, command retried, and result.
+1. Capture the narrow failing command and exact error.
+2. Classify the blocker as a missing project tool, missing environment capability, container limitation, PATH problem, browser/display issue, SQLite/filesystem permission, or upstream build failure.
+3. Inspect only relevant tracked `.devcontainer/**`, `.vscode/**`, project commands, toolchain files, and lockfiles.
+4. Discover project tools through the declared environment and environment capabilities through ordinary `PATH` lookup.
+5. Do not introduce Nix as a diagnostic side effect, use global installs, invoke a host package manager, or mutate system configuration.
+6. Put one-off diagnostics under a confirmed ignored `tmp/agent/<task-id>/` path and clean them up. Use the system temporary directory when no project temp path is confirmed.
+7. If a durable project tool is missing and edits are authorized, add it through the existing project environment and validate its consumer.
+8. If resolution requires a user-controlled host/container change, state the exact capability or permission required.
+9. Re-run the narrow command and report blocker class, evidence, change or user action, retry, outcome, and remaining limitation.

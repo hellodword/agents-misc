@@ -1,28 +1,17 @@
 ---
 name: browser-e2e
-description: Use this when durable Playwright browser validation or project-owned E2E tests are needed. Do not use for ordinary non-browser tests.
+description: Add or run durable, project-owned Playwright tests for browser-specific behavior and primary user flows. Use for trusted local applications when lower-level tests cannot cover the boundary; do not use for ordinary tests, arbitrary external pages, untrusted browsing sessions, or screenshot-only review.
 ---
 
-# Browser E2E Workflow
+# Browser E2E
 
-## Purpose
-
-Implement the smallest meaningful browser regression flow using the project's established browser runner. Apply the shared system-browser policy only for a greenfield Playwright setup or a project that explicitly adopts it.
-
-## Workflow
-
-1. Define the user flow and expected observable behavior.
-2. Keep regression-worthy tests in project files such as `e2e/*.spec.ts` and expose them through a package script.
-3. Preserve existing runner/config/browser behavior. For a new Playwright setup, use a project-local locked `@playwright/test` dev dependency and npm.
-4. Under the shared system-browser policy, put selection in project Playwright configuration or a copied project helper following `.agents/references/playwright-system-browser.ts`. The agent does not probe browsers.
-5. Search order must be `google-chrome`, `chromium`, then `microsoft-edge`.
-6. Default to headful. Fail clearly when no browser or display is available; never install a browser or silently switch to headless.
-7. Inside a container, add `--no-sandbox`; if `/dev/shm` is below 1 GiB, also add `--disable-dev-shm-usage`.
-8. Prefer accessibility-first locators and stable behavioral assertions.
-9. Preserve every project-configured artifact root. If none exists, use `tmp/playwright/`.
-10. For every selected root inside the worktree, confirm that Git ignore rules cover it; an existing broader rule is sufficient. Add the narrowest ignore entry when an existing configured root is not ignored. Report an outside-worktree root instead of adding an ignore entry.
-11. Store traces, videos, screenshots, downloads, and profiles only under the selected roots.
-
-## Validation report
-
-Report the durable test and package script, selected project-owned helper/config behavior, command and result, every actual artifact root and how its ignore or outside-worktree status was verified, and environment blockers.
+1. Define the smallest browser-specific user flow and its observable assertions.
+2. Use the project's existing browser runner and configuration. For a new Playwright setup, use a project-local locked dependency and the established package manager.
+3. Keep durable tests in project-owned files and expose them through a package script.
+4. Apply [the system-browser helper](assets/playwright-system-browser.ts) only for a new policy or a project that explicitly adopts it; copy it into project-owned code rather than importing from the skill.
+5. Preserve the required search order: `google-chrome`, `chromium`, then `microsoft-edge`.
+6. Run headful. Fail clearly when no supported browser or Linux display exists; never download a browser or silently switch to headless.
+7. Add `--no-sandbox` only inside a detected container. Add `--disable-dev-shm-usage` only there when `/dev/shm` is below 1 GiB.
+8. Use accessibility-first locators and stable behavioral assertions. Do not navigate arbitrary external pages or execute an untrusted browsing session.
+9. Preserve configured artifact roots. If none exists, use an ignored `tmp/playwright/` path. Confirm every in-worktree trace, video, screenshot, download, report, and profile root is ignored.
+10. Report the durable test, package command, helper/config behavior, actual artifact roots and ignore evidence, command result, and environment blockers.

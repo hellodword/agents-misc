@@ -1,80 +1,72 @@
 # Agent Rules Kit
 
-This repository provides a reusable, project-scoped `AGENTS.md` rule system for coding agents. A project opts in by making `AGENTS.md` and `.agents/` available at its root; these instructions are not intended as universal global defaults.
+Agent Rules Kit is a small, project-scoped instruction payload for coding agents. It uses the open [AGENTS.md format](https://agents.md/) for shared instructions and the open [Agent Skills specification](https://agentskills.io/specification) for on-demand workflows.
 
-## Structure
+## Distribution boundary
 
-- `AGENTS.md`: compact entrypoint, priority, safety, and overlay discovery protocol.
-- `.agents/manifest.json`: kit identity and versioned metadata dimensions.
-- `.agents/rules/`: focused shared rules loaded on demand.
-- `.agents/skills/`: reusable workflows loaded only when routed or relevant.
-- `.agents/templates/`: consumer-facing artifact templates and output schemas, including the shared-rules lock schema.
-- `.agents/references/`: examples and longer reference material.
-- `.project-agent/`: this repository's maintenance overlay; it is not part of the distributed kit.
-- `schemas/agent-rules/`: central-maintenance schemas for kit metadata.
-- `scripts/check-agent-rules.py`: structural validator for the rules kit.
+Only [AGENTS.md](AGENTS.md) and `.agents/**` are distributed. Consuming repositories provide both at their root and normally mount or copy them read-only. The external distribution system chooses and records a Git commit, version, or tag; this repository does not maintain a payload version or consumer lock.
 
-## Project overlay
-
-Project facts, architecture, contracts, mandatory constraints, and project-specific workflows belong in a local overlay rather than shared defaults:
-
-```text
-.project-agent/
-  project.md
-  route-map.md
-  shared-rules.lock
-  rules/
-    mandatory.md
-  workflows/
-contracts/
-docs/
-  architecture/
-  adr/
-```
-
-Agents read `AGENTS.md` first, discover overlay entrypoints by path existence, prefer project routing, and load only the rules and documents relevant to the current task. If no overlay exists, shared defaults still apply.
-
-## Shared-rules lock
-
-The kit identity and version dimensions live in `.agents/manifest.json`. A consuming project records its expected values in `.project-agent/shared-rules.lock`:
-
-```json
-{
-  "schema_version": "<lock-schema-version>",
-  "expected_name": "<kit-name>",
-  "expected_version": "<kit-version>",
-  "expected_manifest_schema_version": "<manifest-schema-version>",
-  "expected_rules_schema_version": "<rules-schema-version>",
-  "expected_skills_schema_version": "<skills-schema-version>",
-  "expected_overlay_discovery_version": "<overlay-discovery-version>",
-  "expected_companion_metadata_version": "<companion-metadata-version>"
-}
-```
-
-Replace every placeholder before validating or using the lock. Validate it against `.agents/templates/shared-rules-lock.schema.json` when a validator is available. A missing, malformed, or mismatched lock is advisory: agents report the exact issue, continue otherwise safe local work, and never rewrite the lock automatically.
+Repository maintenance files such as `.project-agent/**`, the checker, tests, Just recipes, and Nix checks are not part of the payload. The unrelated `codex/**`, `tools/**`, and `.github/**` trees are outside rules-kit maintenance.
 
 ## Loading model
 
-Use `.project-agent/route-map.md` first when present, then `.agents/rules/route-map.md`. Keep each task's rule set small. `required_rules` are mandatory one-hop imports. Conditional rules, skills, templates, and references load only when their `when` condition applies. Companion loading never recurses.
+A consumer has one fixed overlay entrypoint: `.project-agent/project.md`. That file links requirements directly and states when they apply:
 
-## Validation
+```md
+# Project instructions
 
-Run the structural checker after changing rules, skills, schemas, references, routing, or manifest metadata:
-
-```sh
-just check-agent-rules
+| When                       | Read                                  |
+| -------------------------- | ------------------------------------- |
+| Any tracked product change | [Mandatory rules](rules/mandatory.md) |
+| Public API work            | [HTTP contract](../contracts/http.md) |
 ```
 
-The checker validates frontmatter, identities, companion references, route coverage, the manifest, and JSON Schema dialects and structure.
+Agents read the project entrypoint, follow only the directly applicable links, then route shared guidance through [.agents/rules/index.md](.agents/rules/index.md). There is no recursive metadata or hidden dependency traversal.
 
-## Maintenance
+## What belongs where
 
-When changing the kit:
+- A **rule** is always-applicable guidance for a recognizable technical boundary. Rules are plain Markdown with one H1 and no YAML frontmatter.
+- A **skill** is a procedural workflow worth loading only for a particular task. Each `SKILL.md` uses only the required `name` and `description` frontmatter.
+- A skill-local **asset** is a template, schema, or reusable source file consumed by that workflow.
+- A skill-local **reference** is longer optional guidance that the workflow tells the agent when to read.
 
-1. Follow this repository's `.project-agent/` maintenance overlay; do not place checker or schema-maintenance instructions in the distributed payload.
-2. Give every rule frontmatter fields `id`, `kind`, `triggers`, `summary`, and `companions`.
-3. Give every skill frontmatter fields `name` and `description`.
-4. Add rules and skills to `.agents/rules/route-map.md`.
-5. Put reusable workflows under `.agents/skills/`, consumer-facing artifact structures under `.agents/templates/`, central metadata schemas under `schemas/agent-rules/`, and longer consumer guidance under `.agents/references/`.
-6. Update `.agents/manifest.json` and lock documentation when versioned contracts change.
-7. Run the structural checker and the narrow validation relevant to the change.
+Keep supporting files beside their owning skill and link them directly from `SKILL.md`. Do not create global template or reference catalogs.
+
+## Shared rules
+
+The 19 flat rules are:
+
+- `index.md`, `defaults.md`, `architecture.md`, `environment.md`, `scripts.md`
+- `security.md`, `contracts.md`, `data.md`, `dependencies.md`, `testing.md`
+- `formatting.md`, `generated-artifacts.md`, `cli.md`, `go.md`, `rust.md`
+- `web.md`, `flutter-rust.md`, `nix.md`, `github-actions.md`
+
+## Workflow skills
+
+The 10 skills are:
+
+- `ai-visual-review`
+- `atomic-commit`
+- `browser-e2e`
+- `compatibility-review`
+- `environment-troubleshooting`
+- `generated-artifacts-review`
+- `nix-workflow`
+- `pure-patch-workflow`
+- `sqlite-migration-backup`
+- `standalone-final-execution-plan`
+
+## Maintenance and validation
+
+Read [.project-agent/project.md](.project-agent/project.md) before modifying the kit. The required checks are:
+
+```sh
+nix fmt
+nix develop .#dev --command python3 scripts/check-agent-rules.py --root .
+nix develop .#dev --command python3 -m unittest discover -s tests -p 'test_*.py'
+nix build --no-link .#checks.x86_64-linux.agent-rules
+nix flake check
+git status --short --ignored
+```
+
+The deterministic checker validates structure, links, skill ownership, JSON Schemas, and the scenario-eval corpus. The eval cases are repository fixtures for human or fresh-agent regression; CI validates their structure and coverage without using an LLM as a gate. Maintenance checks require no new task-created temporary artifacts; pre-existing ignored work is preserved and disclosed rather than deleted incidentally.

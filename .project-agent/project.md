@@ -2,6 +2,6 @@
 
 This repository is the upstream maintenance source for the shared `AGENTS.md` and `.agents/**` payload.
 
-Consuming projects receive only that payload and extend it through their own `.project-agent/**`. Repository-only maintenance rules, schemas, scripts, and checks must not be referenced by the distributed payload.
+The `codex/**`, `tools/**`, and `.github/**` trees are outside rules-kit maintenance.
 
-Use `.project-agent/route-map.md` for maintenance routing.
+When changing `AGENTS.md`, `.agents/**`, `README.md`, `scripts/check-agent-rules.py`, `tests/**`, `justfile`, or the Nix check wiring, read [the maintenance rules](rules/maintenance.md).

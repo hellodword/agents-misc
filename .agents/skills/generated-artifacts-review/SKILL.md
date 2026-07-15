@@ -1,35 +1,15 @@
 ---
 name: generated-artifacts-review
-description: Use this when code generation, bindings, SQLx metadata, bridge files, API clients, parser output, snapshots, or generated source files are added or changed.
+description: Decide ownership, tracking, reproducibility, and validation for generated bindings, metadata, clients, parser output, snapshots, or source. Use when generated files are added or changed; do not use for ordinary handwritten source or transient build/runtime output that must remain ignored.
 ---
 
 # Generated Artifacts Review
 
-## Purpose
-
-Decide whether generated files should be committed and how to keep generation reproducible.
-
-## Workflow
-
-1. Identify generated files and their generator.
-2. Identify tracked inputs.
-3. Identify whether the generated files are imported by source, required by build/tests/runtime, or expected by upstream.
-4. Verify generator tooling is pinned by the project's reproducible toolchain or lockfile.
-5. Verify the generation command is documented through the project's command system or docs.
-6. Check for timestamps, absolute paths, random ids, machine-specific data, or nondeterministic ordering.
-7. Commit durable generated outputs when required and reproducible; project convention is evidence, not a prerequisite.
-8. Do not commit runtime/build outputs.
-9. For pure patch projects, follow upstream convention.
-10. Report the decision for each generated file group.
-
-## Output
-
-For each group:
-
-- commit or ignore;
-- reason;
-- generator;
-- tracked inputs;
-- command;
-- reproducibility risks;
-- validation performed.
+1. Group generated files by generator and identify tracked inputs.
+2. Identify the build, test, runtime, packaging, or downstream consumer for each group.
+3. Mark a group for tracking only when the consumer requires it and generation is reproducible. Mark build/runtime output for ignore.
+4. Verify the generator is pinned by the project environment or lockfile and the command is documented through the established command system.
+5. Check output for timestamps, absolute paths, random IDs, machine values, unstable ordering, and inappropriate size.
+6. Run the generator, validate a real consumer, then run generation again and require no diff.
+7. For pure patch work, follow upstream tracking conventions and keep required generated changes reviewable.
+8. Report for each group: track or ignore, reason, generator, inputs, command, consumer validation, reproducibility risks, and second-run result.

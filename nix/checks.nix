@@ -21,7 +21,7 @@ lib.genAttrs supportedSystems (
     agent-rules = pkgs.runCommand "agent-rules-check" { nativeBuildInputs = [ agentRulesPython ]; } ''
       cd ${../.}
       python3 scripts/check-agent-rules.py --root .
-      python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+      python3 -m unittest discover -s tests -p 'test_*.py'
       touch "$out"
     '';
     codex-config-atlas-registry = codexConfigAtlas.checkConfigAtlasRegistry;
