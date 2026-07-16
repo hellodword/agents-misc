@@ -85,12 +85,12 @@ test("indexes an empty cache, searches content, reloads a deep link, and exposes
       .locator("xpath=../ul")
       .locator('a[href="/sessions/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"]'),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Filter" }).click();
+  await page.getByRole("button", { name: "Settings" }).click();
   await page.getByLabel("Source").selectOption("exec");
   await page.getByRole("button", { name: "Apply" }).click();
   await expect(planParent).toBeVisible();
   await expect(planChild).toBeVisible();
-  await page.getByRole("button", { name: "Filter" }).click();
+  await page.getByRole("button", { name: "Settings" }).click();
   await page.getByRole("button", { name: "Reset" }).click();
   await page.getByRole("button", { name: "Apply" }).click();
   await expect(page.getByText("Pagination message 109").first()).toBeVisible();
@@ -195,6 +195,59 @@ test("indexes an empty cache, searches content, reloads a deep link, and exposes
     .getByRole("button", { name: "Close inspector" })
     .click();
   await expect(page.locator("#entry-inspector")).toHaveCount(0);
+});
+
+test("persists a resized or collapsed sidebar without inspector resets", async ({
+  page,
+}) => {
+  const sidebarPanel = page.locator("#sessions-panel");
+  const handle = page.locator(".sidebar-handle");
+  const initialBox = await sidebarPanel.boundingBox();
+  expect(initialBox).not.toBeNull();
+  const gripBox = await handle.locator("div").boundingBox();
+  expect(gripBox).not.toBeNull();
+  const gripX = gripBox!.x + gripBox!.width / 2;
+  const gripY = gripBox!.y + gripBox!.height / 2;
+  await page.mouse.move(gripX, gripY);
+  await page.mouse.down();
+  await page.mouse.move(gripX + 84, gripY, { steps: 8 });
+  await page.mouse.up();
+
+  await expect
+    .poll(async () => (await sidebarPanel.boundingBox())?.width ?? 0)
+    .toBeGreaterThan(initialBox!.width + 50);
+  const persistedWidth = Number(
+    await page.evaluate(() =>
+      localStorage.getItem("agents-viewer-sidebar-width"),
+    ),
+  );
+  expect(persistedWidth).toBeGreaterThan(initialBox!.width + 50);
+
+  await page.getByRole("button", { name: "Open inspector" }).last().click();
+  await expect(page.locator("#entry-inspector")).toBeVisible();
+  await page
+    .locator("#entry-inspector")
+    .getByRole("button", { name: "Close inspector" })
+    .click();
+  await expect
+    .poll(async () => (await sidebarPanel.boundingBox())?.width ?? 0)
+    .toBeCloseTo(persistedWidth, 0);
+
+  await page.getByRole("button", { name: "Collapse sessions" }).click();
+  await expect
+    .poll(async () => (await sidebarPanel.boundingBox())?.width ?? 0)
+    .toBeLessThan(1);
+  await page.reload();
+  await expect(
+    page.getByRole("button", { name: "Expand sessions" }),
+  ).toBeVisible();
+  await expect
+    .poll(async () => (await sidebarPanel.boundingBox())?.width ?? 0)
+    .toBeLessThan(1);
+  await page.getByRole("button", { name: "Expand sessions" }).click();
+  await expect
+    .poll(async () => (await sidebarPanel.boundingBox())?.width ?? 0)
+    .toBeCloseTo(persistedWidth, 0);
 });
 
 test("renders multiple request_user_input questions as responsive poll messages", async ({
@@ -306,7 +359,7 @@ test("renders multiple request_user_input questions as responsive poll messages"
       elements.every((element, index) => {
         const box = element.getBoundingClientRect();
         const previous = elements[index - 1]?.getBoundingClientRect();
-        return !previous || box.top >= previous.bottom;
+        return !previous || box.top - previous.bottom >= 7.5;
       }),
     ),
   ).toBe(true);
@@ -350,22 +403,29 @@ test("supports locale, theme, keyboard focus, responsive sheets, and accessibili
   await expect(
     page.locator(".session-item .session-preview").first(),
   ).toBeVisible();
-  await page.getByLabel("Language").selectOption("zh-CN");
-  await expect(page.getByText("Agents Viewer")).toBeVisible();
-  await page.getByRole("button", { name: "筛选" }).click();
-  await expect(page.getByRole("option", { name: "代码审查" })).toBeAttached();
-  await page.getByText("这些来源分别是什么意思？").click();
+  await page.getByRole("button", { name: "Settings" }).click();
   await expect(
-    page.getByText("由 codex exec 启动的非交互任务。"),
+    page.getByRole("option", { name: "Code review" }),
+  ).toBeAttached();
+  await page.getByText("What do these sources mean?").click();
+  await expect(
+    page.getByText("Non-interactive codex exec tasks."),
   ).toBeVisible();
-  await page.getByLabel("归档").selectOption("only");
-  await page.getByRole("button", { name: "应用" }).click();
-  await page.getByRole("button", { name: "主题" }).click();
-  await page.getByRole("menuitemradio", { name: "深色" }).click();
+  await page.getByLabel("Language").selectOption("zh-CN");
+  await page.getByLabel("Theme").selectOption("dark");
+  await page
+    .getByRole("checkbox", { name: /Use Ctrl\+Shift\+F to search/ })
+    .check();
+  await page.getByRole("button", { name: "Apply" }).click();
   await expect(page.locator("html")).toHaveClass(/dark/);
+  expect(
+    await page.evaluate(() =>
+      localStorage.getItem("agents-viewer-search-ctrl-shift-f"),
+    ),
+  ).toBe("true");
 
   await page.getByRole("button", { name: "搜索" }).focus();
-  await page.keyboard.press("Control+k");
+  await page.keyboard.press("Control+Shift+F");
   await expect(page.getByRole("dialog", { name: "搜索" })).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("button", { name: "搜索" })).toBeFocused();
@@ -373,7 +433,10 @@ test("supports locale, theme, keyboard focus, responsive sheets, and accessibili
   await page.setViewportSize({ width: 900, height: 800 });
   await expect(
     page.getByRole("banner").getByRole("button", { name: "打开检查器" }),
-  ).toBeVisible();
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "打开检查器" }).last().click();
+  await expect(page.getByRole("dialog", { name: "检查器" })).toBeVisible();
+  await page.keyboard.press("Escape");
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole("button", { name: "打开会话列表" }).click();
   await expect(page.getByRole("dialog", { name: "会话" })).toBeVisible();
@@ -501,14 +564,14 @@ test("measures mixed-height transcript rows after updates, jumps, and responsive
   page,
   rollout,
 }) => {
-  await page.getByRole("button", { name: "Filter" }).click();
+  await page.getByRole("button", { name: "Settings" }).click();
   await page.getByRole("checkbox", { name: /Show technical activity/ }).check();
   await page.getByRole("button", { name: "Apply" }).click();
 
-  const longMessage = Array.from(
-    { length: 36 },
+  const longMessage = `${Array.from(
+    { length: 180 },
     (_, index) => `Long line ${index}: ${"content ".repeat(12)}`,
-  ).join("\n");
+  ).join("\n")}\n\nLong content end sentinel`;
   const records = [
     {
       timestamp: "2025-01-02T03:08:00.000Z",
@@ -565,6 +628,7 @@ test("measures mixed-height transcript rows after updates, jumps, and responsive
   await expect(page.getByText("Geometry sentinel")).toBeVisible({
     timeout: 8_000,
   });
+  await expect(page.getByText("Long content end sentinel")).toBeAttached();
   const multiLineActivity = page.getByRole("button", {
     name: /Executing: printf first/,
   });

@@ -13,6 +13,11 @@
   --danger: #dc2626;
   --warn: #d97706;
   --radius: 7px;
+  --topbar-height: 44px;
+  --transcript-bg: #f4f6f8;
+  --assistant-bubble: #fff;
+  --user-bubble: #eaf2ff;
+  --user-bubble-border: #b8cff7;
   color-scheme: light;
 }
 .dark {
@@ -25,6 +30,10 @@
   --accent: #3b82f6;
   --danger: #ef4444;
   --warn: #f59e0b;
+  --transcript-bg: #101014;
+  --assistant-bubble: #18181b;
+  --user-bubble: #111d31;
+  --user-bubble-border: #2e5d9f;
   color-scheme: dark;
 }
 * {
@@ -84,7 +93,7 @@ button {
 .app {
   height: 100%;
   display: grid;
-  grid-template-rows: 44px minmax(0, 1fr);
+  grid-template-rows: var(--topbar-height) minmax(0, 1fr);
 }
 .topbar {
   display: flex;
@@ -104,6 +113,12 @@ button {
 }
 .layout {
   min-height: 0;
+}
+.panel-handle-hidden {
+  width: 0 !important;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
 }
 .sidebar,
 .inspector {
@@ -150,7 +165,7 @@ button {
 .conversation-head h1 {
   font-size: 17px;
   margin: 0;
-  max-width: 960px;
+  max-width: 1200px;
 }
 .transcript {
   flex: 1;
@@ -158,7 +173,7 @@ button {
   position: relative;
 }
 .transcript-inner {
-  width: min(100%, 960px);
+  width: min(100%, 1200px);
   margin: 0 auto;
   position: relative;
 }
@@ -216,10 +231,6 @@ mark {
   background: #fde68a;
   color: #422006;
 }
-.settings {
-  display: flex;
-  gap: 6px;
-}
 .mobile-only {
   display: none;
 }
@@ -227,6 +238,9 @@ mark {
   display: block;
 }
 @media (max-width: 767px) {
+  :root {
+    --topbar-height: 52px;
+  }
   .app {
     width: 100vw;
     min-width: 0;
@@ -235,24 +249,26 @@ mark {
   .topbar {
     min-width: 0;
     overflow: hidden;
-  }
-  .layout {
-    display: block;
-  }
-  .sidebar {
-    display: none;
+    gap: 6px;
+    padding: 0 6px;
   }
   .conversation-head {
     padding: 10px 12px;
   }
   .mobile-only {
-    display: inline-block;
+    display: inline-flex;
+  }
+  .desktop-sidebar-toggle {
+    display: none !important;
   }
   .brand {
     font-size: 13px;
+    white-space: nowrap;
   }
-  .settings select {
-    max-width: 90px;
+  .topbar button {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
   }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -318,7 +334,7 @@ mark {
 .index-progress {
   position: fixed;
   z-index: 30;
-  top: 42px;
+  top: calc(var(--topbar-height) - 2px);
   left: 0;
   width: 100%;
   height: 2px;
@@ -333,9 +349,6 @@ mark {
   background: var(--panel);
 }
 @media (max-width: 767px) {
-  .layout {
-    display: block;
-  }
   .layout > [data-panel]:has(> .sidebar) {
     display: none !important;
   }
@@ -351,8 +364,8 @@ mark {
   }
 }
 
-/* Filters and Telegram-style session list */
-.filter-count {
+/* Settings and Telegram-style session list */
+.settings-count {
   display: grid;
   min-width: 18px;
   height: 18px;
@@ -364,19 +377,19 @@ mark {
   font-size: 10px;
   font-weight: 700;
 }
-.filter-dialog {
-  width: min(520px, calc(100vw - 24px));
-  max-width: 520px;
+.settings-dialog {
+  width: min(560px, calc(100vw - 24px));
+  max-width: 560px;
   max-height: min(760px, calc(100vh - 24px));
   min-width: 0;
   overflow: auto;
 }
-.filter-form {
+.settings-form {
   display: grid;
-  gap: 16px;
+  gap: 12px;
   min-width: 0;
 }
-.filter-form fieldset {
+.settings-form fieldset {
   display: grid;
   min-width: 0;
   gap: 7px;
@@ -384,7 +397,7 @@ mark {
   border: 0;
   padding: 0;
 }
-.filter-form legend {
+.settings-form legend {
   margin-bottom: 3px;
   font-size: 12px;
   font-weight: 700;
@@ -392,21 +405,21 @@ mark {
   letter-spacing: 0.06em;
   color: var(--muted);
 }
-.filter-form label:not(.technical-filter) {
+.settings-form label:not(.technical-filter) {
   font-size: 12px;
   font-weight: 600;
 }
-.filter-form .select,
-.filter-form input {
+.settings-form .select,
+.settings-form input {
   min-width: 0;
 }
-.filter-actions {
+.settings-actions {
   display: flex;
   align-items: center;
   width: 100%;
   padding-top: 3px;
 }
-.filter-action-spacer {
+.settings-action-spacer {
   flex: 1;
 }
 .technical-filter,
@@ -658,7 +671,7 @@ mark {
 }
 .conversation-cwd {
   margin-top: 3px;
-  max-width: 960px;
+  max-width: 1200px;
 }
 .inspector-head {
   display: flex;
@@ -689,7 +702,7 @@ mark {
 .source-help dd {
   margin: 0;
 }
-.filter-help {
+.settings-help {
   margin: 5px 0 0;
   color: var(--muted);
   font-size: 11px;
@@ -731,7 +744,7 @@ mark {
   flex: 1;
   min-height: 0;
   overflow: hidden;
-  background: color-mix(in srgb, var(--panel) 55%, var(--bg));
+  background: var(--transcript-bg);
 }
 .transcript {
   height: 100%;
@@ -739,11 +752,11 @@ mark {
   scrollbar-gutter: stable;
 }
 .transcript-inner {
-  width: min(100%, 960px);
+  width: min(100%, 1200px);
   padding-bottom: 16px;
 }
 .entry-wrap {
-  padding: 3px 22px;
+  padding: 4px 22px;
 }
 .date-divider {
   display: flex;
@@ -774,19 +787,19 @@ mark {
 }
 .message-bubble {
   position: relative;
-  max-width: min(78%, 720px);
+  max-width: min(85%, 960px);
   min-width: 96px;
   border: 1px solid var(--border);
   border-radius: 17px;
-  background: var(--bg);
+  background: var(--assistant-bubble);
   padding: 9px 11px 5px;
   box-shadow: 0 1px 2px rgb(0 0 0/0.06);
   overflow-wrap: anywhere;
 }
 .message-user .message-bubble {
   border-bottom-right-radius: 5px;
-  border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
-  background: color-mix(in srgb, var(--accent) 12%, var(--bg));
+  border-color: var(--user-bubble-border);
+  background: var(--user-bubble);
 }
 .message-assistant .message-bubble {
   border-bottom-left-radius: 5px;
@@ -804,6 +817,20 @@ mark {
   min-height: 18px;
   margin-top: 1px;
   color: var(--muted);
+}
+.message-load-status {
+  margin: 5px 0 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.message-load-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 7px 0 3px;
+  color: var(--danger);
+  font-size: 11px;
 }
 .message-action {
   width: 24px !important;
@@ -850,12 +877,12 @@ mark {
 }
 .request-user-input-message-group {
   display: grid;
-  gap: 4px;
+  gap: 8px;
   width: 100%;
   min-width: 0;
 }
 .request-user-input-poll {
-  width: min(78%, 560px);
+  width: min(85%, 720px);
   min-width: min(280px, 100%);
   padding: 10px 11px 5px;
 }
@@ -1145,36 +1172,47 @@ mark {
 
 @media (max-width: 767px) {
   .entry-wrap {
-    padding: 3px 9px;
+    padding: 4px 9px;
   }
   .message-bubble {
-    max-width: 90%;
+    max-width: 94%;
     border-radius: 15px;
   }
   .request-user-input-poll {
-    width: min(90%, 560px);
+    width: min(94%, 720px);
   }
   .message-action {
-    width: 28px !important;
-    height: 28px !important;
-    min-height: 28px !important;
+    width: 44px !important;
+    height: 44px !important;
+    min-height: 44px !important;
     opacity: 0.8;
   }
   .transcript-nav {
     right: 10px;
     bottom: 12px;
   }
-  .filter-dialog {
-    max-height: calc(100vh - 16px);
+  .settings-dialog {
+    width: calc(100vw - 16px);
+    max-height: calc(100dvh - 16px);
   }
-  .filter-actions {
+  .settings-actions {
     display: grid;
     grid-template-columns: 1fr 1fr;
+    position: sticky;
+    bottom: -1px;
+    background: var(--bg);
+    padding-top: 10px;
   }
-  .filter-action-spacer {
+  .settings-action-spacer {
     display: none;
   }
-  .filter-actions > button:first-child {
+  .settings-actions > button:first-child {
     grid-column: 1/-1;
+  }
+}
+
+@media (max-width: 359px) {
+  .index-live {
+    display: none;
   }
 }

@@ -4,10 +4,12 @@ import {
   ArrowUpToLine,
   Check,
   Copy,
-  Filter,
   Menu,
+  PanelLeftClose,
+  PanelLeftOpen,
   PanelRight,
   Search,
+  Settings as SettingsIcon,
   X,
 } from "lucide-react";
 import {
@@ -49,23 +51,15 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuLabel,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import {
   ResizableHandle,
   ResizablePanel,
   ResizablePanelGroup,
+  usePanelRef,
 } from "@/components/ui/resizable";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Separator } from "@/components/ui/separator";
 import {
   Sheet,
   SheetContent,
@@ -92,7 +86,32 @@ import type {
   TranscriptEntry,
 } from "@/generated/api";
 import { api, ApiClientError, subscribeEvents } from "@/lib/api";
-import i18n, { setLanguage } from "@/lib/i18n";
+import i18n, {
+  preferredLanguage,
+  setLanguage,
+  type SupportedLanguage,
+} from "@/lib/i18n";
+
+type ThemeValue = "light" | "dark" | "system";
+
+const SIDEBAR_DEFAULT_WIDTH = 300;
+const SIDEBAR_MIN_WIDTH = 240;
+const SIDEBAR_MAX_WIDTH = 480;
+const INSPECTOR_DEFAULT_WIDTH = 360;
+
+function storedTheme(): ThemeValue {
+  const value = localStorage.getItem("agents-viewer-theme");
+  return value === "light" || value === "dark" || value === "system"
+    ? value
+    : "system";
+}
+
+function storedSidebarWidth() {
+  const value = Number(localStorage.getItem("agents-viewer-sidebar-width"));
+  return Number.isFinite(value) && value >= SIDEBAR_MIN_WIDTH
+    ? Math.min(SIDEBAR_MAX_WIDTH, value)
+    : SIDEBAR_DEFAULT_WIDTH;
+}
 
 export function App() {
   const { t, i18n } = useTranslation();
@@ -112,11 +131,13 @@ export function App() {
     () => localStorage.getItem("agents-viewer-show-technical") === "true",
   );
   const [forcedTechnical, setForcedTechnical] = useState(false);
-  const [theme, setTheme] = useState<"light" | "dark" | "system">(
-    (localStorage.getItem("agents-viewer-theme") ?? "system") as
-      | "light"
-      | "dark"
-      | "system",
+  const [theme, setTheme] = useState<ThemeValue>(storedTheme);
+  const [searchCtrlShiftF, setSearchCtrlShiftF] = useState(
+    () => localStorage.getItem("agents-viewer-search-ctrl-shift-f") === "true",
+  );
+  const [sidebarWidth] = useState(storedSidebarWidth);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => localStorage.getItem("agents-viewer-sidebar-collapsed") === "true",
   );
   const [selectedEntry, setSelectedEntry] = useState<{
     sessionId: string;
@@ -124,6 +145,9 @@ export function App() {
   }>();
   const [compactInspector, setCompactInspector] = useState(
     () => matchMedia("(max-width:1199px)").matches,
+  );
+  const [compactNavigation, setCompactNavigation] = useState(
+    () => matchMedia("(max-width:767px)").matches,
   );
   const [conversationSignals, setConversationSignals] = useState<
     Record<string, number>
@@ -137,6 +161,11 @@ export function App() {
   );
   const sessionRefreshTimer = useRef<number | undefined>(undefined);
   const liveSequence = useRef(0);
+  const sidebarPanelRef = usePanelRef();
+  const inspectorPanelRef = usePanelRef();
+  const sidebarWidthRef = useRef(sidebarWidth);
+  const sidebarCollapsedRef = useRef(sidebarCollapsed);
+  const inspectorWidthRef = useRef(INSPECTOR_DEFAULT_WIDTH);
   const navigate = useNavigate();
   const location = useLocation();
   const openSearch = useCallback(() => {
@@ -257,6 +286,29 @@ export function App() {
     return () => media.removeEventListener("change", update);
   }, []);
   useEffect(() => {
+    const media = matchMedia("(max-width:767px)");
+    const update = () => setCompactNavigation(media.matches);
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  useEffect(() => {
+    if (compactNavigation) return;
+    sidebarCollapsedRef.current = sidebarCollapsed;
+    const frame = requestAnimationFrame(() => {
+      const panel = sidebarPanelRef.current;
+      if (!panel) return;
+      if (sidebarCollapsed) panel.collapse();
+      else panel.resize(`${sidebarWidthRef.current}px`);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [compactNavigation, sidebarCollapsed, sidebarPanelRef]);
+  useEffect(() => {
+    const panel = inspectorPanelRef.current;
+    if (!panel) return;
+    if (!inspectorOpen || compactInspector) panel.collapse();
+    else panel.resize(`${inspectorWidthRef.current}px`);
+  }, [compactInspector, inspectorOpen, inspectorPanelRef]);
+  useEffect(() => {
     setInspectorOpen(false);
     setSelectedEntry(undefined);
     setForcedTechnical(false);
@@ -267,7 +319,19 @@ export function App() {
       const input =
         event.target instanceof HTMLInputElement ||
         event.target instanceof HTMLTextAreaElement;
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+      if (
+        searchCtrlShiftF &&
+        event.ctrlKey &&
+        event.shiftKey &&
+        !event.metaKey &&
+        event.key.toLowerCase() === "f"
+      ) {
+        event.preventDefault();
+        openSearch();
+      } else if (
+        (event.metaKey || event.ctrlKey) &&
+        event.key.toLowerCase() === "k"
+      ) {
         event.preventDefault();
         openSearch();
       } else if (event.key === "/" && !input) {
@@ -305,9 +369,9 @@ export function App() {
     };
     addEventListener("keydown", handler);
     return () => removeEventListener("keydown", handler);
-  }, [closeSearch, openSearch, searchOpen]);
-  const changeTheme = (value: string) => {
-    setTheme(value as "light" | "dark" | "system");
+  }, [closeSearch, openSearch, searchCtrlShiftF, searchOpen]);
+  const changeTheme = useCallback((value: ThemeValue) => {
+    setTheme(value);
     localStorage.setItem("agents-viewer-theme", value);
     document.documentElement.classList.toggle(
       "dark",
@@ -315,7 +379,7 @@ export function App() {
         (value === "system" &&
           matchMedia("(prefers-color-scheme:dark)").matches),
     );
-  };
+  }, []);
   const closeInspector = useCallback(() => {
     setInspectorOpen(false);
     requestAnimationFrame(() => inspectorReturnFocus.current?.focus());
@@ -331,13 +395,8 @@ export function App() {
     },
     [],
   );
-  const applyFilters = useCallback(
-    (next: {
-      archived: "exclude" | "include" | "only";
-      source: string;
-      cwd: string;
-      showTechnical: boolean;
-    }) => {
+  const applySettings = useCallback(
+    (next: SettingsValues) => {
       setArchived(next.archived);
       setSource(next.source);
       setCwd(next.cwd);
@@ -347,9 +406,36 @@ export function App() {
         "agents-viewer-show-technical",
         String(next.showTechnical),
       );
+      setSearchCtrlShiftF(next.searchCtrlShiftF);
+      localStorage.setItem(
+        "agents-viewer-search-ctrl-shift-f",
+        String(next.searchCtrlShiftF),
+      );
+      changeTheme(next.theme);
+      setLanguage(next.language);
     },
-    [],
+    [changeTheme],
   );
+  const toggleSidebar = useCallback(() => {
+    const panel = sidebarPanelRef.current;
+    if (!panel) return;
+    if (panel.isCollapsed()) {
+      sidebarCollapsedRef.current = false;
+      setSidebarCollapsed(false);
+      localStorage.setItem("agents-viewer-sidebar-collapsed", "false");
+      panel.resize(`${sidebarWidthRef.current}px`);
+    } else {
+      const width = panel.getSize().inPixels;
+      if (width >= SIDEBAR_MIN_WIDTH) {
+        sidebarWidthRef.current = width;
+        localStorage.setItem("agents-viewer-sidebar-width", String(width));
+      }
+      sidebarCollapsedRef.current = true;
+      panel.collapse();
+      setSidebarCollapsed(true);
+      localStorage.setItem("agents-viewer-sidebar-collapsed", "true");
+    }
+  }, [sidebarPanelRef]);
   const effectiveTechnical = showTechnical || forcedTechnical;
   const sidebar = (
     <SessionSidebar
@@ -375,38 +461,62 @@ export function App() {
           >
             <Menu size={17} />
           </Button>
+          <Button
+            variant="outline"
+            size="icon"
+            className="desktop-sidebar-toggle"
+            aria-label={
+              sidebarCollapsed ? t("expandNavigation") : t("collapseNavigation")
+            }
+            aria-expanded={!sidebarCollapsed}
+            aria-controls="sessions-panel"
+            onClick={toggleSidebar}
+          >
+            {sidebarCollapsed ? (
+              <PanelLeftOpen size={17} />
+            ) : (
+              <PanelLeftClose size={17} />
+            )}
+          </Button>
           <span className="brand">{t("appName")}</span>
           <span className="top-spacer" />
           {status && (
-            <div
-              className="index-live"
-              role="status"
-              aria-live="polite"
-              aria-atomic="true"
-            >
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <span tabIndex={0}>
-                    <Badge
-                      variant={
-                        status.phase === "degraded" ? "destructive" : "outline"
-                      }
-                    >
-                      {indexStatusLabel(status, t)}
-                    </Badge>
-                  </span>
-                </TooltipTrigger>
-                <TooltipContent>
-                  {indexWindowLabel(status, t)} ·{" "}
-                  {t("indexCutoff", {
-                    cutoff: status.initialIndexCutoff
-                      ? new Date(status.initialIndexCutoff).toLocaleString()
-                      : t("none"),
-                    bytes: formatBytes(status.progress.excludedBytes),
-                  })}
-                </TooltipContent>
-              </Tooltip>
-            </div>
+            <>
+              <span
+                className="sr-only"
+                role="status"
+                aria-live="polite"
+                aria-atomic="true"
+              >
+                {indexStatusLabel(status, t)}
+              </span>
+              <div className="index-live">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span tabIndex={0}>
+                      <Badge
+                        variant={
+                          status.phase === "degraded"
+                            ? "destructive"
+                            : "outline"
+                        }
+                      >
+                        {indexStatusLabel(status, t)}
+                      </Badge>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    {indexWindowLabel(status, t)} ·{" "}
+                    {t("indexCutoff", {
+                      cutoff: status.initialIndexCutoff
+                        ? new Date(status.initialIndexCutoff).toLocaleString()
+                        : t("none"),
+                      bytes: formatBytes(status.progress.excludedBytes),
+                    })}
+                  </TooltipContent>
+                </Tooltip>
+              </div>
+            </>
           )}
           <Tooltip>
             <TooltipTrigger asChild>
@@ -422,69 +532,17 @@ export function App() {
             </TooltipTrigger>
             <TooltipContent>{t("search")}</TooltipContent>
           </Tooltip>
-          <FilterControl
+          <SettingsControl
             archived={archived}
             source={source}
             cwd={cwd}
             showTechnical={showTechnical}
             forcedTechnical={forcedTechnical}
-            onApply={applyFilters}
+            theme={theme}
+            language={i18n.language.startsWith("zh") ? "zh-CN" : "en"}
+            searchCtrlShiftF={searchCtrlShiftF}
+            onApply={applySettings}
           />
-          <Separator orientation="vertical" className="h-5" />
-          <div className="settings">
-            <label className="sr-only" htmlFor="language">
-              {t("language")}
-            </label>
-            <select
-              id="language"
-              className="select"
-              value={i18n.language.startsWith("zh") ? "zh-CN" : "en"}
-              onChange={(event) =>
-                setLanguage(event.target.value as "en" | "zh-CN")
-              }
-            >
-              <option value="en">{t("english")}</option>
-              <option value="zh-CN">{t("chinese")}</option>
-            </select>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="outline" size="sm" aria-label={t("theme")}>
-                  {t(theme)}
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuLabel>{t("theme")}</DropdownMenuLabel>
-                <DropdownMenuRadioGroup
-                  value={theme}
-                  onValueChange={changeTheme}
-                >
-                  <DropdownMenuRadioItem value="system">
-                    {t("system")}
-                  </DropdownMenuRadioItem>
-                  <DropdownMenuRadioItem value="light">
-                    {t("light")}
-                  </DropdownMenuRadioItem>
-                  <DropdownMenuRadioItem value="dark">
-                    {t("dark")}
-                  </DropdownMenuRadioItem>
-                </DropdownMenuRadioGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-          <Button
-            variant="outline"
-            size="sm"
-            className="inspector-button"
-            aria-label={
-              inspectorOpen ? t("closeInspector") : t("openInspector")
-            }
-            aria-expanded={inspectorOpen}
-            aria-controls="entry-inspector"
-            onClick={() => (inspectorOpen ? closeInspector() : openInspector())}
-          >
-            <PanelRight size={17} />
-            <span className="desktop-only">{t("inspector")}</span>
-          </Button>
         </header>
         {status &&
           (status.phase === "discovering" || status.phase === "indexing") && (
@@ -494,19 +552,61 @@ export function App() {
               className={`index-progress ${status.phase === "discovering" ? "indeterminate" : ""}`}
             />
           )}
-        <ResizablePanelGroup orientation="horizontal" className="layout">
+        <ResizablePanelGroup
+          id="viewer-layout"
+          orientation="horizontal"
+          className="layout"
+        >
           <ResizablePanel
-            defaultSize="300px"
-            minSize="240px"
-            maxSize="480px"
+            id="sessions-panel"
+            panelRef={sidebarPanelRef}
+            defaultSize={sidebarCollapsed ? "0px" : `${sidebarWidth}px`}
+            minSize={`${SIDEBAR_MIN_WIDTH}px`}
+            maxSize={`${SIDEBAR_MAX_WIDTH}px`}
+            collapsedSize="0px"
+            collapsible
+            groupResizeBehavior="preserve-pixel-size"
+            onResize={(size) => {
+              if (size.inPixels >= SIDEBAR_MIN_WIDTH) {
+                const width = Math.round(size.inPixels);
+                sidebarWidthRef.current = width;
+                if (!compactNavigation) {
+                  sidebarCollapsedRef.current = false;
+                  setSidebarCollapsed(false);
+                  localStorage.setItem(
+                    "agents-viewer-sidebar-width",
+                    String(width),
+                  );
+                  localStorage.setItem(
+                    "agents-viewer-sidebar-collapsed",
+                    "false",
+                  );
+                }
+              } else if (!compactNavigation && !sidebarCollapsedRef.current) {
+                requestAnimationFrame(() => {
+                  if (!sidebarCollapsedRef.current)
+                    sidebarPanelRef.current?.resize(
+                      `${sidebarWidthRef.current}px`,
+                    );
+                });
+              }
+            }}
             className="sidebar"
           >
             <ScrollArea className="h-full">
               <aside aria-label={t("sessions")}>{sidebar}</aside>
             </ScrollArea>
           </ResizablePanel>
-          <ResizableHandle withHandle className="sidebar-handle" />
-          <ResizablePanel minSize="480px" className="main-panel">
+          <ResizableHandle
+            withHandle
+            disabled={compactNavigation || sidebarCollapsed}
+            className={`sidebar-handle ${compactNavigation || sidebarCollapsed ? "panel-handle-hidden" : ""}`}
+          />
+          <ResizablePanel
+            id="conversation-panel"
+            minSize="480px"
+            className="main-panel"
+          >
             <main id="main-content" className="main">
               <Routes>
                 <Route
@@ -543,26 +643,37 @@ export function App() {
               </Routes>
             </main>
           </ResizablePanel>
-          {inspectorOpen && !compactInspector && (
-            <>
-              <ResizableHandle withHandle className="inspector-handle" />
-              <ResizablePanel
-                defaultSize="360px"
-                minSize="300px"
-                maxSize="600px"
-                className="inspector"
-              >
-                <ScrollArea className="h-full">
-                  <aside id="entry-inspector" aria-label={t("inspector")}>
-                    <Inspector
-                      selected={selectedEntry}
-                      onClose={closeInspector}
-                    />
-                  </aside>
-                </ScrollArea>
-              </ResizablePanel>
-            </>
-          )}
+          <ResizableHandle
+            withHandle
+            disabled={!inspectorOpen || compactInspector}
+            className={`inspector-handle ${!inspectorOpen || compactInspector ? "panel-handle-hidden" : ""}`}
+          />
+          <ResizablePanel
+            id="inspector-panel"
+            panelRef={inspectorPanelRef}
+            defaultSize="0px"
+            minSize="300px"
+            maxSize="600px"
+            collapsedSize="0px"
+            collapsible
+            groupResizeBehavior="preserve-pixel-size"
+            onResize={(size) => {
+              if (size.inPixels >= 300)
+                inspectorWidthRef.current = Math.round(size.inPixels);
+            }}
+            className="inspector"
+          >
+            {inspectorOpen && !compactInspector && (
+              <ScrollArea className="h-full">
+                <aside id="entry-inspector" aria-label={t("inspector")}>
+                  <Inspector
+                    selected={selectedEntry}
+                    onClose={closeInspector}
+                  />
+                </aside>
+              </ScrollArea>
+            )}
+          </ResizablePanel>
         </ResizablePanelGroup>
         <Sheet open={navOpen} onOpenChange={setNavOpen}>
           <SheetContent side="left" className="mobile-sheet">
@@ -624,15 +735,21 @@ type FilterValues = {
   showTechnical: boolean;
 };
 
-function FilterControl(
-  props: FilterValues & {
+type SettingsValues = FilterValues & {
+  theme: ThemeValue;
+  language: SupportedLanguage;
+  searchCtrlShiftF: boolean;
+};
+
+function SettingsControl(
+  props: SettingsValues & {
     forcedTechnical: boolean;
-    onApply: (values: FilterValues) => void;
+    onApply: (values: SettingsValues) => void;
   },
 ) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState<FilterValues>({
+  const [draft, setDraft] = useState<SettingsValues>({
     ...props,
     showTechnical: props.showTechnical || props.forcedTechnical,
   });
@@ -648,6 +765,9 @@ function FilterControl(
         source: props.source,
         cwd: props.cwd,
         showTechnical: props.showTechnical || props.forcedTechnical,
+        theme: props.theme,
+        language: props.language,
+        searchCtrlShiftF: props.searchCtrlShiftF,
       });
     setOpen(next);
   };
@@ -666,14 +786,14 @@ function FilterControl(
               size="sm"
               aria-label={
                 activeCount
-                  ? t("filterActive", { count: activeCount })
-                  : t("filter")
+                  ? t("settingsActive", { count: activeCount })
+                  : t("settings")
               }
             >
-              <Filter size={15} />
-              <span className="desktop-only">{t("filter")}</span>
+              <SettingsIcon size={15} />
+              <span className="desktop-only">{t("settings")}</span>
               {activeCount > 0 && (
-                <span className="filter-count" aria-hidden="true">
+                <span className="settings-count" aria-hidden="true">
                   {activeCount}
                 </span>
               )}
@@ -682,16 +802,16 @@ function FilterControl(
         </TooltipTrigger>
         <TooltipContent>
           {activeCount
-            ? t("filterActive", { count: activeCount })
-            : t("filter")}
+            ? t("settingsActive", { count: activeCount })
+            : t("settings")}
         </TooltipContent>
       </Tooltip>
-      <DialogContent className="filter-dialog">
+      <DialogContent className="settings-dialog">
         <DialogHeader>
-          <DialogTitle>{t("filter")}</DialogTitle>
-          <DialogDescription>{t("filterHelp")}</DialogDescription>
+          <DialogTitle>{t("settings")}</DialogTitle>
+          <DialogDescription>{t("settingsHelp")}</DialogDescription>
         </DialogHeader>
-        <form className="filter-form" onSubmit={apply}>
+        <form className="settings-form" onSubmit={apply}>
           <fieldset>
             <legend>{t("sessionFilters")}</legend>
             <label htmlFor="source-filter">{t("source")}</label>
@@ -749,7 +869,7 @@ function FilterControl(
               <option value="include">{t("archiveInclude")}</option>
               <option value="only">{t("archiveOnly")}</option>
             </select>
-            <p className="filter-help">{t("archiveHelp")}</p>
+            <p className="settings-help">{t("archiveHelp")}</p>
           </fieldset>
           <fieldset>
             <legend>{t("conversationDisplay")}</legend>
@@ -775,7 +895,61 @@ function FilterControl(
               </span>
             </label>
           </fieldset>
-          <DialogFooter className="filter-actions">
+          <fieldset>
+            <legend>{t("appearance")}</legend>
+            <label htmlFor="language-setting">{t("language")}</label>
+            <select
+              id="language-setting"
+              className="select"
+              value={draft.language}
+              onChange={(event) =>
+                setDraft((current) => ({
+                  ...current,
+                  language: event.target.value as SupportedLanguage,
+                }))
+              }
+            >
+              <option value="en">{t("english")}</option>
+              <option value="zh-CN">{t("chinese")}</option>
+            </select>
+            <label htmlFor="theme-setting">{t("theme")}</label>
+            <select
+              id="theme-setting"
+              className="select"
+              value={draft.theme}
+              onChange={(event) =>
+                setDraft((current) => ({
+                  ...current,
+                  theme: event.target.value as ThemeValue,
+                }))
+              }
+            >
+              <option value="system">{t("system")}</option>
+              <option value="light">{t("light")}</option>
+              <option value="dark">{t("dark")}</option>
+            </select>
+          </fieldset>
+          <fieldset>
+            <legend>{t("keyboard")}</legend>
+            <label className="technical-filter" htmlFor="search-shortcut">
+              <input
+                id="search-shortcut"
+                type="checkbox"
+                checked={draft.searchCtrlShiftF}
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    searchCtrlShiftF: event.target.checked,
+                  }))
+                }
+              />
+              <span>
+                <strong>{t("searchShortcut")}</strong>
+                <small>{t("searchShortcutHelp")}</small>
+              </span>
+            </label>
+          </fieldset>
+          <DialogFooter className="settings-actions">
             <Button
               type="button"
               variant="ghost"
@@ -785,12 +959,15 @@ function FilterControl(
                   source: "",
                   cwd: "",
                   showTechnical: false,
+                  theme: "system",
+                  language: preferredLanguage(),
+                  searchCtrlShiftF: false,
                 })
               }
             >
               {t("reset")}
             </Button>
-            <span className="filter-action-spacer" />
+            <span className="settings-action-spacer" />
             <Button
               type="button"
               variant="outline"
@@ -1480,23 +1657,12 @@ function TranscriptEntryView({
           aria-current={highlighted || undefined}
         >
           <div className="message-bubble">
-            <span className="sr-only">
-              {entry.presentation === "user" ? t("user") : t("assistant")}:{" "}
-            </span>
-            <SafeMarkdown text={entry.primaryPreview} />
-            <footer className="message-meta">
-              <CopyMessageButton entry={entry} />
-              <Button
-                variant="ghost"
-                size="icon-xs"
-                className="message-action"
-                aria-label={t("openInspector")}
-                onClick={() => onInspect(entry.id)}
-              >
-                <PanelRight size={13} />
-              </Button>
-              {timestamp && <EntryTime value={timestamp} locale={locale} />}
-            </footer>
+            <MessageBubbleContent
+              entry={entry}
+              locale={locale}
+              timestamp={timestamp}
+              onInspect={onInspect}
+            />
           </div>
         </article>
       ) : (
@@ -1522,6 +1688,122 @@ function TranscriptEntryView({
           )}
         </div>
       )}
+    </>
+  );
+}
+
+function MessageBubbleContent({
+  entry,
+  locale,
+  timestamp,
+  onInspect,
+}: {
+  entry: EntryListItem;
+  locale: string;
+  timestamp?: Date;
+  onInspect: (id: string) => void;
+}) {
+  const { t } = useTranslation();
+  const [text, setText] = useState(entry.primaryPreview);
+  const [loadState, setLoadState] = useState<"complete" | "loading" | "failed">(
+    entry.primaryComplete ? "complete" : "loading",
+  );
+  const [attempt, setAttempt] = useState(0);
+  const loadPromise = useRef<Promise<string> | undefined>(undefined);
+
+  useEffect(() => {
+    setText(entry.primaryPreview);
+    if (entry.primaryComplete) {
+      setLoadState("complete");
+      loadPromise.current = undefined;
+      return;
+    }
+    const controller = new AbortController();
+    setLoadState("loading");
+    const promise = fullPrimaryText(entry, controller.signal);
+    loadPromise.current = promise;
+    void promise
+      .then((completeText) => {
+        if (!controller.signal.aborted) {
+          setText(completeText);
+          setLoadState("complete");
+        }
+      })
+      .catch((failure: unknown) => {
+        if (
+          !controller.signal.aborted &&
+          !(failure instanceof DOMException && failure.name === "AbortError")
+        )
+          setLoadState("failed");
+      })
+      .finally(() => {
+        if (loadPromise.current === promise) loadPromise.current = undefined;
+      });
+    return () => controller.abort();
+  }, [
+    attempt,
+    entry.id,
+    entry.primaryComplete,
+    entry.primaryPreview,
+    entry.sessionId,
+  ]);
+
+  const getFullText = useCallback(async () => {
+    if (loadState === "complete") return text;
+    if (loadPromise.current) return loadPromise.current;
+    setLoadState("loading");
+    const promise = fullPrimaryText(entry);
+    loadPromise.current = promise;
+    try {
+      const completeText = await promise;
+      setText(completeText);
+      setLoadState("complete");
+      return completeText;
+    } catch (failure) {
+      setLoadState("failed");
+      throw failure;
+    } finally {
+      if (loadPromise.current === promise) loadPromise.current = undefined;
+    }
+  }, [entry, loadState, text]);
+
+  return (
+    <>
+      <span className="sr-only">
+        {entry.presentation === "user" ? t("user") : t("assistant")}:{" "}
+      </span>
+      <SafeMarkdown text={text} />
+      {loadState === "loading" && (
+        <p className="message-load-status" role="status">
+          {t("loadingFullMessage")}
+        </p>
+      )}
+      {loadState === "failed" && (
+        <div className="message-load-error" role="alert">
+          <span>{t("loadFullMessageFailed")}</span>
+          <Button
+            type="button"
+            variant="outline"
+            size="xs"
+            onClick={() => setAttempt((current) => current + 1)}
+          >
+            {t("retry")}
+          </Button>
+        </div>
+      )}
+      <footer className="message-meta">
+        <CopyMessageButton entry={entry} getText={getFullText} />
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          className="message-action"
+          aria-label={t("openInspector")}
+          onClick={() => onInspect(entry.id)}
+        >
+          <PanelRight size={13} />
+        </Button>
+        {timestamp && <EntryTime value={timestamp} locale={locale} />}
+      </footer>
     </>
   );
 }
@@ -1649,7 +1931,13 @@ function EntryTime({ value, locale }: { value: Date; locale: string }) {
   );
 }
 
-function CopyMessageButton({ entry }: { entry: EntryListItem }) {
+function CopyMessageButton({
+  entry,
+  getText,
+}: {
+  entry: EntryListItem;
+  getText?: () => Promise<string>;
+}) {
   const { t } = useTranslation();
   const [state, setState] = useState<"idle" | "copying" | "copied" | "failed">(
     "idle",
@@ -1662,7 +1950,9 @@ function CopyMessageButton({ entry }: { entry: EntryListItem }) {
   const copy = async () => {
     setState("copying");
     try {
-      await navigator.clipboard.writeText(await fullPrimaryText(entry));
+      await navigator.clipboard.writeText(
+        await (getText ? getText() : fullPrimaryText(entry)),
+      );
       setState("copied");
     } catch {
       setState("failed");
@@ -1698,7 +1988,7 @@ function CopyMessageButton({ entry }: { entry: EntryListItem }) {
   );
 }
 
-async function fullPrimaryText(entry: EntryListItem) {
+async function fullPrimaryText(entry: EntryListItem, signal?: AbortSignal) {
   if (entry.primaryComplete) return entry.primaryPreview;
   let offset = 0;
   let text = "";
@@ -1708,6 +1998,7 @@ async function fullPrimaryText(entry: EntryListItem) {
       entry.id,
       "primary",
       offset,
+      signal,
     );
     text += chunk.text;
     if (chunk.nextOffset === undefined) return text;

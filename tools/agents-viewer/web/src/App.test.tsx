@@ -198,12 +198,20 @@ describe("Agents Viewer UI", () => {
     expect(
       screen.queryByRole("complementary", { name: "Inspector" }),
     ).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Filter" }));
+    expect(
+      within(screen.getByRole("banner")).queryByRole("button", {
+        name: "Open inspector",
+      }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Settings" }));
     expect(
       screen.getByRole("option", { name: "Code review" }),
     ).toBeInTheDocument();
     await user.click(
       screen.getByRole("checkbox", { name: /Show technical activity/ }),
+    );
+    await user.click(
+      screen.getByRole("checkbox", { name: /Use Ctrl\+Shift\+F to search/ }),
     );
     await user.click(screen.getByRole("button", { name: "Apply" }));
     await waitFor(() =>
@@ -216,6 +224,9 @@ describe("Agents Viewer UI", () => {
       ).toBe(true),
     );
     expect(localStorage.getItem("agents-viewer-show-technical")).toBe("true");
+    expect(localStorage.getItem("agents-viewer-search-ctrl-shift-f")).toBe(
+      "true",
+    );
     const inspectorButtons = screen.getAllByRole("button", {
       name: "Open inspector",
     });
@@ -226,7 +237,7 @@ describe("Agents Viewer UI", () => {
     const rawRecords = await screen.findAllByText("#1 event_msg");
     await user.click(rawRecords[0]);
     expect((await screen.findAllByText(/safe/)).length).toBeGreaterThan(0);
-    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    fireEvent.keyDown(window, { key: "F", ctrlKey: true, shiftKey: true });
     expect(
       await screen.findByRole("dialog", { name: "Search" }),
     ).toBeInTheDocument();
@@ -275,14 +286,14 @@ describe("Agents Viewer UI", () => {
       await screen.findByRole("heading", { name: "Hello session" }),
     ).toBeInTheDocument();
     const before = callsFor("/api/v1/session-groups?");
-    await user.click(screen.getByRole("button", { name: "Filter" }));
+    await user.click(screen.getByRole("button", { name: "Settings" }));
     await user.type(
       screen.getByRole("textbox", { name: "Working directory" }),
       "/work/demo",
     );
     expect(callsFor("/api/v1/session-groups?")).toBe(before);
     await user.click(screen.getByRole("button", { name: "Cancel" }));
-    await user.click(screen.getByRole("button", { name: "Filter" }));
+    await user.click(screen.getByRole("button", { name: "Settings" }));
     await user.type(
       screen.getByRole("textbox", { name: "Working directory" }),
       "/work/demo",
@@ -677,7 +688,7 @@ describe("Agents Viewer UI", () => {
       screen.queryByText("Sensitive synthetic note."),
     ).not.toBeInTheDocument();
   });
-  it("loads complete message content before copying a truncated bubble", async () => {
+  it("loads and displays complete message content before copying a truncated bubble", async () => {
     const user = userEvent.setup();
     const writeText = vi.spyOn(navigator.clipboard, "writeText");
     render(
@@ -688,6 +699,8 @@ describe("Agents Viewer UI", () => {
         onInspect={() => {}}
       />,
     );
+    expect(screen.getByText("Hello…")).toBeInTheDocument();
+    expect(await screen.findByText("world")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Copy message" }));
     await waitFor(() =>
       expect(writeText).toHaveBeenCalledWith("Hello **world**"),
@@ -699,6 +712,41 @@ describe("Agents Viewer UI", () => {
           String(input).includes("/entries/e1/content?field=primary"),
         ),
     ).toBe(true);
+  });
+  it("shows a retry state when complete message loading fails", async () => {
+    const user = userEvent.setup();
+    const fallback = vi.mocked(fetch);
+    let attempts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        if (
+          String(input).includes("/entries/e1/content?field=primary") &&
+          attempts++ === 0
+        )
+          return Promise.resolve(
+            new Response(JSON.stringify({ error: "synthetic failure" }), {
+              status: 500,
+              headers: { "content-type": "application/json" },
+            }),
+          );
+        return fallback(input, init);
+      }),
+    );
+    render(
+      <VirtualTranscript
+        entries={[
+          { ...entry, primaryPreview: "Hello…", primaryComplete: false },
+        ]}
+        onInspect={() => {}}
+      />,
+    );
+    expect(
+      await screen.findByText("Could not load the complete message."),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("world")).toBeInTheDocument();
+    expect(attempts).toBe(2);
   });
   it("renders true-boundary navigation and keeps a 10,000-entry transcript below 200 DOM rows", async () => {
     const user = userEvent.setup();
@@ -762,7 +810,7 @@ describe("Agents Viewer UI", () => {
         excludedBytes: 0,
       },
     });
-    expect(await screen.findByText("Indexing 5 / 10")).toBeInTheDocument();
+    expect(await screen.findAllByText("Indexing 5 / 10")).toHaveLength(2);
     expect(callsFor("/api/v1/session-groups?")).toBe(listBefore);
     expect(callsFor("/api/v1/status")).toBe(statusBefore);
     stream.emit("sessionUpdated", { generation: 3, sessionId: "s1" });

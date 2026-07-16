@@ -158,13 +158,14 @@ Only one process may hold a source/cache lock. To reset a disposable cache, stop
 
 ## UI controls
 
-The top bar contains global search, session filters, technical-activity visibility, language, theme, and the initially collapsed inspector. Filter changes are applied together. Reasoning, commands, warnings, errors, and `request_user_input` questionnaires remain visible when other technical activity is hidden. Search defaults to user and assistant messages; “Search all activity types” also includes reasoning, commands, results, context, and other technical entries. Both choices are remembered in the browser.
+The top bar contains navigation, global search, and Settings. Settings stages session filters, technical-activity visibility, language, theme, and the optional search shortcut, then applies them together. The desktop session sidebar can be resized or collapsed; both its width and collapsed state are remembered. Entry-level Inspect actions open the inspector as a desktop panel or a responsive sheet. Reasoning, commands, warnings, errors, and `request_user_input` questionnaires remain visible when other technical activity is hidden. Search defaults to user and assistant messages; “Search all activity types” also includes reasoning, commands, results, context, and other technical entries. Both choices are remembered in the browser.
 
 Conversation navigation opens at the latest page and follows appended entries while the viewport remains at the true bottom. Floating controls jump to the first or latest message without downloading the full transcript.
 
 Keyboard controls:
 
 - `Ctrl/Cmd+K` or `/`: open global search.
+- `Ctrl+Shift+F`: optionally open global search when enabled in Settings; disabled by default.
 - `Escape`: close the active dialog or sheet and restore focus.
 - `j` / `k`: focus the next or previous visible transcript entry.
 - `g g`: jump to the first message.

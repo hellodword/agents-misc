@@ -28,13 +28,24 @@ export const resources = {
       filterHelp:
         "Choose which sessions and conversation activity to show. Changes apply together.",
       filterActive: "Filter, {{count}} active",
+      settings: "Settings",
+      settingsHelp:
+        "Configure session filters, conversation display, appearance, and keyboard shortcuts. Changes apply together.",
+      settingsActive: "Settings, {{count}} filters active",
       sessionFilters: "Sessions",
       conversationDisplay: "Conversation display",
+      appearance: "Appearance",
+      keyboard: "Keyboard",
+      searchShortcut: "Use Ctrl+Shift+F to search",
+      searchShortcutHelp:
+        "Adds Ctrl+Shift+F without changing the existing Ctrl/Command+K and / shortcuts.",
       reset: "Reset",
       cancel: "Cancel",
       apply: "Apply",
       close: "Close",
       openNavigation: "Open sessions",
+      collapseNavigation: "Collapse sessions",
+      expandNavigation: "Expand sessions",
       openInspector: "Open inspector",
       closeInspector: "Close inspector",
       theme: "Theme",
@@ -51,6 +62,8 @@ export const resources = {
       copying: "Copying…",
       copied: "Copied",
       copyFailed: "Copy failed",
+      loadingFullMessage: "Loading complete message…",
+      loadFullMessageFailed: "Could not load the complete message.",
       selected: "Selected",
       retry: "Retry",
       partial: "Results may be incomplete",
@@ -158,13 +171,24 @@ export const resources = {
       filter: "筛选",
       filterHelp: "选择要显示的会话和对话活动，所有改动会一次生效。",
       filterActive: "筛选，已启用 {{count}} 项",
+      settings: "设置",
+      settingsHelp:
+        "配置会话筛选、对话显示、外观和键盘快捷键，所有改动会一次生效。",
+      settingsActive: "设置，已启用 {{count}} 项筛选",
       sessionFilters: "会话",
       conversationDisplay: "对话显示",
+      appearance: "外观",
+      keyboard: "键盘",
+      searchShortcut: "使用 Ctrl+Shift+F 搜索",
+      searchShortcutHelp:
+        "新增 Ctrl+Shift+F，同时保留现有的 Ctrl/Command+K 和 / 快捷键。",
       reset: "重置",
       cancel: "取消",
       apply: "应用",
       close: "关闭",
       openNavigation: "打开会话列表",
+      collapseNavigation: "收起会话列表",
+      expandNavigation: "展开会话列表",
       openInspector: "打开检查器",
       closeInspector: "关闭检查器",
       theme: "主题",
@@ -181,6 +205,8 @@ export const resources = {
       copying: "正在复制…",
       copied: "已复制",
       copyFailed: "复制失败",
+      loadingFullMessage: "正在加载完整消息…",
+      loadFullMessageFailed: "无法加载完整消息。",
       selected: "已选择",
       retry: "重试",
       partial: "结果可能不完整",
@@ -259,10 +285,17 @@ export const resources = {
   },
 } as const;
 
+export type SupportedLanguage = "en" | "zh-CN";
+
+export function preferredLanguage(): SupportedLanguage {
+  return navigator.language.toLowerCase().startsWith("zh") ? "zh-CN" : "en";
+}
+
 const storedLanguage = localStorage.getItem("agents-viewer-language");
-const language =
-  storedLanguage ??
-  (navigator.language.toLowerCase().startsWith("zh") ? "zh-CN" : "en");
+const language: SupportedLanguage =
+  storedLanguage === "en" || storedLanguage === "zh-CN"
+    ? storedLanguage
+    : preferredLanguage();
 
 void i18n.use(initReactI18next).init({
   resources,
@@ -272,7 +305,7 @@ void i18n.use(initReactI18next).init({
 });
 document.documentElement.lang = language;
 
-export function setLanguage(language: "en" | "zh-CN") {
+export function setLanguage(language: SupportedLanguage) {
   localStorage.setItem("agents-viewer-language", language);
   document.documentElement.lang = language;
   void i18n.changeLanguage(language);
