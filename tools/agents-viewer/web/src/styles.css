@@ -227,6 +227,15 @@ mark {
   display: block;
 }
 @media (max-width: 767px) {
+  .app {
+    width: 100vw;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .topbar {
+    min-width: 0;
+    overflow: hidden;
+  }
   .layout {
     display: block;
   }
@@ -327,8 +336,15 @@ mark {
   .layout {
     display: block;
   }
+  .layout > [data-panel]:has(> .sidebar) {
+    display: none !important;
+  }
+  .layout > [data-panel]:has(> .main-panel) {
+    flex-basis: 0 !important;
+    flex-grow: 1 !important;
+  }
   .sidebar-handle {
-    display: none;
+    display: none !important;
   }
   .main-panel {
     height: 100%;
@@ -832,6 +848,99 @@ mark {
 .activity-notice:hover {
   background: color-mix(in srgb, var(--soft) 74%, transparent);
 }
+.request-user-input-message-group {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+}
+.request-user-input-poll {
+  width: min(78%, 560px);
+  min-width: min(280px, 100%);
+  padding: 10px 11px 5px;
+}
+.request-user-input-poll-title {
+  color: var(--fg);
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.35;
+  text-wrap: pretty;
+}
+.request-user-input-options {
+  margin: 8px -11px 0;
+  padding: 0;
+  border-top: 1px solid color-mix(in srgb, var(--border) 76%, transparent);
+  list-style: none;
+}
+.request-user-input-option {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 11px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 68%, transparent);
+  color: var(--muted);
+}
+.request-user-input-option.is-selected {
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+.request-user-input-radio {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  border: 1.5px solid color-mix(in srgb, var(--muted) 72%, var(--border));
+  border-radius: 999px;
+  color: white;
+}
+.request-user-input-option.is-selected .request-user-input-radio {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.request-user-input-option-copy {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.request-user-input-option-label,
+.request-user-input-option.is-selected .request-user-input-option-copy {
+  color: var(--fg);
+}
+.request-user-input-option-label {
+  font-weight: 550;
+}
+.request-user-input-option-description {
+  color: var(--muted);
+}
+.request-user-input-option.is-selected .request-user-input-option-description {
+  color: color-mix(in srgb, var(--muted) 75%, var(--fg));
+}
+.request-user-input-option-note,
+.request-user-input-unassigned-note,
+.request-user-input-legacy-note {
+  color: color-mix(in srgb, var(--accent) 62%, var(--muted));
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.request-user-input-option-note {
+  display: block;
+  margin-top: 3px;
+}
+.request-user-input-unassigned-note,
+.request-user-input-legacy-note {
+  margin: 7px 0 2px;
+}
+.request-user-input-legacy-note span {
+  font-weight: 600;
+}
 .activity-label {
   color: var(--fg);
   font-weight: 600;
@@ -1041,6 +1150,9 @@ mark {
   .message-bubble {
     max-width: 90%;
     border-radius: 15px;
+  }
+  .request-user-input-poll {
+    width: min(90%, 560px);
   }
   .message-action {
     width: 28px !important;

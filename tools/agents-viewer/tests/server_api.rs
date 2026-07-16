@@ -192,6 +192,52 @@ async fn status_sessions_entries_content_raw_and_search_follow_contract() {
 }
 
 #[tokio::test]
+async fn request_user_input_is_visible_without_other_technical_activity() {
+    let app = support::TestApp::new().await;
+    let session = "11111111-1111-4111-8111-111111111111";
+    for (id, sequence, tool_kind) in [
+        ("request-user-input-entry", 999_i64, "requestUserInput"),
+        ("generic-function-entry", 1_000_i64, "function"),
+    ] {
+        sqlx::query(
+            "INSERT INTO entries( \
+                id, session_id, sequence, timestamp_micros, kind, presentation, role, phase, \
+                tool_kind, tool_status, title, primary_text, secondary_text, metadata_json, \
+                id_basis, call_id, parent_entry_id, default_collapsed, searchable, primary_bytes, \
+                secondary_bytes \
+             ) VALUES (?, ?, ?, NULL, 'tool', 'technical', NULL, NULL, ?, 'succeeded', \
+                'synthetic tool', '{}', '', '{}', ?, NULL, NULL, 1, 1, 2, 0)",
+        )
+        .bind(id)
+        .bind(session)
+        .bind(sequence)
+        .bind(tool_kind)
+        .bind(format!("basis-{id}"))
+        .execute(app.state.database.pool())
+        .await
+        .unwrap();
+    }
+
+    let entries = support::json(
+        app.router()
+            .oneshot(support::request(&format!(
+                "/api/v1/sessions/{session}/entries?limit=500"
+            )))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let ids = entries["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry["id"].as_str())
+        .collect::<Vec<_>>();
+    assert!(ids.contains(&"request-user-input-entry"));
+    assert!(!ids.contains(&"generic-function-entry"));
+}
+
+#[tokio::test]
 async fn sse_ring_replays_recent_events_and_marks_expired_ids_for_resync() {
     let hub = SseHub::new();
     for generation in 0..=SSE_RING_CAPACITY as u64 {

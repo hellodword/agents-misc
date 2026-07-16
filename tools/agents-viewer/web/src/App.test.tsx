@@ -421,6 +421,262 @@ describe("Agents Viewer UI", () => {
     );
     expect(isDefaultVisible(command)).toBe(true);
   });
+  it("renders each request_user_input question as an incoming poll message", async () => {
+    const user = userEvent.setup();
+    const inspect = vi.fn();
+    const questions = [
+      {
+        id: "target",
+        header: "Target",
+        question: "Where should this run?",
+        isOther: true,
+        isSecret: false,
+        options: [
+          {
+            label: "Staging",
+            description: "Use the synthetic staging environment.",
+          },
+          {
+            label: "Production",
+            description: "Use the synthetic production environment.",
+          },
+        ],
+      },
+      {
+        id: "rollout",
+        header: "Rollout",
+        question: "How should rollout proceed?",
+        isOther: true,
+        isSecret: false,
+        options: [
+          {
+            label: "Safe",
+            description: "Use the slower synthetic rollout.",
+          },
+          {
+            label: "Fast",
+            description: "Use the faster synthetic rollout.",
+          },
+        ],
+      },
+      {
+        id: "fallback",
+        header: "Fallback",
+        question: "What should happen after a synthetic failure?",
+        isOther: true,
+        isSecret: false,
+        options: [
+          { label: "Retry", description: "Retry the synthetic operation." },
+          { label: "Stop", description: "Stop the synthetic operation." },
+        ],
+      },
+    ];
+    const request = {
+      ...entry,
+      id: "request-user-input",
+      kind: "tool" as const,
+      presentation: "technical" as const,
+      role: undefined,
+      toolKind: "requestUserInput" as const,
+      toolStatus: "running" as const,
+      title: "request_user_input",
+      primaryPreview: "synthetic request",
+      metadata: { requestUserInputQuestions: questions },
+      defaultCollapsed: true,
+    };
+    const { container, rerender } = render(
+      <VirtualTranscript entries={[request]} onInspect={inspect} />,
+    );
+    let polls = container.querySelectorAll<HTMLElement>(
+      ".request-user-input-message",
+    );
+    expect(polls).toHaveLength(3);
+    for (const poll of polls) {
+      expect(poll).toHaveClass("message-assistant");
+      expect(poll).toHaveAttribute("data-transcript-entry");
+      expect(
+        within(poll).getByRole("button", { name: /Open inspector:/ }),
+      ).toBeVisible();
+    }
+    let options = container.querySelectorAll(".request-user-input-option");
+    expect(options).toHaveLength(6);
+    expect(options[0]).toHaveTextContent(
+      "Staging — Use the synthetic staging environment.",
+    );
+    expect(options[1]).toHaveTextContent(
+      "Production — Use the synthetic production environment.",
+    );
+    expect(
+      container.querySelector(".request-user-input-option.is-selected"),
+    ).not.toBeInTheDocument();
+    expect(
+      container.querySelector(".request-user-input-radio svg"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("notes:")).not.toBeInTheDocument();
+    expect(screen.queryByText("Target")).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Q:/)).not.toBeInTheDocument();
+    expect(isDefaultVisible(request)).toBe(true);
+
+    const answered = {
+      ...request,
+      toolStatus: "succeeded" as const,
+      metadata: {
+        requestUserInputQuestions: questions,
+        requestUserInputAnswers: {
+          target: {
+            answers: ["Production", "user_note: Use the synthetic canary."],
+          },
+          rollout: {
+            answers: [
+              "None of the above",
+              "user_note: Use a custom synthetic rollout.",
+            ],
+          },
+          fallback: { answers: ["Retry"] },
+        },
+      },
+    };
+    rerender(<VirtualTranscript entries={[answered]} onInspect={inspect} />);
+    polls = container.querySelectorAll<HTMLElement>(
+      ".request-user-input-message",
+    );
+    expect(polls).toHaveLength(3);
+    options = container.querySelectorAll(
+      ".request-user-input-option.is-selected",
+    );
+    expect(options).toHaveLength(3);
+    const production = screen.getByText("Production").closest("li");
+    expect(production).toHaveClass("is-selected");
+    expect(
+      production?.querySelector(".request-user-input-radio svg"),
+    ).toBeInTheDocument();
+    expect(
+      within(production!).getByText("Use the synthetic canary."),
+    ).toHaveClass("request-user-input-option-note");
+    const other = screen.getByText("None of the above").closest("li");
+    expect(other).toHaveClass("is-selected");
+    expect(
+      within(other!).getByText("Use a custom synthetic rollout."),
+    ).toHaveClass("request-user-input-option-note");
+    expect(screen.queryByText("notes:")).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", {
+        name: "Open inspector: Where should this run?",
+      }),
+    );
+    expect(inspect).toHaveBeenCalledWith("request-user-input");
+  });
+  it("places legacy request_user_input notes under the sole selected option", () => {
+    const request = {
+      ...entry,
+      id: "legacy-request-user-input",
+      kind: "tool" as const,
+      presentation: "technical" as const,
+      role: undefined,
+      toolKind: "requestUserInput" as const,
+      title: "request_user_input",
+      metadata: {
+        requestUserInputQuestions: [
+          {
+            id: "target",
+            question: "Where should this run?",
+            isSecret: false,
+            options: [
+              { label: "Staging", description: "Use synthetic staging." },
+              { label: "Production", description: "Use synthetic production." },
+            ],
+          },
+        ],
+        requestUserInputAnswers: { target: { answers: ["Production"] } },
+        requestUserInputNotes: "Legacy synthetic note.",
+      },
+    };
+    render(<VirtualTranscript entries={[request]} onInspect={() => {}} />);
+    const production = screen.getByText("Production").closest("li");
+    expect(within(production!).getByText("Legacy synthetic note.")).toHaveClass(
+      "request-user-input-option-note",
+    );
+  });
+  it("keeps ambiguous legacy notes as a footer on the final poll", () => {
+    const question = (id: string, prompt: string) => ({
+      id,
+      question: prompt,
+      isSecret: false,
+      options: [
+        { label: "First", description: "Use the first synthetic choice." },
+        { label: "Second", description: "Use the second synthetic choice." },
+      ],
+    });
+    const request = {
+      ...entry,
+      id: "ambiguous-legacy-request-user-input",
+      kind: "tool" as const,
+      presentation: "technical" as const,
+      role: undefined,
+      toolKind: "requestUserInput" as const,
+      title: "request_user_input",
+      metadata: {
+        requestUserInputQuestions: [
+          question("first", "Choose the first value"),
+          question("second", "Choose the second value"),
+        ],
+        requestUserInputAnswers: {
+          first: { answers: ["First"] },
+          second: { answers: ["Second"] },
+        },
+        requestUserInputNotes: "Ambiguous synthetic legacy note.",
+      },
+    };
+    const { container } = render(
+      <VirtualTranscript entries={[request]} onInspect={() => {}} />,
+    );
+    const polls = container.querySelectorAll<HTMLElement>(
+      ".request-user-input-message",
+    );
+    expect(polls).toHaveLength(2);
+    expect(
+      within(polls[1]).getByText(/Ambiguous synthetic legacy note\./),
+    ).toHaveClass("request-user-input-legacy-note");
+  });
+  it("does not expose secret request_user_input answers or notes", () => {
+    const secret = {
+      ...entry,
+      id: "secret-request-user-input",
+      kind: "tool" as const,
+      presentation: "technical" as const,
+      role: undefined,
+      toolKind: "requestUserInput" as const,
+      title: "request_user_input",
+      metadata: {
+        requestUserInputQuestions: [
+          {
+            id: "secret",
+            question: "Choose a secret value",
+            isSecret: true,
+            options: [
+              { label: "First", description: "The first secret value." },
+              { label: "Second", description: "The second secret value." },
+            ],
+          },
+        ],
+        requestUserInputAnswers: {
+          secret: {
+            answers: ["Second", "user_note: Sensitive synthetic note."],
+          },
+        },
+      },
+    };
+    const { container } = render(
+      <VirtualTranscript entries={[secret]} onInspect={() => {}} />,
+    );
+    expect(
+      container.querySelector(".request-user-input-option.is-selected"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("notes:")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Sensitive synthetic note."),
+    ).not.toBeInTheDocument();
+  });
   it("loads complete message content before copying a truncated bubble", async () => {
     const user = userEvent.setup();
     const writeText = vi.spyOn(navigator.clipboard, "writeText");

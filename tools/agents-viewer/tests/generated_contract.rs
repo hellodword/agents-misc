@@ -88,6 +88,7 @@ fn fixed_enums_use_contract_json_values() {
         ToolKind::Patch => "patch",
         ToolKind::Mcp => "mcp",
         ToolKind::WebSearch => "webSearch",
+        ToolKind::RequestUserInput => "requestUserInput",
         ToolKind::Function => "function",
         ToolKind::Dynamic => "dynamic",
         ToolKind::Terminal => "terminal",

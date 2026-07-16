@@ -470,6 +470,11 @@ fn normalize_event(
             true,
             false,
         )),
+        "request_user_input" => NormalizeResult::Entry(request_user_input_event_entry(
+            payload,
+            timestamp_micros,
+            raw_id,
+        )),
         event if tool_event_kind(event).is_some() => {
             NormalizeResult::Entry(tool_event_entry(event, payload, timestamp_micros, raw_id))
         }
@@ -581,32 +586,39 @@ fn normalize_response_item(
         "function_call" | "custom_tool_call" | "tool_search_call" => {
             let name = string_field(payload, &["name", "execution"]);
             let primary = string_field(payload, &["arguments", "input"]);
-            NormalizeResult::Entry(tool_entry(
+            let mut entry = tool_entry(
                 tool_kind_from_name(&name),
                 if name.is_empty() { "Tool call" } else { &name },
-                primary,
+                primary.clone(),
                 String::new(),
                 call_id(payload),
                 Some(ToolStatus::Running),
                 timestamp_micros,
                 raw_id,
                 EntryOrigin::ResponseItem,
-            ))
+            );
+            if entry.tool_kind == Some(ToolKind::RequestUserInput) {
+                add_request_user_input_questions_from_text(&mut entry, &primary);
+            }
+            NormalizeResult::Entry(entry)
         }
         "function_call_output" | "custom_tool_call_output" | "tool_search_output" => {
-            NormalizeResult::Entry(tool_entry(
+            let secondary = value_text(payload.get("output"))
+                .or_else(|| value_text(payload.get("execution")))
+                .unwrap_or_default();
+            let mut entry = tool_entry(
                 ToolKind::Function,
                 "Tool output",
                 String::new(),
-                value_text(payload.get("output"))
-                    .or_else(|| value_text(payload.get("execution")))
-                    .unwrap_or_default(),
+                secondary.clone(),
                 call_id(payload),
                 Some(ToolStatus::Succeeded),
                 timestamp_micros,
                 raw_id,
                 EntryOrigin::ResponseItem,
-            ))
+            );
+            add_request_user_input_response_from_text(&mut entry, &secondary);
+            NormalizeResult::Entry(entry)
         }
         "local_shell_call" => NormalizeResult::Entry(tool_entry(
             ToolKind::Command,
@@ -918,6 +930,57 @@ fn tool_event_entry(
     )
 }
 
+fn request_user_input_event_entry(
+    payload: &Value,
+    timestamp_micros: Option<i64>,
+    raw_id: &str,
+) -> NormalizedEntry {
+    let mut entry = tool_entry(
+        ToolKind::RequestUserInput,
+        "request_user_input",
+        pretty_value(Some(payload)),
+        String::new(),
+        call_id(payload),
+        Some(ToolStatus::Running),
+        timestamp_micros,
+        raw_id,
+        EntryOrigin::EventPresentation,
+    );
+    add_request_user_input_questions(&mut entry, payload.get("questions"));
+    entry
+}
+
+fn add_request_user_input_questions_from_text(entry: &mut NormalizedEntry, text: &str) {
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return;
+    };
+    add_request_user_input_questions(entry, value.get("questions"));
+}
+
+fn add_request_user_input_questions(entry: &mut NormalizedEntry, questions: Option<&Value>) {
+    if let Some(questions) = questions.filter(|value| value.is_array()) {
+        entry
+            .metadata
+            .insert("requestUserInputQuestions".into(), questions.clone());
+    }
+}
+
+fn add_request_user_input_response_from_text(entry: &mut NormalizedEntry, text: &str) {
+    let Ok(value) = serde_json::from_str::<Value>(text) else {
+        return;
+    };
+    if let Some(answers) = value.get("answers").filter(|value| value.is_object()) {
+        entry
+            .metadata
+            .insert("requestUserInputAnswers".into(), answers.clone());
+    }
+    if let Some(notes) = value.get("notes").filter(|value| value.is_string()) {
+        entry
+            .metadata
+            .insert("requestUserInputNotes".into(), notes.clone());
+    }
+}
+
 fn tool_event_kind(event: &str) -> Option<ToolKind> {
     if event.starts_with("exec_command") || event == "terminal_interaction" {
         Some(ToolKind::Command)
@@ -937,7 +1000,9 @@ fn tool_event_kind(event: &str) -> Option<ToolKind> {
 }
 
 fn tool_kind_from_name(name: &str) -> ToolKind {
-    if name.contains("apply_patch") || name == "patch" {
+    if name == "request_user_input" {
+        ToolKind::RequestUserInput
+    } else if name.contains("apply_patch") || name == "patch" {
         ToolKind::Patch
     } else if name.starts_with("mcp__") {
         ToolKind::Mcp

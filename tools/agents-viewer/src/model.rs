@@ -75,6 +75,7 @@ contract_enum!(ToolKind {
     Patch,
     Mcp,
     WebSearch,
+    RequestUserInput,
     Function,
     Dynamic,
     Terminal,

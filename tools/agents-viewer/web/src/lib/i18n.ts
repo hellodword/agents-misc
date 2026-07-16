@@ -51,6 +51,7 @@ export const resources = {
       copying: "Copying…",
       copied: "Copied",
       copyFailed: "Copy failed",
+      selected: "Selected",
       retry: "Retry",
       partial: "Results may be incomplete",
       conversationNavigation: "Conversation navigation",
@@ -180,6 +181,7 @@ export const resources = {
       copying: "正在复制…",
       copied: "已复制",
       copyFailed: "复制失败",
+      selected: "已选择",
       retry: "重试",
       partial: "结果可能不完整",
       conversationNavigation: "对话导航",
@@ -262,14 +264,12 @@ const language =
   storedLanguage ??
   (navigator.language.toLowerCase().startsWith("zh") ? "zh-CN" : "en");
 
-void i18n
-  .use(initReactI18next)
-  .init({
-    resources,
-    lng: language,
-    fallbackLng: "en",
-    interpolation: { escapeValue: false },
-  });
+void i18n.use(initReactI18next).init({
+  resources,
+  lng: language,
+  fallbackLng: "en",
+  interpolation: { escapeValue: false },
+});
 document.documentElement.lang = language;
 
 export function setLanguage(language: "en" | "zh-CN") {

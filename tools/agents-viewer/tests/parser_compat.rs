@@ -2,7 +2,7 @@ use std::io::{BufReader, Cursor, Write};
 
 use agents_viewer::model::{
     Completeness, EntryKind, EntryPresentation, MessageRole, SessionParentRelation, SourceKind,
-    ToolStatus,
+    ToolKind, ToolStatus,
 };
 use agents_viewer::rollout::{
     CollectingSink, ParseContext, RootKind, checkpoint_for_file, parse_rollout, verify_checkpoint,
@@ -15,6 +15,7 @@ const V144: &[u8] = include_bytes!("fixtures/rollouts/v0_144.jsonl");
 const DEDUP: &[u8] = include_bytes!("fixtures/rollouts/dedup.jsonl");
 const MALFORMED: &[u8] = include_bytes!("fixtures/rollouts/malformed.jsonl");
 const REVIEW: &[u8] = include_bytes!("fixtures/rollouts/subagent_review.jsonl");
+const REQUEST_USER_INPUT: &[u8] = include_bytes!("fixtures/rollouts/request_user_input.jsonl");
 
 fn context(file_name: &str, max_event_bytes: usize) -> ParseContext {
     ParseContext {
@@ -101,6 +102,42 @@ fn parses_v144_without_exposing_raw_or_encrypted_reasoning() {
         .expect("world state context");
     assert!(context.default_collapsed);
     assert!(!context.searchable);
+}
+
+#[test]
+fn parses_and_merges_request_user_input_with_answers_and_notes() {
+    let parsed = parse(
+        REQUEST_USER_INPUT,
+        "rollout-2026-07-02T10-00-00-66666666-6666-4666-8666-666666666666.jsonl",
+        1024 * 1024,
+    );
+
+    let request = parsed
+        .entries
+        .iter()
+        .find(|entry| entry.tool_kind == Some(ToolKind::RequestUserInput))
+        .expect("request_user_input entry");
+    assert_eq!(request.tool_status, Some(ToolStatus::Succeeded));
+    assert_eq!(request.raw_refs.len(), 3);
+    assert_eq!(
+        request.metadata["requestUserInputQuestions"][0]["options"][1]["description"],
+        "Use the synthetic production environment."
+    );
+    assert_eq!(
+        request.metadata["requestUserInputAnswers"]["target"]["answers"][0],
+        "Production"
+    );
+    assert_eq!(
+        request.metadata["requestUserInputAnswers"]["target"]["answers"][1],
+        "user_note: Use the synthetic canary."
+    );
+    assert!(!request.metadata.contains_key("requestUserInputNotes"));
+    assert!(
+        parsed
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != "unknown_event")
+    );
 }
 
 #[test]

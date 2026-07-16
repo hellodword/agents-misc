@@ -10,15 +10,22 @@ async function expectTranscriptRowsNotToOverlap(page: Page) {
         const rows = elements
           .map((element) => {
             const box = element.getBoundingClientRect();
-            const content = element
-              .querySelector("[data-transcript-entry]")
-              ?.getBoundingClientRect();
+            const contents = [
+              ...element.querySelectorAll("[data-transcript-entry]"),
+            ].map((content) => content.getBoundingClientRect());
+            const contentTop = Math.min(
+              ...contents.map((content) => content.top),
+            );
+            const contentBottom = Math.max(
+              ...contents.map((content) => content.bottom),
+            );
             return {
               index: Number(element.getAttribute("data-index")),
               top: box.top,
               bottom: box.bottom,
               height: box.height,
-              contentHeight: content?.height ?? 0,
+              contentHeight:
+                contents.length > 0 ? contentBottom - contentTop : 0,
             };
           })
           .sort((left, right) => left.index - right.index);
@@ -188,6 +195,153 @@ test("indexes an empty cache, searches content, reloads a deep link, and exposes
     .getByRole("button", { name: "Close inspector" })
     .click();
   await expect(page.locator("#entry-inspector")).toHaveCount(0);
+});
+
+test("renders multiple request_user_input questions as responsive poll messages", async ({
+  page,
+  rollout,
+}) => {
+  const questions = [
+    {
+      id: "target",
+      header: "Target",
+      question: "Where should this run?",
+      isOther: true,
+      isSecret: false,
+      options: [
+        {
+          label: "Staging",
+          description: "Use the synthetic staging environment.",
+        },
+        {
+          label: "Production",
+          description: "Use the synthetic production environment.",
+        },
+      ],
+    },
+    {
+      id: "rollout",
+      header: "Rollout",
+      question: "How should rollout proceed?",
+      isOther: true,
+      isSecret: false,
+      options: [
+        { label: "Safe", description: "Use a slower synthetic rollout." },
+        { label: "Fast", description: "Use a faster synthetic rollout." },
+      ],
+    },
+    {
+      id: "fallback",
+      header: "Fallback",
+      question: "What should happen after a synthetic failure?",
+      isOther: true,
+      isSecret: false,
+      options: [
+        { label: "Retry", description: "Retry the synthetic operation." },
+        { label: "Stop", description: "Stop the synthetic operation." },
+      ],
+    },
+  ];
+  const records = [
+    {
+      timestamp: "2025-01-02T03:10:00.000Z",
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        call_id: "call-browser-poll",
+        name: "request_user_input",
+        arguments: JSON.stringify({ questions }),
+      },
+    },
+    {
+      timestamp: "2025-01-02T03:10:00.100Z",
+      type: "event_msg",
+      payload: {
+        type: "request_user_input",
+        call_id: "call-browser-poll",
+        turn_id: "turn-browser-poll",
+        questions,
+      },
+    },
+    {
+      timestamp: "2025-01-02T03:10:01.000Z",
+      type: "response_item",
+      payload: {
+        type: "function_call_output",
+        call_id: "call-browser-poll",
+        output: JSON.stringify({
+          answers: {
+            target: {
+              answers: ["Production", "user_note: Use the synthetic canary."],
+            },
+          },
+        }),
+      },
+    },
+  ];
+  await appendFile(
+    rollout,
+    `\n${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
+  );
+
+  const polls = page.locator(".request-user-input-message");
+  await expect(polls).toHaveCount(3);
+  await expect(
+    page.getByRole("article", { name: "Where should this run?" }),
+  ).toBeVisible();
+  await expect(polls.first()).toHaveCSS("justify-content", "flex-start");
+  await expect(
+    polls.first().getByText("Use the synthetic production environment."),
+  ).toBeVisible();
+  const production = polls.first().locator("li", { hasText: "Production" });
+  await expect(production).toHaveClass(/is-selected/);
+  await expect(production.locator(".request-user-input-radio svg")).toHaveCount(
+    1,
+  );
+  await expect(
+    production.locator(".request-user-input-option-note"),
+  ).toHaveText("Use the synthetic canary.");
+  expect(
+    await polls.evaluateAll((elements) =>
+      elements.every((element, index) => {
+        const box = element.getBoundingClientRect();
+        const previous = elements[index - 1]?.getBoundingClientRect();
+        return !previous || box.top >= previous.bottom;
+      }),
+    ),
+  ).toBe(true);
+  await expectTranscriptRowsNotToOverlap(page);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect
+    .poll(() =>
+      polls.evaluateAll((elements) =>
+        elements.every((element) => {
+          const box = element
+            .querySelector(".request-user-input-poll")
+            ?.getBoundingClientRect();
+          return Boolean(
+            box && box.left >= 0 && box.right <= window.innerWidth,
+          );
+        }),
+      ),
+    )
+    .toBe(true);
+  await expectTranscriptRowsNotToOverlap(page);
+  const results = await new AxeBuilder({ page })
+    .include(".request-user-input-message-group")
+    .analyze();
+  expect(
+    results.violations.filter(
+      (item) => item.impact === "critical" || item.impact === "serious",
+    ),
+  ).toEqual([]);
+
+  await polls
+    .first()
+    .getByRole("button", { name: "Open inspector: Where should this run?" })
+    .click();
+  await expect(page.locator("#entry-inspector")).toBeVisible();
 });
 
 test("supports locale, theme, keyboard focus, responsive sheets, and accessibility", async ({

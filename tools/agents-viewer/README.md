@@ -50,7 +50,7 @@ The database is initialized from the single baseline in `schema.sql`. This proje
 
 Axum serves a loopback-only JSON API, an SSE stream for index and conversation updates, and the embedded Web bundle. Public DTOs are defined in Rust and exported deterministically to `web/src/generated/api.ts`, so the React client and service share one checked contract.
 
-The React/Vite UI presents conversations in a Telegram-like layout. User messages are right-aligned, assistant messages are left-aligned, Markdown is sanitized and rendered with GFM, and full message content is fetched before copying when the list preview is truncated. Reasoning and commands appear as compact inspectable activity; command results remain in the inspector.
+The React/Vite UI presents conversations in a Telegram-like layout. User messages are right-aligned, assistant messages are left-aligned, Markdown is sanitized and rendered with GFM, and full message content is fetched before copying when the list preview is truncated. Reasoning and commands appear as compact inspectable activity. Each `request_user_input` question appears as its own default-visible incoming poll message with option labels and descriptions; completed polls mark selected answers and place non-empty per-question notes below the selected option. Command results remain in the inspector.
 
 The sidebar uses parent/child trees rather than a flat list. All indexed `parentThreadId` relationships share the same layout, filters match whole trees, pagination never splits a tree, and the newest session in the newest group is the default route. Plan-implementation children use the localized title “Implement · parent title”.
 
@@ -158,7 +158,7 @@ Only one process may hold a source/cache lock. To reset a disposable cache, stop
 
 ## UI controls
 
-The top bar contains global search, session filters, technical-activity visibility, language, theme, and the initially collapsed inspector. Filter changes are applied together. Search defaults to user and assistant messages; “Search all activity types” also includes reasoning, commands, results, context, and other technical entries. Both choices are remembered in the browser.
+The top bar contains global search, session filters, technical-activity visibility, language, theme, and the initially collapsed inspector. Filter changes are applied together. Reasoning, commands, warnings, errors, and `request_user_input` questionnaires remain visible when other technical activity is hidden. Search defaults to user and assistant messages; “Search all activity types” also includes reasoning, commands, results, context, and other technical entries. Both choices are remembered in the browser.
 
 Conversation navigation opens at the latest page and follows appended entries while the viewport remains at the true bottom. Floating controls jump to the first or latest message without downloading the full transcript.
 

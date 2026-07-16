@@ -590,7 +590,7 @@ fn push_entry_visibility(builder: &mut QueryBuilder<Sqlite>, include_technical: 
         builder.push(
             " AND ((e.kind = 'message' AND e.presentation IN ('user', 'response')) \
              OR e.kind = 'reasoning' \
-             OR (e.kind = 'tool' AND e.tool_kind = 'command') \
+             OR (e.kind = 'tool' AND e.tool_kind IN ('command', 'requestUserInput')) \
              OR e.kind IN ('warning', 'error'))",
         );
     }
