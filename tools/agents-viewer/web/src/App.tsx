@@ -1262,6 +1262,16 @@ type ScrollTarget = {
 };
 type ViewportState = { atBottom: boolean; anchorId?: string };
 
+const TRANSCRIPT_BOTTOM_THRESHOLD = 80;
+const TRANSCRIPT_EXACT_BOTTOM_TOLERANCE = 1;
+
+function transcriptBottomDistance(element: HTMLElement) {
+  return Math.max(
+    0,
+    element.scrollHeight - element.scrollTop - element.clientHeight,
+  );
+}
+
 export function shouldApplyScrollTarget(
   targetToken: number | undefined,
   appliedToken: number | undefined,
@@ -1548,9 +1558,12 @@ export function VirtualTranscript({
 }: VirtualTranscriptProps) {
   const { t, i18n } = useTranslation();
   const parent = useRef<HTMLDivElement>(null);
+  const transcriptInner = useRef<HTMLDivElement>(null);
   const initialized = useRef(false);
   const appliedScrollTarget = useRef<number | undefined>(undefined);
-  const atBottomRef = useRef(!around);
+  const applyingBottomTarget = useRef<number | undefined>(undefined);
+  const pinToBottom = useRef(!around);
+  const geometryFrame = useRef<number | undefined>(undefined);
   const loadingOlder = useRef(false);
   const loadingNewer = useRef(false);
   const restoreAnchor = useRef<{ id: string; offset: number } | undefined>(
@@ -1581,16 +1594,14 @@ export function VirtualTranscript({
   const reportViewport = useCallback(() => {
     const element = parent.current;
     if (!element) return;
-    const remaining = Math.max(
-      0,
-      element.scrollHeight - element.scrollTop - element.clientHeight,
-    );
+    const remaining = transcriptBottomDistance(element);
     const first = virtual
       .getVirtualItems()
       .find((row) => row.end >= element.scrollTop);
-    const trueTop = element.scrollTop <= 80 && !hasOlder;
-    const trueBottom = remaining <= 80 && !hasNewer;
-    atBottomRef.current = trueBottom;
+    const trueTop =
+      element.scrollTop <= TRANSCRIPT_BOTTOM_THRESHOLD && !hasOlder;
+    const trueBottom =
+      remaining <= TRANSCRIPT_BOTTOM_THRESHOLD && !hasNewer;
     setAtTop(trueTop);
     setAtBottom(trueBottom);
     onViewportChange?.({
@@ -1598,6 +1609,49 @@ export function VirtualTranscript({
       anchorId: first ? entries[first.index]?.id : entries[0]?.id,
     });
   }, [entries, hasNewer, hasOlder, onViewportChange, virtual]);
+
+  const scrollToPinnedBottom = useCallback(() => {
+    const element = parent.current;
+    if (!element) return false;
+    element.scrollTop = element.scrollHeight;
+    return (
+      transcriptBottomDistance(element) <=
+      TRANSCRIPT_EXACT_BOTTOM_TOLERANCE
+    );
+  }, []);
+
+  const scheduleGeometrySync = useCallback(() => {
+    if (geometryFrame.current !== undefined) return;
+    geometryFrame.current = requestAnimationFrame(() => {
+      geometryFrame.current = undefined;
+      const element = parent.current;
+      if (!element) return;
+      const landed = !pinToBottom.current || scrollToPinnedBottom();
+      if (applyingBottomTarget.current !== undefined && landed) {
+        applyingBottomTarget.current = undefined;
+        initialized.current = true;
+      }
+      reportViewport();
+    });
+  }, [reportViewport, scrollToPinnedBottom]);
+
+  useEffect(() => {
+    const element = parent.current;
+    const inner = transcriptInner.current;
+    if (!element || !inner) return;
+    const observer = new ResizeObserver(scheduleGeometrySync);
+    observer.observe(element);
+    observer.observe(inner);
+    return () => observer.disconnect();
+  }, [scheduleGeometrySync]);
+
+  useEffect(
+    () => () => {
+      if (geometryFrame.current !== undefined)
+        cancelAnimationFrame(geometryFrame.current);
+    },
+    [],
+  );
 
   const captureRestoreAnchor = useCallback(() => {
     const element = parent.current;
@@ -1634,18 +1688,39 @@ export function VirtualTranscript({
           ? "end"
           : "start";
     appliedScrollTarget.current = scrollTarget.token;
+    pinToBottom.current = scrollTarget.kind === "bottom";
+    applyingBottomTarget.current =
+      scrollTarget.kind === "bottom" ? scrollTarget.token : undefined;
     initialized.current = false;
-    virtual.scrollToIndex(index, { align });
+    if (scrollTarget.kind === "bottom") scrollToPinnedBottom();
+    else virtual.scrollToIndex(index, { align });
     requestAnimationFrame(() => {
       if (appliedScrollTarget.current !== scrollTarget.token) return;
-      virtual.scrollToIndex(index, { align });
+      if (scrollTarget.kind === "bottom" && !pinToBottom.current) return;
+      if (scrollTarget.kind === "bottom") scrollToPinnedBottom();
+      else virtual.scrollToIndex(index, { align });
       requestAnimationFrame(() => {
         if (appliedScrollTarget.current !== scrollTarget.token) return;
+        if (scrollTarget.kind === "bottom" && !pinToBottom.current) return;
+        if (scrollTarget.kind === "bottom") {
+          if (!scrollToPinnedBottom()) {
+            scheduleGeometrySync();
+            return;
+          }
+        }
+        applyingBottomTarget.current = undefined;
         initialized.current = true;
         reportViewport();
       });
     });
-  }, [entries, reportViewport, scrollTarget, virtual]);
+  }, [
+    entries,
+    reportViewport,
+    scheduleGeometrySync,
+    scrollTarget,
+    scrollToPinnedBottom,
+    virtual,
+  ]);
 
   useEffect(() => {
     const anchor = restoreAnchor.current;
@@ -1709,7 +1784,8 @@ export function VirtualTranscript({
     if (!onLoadNewer || loadingNewer.current) return;
     loadingNewer.current = true;
     const element = parent.current;
-    if (element) virtual.scrollToOffset(element.scrollTop);
+    if (element && !pinToBottom.current)
+      virtual.scrollToOffset(element.scrollTop);
     try {
       await onLoadNewer();
     } finally {
@@ -1717,14 +1793,20 @@ export function VirtualTranscript({
     }
   }, [onLoadNewer, virtual]);
 
+  const releaseBottomPin = useCallback(() => {
+    pinToBottom.current = false;
+    applyingBottomTarget.current = undefined;
+    initialized.current = true;
+  }, []);
+
   const handleScroll = useCallback(() => {
-    reportViewport();
     const element = parent.current;
-    if (!element || !initialized.current) return;
-    const remaining = Math.max(
-      0,
-      element.scrollHeight - element.scrollTop - element.clientHeight,
-    );
+    if (!element) return;
+    const remaining = transcriptBottomDistance(element);
+    if (remaining <= TRANSCRIPT_BOTTOM_THRESHOLD)
+      pinToBottom.current = true;
+    reportViewport();
+    if (!initialized.current) return;
     if (hasOlder && element.scrollTop <= 160) void requestOlder();
     if (hasNewer && remaining <= 160) void requestNewer();
   }, [hasNewer, hasOlder, reportViewport, requestNewer, requestOlder]);
@@ -1755,9 +1837,21 @@ export function VirtualTranscript({
           className="transcript"
           ref={parent}
           onScroll={handleScroll}
+          onWheel={(event) => {
+            if (event.deltaY < 0) releaseBottomPin();
+          }}
+          onTouchMove={releaseBottomPin}
+          onPointerDown={(event) => {
+            if (event.target === event.currentTarget) releaseBottomPin();
+          }}
+          onKeyDown={(event) => {
+            if (["ArrowUp", "Home", "PageUp"].includes(event.key))
+              releaseBottomPin();
+          }}
         >
           <div
             className="transcript-inner"
+            ref={transcriptInner}
             style={{ height: virtual.getTotalSize() }}
           >
             {rows.map((row) => {

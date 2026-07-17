@@ -3,6 +3,18 @@ import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
 
+async function expectTranscriptAtBottom(page: Page) {
+  const transcript = page.locator("#transcript-scroll");
+  await expect
+    .poll(() =>
+      transcript.evaluate(
+        (element) =>
+          element.scrollHeight - element.scrollTop - element.clientHeight,
+      ),
+    )
+    .toBeLessThanOrEqual(1);
+}
+
 async function expectTranscriptRowsNotToOverlap(page: Page) {
   await expect
     .poll(async () =>
@@ -94,12 +106,14 @@ test("indexes an empty cache, searches content, reloads a deep link, and exposes
   await page.getByRole("button", { name: "Reset" }).click();
   await page.getByRole("button", { name: "Apply" }).click();
   await expect(page.getByText("Pagination message 109").first()).toBeVisible();
+  await expectTranscriptAtBottom(page);
   await page.getByRole("button", { name: "Go to first message" }).click();
   await expect(
     page.getByText("Inspect synthetic fixture").first(),
   ).toBeVisible();
   await page.getByRole("button", { name: "Go to latest message" }).click();
   await expect(page.getByText("Pagination message 109").first()).toBeVisible();
+  await expectTranscriptAtBottom(page);
   await page.getByRole("button", { name: "Copy message" }).last().click();
   await expect(page.getByRole("button", { name: "Copied" })).toBeVisible();
 
@@ -224,9 +238,8 @@ test("preserves the reader position when older transcript entries load", async (
     await route.continue();
   });
 
-  await transcript.evaluate((element) => {
-    element.scrollTo({ top: 120, behavior: "auto" });
-  });
+  await transcript.hover();
+  await page.mouse.wheel(0, -100_000);
   await cursorRequest;
   const anchor = await transcript.evaluate((element) => {
     const viewport = element.getBoundingClientRect();
@@ -859,12 +872,16 @@ test("measures mixed-height transcript rows after updates, jumps, and responsive
     page.getByRole("tooltip", { name: /printf first/ }),
   ).toContainText("printf second");
   await expectTranscriptRowsNotToOverlap(page);
+  await expectTranscriptAtBottom(page);
 
   await page.setViewportSize({ width: 900, height: 800 });
   await expectTranscriptRowsNotToOverlap(page);
+  await expectTranscriptAtBottom(page);
   await page.setViewportSize({ width: 390, height: 844 });
   await expectTranscriptRowsNotToOverlap(page);
+  await expectTranscriptAtBottom(page);
   await page.setViewportSize({ width: 1440, height: 900 });
+  await expectTranscriptAtBottom(page);
 
   await page.getByRole("button", { name: "Go to first message" }).click();
   await expect(
@@ -873,4 +890,5 @@ test("measures mixed-height transcript rows after updates, jumps, and responsive
   await page.getByRole("button", { name: "Go to latest message" }).click();
   await expect(page.getByText("Geometry sentinel")).toBeVisible();
   await expectTranscriptRowsNotToOverlap(page);
+  await expectTranscriptAtBottom(page);
 });
