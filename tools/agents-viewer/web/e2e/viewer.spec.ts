@@ -197,6 +197,88 @@ test("indexes an empty cache, searches content, reloads a deep link, and exposes
   await expect(page.locator("#entry-inspector")).toHaveCount(0);
 });
 
+test("preserves the reader position when older transcript entries load", async ({
+  page,
+}) => {
+  await expect(page.getByText("Pagination message 109").first()).toBeVisible();
+  const transcript = page.locator("#transcript-scroll");
+  const heightBefore = await transcript.evaluate(
+    (element) => element.scrollHeight,
+  );
+  let releaseCursor = () => {};
+  const cursorGate = new Promise<void>((resolve) => {
+    releaseCursor = resolve;
+  });
+  let reportCursorRequest = () => {};
+  const cursorRequest = new Promise<void>((resolve) => {
+    reportCursorRequest = resolve;
+  });
+  await page.route("**/api/v1/sessions/**/entries**", async (route) => {
+    const url = new URL(route.request().url());
+    if (!url.searchParams.has("cursor")) {
+      await route.continue();
+      return;
+    }
+    reportCursorRequest();
+    await cursorGate;
+    await route.continue();
+  });
+
+  await transcript.evaluate((element) => {
+    element.scrollTo({ top: 120, behavior: "auto" });
+  });
+  await cursorRequest;
+  const anchor = await transcript.evaluate((element) => {
+    const viewport = element.getBoundingClientRect();
+    for (const row of element.querySelectorAll<HTMLElement>(".entry-wrap")) {
+      const bounds = row.getBoundingClientRect();
+      const message = row
+        .querySelector<HTMLElement>(".markdown-content")
+        ?.textContent?.trim();
+      if (
+        message &&
+        /^Pagination message \d+$/.test(message) &&
+        bounds.bottom > viewport.top &&
+        bounds.top < viewport.bottom
+      )
+        return { message, offset: bounds.top - viewport.top };
+    }
+    throw new Error("no stable visible pagination message found");
+  });
+  const cursorResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname.endsWith("/entries") && url.searchParams.has("cursor");
+  });
+  releaseCursor();
+  await cursorResponse;
+  await expect
+    .poll(() => transcript.evaluate((element) => element.scrollHeight))
+    .toBeGreaterThan(heightBefore);
+
+  await expect
+    .poll(async () => {
+      const offset = await page
+        .getByText(anchor.message, { exact: true })
+        .first()
+        .evaluate((element) => {
+          const transcript = document.getElementById("transcript-scroll");
+          const row = element.closest(".entry-wrap");
+          if (!transcript || !row) throw new Error("anchor is not rendered");
+          return (
+            row.getBoundingClientRect().top -
+            transcript.getBoundingClientRect().top
+          );
+        });
+      return Math.abs(offset - anchor.offset);
+    })
+    .toBeLessThanOrEqual(3);
+  const remaining = await transcript.evaluate(
+    (element) =>
+      element.scrollHeight - element.scrollTop - element.clientHeight,
+  );
+  expect(remaining).toBeGreaterThan(80);
+});
+
 test("persists a resized or collapsed sidebar without inspector resets", async ({
   page,
 }) => {

@@ -13,6 +13,7 @@ import {
   executedContent,
   isDefaultVisible,
   SafeMarkdown,
+  shouldApplyScrollTarget,
   VirtualTranscript,
 } from "@/App";
 import { resources } from "@/lib/i18n";
@@ -782,6 +783,13 @@ describe("Agents Viewer UI", () => {
     await user.click(screen.getByRole("button", { name: "Go to 3 new items" }));
     expect(top).toHaveBeenCalled();
     expect(bottom).toHaveBeenCalled();
+  });
+  it("treats transcript scroll target tokens as one-shot commands", () => {
+    expect(shouldApplyScrollTarget(1, undefined, 20)).toBe(true);
+    expect(shouldApplyScrollTarget(1, 1, 21)).toBe(false);
+    expect(shouldApplyScrollTarget(2, 1, 21)).toBe(true);
+    expect(shouldApplyScrollTarget(undefined, 1, 21)).toBe(false);
+    expect(shouldApplyScrollTarget(1, undefined, 0)).toBe(false);
   });
   it("uses one event stream and coalesces refreshes by event type", async () => {
     render(

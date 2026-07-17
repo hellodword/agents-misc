@@ -1100,6 +1100,16 @@ type ScrollTarget = {
 };
 type ViewportState = { atBottom: boolean; anchorId?: string };
 
+export function shouldApplyScrollTarget(
+  targetToken: number | undefined,
+  appliedToken: number | undefined,
+  entryCount: number,
+) {
+  return (
+    entryCount > 0 && targetToken !== undefined && targetToken !== appliedToken
+  );
+}
+
 function Conversation({
   onInspect,
   signals,
@@ -1347,6 +1357,7 @@ export function VirtualTranscript({
   const { t, i18n } = useTranslation();
   const parent = useRef<HTMLDivElement>(null);
   const initialized = useRef(false);
+  const appliedScrollTarget = useRef<number | undefined>(undefined);
   const atBottomRef = useRef(!around);
   const loadingOlder = useRef(false);
   const loadingNewer = useRef(false);
@@ -1361,6 +1372,7 @@ export function VirtualTranscript({
     getItemKey: (index) => entries[index]?.id ?? index,
     estimateSize: (index) => (entries[index]?.kind === "message" ? 96 : 36),
     overscan: 10,
+    anchorTo: "end",
     initialRect: { width: 800, height: 800 },
     measureElement: (element) => element.getBoundingClientRect().height,
   });
@@ -1395,8 +1407,27 @@ export function VirtualTranscript({
     });
   }, [entries, hasNewer, hasOlder, onViewportChange, virtual]);
 
+  const captureRestoreAnchor = useCallback(() => {
+    const element = parent.current;
+    if (!element) return;
+    const first = virtual.getVirtualItemForOffset(element.scrollTop);
+    if (!first) return;
+    restoreAnchor.current = {
+      id: entries[first.index].id,
+      offset: first.start - element.scrollTop,
+    };
+  }, [entries, virtual]);
+
   useEffect(() => {
-    if (!scrollTarget || entries.length === 0) return;
+    if (
+      !scrollTarget ||
+      !shouldApplyScrollTarget(
+        scrollTarget.token,
+        appliedScrollTarget.current,
+        entries.length,
+      )
+    )
+      return;
     const index =
       scrollTarget.kind === "top"
         ? 0
@@ -1410,20 +1441,18 @@ export function VirtualTranscript({
         : scrollTarget.kind === "bottom"
           ? "end"
           : "start";
+    appliedScrollTarget.current = scrollTarget.token;
     initialized.current = false;
     virtual.scrollToIndex(index, { align });
-    let settleFrame = 0;
-    const correctionFrame = requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      if (appliedScrollTarget.current !== scrollTarget.token) return;
       virtual.scrollToIndex(index, { align });
-      settleFrame = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (appliedScrollTarget.current !== scrollTarget.token) return;
         initialized.current = true;
         reportViewport();
       });
     });
-    return () => {
-      cancelAnimationFrame(correctionFrame);
-      cancelAnimationFrame(settleFrame);
-    };
   }, [entries, reportViewport, scrollTarget, virtual]);
 
   useEffect(() => {
@@ -1434,44 +1463,67 @@ export function VirtualTranscript({
       restoreAnchor.current = undefined;
       return;
     }
+    initialized.current = false;
     virtual.scrollToIndex(index, { align: "start" });
-    requestAnimationFrame(() => {
-      const row = virtual
-        .getVirtualItems()
-        .find((item) => item.index === index);
-      if (row && parent.current)
-        parent.current.scrollTop = row.start - anchor.offset;
-      restoreAnchor.current = undefined;
+    let correctionFrame = 0;
+    let attempts = 0;
+    let stableFrames = 0;
+    const correct = () => {
+      const element = parent.current;
+      const row = element?.querySelector<HTMLElement>(
+        `.entry-wrap[data-index="${index}"]`,
+      );
+      if (element && row) {
+        const offset =
+          row.getBoundingClientRect().top - element.getBoundingClientRect().top;
+        const delta = offset - anchor.offset;
+        if (Math.abs(delta) > 0.5) {
+          element.scrollTop += delta;
+          stableFrames = 0;
+        } else {
+          stableFrames += 1;
+        }
+      } else {
+        virtual.scrollToIndex(index, { align: "start" });
+        stableFrames = 0;
+      }
+      attempts += 1;
+      if (attempts < 8 && stableFrames < 2) {
+        correctionFrame = requestAnimationFrame(correct);
+        return;
+      }
+      if (restoreAnchor.current === anchor) restoreAnchor.current = undefined;
+      initialized.current = true;
       reportViewport();
-    });
+    };
+    correctionFrame = requestAnimationFrame(correct);
+    return () => cancelAnimationFrame(correctionFrame);
   }, [entries, reportViewport, virtual]);
 
   const requestOlder = useCallback(async () => {
     if (!onLoadOlder || loadingOlder.current) return;
-    const element = parent.current;
-    const first = virtual.getVirtualItems()[0];
-    if (element && first)
-      restoreAnchor.current = {
-        id: entries[first.index].id,
-        offset: first.start - element.scrollTop,
-      };
     loadingOlder.current = true;
+    captureRestoreAnchor();
+    const element = parent.current;
+    if (element) virtual.scrollToOffset(element.scrollTop);
     try {
       await onLoadOlder();
     } finally {
       loadingOlder.current = false;
     }
-  }, [entries, onLoadOlder, virtual]);
+  }, [captureRestoreAnchor, onLoadOlder, virtual]);
 
   const requestNewer = useCallback(async () => {
     if (!onLoadNewer || loadingNewer.current) return;
     loadingNewer.current = true;
+    const element = parent.current;
+    if (element) virtual.scrollToOffset(element.scrollTop);
     try {
       await onLoadNewer();
     } finally {
       loadingNewer.current = false;
     }
-  }, [onLoadNewer]);
+  }, [onLoadNewer, virtual]);
 
   const handleScroll = useCallback(() => {
     reportViewport();

@@ -111,16 +111,20 @@ _agents-viewer-test:
   npm --prefix tools/agents-viewer/web ci
   npm --prefix tools/agents-viewer/web run test
 
-# Build the embedded debug binary and run host-browser E2E tests.
-agents-viewer-e2e:
-  {{viewer_nix}} just _agents-viewer-e2e
+# Rebuild Web into the embedded debug binary before E2E; forward optional Playwright arguments.
+agents-viewer-e2e *args:
+  {{viewer_nix}} just -- _agents-viewer-e2e "$@"
 
 [private]
-_agents-viewer-e2e:
+_agents-viewer-build-embedded-debug:
   npm --prefix tools/agents-viewer/web ci
   npm --prefix tools/agents-viewer/web run build
   cargo build --manifest-path tools/agents-viewer/Cargo.toml --bin agents-viewer --features embedded-ui
-  npm --prefix tools/agents-viewer/web run e2e
+
+[private]
+_agents-viewer-e2e *args:
+  just _agents-viewer-build-embedded-debug
+  npm --prefix tools/agents-viewer/web run e2e -- "$@"
 
 # Export TypeScript API bindings from Rust DTOs.
 agents-viewer-generate:

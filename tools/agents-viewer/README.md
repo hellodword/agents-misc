@@ -192,6 +192,18 @@ just agents-viewer-e2e            # embedded server plus host-browser Playwright
 just agents-viewer-acceptance-large
 ```
 
+The Playwright fixtures start `target/debug/agents-viewer`, whose Web UI is
+embedded from `web/dist` at Rust compile time. Running the Web package's `e2e`
+script directly does not rebuild either artifact and can silently test an old
+Web bundle. Always use `just agents-viewer-e2e` after frontend changes; it
+installs the locked Web dependencies, builds `web/dist`, recompiles the debug
+binary with `embedded-ui`, and only then starts Playwright. Pass Playwright
+arguments through the same recipe for focused runs:
+
+```bash
+just -- agents-viewer-e2e --grep "preserves the reader position"
+```
+
 E2E does not download a browser. Set `PLAYWRIGHT_CDP_ENDPOINT`, copy the ignored `web/e2e.config.example.json` to `web/e2e.config.json`, or expose `google-chrome`, `microsoft-edge`, or `chromium` on `PATH`. Browser profiles, screenshots, traces, databases, build output, and other runtime artifacts stay in ignored locations.
 
 The Nix package contains one executable with the Web UI embedded:
@@ -210,4 +222,5 @@ Common failures:
 - index setting mismatch: intentionally rebuild with `just agents-viewer-run --rebuild-index`.
 - no FTS5: use the Nix package or another build with bundled SQLite and FTS5.
 - no E2E browser: configure CDP or expose a supported Chromium-family executable; do not install a browser from the test command.
+- stale UI during E2E: use `just agents-viewer-e2e`, not the Web package's `e2e` script directly; the Just recipe rebuilds the compile-time embedded bundle first.
 - UI/API version mismatch: rebuild the embedded binary with `just agents-viewer-build`.
