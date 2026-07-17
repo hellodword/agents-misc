@@ -94,10 +94,125 @@ import i18n, {
 
 type ThemeValue = "light" | "dark" | "system";
 
+export type ConversationDisplayType =
+  | "received"
+  | "sent"
+  | "requestUserInput"
+  | "reasoning"
+  | "exec"
+  | "plan"
+  | "patch"
+  | "mcp"
+  | "webSearch"
+  | "function"
+  | "dynamic"
+  | "terminal"
+  | "viewImage"
+  | "otherTool"
+  | "warning"
+  | "error"
+  | "context"
+  | "marker"
+  | "technicalMessage"
+  | "internalMessage"
+  | "unknown";
+
+const CONVERSATION_DISPLAY_OPTIONS: readonly {
+  value: ConversationDisplayType;
+  labelKey: string;
+}[] = [
+  { value: "received", labelKey: "displayReceived" },
+  { value: "sent", labelKey: "displaySent" },
+  { value: "requestUserInput", labelKey: "displayRequestUserInput" },
+  { value: "reasoning", labelKey: "displayReasoning" },
+  { value: "exec", labelKey: "displayExec" },
+  { value: "plan", labelKey: "displayPlan" },
+  { value: "patch", labelKey: "displayPatch" },
+  { value: "mcp", labelKey: "displayMcp" },
+  { value: "webSearch", labelKey: "displayWebSearch" },
+  { value: "function", labelKey: "displayFunction" },
+  { value: "dynamic", labelKey: "displayDynamic" },
+  { value: "terminal", labelKey: "displayTerminal" },
+  { value: "viewImage", labelKey: "displayViewImage" },
+  { value: "otherTool", labelKey: "displayOtherTool" },
+  { value: "warning", labelKey: "displayWarning" },
+  { value: "error", labelKey: "displayError" },
+  { value: "context", labelKey: "displayContext" },
+  { value: "marker", labelKey: "displayMarker" },
+  { value: "technicalMessage", labelKey: "displayTechnicalMessage" },
+  { value: "internalMessage", labelKey: "displayInternalMessage" },
+  { value: "unknown", labelKey: "displayUnknown" },
+];
+const REQUIRED_CONVERSATION_DISPLAY_TYPES: readonly ConversationDisplayType[] =
+  ["received", "sent", "requestUserInput"];
+export const DEFAULT_CONVERSATION_DISPLAY_TYPES: readonly ConversationDisplayType[] =
+  [...REQUIRED_CONVERSATION_DISPLAY_TYPES, "reasoning", "exec"];
+const CONVERSATION_DISPLAY_STORAGE_KEY =
+  "agents-viewer-conversation-display-types";
+const conversationDisplayTypeSet = new Set(
+  CONVERSATION_DISPLAY_OPTIONS.map(({ value }) => value),
+);
+const requiredConversationDisplayTypeSet = new Set(
+  REQUIRED_CONVERSATION_DISPLAY_TYPES,
+);
+
+function canonicalConversationDisplayTypes(
+  values: readonly ConversationDisplayType[],
+) {
+  const selected = new Set<ConversationDisplayType>([
+    ...REQUIRED_CONVERSATION_DISPLAY_TYPES,
+    ...values,
+  ]);
+  return CONVERSATION_DISPLAY_OPTIONS.map(({ value }) => value).filter(
+    (value) => selected.has(value),
+  );
+}
+
+function storedConversationDisplayTypes() {
+  const stored = localStorage.getItem(CONVERSATION_DISPLAY_STORAGE_KEY);
+  if (stored === null) return [...DEFAULT_CONVERSATION_DISPLAY_TYPES];
+  try {
+    const values = JSON.parse(stored) as unknown;
+    if (
+      !Array.isArray(values) ||
+      !values.every(
+        (value): value is ConversationDisplayType =>
+          typeof value === "string" &&
+          conversationDisplayTypeSet.has(value as ConversationDisplayType),
+      )
+    )
+      return [...DEFAULT_CONVERSATION_DISPLAY_TYPES];
+    return canonicalConversationDisplayTypes(values);
+  } catch {
+    return [...DEFAULT_CONVERSATION_DISPLAY_TYPES];
+  }
+}
+
+function sameConversationDisplayTypes(
+  left: readonly ConversationDisplayType[],
+  right: readonly ConversationDisplayType[],
+) {
+  const canonicalLeft = canonicalConversationDisplayTypes(left);
+  const canonicalRight = canonicalConversationDisplayTypes(right);
+  return (
+    canonicalLeft.length === canonicalRight.length &&
+    canonicalLeft.every((value, index) => value === canonicalRight[index])
+  );
+}
+
+function withConversationDisplayType(
+  values: readonly ConversationDisplayType[],
+  value?: ConversationDisplayType,
+) {
+  return canonicalConversationDisplayTypes(value ? [...values, value] : values);
+}
+
 const SIDEBAR_DEFAULT_WIDTH = 300;
 const SIDEBAR_MIN_WIDTH = 240;
 const SIDEBAR_MAX_WIDTH = 480;
 const INSPECTOR_DEFAULT_WIDTH = 360;
+const INSPECTOR_MIN_WIDTH = 300;
+const INSPECTOR_MAX_WIDTH = 600;
 
 function storedTheme(): ThemeValue {
   const value = localStorage.getItem("agents-viewer-theme");
@@ -127,10 +242,11 @@ export function App() {
   const [navOpen, setNavOpen] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [showTechnical, setShowTechnical] = useState(
-    () => localStorage.getItem("agents-viewer-show-technical") === "true",
+  const [conversationDisplayTypes, setConversationDisplayTypes] = useState(
+    storedConversationDisplayTypes,
   );
-  const [forcedTechnical, setForcedTechnical] = useState(false);
+  const [forcedConversationDisplayType, setForcedConversationDisplayType] =
+    useState<ConversationDisplayType>();
   const [theme, setTheme] = useState<ThemeValue>(storedTheme);
   const [searchCtrlShiftF, setSearchCtrlShiftF] = useState(
     () => localStorage.getItem("agents-viewer-search-ctrl-shift-f") === "true",
@@ -311,7 +427,7 @@ export function App() {
   useEffect(() => {
     setInspectorOpen(false);
     setSelectedEntry(undefined);
-    setForcedTechnical(false);
+    setForcedConversationDisplayType(undefined);
   }, [location.pathname]);
   useEffect(() => {
     const keys: string[] = [];
@@ -400,11 +516,17 @@ export function App() {
       setArchived(next.archived);
       setSource(next.source);
       setCwd(next.cwd);
-      setShowTechnical(next.showTechnical);
-      setForcedTechnical(false);
+      const nextDisplayTypes = canonicalConversationDisplayTypes(
+        next.conversationDisplayTypes,
+      );
+      setConversationDisplayTypes((current) =>
+        sameConversationDisplayTypes(current, nextDisplayTypes)
+          ? current
+          : nextDisplayTypes,
+      );
       localStorage.setItem(
-        "agents-viewer-show-technical",
-        String(next.showTechnical),
+        CONVERSATION_DISPLAY_STORAGE_KEY,
+        JSON.stringify(nextDisplayTypes),
       );
       setSearchCtrlShiftF(next.searchCtrlShiftF);
       localStorage.setItem(
@@ -436,7 +558,6 @@ export function App() {
       localStorage.setItem("agents-viewer-sidebar-collapsed", "true");
     }
   }, [sidebarPanelRef]);
-  const effectiveTechnical = showTechnical || forcedTechnical;
   const sidebar = (
     <SessionSidebar
       groups={sessionGroups}
@@ -536,8 +657,8 @@ export function App() {
             archived={archived}
             source={source}
             cwd={cwd}
-            showTechnical={showTechnical}
-            forcedTechnical={forcedTechnical}
+            conversationDisplayTypes={conversationDisplayTypes}
+            forcedConversationDisplayType={forcedConversationDisplayType}
             theme={theme}
             language={i18n.language.startsWith("zh") ? "zh-CN" : "en"}
             searchCtrlShiftF={searchCtrlShiftF}
@@ -630,8 +751,10 @@ export function App() {
                     <Conversation
                       signals={conversationSignals}
                       resyncSequence={resyncSequence}
-                      showTechnical={effectiveTechnical}
-                      onForceTechnical={setForcedTechnical}
+                      conversationDisplayTypes={conversationDisplayTypes}
+                      onForceConversationDisplayType={
+                        setForcedConversationDisplayType
+                      }
                       onInspect={(sessionId, entryId) =>
                         openInspector({ sessionId, entryId })
                       }
@@ -652,14 +775,22 @@ export function App() {
             id="inspector-panel"
             panelRef={inspectorPanelRef}
             defaultSize="0px"
-            minSize="300px"
-            maxSize="600px"
+            minSize={`${INSPECTOR_MIN_WIDTH}px`}
+            maxSize={`${INSPECTOR_MAX_WIDTH}px`}
             collapsedSize="0px"
             collapsible
             groupResizeBehavior="preserve-pixel-size"
             onResize={(size) => {
-              if (size.inPixels >= 300)
+              if (size.inPixels >= INSPECTOR_MIN_WIDTH) {
                 inspectorWidthRef.current = Math.round(size.inPixels);
+              } else if (inspectorOpen && !compactInspector) {
+                requestAnimationFrame(() => {
+                  if (inspectorOpen && !compactInspector)
+                    inspectorPanelRef.current?.resize(
+                      `${inspectorWidthRef.current}px`,
+                    );
+                });
+              }
             }}
             className="inspector"
           >
@@ -732,7 +863,7 @@ type FilterValues = {
   archived: "exclude" | "include" | "only";
   source: string;
   cwd: string;
-  showTechnical: boolean;
+  conversationDisplayTypes: ConversationDisplayType[];
 };
 
 type SettingsValues = FilterValues & {
@@ -743,7 +874,7 @@ type SettingsValues = FilterValues & {
 
 function SettingsControl(
   props: SettingsValues & {
-    forcedTechnical: boolean;
+    forcedConversationDisplayType?: ConversationDisplayType;
     onApply: (values: SettingsValues) => void;
   },
 ) {
@@ -751,20 +882,25 @@ function SettingsControl(
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<SettingsValues>({
     ...props,
-    showTechnical: props.showTechnical || props.forcedTechnical,
+    conversationDisplayTypes: [...props.conversationDisplayTypes],
   });
   const activeCount =
     Number(Boolean(props.source)) +
     Number(Boolean(props.cwd)) +
     Number(props.archived !== "exclude") +
-    Number(props.showTechnical || props.forcedTechnical);
+    Number(
+      !sameConversationDisplayTypes(
+        props.conversationDisplayTypes,
+        DEFAULT_CONVERSATION_DISPLAY_TYPES,
+      ),
+    );
   const changeOpen = (next: boolean) => {
     if (next)
       setDraft({
         archived: props.archived,
         source: props.source,
         cwd: props.cwd,
-        showTechnical: props.showTechnical || props.forcedTechnical,
+        conversationDisplayTypes: [...props.conversationDisplayTypes],
         theme: props.theme,
         language: props.language,
         searchCtrlShiftF: props.searchCtrlShiftF,
@@ -873,27 +1009,51 @@ function SettingsControl(
           </fieldset>
           <fieldset>
             <legend>{t("conversationDisplay")}</legend>
-            <label className="technical-filter" htmlFor="technical-filter">
-              <input
-                id="technical-filter"
-                type="checkbox"
-                checked={draft.showTechnical}
-                onChange={(event) =>
-                  setDraft((current) => ({
-                    ...current,
-                    showTechnical: event.target.checked,
-                  }))
-                }
-              />
-              <span>
-                <strong>{t("showTechnical")}</strong>
-                <small>
-                  {props.forcedTechnical
-                    ? t("showTechnicalForced")
-                    : t("showTechnicalHelp")}
-                </small>
-              </span>
-            </label>
+            <p className="settings-help">{t("conversationDisplayHelp")}</p>
+            <div className="conversation-display-types">
+              {CONVERSATION_DISPLAY_OPTIONS.map(({ value, labelKey }) => {
+                const required = requiredConversationDisplayTypeSet.has(value);
+                return (
+                  <label
+                    className={`conversation-display-type ${required ? "conversation-display-type-required" : ""}`}
+                    key={value}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={draft.conversationDisplayTypes.includes(value)}
+                      disabled={required}
+                      onChange={(event) =>
+                        setDraft((current) => ({
+                          ...current,
+                          conversationDisplayTypes:
+                            canonicalConversationDisplayTypes(
+                              event.target.checked
+                                ? [...current.conversationDisplayTypes, value]
+                                : current.conversationDisplayTypes.filter(
+                                    (candidate) => candidate !== value,
+                                  ),
+                            ),
+                        }))
+                      }
+                    />
+                    <span>{t(labelKey)}</span>
+                  </label>
+                );
+              })}
+            </div>
+            <p className="settings-help">{t("requiredDisplayTypesHelp")}</p>
+            {props.forcedConversationDisplayType && (
+              <p className="settings-help forced-display-type" role="status">
+                {t("displayTypeForced", {
+                  type: t(
+                    CONVERSATION_DISPLAY_OPTIONS.find(
+                      ({ value }) =>
+                        value === props.forcedConversationDisplayType,
+                    )?.labelKey ?? "displayUnknown",
+                  ),
+                })}
+              </p>
+            )}
           </fieldset>
           <fieldset>
             <legend>{t("appearance")}</legend>
@@ -958,7 +1118,9 @@ function SettingsControl(
                   archived: "exclude",
                   source: "",
                   cwd: "",
-                  showTechnical: false,
+                  conversationDisplayTypes: [
+                    ...DEFAULT_CONVERSATION_DISPLAY_TYPES,
+                  ],
                   theme: "system",
                   language: preferredLanguage(),
                   searchCtrlShiftF: false,
@@ -1114,14 +1276,16 @@ function Conversation({
   onInspect,
   signals,
   resyncSequence,
-  showTechnical,
-  onForceTechnical,
+  conversationDisplayTypes,
+  onForceConversationDisplayType,
 }: {
   onInspect: (s: string, e: string) => void;
   signals: Record<string, number>;
   resyncSequence: number;
-  showTechnical: boolean;
-  onForceTechnical: (value: boolean) => void;
+  conversationDisplayTypes: ConversationDisplayType[];
+  onForceConversationDisplayType: (
+    value: ConversationDisplayType | undefined,
+  ) => void;
 }) {
   const { sessionId = "" } = useParams();
   const { t } = useTranslation();
@@ -1134,6 +1298,8 @@ function Conversation({
   const [error, setError] = useState("");
   const [newCount, setNewCount] = useState(0);
   const [visibilityReady, setVisibilityReady] = useState(false);
+  const [deepLinkDisplayType, setDeepLinkDisplayType] =
+    useState<ConversationDisplayType>();
   const [scrollTarget, setScrollTarget] = useState<ScrollTarget>();
   const viewport = useRef<ViewportState>({ atBottom: true });
   const requestSequence = useRef(0);
@@ -1141,13 +1307,25 @@ function Conversation({
   const loadingCursors = useRef(new Set<string>());
   const handledSignal = useRef(0);
   const refreshTimer = useRef<number | undefined>(undefined);
+  const selectedConversationDisplayTypes = canonicalConversationDisplayTypes(
+    conversationDisplayTypes,
+  );
+  const serializedSelectedConversationDisplayTypes =
+    selectedConversationDisplayTypes.join(",");
+  const effectiveConversationDisplayTypes = withConversationDisplayType(
+    selectedConversationDisplayTypes,
+    deepLinkDisplayType,
+  );
+  const serializedConversationDisplayTypes =
+    effectiveConversationDisplayTypes.join(",");
 
   useEffect(() => {
     const controller = new AbortController();
     setEntries([]);
     setPreviousCursor(undefined);
     setNextCursor(undefined);
-    onForceTechnical(false);
+    setDeepLinkDisplayType(undefined);
+    onForceConversationDisplayType(undefined);
     setNewCount(0);
     viewport.current = { atBottom: !around };
     if (!around) {
@@ -1158,7 +1336,12 @@ function Conversation({
     api
       .entry(sessionId, around, controller.signal)
       .then((detail) => {
-        onForceTechnical(!isDefaultVisible(detail.item));
+        const displayType = conversationDisplayType(detail.item);
+        const forced = selectedConversationDisplayTypes.includes(displayType)
+          ? undefined
+          : displayType;
+        setDeepLinkDisplayType(forced);
+        onForceConversationDisplayType(forced);
         setVisibilityReady(true);
       })
       .catch((f) => {
@@ -1168,7 +1351,12 @@ function Conversation({
         }
       });
     return () => controller.abort();
-  }, [around, onForceTechnical, sessionId]);
+  }, [
+    around,
+    onForceConversationDisplayType,
+    serializedSelectedConversationDisplayTypes,
+    sessionId,
+  ]);
 
   const replacePage = useCallback(
     async (
@@ -1179,11 +1367,15 @@ function Conversation({
       const request = ++requestSequence.current;
       const options =
         kind === "around" && id
-          ? { limit: 100, aroundEntryId: id, includeTechnical: showTechnical }
+          ? {
+              limit: 100,
+              aroundEntryId: id,
+              displayTypes: serializedConversationDisplayTypes,
+            }
           : {
               limit: 100,
               direction: kind === "top" ? "forward" : "backward",
-              includeTechnical: showTechnical,
+              displayTypes: serializedConversationDisplayTypes,
             };
       try {
         const [detail, page] = await Promise.all([
@@ -1203,7 +1395,7 @@ function Conversation({
           setError(message(f));
       }
     },
-    [sessionId, showTechnical],
+    [serializedConversationDisplayTypes, sessionId],
   );
 
   useEffect(() => {
@@ -1249,7 +1441,7 @@ function Conversation({
       const page = await api.entries(sessionId, {
         cursor,
         limit: 100,
-        includeTechnical: showTechnical,
+        displayTypes: serializedConversationDisplayTypes,
       });
       setEntries((current) => mergeEntries(page.data, current));
       setPreviousCursor(page.previousCursor);
@@ -1259,7 +1451,7 @@ function Conversation({
     } finally {
       loadingCursors.current.delete(cursor);
     }
-  }, [previousCursor, sessionId, showTechnical]);
+  }, [previousCursor, serializedConversationDisplayTypes, sessionId]);
 
   const loadNewer = useCallback(async () => {
     const cursor = nextCursor;
@@ -1269,7 +1461,7 @@ function Conversation({
       const page = await api.entries(sessionId, {
         cursor,
         limit: 100,
-        includeTechnical: showTechnical,
+        displayTypes: serializedConversationDisplayTypes,
       });
       setEntries((current) => mergeEntries(current, page.data));
       setNextCursor(page.nextCursor);
@@ -1279,7 +1471,7 @@ function Conversation({
     } finally {
       loadingCursors.current.delete(cursor);
     }
-  }, [nextCursor, sessionId, showTechnical]);
+  }, [nextCursor, serializedConversationDisplayTypes, sessionId]);
 
   const updateViewport = useCallback((next: ViewportState) => {
     viewport.current = next;
@@ -2580,6 +2772,56 @@ function mergeEntries(first: EntryListItem[], second: EntryListItem[]) {
       (left, right) =>
         left.sequence - right.sequence || left.id.localeCompare(right.id),
     );
+}
+export function conversationDisplayType(
+  entry: EntryListItem,
+): ConversationDisplayType {
+  if (entry.kind === "message") {
+    if (entry.presentation === "user") return "sent";
+    if (entry.presentation === "response") return "received";
+    if (entry.presentation === "internal") return "internalMessage";
+    return "technicalMessage";
+  }
+  if (entry.kind === "tool") {
+    switch (entry.toolKind) {
+      case "requestUserInput":
+        return "requestUserInput";
+      case "command":
+        return "exec";
+      case "patch":
+        return "patch";
+      case "mcp":
+        return "mcp";
+      case "webSearch":
+        return "webSearch";
+      case "function":
+        return "function";
+      case "dynamic":
+        return "dynamic";
+      case "terminal":
+        return "terminal";
+      case "viewImage":
+        return "viewImage";
+      default:
+        return "otherTool";
+    }
+  }
+  switch (entry.kind) {
+    case "reasoning":
+      return "reasoning";
+    case "plan":
+      return "plan";
+    case "warning":
+      return "warning";
+    case "error":
+      return "error";
+    case "context":
+      return "context";
+    case "marker":
+      return "marker";
+    default:
+      return "unknown";
+  }
 }
 export function isDefaultVisible(entry: EntryListItem) {
   return (

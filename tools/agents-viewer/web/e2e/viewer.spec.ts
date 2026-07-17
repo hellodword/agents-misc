@@ -332,6 +332,132 @@ test("persists a resized or collapsed sidebar without inspector resets", async (
     .toBeCloseTo(persistedWidth, 0);
 });
 
+test("keeps the desktop inspector within its resize limits", async ({ page }) => {
+  await page.getByRole("button", { name: "Open inspector" }).last().click();
+  const inspector = page.locator("#inspector-panel");
+  const handle = page.locator(".inspector-handle");
+  await expect(page.locator("#entry-inspector")).toBeVisible();
+
+  const expandGrip = await handle.locator("div").boundingBox();
+  expect(expandGrip).not.toBeNull();
+  await page.mouse.move(
+    expandGrip!.x + expandGrip!.width / 2,
+    expandGrip!.y + expandGrip!.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(expandGrip!.x - 900, expandGrip!.y, { steps: 12 });
+  await page.mouse.up();
+  await expect
+    .poll(async () => (await inspector.boundingBox())?.width ?? 0)
+    .toBeGreaterThanOrEqual(595);
+  expect((await inspector.boundingBox())!.width).toBeLessThanOrEqual(601);
+
+  const shrinkGrip = await handle.locator("div").boundingBox();
+  expect(shrinkGrip).not.toBeNull();
+  await page.mouse.move(
+    shrinkGrip!.x + shrinkGrip!.width / 2,
+    shrinkGrip!.y + shrinkGrip!.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(shrinkGrip!.x + 900, shrinkGrip!.y, { steps: 16 });
+  await page.mouse.up();
+  await expect
+    .poll(async () => (await inspector.boundingBox())?.width ?? 0)
+    .toBeGreaterThanOrEqual(299);
+  expect((await inspector.boundingBox())!.width).toBeLessThanOrEqual(310);
+  await expect(page.locator("#entry-inspector")).toBeVisible();
+
+  const validWidth = (await inspector.boundingBox())!.width;
+  await page
+    .locator("#entry-inspector")
+    .getByRole("button", { name: "Close inspector" })
+    .click();
+  await page.getByRole("button", { name: "Open inspector" }).last().click();
+  await expect
+    .poll(async () => (await inspector.boundingBox())?.width ?? 0)
+    .toBeCloseTo(validWidth, 0);
+});
+
+test("persists normalized conversation display types", async ({
+  page,
+  rollout,
+}) => {
+  await page.getByRole("button", { name: "Settings" }).click();
+  const settings = page.getByRole("dialog", { name: "Settings" });
+  for (const name of [
+    "Received replies",
+    "Sent messages",
+    "request_user_input",
+  ]) {
+    const required = settings.getByRole("checkbox", { name });
+    await expect(required).toBeChecked();
+    await expect(required).toBeDisabled();
+  }
+  await expect(
+    settings.getByRole("checkbox", { name: "Reasoning" }),
+  ).toBeChecked();
+  await expect(
+    settings.getByRole("checkbox", { name: "Exec commands" }),
+  ).toBeChecked();
+  await settings.getByRole("checkbox", { name: "Reasoning" }).uncheck();
+  await settings.getByRole("checkbox", { name: "Warnings" }).check();
+  await settings.getByRole("button", { name: "Apply" }).click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        localStorage.getItem("agents-viewer-conversation-display-types"),
+      ),
+    )
+    .toBe(
+      JSON.stringify([
+        "received",
+        "sent",
+        "requestUserInput",
+        "exec",
+        "warning",
+      ]),
+    );
+
+  const records = [
+    {
+      timestamp: "2025-01-02T03:07:30.000Z",
+      type: "event_msg",
+      payload: {
+        type: "agent_reasoning",
+        text: "Hidden reasoning display sentinel",
+      },
+    },
+    {
+      timestamp: "2025-01-02T03:07:31.000Z",
+      type: "event_msg",
+      payload: {
+        type: "warning",
+        message: "Visible warning display sentinel",
+      },
+    },
+  ];
+  await appendFile(
+    rollout,
+    `${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
+  );
+  await expect(page.getByText("Visible warning display sentinel")).toBeVisible({
+    timeout: 8_000,
+  });
+  await expect(page.getByText("Hidden reasoning display sentinel")).toHaveCount(
+    0,
+  );
+
+  await page.reload();
+  await page.getByRole("button", { name: "Settings" }).click();
+  await expect(
+    page.getByRole("checkbox", { name: "Reasoning" }),
+  ).not.toBeChecked();
+  await expect(
+    page.getByRole("checkbox", { name: "Warnings" }),
+  ).toBeChecked();
+});
+
 test("renders multiple request_user_input questions as responsive poll messages", async ({
   page,
   rollout,
@@ -646,10 +772,6 @@ test("measures mixed-height transcript rows after updates, jumps, and responsive
   page,
   rollout,
 }) => {
-  await page.getByRole("button", { name: "Settings" }).click();
-  await page.getByRole("checkbox", { name: /Show technical activity/ }).check();
-  await page.getByRole("button", { name: "Apply" }).click();
-
   const longMessage = `${Array.from(
     { length: 180 },
     (_, index) => `Long line ${index}: ${"content ".repeat(12)}`,

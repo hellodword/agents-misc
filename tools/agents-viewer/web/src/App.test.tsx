@@ -10,6 +10,7 @@ import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   App,
+  conversationDisplayType,
   executedContent,
   isDefaultVisible,
   SafeMarkdown,
@@ -62,6 +63,16 @@ const entry: EntryListItem = {
   metadata: {},
   rawRefCount: 1,
 };
+const warningEntry: EntryListItem = {
+  ...entry,
+  id: "warning-entry",
+  sequence: 2,
+  kind: "warning",
+  presentation: "technical",
+  role: undefined,
+  title: "Warning",
+  primaryPreview: "Linked warning detail",
+};
 type EventSourceHarness = {
   instances: Array<{ emit: (name: string, data: unknown) => void }>;
 };
@@ -92,7 +103,13 @@ beforeEach(() => {
           totalBytes: secondary ? 0 : 15,
           complete: true,
         };
-      } else if (url.includes("/sessions/s1/entries/e1"))
+      } else if (url.includes("/sessions/s1/entries/warning-entry"))
+        body = {
+          item: warningEntry,
+          derivedMetadata: {},
+          rawRefs: [],
+        };
+      else if (url.includes("/sessions/s1/entries/e1"))
         body = {
           item: entry,
           derivedMetadata: {},
@@ -128,7 +145,12 @@ beforeEach(() => {
           },
         };
       else if (url.includes("/sessions/s1/entries"))
-        body = { data: [entry], partial: false };
+        body = {
+          data: url.includes("aroundEntryId=warning-entry")
+            ? [warningEntry]
+            : [entry],
+          partial: false,
+        };
       else if (url.endsWith("/sessions/s1"))
         body = { summary: session, diagnostics: [] };
       else if (url.includes("/session-groups"))
@@ -185,6 +207,59 @@ describe("Agents Viewer UI", () => {
       Object.keys(resources["zh-CN"].translation).sort(),
     );
   });
+  it("classifies every normalized conversation display type", () => {
+    const cases: Array<
+      [
+        ReturnType<typeof conversationDisplayType>,
+        Partial<EntryListItem>,
+      ]
+    > = [
+      ["received", { kind: "message", presentation: "response" }],
+      ["sent", { kind: "message", presentation: "user" }],
+      [
+        "requestUserInput",
+        { kind: "tool", presentation: "technical", toolKind: "requestUserInput" },
+      ],
+      ["reasoning", { kind: "reasoning", presentation: "technical" }],
+      ["exec", { kind: "tool", presentation: "technical", toolKind: "command" }],
+      ["plan", { kind: "plan", presentation: "technical" }],
+      ["patch", { kind: "tool", presentation: "technical", toolKind: "patch" }],
+      ["mcp", { kind: "tool", presentation: "technical", toolKind: "mcp" }],
+      [
+        "webSearch",
+        { kind: "tool", presentation: "technical", toolKind: "webSearch" },
+      ],
+      [
+        "function",
+        { kind: "tool", presentation: "technical", toolKind: "function" },
+      ],
+      [
+        "dynamic",
+        { kind: "tool", presentation: "technical", toolKind: "dynamic" },
+      ],
+      [
+        "terminal",
+        { kind: "tool", presentation: "technical", toolKind: "terminal" },
+      ],
+      [
+        "viewImage",
+        { kind: "tool", presentation: "technical", toolKind: "viewImage" },
+      ],
+      ["otherTool", { kind: "tool", presentation: "technical", toolKind: "other" }],
+      ["warning", { kind: "warning", presentation: "technical" }],
+      ["error", { kind: "error", presentation: "technical" }],
+      ["context", { kind: "context", presentation: "technical" }],
+      ["marker", { kind: "marker", presentation: "technical" }],
+      [
+        "technicalMessage",
+        { kind: "message", presentation: "technical" },
+      ],
+      ["internalMessage", { kind: "message", presentation: "internal" }],
+      ["unknown", { kind: "unknown", presentation: "technical" }],
+    ];
+    for (const [expected, override] of cases)
+      expect(conversationDisplayType({ ...entry, ...override })).toBe(expected);
+  });
   it("renders session, deep link, inspector raw chunk, search, and SSE-safe states", async () => {
     const user = userEvent.setup();
     render(
@@ -208,8 +283,31 @@ describe("Agents Viewer UI", () => {
     expect(
       screen.getByRole("option", { name: "Code review" }),
     ).toBeInTheDocument();
+    const settings = screen.getByRole("dialog", { name: "Settings" });
+    expect(within(settings).getAllByRole("checkbox")).toHaveLength(22);
+    for (const name of [
+      "Received replies",
+      "Sent messages",
+      "request_user_input",
+    ]) {
+      const required = within(settings).getByRole("checkbox", { name });
+      expect(required).toBeChecked();
+      expect(required).toBeDisabled();
+    }
+    expect(
+      within(settings).getByRole("checkbox", { name: "Reasoning" }),
+    ).toBeChecked();
+    expect(
+      within(settings).getByRole("checkbox", { name: "Exec commands" }),
+    ).toBeChecked();
+    expect(
+      within(settings).getByRole("checkbox", { name: "Warnings" }),
+    ).not.toBeChecked();
     await user.click(
-      screen.getByRole("checkbox", { name: /Show technical activity/ }),
+      within(settings).getByRole("checkbox", { name: "Reasoning" }),
+    );
+    await user.click(
+      within(settings).getByRole("checkbox", { name: "Warnings" }),
     );
     await user.click(
       screen.getByRole("checkbox", { name: /Use Ctrl\+Shift\+F to search/ }),
@@ -220,11 +318,19 @@ describe("Agents Viewer UI", () => {
         vi
           .mocked(fetch)
           .mock.calls.some(([input]) =>
-            String(input).includes("includeTechnical=true"),
+            String(input).includes(
+              "displayTypes=received%2Csent%2CrequestUserInput%2Cexec%2Cwarning",
+            ),
           ),
       ).toBe(true),
     );
-    expect(localStorage.getItem("agents-viewer-show-technical")).toBe("true");
+    expect(
+      JSON.parse(
+        localStorage.getItem(
+          "agents-viewer-conversation-display-types",
+        ) ?? "null",
+      ),
+    ).toEqual(["received", "sent", "requestUserInput", "exec", "warning"]);
     expect(localStorage.getItem("agents-viewer-search-ctrl-shift-f")).toBe(
       "true",
     );
@@ -257,6 +363,79 @@ describe("Agents Viewer UI", () => {
       ).toBe(true),
     );
     expect(localStorage.getItem("agents-viewer-search-all-types")).toBe("true");
+  });
+  it("uses the new display defaults instead of the legacy technical preference", async () => {
+    localStorage.setItem("agents-viewer-show-technical", "true");
+    localStorage.setItem(
+      "agents-viewer-conversation-display-types",
+      "not-json",
+    );
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/sessions/s1"]}>
+        <App />
+      </MemoryRouter>,
+    );
+    await screen.findByRole("heading", { name: "Hello session" });
+    await user.click(screen.getByRole("button", { name: "Settings" }));
+    expect(
+      screen.getByRole("checkbox", { name: "Reasoning" }),
+    ).toBeChecked();
+    expect(
+      screen.getByRole("checkbox", { name: "Exec commands" }),
+    ).toBeChecked();
+    expect(
+      screen.getByRole("checkbox", { name: "Patch activity" }),
+    ).not.toBeChecked();
+    expect(
+      screen.getByRole("checkbox", { name: "Warnings" }),
+    ).not.toBeChecked();
+  });
+  it("temporarily includes a linked entry type without persisting it", async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter
+        initialEntries={["/sessions/s1?entry=warning-entry"]}
+      >
+        <App />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText("Linked warning detail")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(fetch)
+          .mock.calls.some(([input]) =>
+            String(input).includes(
+              "displayTypes=received%2Csent%2CrequestUserInput%2Creasoning%2Cexec%2Cwarning",
+            ),
+          ),
+      ).toBe(true),
+    );
+    await user.click(screen.getByRole("button", { name: "Settings" }));
+    expect(
+      screen.getByRole("checkbox", { name: "Warnings" }),
+    ).not.toBeChecked();
+    expect(
+      screen.getByText(
+        "Warnings is temporarily shown to reveal the linked entry.",
+      ),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+    expect(
+      JSON.parse(
+        localStorage.getItem(
+          "agents-viewer-conversation-display-types",
+        ) ?? "null",
+      ),
+    ).toEqual([
+      "received",
+      "sent",
+      "requestUserInput",
+      "reasoning",
+      "exec",
+    ]);
+    expect(screen.getByText("Linked warning detail")).toBeInTheDocument();
   });
   it("sanitizes raw HTML, scripts, and remote images while rendering GFM", () => {
     const { container } = render(

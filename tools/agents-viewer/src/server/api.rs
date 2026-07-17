@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Read as _, Seek as _, SeekFrom};
 
 use axum::Json;
@@ -436,8 +436,137 @@ struct EntriesQuery {
     cursor: Option<String>,
     direction: Option<String>,
     around_entry_id: Option<String>,
-    #[serde(default)]
-    include_technical: bool,
+    include_technical: Option<bool>,
+    display_types: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum ConversationDisplayType {
+    Received,
+    Sent,
+    RequestUserInput,
+    Reasoning,
+    Exec,
+    Plan,
+    Patch,
+    Mcp,
+    WebSearch,
+    Function,
+    Dynamic,
+    Terminal,
+    ViewImage,
+    OtherTool,
+    Warning,
+    Error,
+    Context,
+    Marker,
+    TechnicalMessage,
+    InternalMessage,
+    Unknown,
+}
+
+impl ConversationDisplayType {
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "received" => Self::Received,
+            "sent" => Self::Sent,
+            "requestUserInput" => Self::RequestUserInput,
+            "reasoning" => Self::Reasoning,
+            "exec" => Self::Exec,
+            "plan" => Self::Plan,
+            "patch" => Self::Patch,
+            "mcp" => Self::Mcp,
+            "webSearch" => Self::WebSearch,
+            "function" => Self::Function,
+            "dynamic" => Self::Dynamic,
+            "terminal" => Self::Terminal,
+            "viewImage" => Self::ViewImage,
+            "otherTool" => Self::OtherTool,
+            "warning" => Self::Warning,
+            "error" => Self::Error,
+            "context" => Self::Context,
+            "marker" => Self::Marker,
+            "technicalMessage" => Self::TechnicalMessage,
+            "internalMessage" => Self::InternalMessage,
+            "unknown" => Self::Unknown,
+            _ => return None,
+        })
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Received => "received",
+            Self::Sent => "sent",
+            Self::RequestUserInput => "requestUserInput",
+            Self::Reasoning => "reasoning",
+            Self::Exec => "exec",
+            Self::Plan => "plan",
+            Self::Patch => "patch",
+            Self::Mcp => "mcp",
+            Self::WebSearch => "webSearch",
+            Self::Function => "function",
+            Self::Dynamic => "dynamic",
+            Self::Terminal => "terminal",
+            Self::ViewImage => "viewImage",
+            Self::OtherTool => "otherTool",
+            Self::Warning => "warning",
+            Self::Error => "error",
+            Self::Context => "context",
+            Self::Marker => "marker",
+            Self::TechnicalMessage => "technicalMessage",
+            Self::InternalMessage => "internalMessage",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+enum EntryVisibility {
+    Default,
+    IncludeTechnical,
+    DisplayTypes(BTreeSet<ConversationDisplayType>),
+}
+
+impl EntryVisibility {
+    fn cursor_filters(&self, session_id: &str) -> String {
+        match self {
+            Self::Default => format!("session={session_id};include_technical=false"),
+            Self::IncludeTechnical => format!("session={session_id};include_technical=true"),
+            Self::DisplayTypes(types) => format!(
+                "session={session_id};display_types={}",
+                types
+                    .iter()
+                    .map(|value| value.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        }
+    }
+}
+
+fn entry_visibility(query: &EntriesQuery) -> Result<EntryVisibility, ApiFailure> {
+    if query.display_types.is_some() && query.include_technical.is_some() {
+        return Err(ApiFailure::invalid(
+            "displayTypes and includeTechnical are mutually exclusive",
+        ));
+    }
+    if let Some(value) = query.display_types.as_deref() {
+        if value.is_empty() {
+            return Err(ApiFailure::invalid("displayTypes must not be empty"));
+        }
+        let mut types = BTreeSet::new();
+        for display_type in value.split(',') {
+            let parsed = ConversationDisplayType::parse(display_type).ok_or_else(|| {
+                ApiFailure::invalid(format!("unknown display type: {display_type}"))
+            })?;
+            types.insert(parsed);
+        }
+        return Ok(EntryVisibility::DisplayTypes(types));
+    }
+    Ok(if query.include_technical.unwrap_or(false) {
+        EntryVisibility::IncludeTechnical
+    } else {
+        EntryVisibility::Default
+    })
 }
 
 async fn entries(
@@ -456,10 +585,8 @@ async fn entries(
     if !matches!(direction, "forward" | "backward") {
         return Err(ApiFailure::invalid("direction must be forward or backward"));
     }
-    let filters = format!(
-        "session={session_id};include_technical={}",
-        query.include_technical
-    );
+    let visibility = entry_visibility(&query)?;
+    let filters = visibility.cursor_filters(&session_id);
     let decoded = query
         .cursor
         .as_deref()
@@ -483,7 +610,7 @@ async fn entries(
         "SELECT e.*, (SELECT COUNT(*) FROM entry_raw_refs x WHERE x.entry_id=e.id) AS raw_ref_count FROM entries e WHERE e.session_id = ",
     );
     builder.push_bind(&session_id);
-    push_entry_visibility(&mut builder, query.include_technical);
+    push_entry_visibility(&mut builder, &visibility);
     let backward = direction == "backward"
         || decoded
             .as_ref()
@@ -539,7 +666,7 @@ async fn entries(
         && entry_exists(
             state.database.pool(),
             &session_id,
-            query.include_technical,
+            &visibility,
             first.sequence,
             &first.id,
             true,
@@ -560,7 +687,7 @@ async fn entries(
         && entry_exists(
             state.database.pool(),
             &session_id,
-            query.include_technical,
+            &visibility,
             last.sequence,
             &last.id,
             false,
@@ -585,21 +712,80 @@ async fn entries(
     }))
 }
 
-fn push_entry_visibility(builder: &mut QueryBuilder<Sqlite>, include_technical: bool) {
-    if !include_technical {
-        builder.push(
-            " AND ((e.kind = 'message' AND e.presentation IN ('user', 'response')) \
-             OR e.kind = 'reasoning' \
-             OR (e.kind = 'tool' AND e.tool_kind IN ('command', 'requestUserInput')) \
-             OR e.kind IN ('warning', 'error'))",
-        );
+fn push_entry_visibility(builder: &mut QueryBuilder<Sqlite>, visibility: &EntryVisibility) {
+    match visibility {
+        EntryVisibility::IncludeTechnical => {}
+        EntryVisibility::Default => {
+            builder.push(
+                " AND ((e.kind = 'message' AND e.presentation IN ('user', 'response')) \
+                 OR e.kind = 'reasoning' \
+                 OR (e.kind = 'tool' AND e.tool_kind IN ('command', 'requestUserInput')) \
+                 OR e.kind IN ('warning', 'error'))",
+            );
+        }
+        EntryVisibility::DisplayTypes(types) => {
+            builder.push(" AND (");
+            for (index, display_type) in types.iter().enumerate() {
+                if index > 0 {
+                    builder.push(" OR ");
+                }
+                builder.push(match display_type {
+                    ConversationDisplayType::Received => {
+                        "(e.kind = 'message' AND e.presentation = 'response')"
+                    }
+                    ConversationDisplayType::Sent => {
+                        "(e.kind = 'message' AND e.presentation = 'user')"
+                    }
+                    ConversationDisplayType::RequestUserInput => {
+                        "(e.kind = 'tool' AND e.tool_kind = 'requestUserInput')"
+                    }
+                    ConversationDisplayType::Reasoning => "e.kind = 'reasoning'",
+                    ConversationDisplayType::Exec => {
+                        "(e.kind = 'tool' AND e.tool_kind = 'command')"
+                    }
+                    ConversationDisplayType::Plan => "e.kind = 'plan'",
+                    ConversationDisplayType::Patch => "(e.kind = 'tool' AND e.tool_kind = 'patch')",
+                    ConversationDisplayType::Mcp => "(e.kind = 'tool' AND e.tool_kind = 'mcp')",
+                    ConversationDisplayType::WebSearch => {
+                        "(e.kind = 'tool' AND e.tool_kind = 'webSearch')"
+                    }
+                    ConversationDisplayType::Function => {
+                        "(e.kind = 'tool' AND e.tool_kind = 'function')"
+                    }
+                    ConversationDisplayType::Dynamic => {
+                        "(e.kind = 'tool' AND e.tool_kind = 'dynamic')"
+                    }
+                    ConversationDisplayType::Terminal => {
+                        "(e.kind = 'tool' AND e.tool_kind = 'terminal')"
+                    }
+                    ConversationDisplayType::ViewImage => {
+                        "(e.kind = 'tool' AND e.tool_kind = 'viewImage')"
+                    }
+                    ConversationDisplayType::OtherTool => {
+                        "(e.kind = 'tool' AND e.tool_kind = 'other')"
+                    }
+                    ConversationDisplayType::Warning => "e.kind = 'warning'",
+                    ConversationDisplayType::Error => "e.kind = 'error'",
+                    ConversationDisplayType::Context => "e.kind = 'context'",
+                    ConversationDisplayType::Marker => "e.kind = 'marker'",
+                    ConversationDisplayType::TechnicalMessage => {
+                        "(e.kind = 'message' AND e.presentation = 'technical')"
+                    }
+                    ConversationDisplayType::InternalMessage => {
+                        "(e.kind = 'message' AND e.presentation = 'internal')"
+                    }
+                    ConversationDisplayType::Unknown => "e.kind = 'unknown'",
+                });
+            }
+            builder.push(")");
+        }
     }
 }
 
 async fn entry_exists(
     pool: &sqlx::SqlitePool,
     session_id: &str,
-    include_technical: bool,
+    visibility: &EntryVisibility,
     sequence: i64,
     id: &str,
     before: bool,
@@ -607,7 +793,7 @@ async fn entry_exists(
     let mut builder =
         QueryBuilder::<Sqlite>::new("SELECT EXISTS(SELECT 1 FROM entries e WHERE e.session_id = ");
     builder.push_bind(session_id);
-    push_entry_visibility(&mut builder, include_technical);
+    push_entry_visibility(&mut builder, visibility);
     builder.push(if before {
         " AND (e.sequence < "
     } else {

@@ -238,6 +238,123 @@ async fn request_user_input_is_visible_without_other_technical_activity() {
 }
 
 #[tokio::test]
+async fn conversation_display_types_filter_every_normalized_entry_category() {
+    let app = support::TestApp::new().await;
+    let router = app.router();
+    let session = "11111111-1111-4111-8111-111111111111";
+    let categories = [
+        ("received", "message", "response", None),
+        ("sent", "message", "user", None),
+        (
+            "requestUserInput",
+            "tool",
+            "technical",
+            Some("requestUserInput"),
+        ),
+        ("reasoning", "reasoning", "technical", None),
+        ("exec", "tool", "technical", Some("command")),
+        ("plan", "plan", "technical", None),
+        ("patch", "tool", "technical", Some("patch")),
+        ("mcp", "tool", "technical", Some("mcp")),
+        ("webSearch", "tool", "technical", Some("webSearch")),
+        ("function", "tool", "technical", Some("function")),
+        ("dynamic", "tool", "technical", Some("dynamic")),
+        ("terminal", "tool", "technical", Some("terminal")),
+        ("viewImage", "tool", "technical", Some("viewImage")),
+        ("otherTool", "tool", "technical", Some("other")),
+        ("warning", "warning", "technical", None),
+        ("error", "error", "technical", None),
+        ("context", "context", "technical", None),
+        ("marker", "marker", "technical", None),
+        ("technicalMessage", "message", "technical", None),
+        ("internalMessage", "message", "internal", None),
+        ("unknown", "unknown", "technical", None),
+    ];
+    for (index, (display_type, kind, presentation, tool_kind)) in categories.iter().enumerate() {
+        let id = format!("display-filter-{display_type}");
+        sqlx::query(
+            "INSERT INTO entries( \
+                id, session_id, sequence, timestamp_micros, kind, presentation, role, phase, \
+                tool_kind, tool_status, title, primary_text, secondary_text, metadata_json, \
+                id_basis, call_id, parent_entry_id, default_collapsed, searchable, primary_bytes, \
+                secondary_bytes \
+             ) VALUES (?, ?, ?, NULL, ?, ?, NULL, NULL, ?, NULL, ?, '', '', '{}', ?, NULL, \
+                NULL, 1, 1, 0, 0)",
+        )
+        .bind(&id)
+        .bind(session)
+        .bind(10_000_i64 + i64::try_from(index).unwrap())
+        .bind(kind)
+        .bind(presentation)
+        .bind(tool_kind)
+        .bind(display_type)
+        .bind(format!("basis-{id}"))
+        .execute(app.state.database.pool())
+        .await
+        .unwrap();
+    }
+
+    for (display_type, _, _, _) in categories {
+        let response = router
+            .clone()
+            .oneshot(support::request(&format!(
+                "/api/v1/sessions/{session}/entries?limit=500&displayTypes={display_type}"
+            )))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{display_type}");
+        let page = support::json(response).await;
+        let filtered_ids = page["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry["id"].as_str())
+            .filter(|id| id.starts_with("display-filter-"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            filtered_ids,
+            vec![format!("display-filter-{display_type}")],
+            "{display_type}"
+        );
+    }
+
+    let first = support::json(
+        router
+            .clone()
+            .oneshot(support::request(&format!(
+                "/api/v1/sessions/{session}/entries?limit=1&displayTypes=received,sent"
+            )))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let cursor = first["nextCursor"].as_str().unwrap();
+    let reordered = router
+        .clone()
+        .oneshot(support::request(&format!(
+            "/api/v1/sessions/{session}/entries?limit=1&displayTypes=sent,received&cursor={cursor}"
+        )))
+        .await
+        .unwrap();
+    assert_eq!(reordered.status(), StatusCode::OK);
+
+    for query in [
+        "displayTypes=",
+        "displayTypes=sent,notAType",
+        "displayTypes=sent&includeTechnical=true",
+    ] {
+        let response = router
+            .clone()
+            .oneshot(support::request(&format!(
+                "/api/v1/sessions/{session}/entries?{query}"
+            )))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+    }
+}
+
+#[tokio::test]
 async fn sse_ring_replays_recent_events_and_marks_expired_ids_for_resync() {
     let hub = SseHub::new();
     for generation in 0..=SSE_RING_CAPACITY as u64 {

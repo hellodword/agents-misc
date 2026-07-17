@@ -92,6 +92,7 @@ export const api = {
       direction?: string;
       limit?: number;
       includeTechnical?: boolean;
+      displayTypes?: string;
     },
     signal?: AbortSignal,
   ) =>
