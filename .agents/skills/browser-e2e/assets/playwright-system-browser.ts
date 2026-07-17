@@ -20,9 +20,13 @@ const CONTAINER_MARKERS = [
 ] as const;
 const ONE_GIB = 1024n * 1024n * 1024n;
 
+export interface SystemBrowserLaunchPolicy {
+  headful?: boolean;
+}
+
 export interface SystemBrowserLaunchOptions {
   executablePath: string;
-  headless: false;
+  headless: boolean;
   args: string[];
 }
 
@@ -150,8 +154,10 @@ function requireHeadfulDisplay(environment: NodeJS.ProcessEnv): void {
 
 export function systemBrowserLaunchOptions(
   environment: NodeJS.ProcessEnv = process.env,
+  policy: SystemBrowserLaunchPolicy = {},
 ): SystemBrowserLaunchOptions {
-  requireHeadfulDisplay(environment);
+  const headful = policy.headful === true;
+  if (headful) requireHeadfulDisplay(environment);
   const args: string[] = [];
   if (isContainer()) {
     args.push("--no-sandbox");
@@ -161,7 +167,7 @@ export function systemBrowserLaunchOptions(
   }
   return {
     executablePath: findSystemBrowser(environment),
-    headless: false,
+    headless: !headful,
     args,
   };
 }

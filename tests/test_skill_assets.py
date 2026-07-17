@@ -43,12 +43,16 @@ class BrowserAssetTests(unittest.TestCase):
             re.findall(r'"([^"]+)"', match.group(1)),
         )
 
-    def test_headless_is_fixed_false(self) -> None:
-        self.assertIn("headless: false;", self.source)
-        self.assertIn("headless: false,", self.source)
-        self.assertNotIn("headless: true", self.source)
+    def test_headless_defaults_true_with_explicit_headful_opt_in(self) -> None:
+        self.assertIn("headful?: boolean;", self.source)
+        self.assertIn("headless: boolean;", self.source)
+        self.assertIn("policy: SystemBrowserLaunchPolicy = {}", self.source)
+        self.assertIn("const headful = policy.headful === true;", self.source)
+        self.assertIn("if (headful) requireHeadfulDisplay(environment);", self.source)
+        self.assertIn("headless: !headful,", self.source)
+        self.assertNotIn("headless: false;", self.source)
 
-    def test_linux_without_display_fails_clearly(self) -> None:
+    def test_explicit_headful_without_display_fails_clearly(self) -> None:
         self.assertIn('process.platform !== "linux"', self.source)
         self.assertIn("!environment.DISPLAY && !environment.WAYLAND_DISPLAY", self.source)
         self.assertIn("Headful Playwright requires DISPLAY or WAYLAND_DISPLAY", self.source)
