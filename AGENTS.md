@@ -51,6 +51,10 @@ Never infer unseen instructions from a filename or directory name.
 - Never silently overwrite, reset, or destroy real user data. Destructive real-data work requires explicit authorization for that exact operation and a verified recovery path.
 - Never weaken, split, skip, or delete tests merely to hide failures.
 - Never use global installs, host package managers, curl/wget-to-shell installers, or system-level environment mutation by default.
+- Treat a dependency lockfile as tool-generated data when the active project's dependency tooling consumes it to record or pin a resolved dependency, toolchain, input graph, or integrity metadata. This includes `Cargo.lock`, `flake.lock`, `package-lock.json`, and equivalent files.
+- Never modify dependency-lockfile content with `apply_patch`, a text editor, search and replace, or an ad hoc script. This prohibition covers versions, checksums, sources, dependency edges, metadata, and merge-conflict hunks.
+- Change authoritative manifests or inputs when required, then update the lockfile only through the repository's documented command or the project's declared dependency tool. A supported command that intentionally updates only the lockfile is allowed.
+- If the declared command is unavailable or fails, diagnose or report the blocker instead of editing the lockfile. Manual content editing is allowed only when `.project-agent/project.md`, a contract it directly marks as required, or official documentation published by the dependency-tool maintainer explicitly requires that exact operation for that exact lockfile. Read and verify the exception source before editing; memory, inferred conventions, and a user request alone are not exceptions.
 - Never use `git add .`, `git add -A`, `git add --all`, or an equivalent bulk-staging operation. Stage explicit paths only.
 - Preserve unrelated user changes. Never reset or overwrite them to simplify the task.
 
