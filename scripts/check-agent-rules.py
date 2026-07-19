@@ -45,6 +45,7 @@ SKILL_NAMES = {
     "atomic-commit",
     "browser-e2e",
     "compatibility-review",
+    "converge-codebase",
     "environment-troubleshooting",
     "generated-artifacts-review",
     "nix-workflow",

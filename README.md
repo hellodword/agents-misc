@@ -43,12 +43,13 @@ The 19 flat rules are:
 
 ## Workflow skills
 
-The 10 skills are:
+The 11 skills are:
 
 - `ai-visual-review`
 - `atomic-commit`
 - `browser-e2e`
 - `compatibility-review`
+- `converge-codebase`
 - `environment-troubleshooting`
 - `generated-artifacts-review`
 - `nix-workflow`
