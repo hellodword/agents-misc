@@ -211,6 +211,42 @@ test("indexes an empty cache, searches content, reloads a deep link, and exposes
   await expect(page.locator("#entry-inspector")).toHaveCount(0);
 });
 
+test("highlights and copies inline and fenced message code", async ({
+  page,
+}) => {
+  const bubble = page
+    .locator(".message-bubble")
+    .filter({ hasText: "Markdown copy fixture" });
+  await expect(bubble).toBeVisible();
+
+  const inline = bubble.locator(".markdown-inline-code");
+  await expect(inline).toHaveAccessibleName("Copy inline code: viewerInline");
+  await inline.click();
+  await expect(inline).toHaveAttribute("data-copy-state", "copied");
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe("viewerInline");
+
+  const highlighted = bubble.locator("pre code.hljs.language-typescript");
+  const keyword = highlighted.locator(".hljs-keyword").filter({
+    hasText: "const",
+  });
+  await expect(keyword).toBeVisible();
+  expect(
+    await keyword.evaluate((element) => getComputedStyle(element).color),
+  ).not.toBe(
+    await highlighted.evaluate((element) => getComputedStyle(element).color),
+  );
+
+  const copyBlock = bubble.locator(".markdown-code-copy");
+  await expect(copyBlock).toHaveAccessibleName("Copy code");
+  await copyBlock.click();
+  await expect(copyBlock).toHaveAttribute("data-copy-state", "copied");
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe("const viewerValue: number = 42;\nconsole.log(viewerValue);");
+});
+
 test("preserves the reader position when older transcript entries load", async ({
   page,
 }) => {

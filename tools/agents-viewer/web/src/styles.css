@@ -1129,19 +1129,168 @@ mark {
     Menlo,
     monospace;
 }
+.markdown-inline-code {
+  appearance: none;
+  display: inline;
+  margin: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  font: inherit;
+  line-height: inherit;
+  text-align: inherit;
+  vertical-align: baseline;
+}
+.markdown-inline-code code {
+  cursor: copy;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+.markdown-inline-code:hover code,
+.markdown-inline-code:focus-visible code {
+  background: color-mix(in srgb, var(--accent) 18%, var(--soft));
+}
+.markdown-inline-code[data-copy-state="copied"] code {
+  background: color-mix(in srgb, var(--accent) 24%, var(--soft));
+  color: color-mix(in srgb, var(--accent) 82%, var(--fg));
+}
+.markdown-code-block {
+  position: relative;
+  max-width: 100%;
+  margin: 0.7em 0;
+}
 .markdown-content pre {
   max-width: 100%;
   overflow: auto;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--soft);
-  padding: 10px 12px;
+  padding: 40px 12px 12px;
   white-space: pre;
+}
+.markdown-content .markdown-code-block pre {
+  margin: 0;
 }
 .markdown-content pre code {
   background: transparent;
   padding: 0;
   font-size: 12px;
+}
+.markdown-code-copy {
+  position: absolute;
+  z-index: 2;
+  top: 7px;
+  right: 7px;
+  width: 28px !important;
+  height: 28px !important;
+  border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
+  background: color-mix(in srgb, var(--panel) 92%, transparent) !important;
+  box-shadow: 0 1px 2px rgb(0 0 0/0.08);
+  color: var(--muted);
+  opacity: 0.82;
+}
+.markdown-code-block:hover .markdown-code-copy,
+.markdown-code-copy:focus-visible,
+.markdown-code-copy[data-copy-state="copied"] {
+  color: var(--fg);
+  opacity: 1;
+}
+.markdown-content code.hljs {
+  color: var(--fg);
+}
+.markdown-content .hljs-comment,
+.markdown-content .hljs-quote {
+  color: #57606a;
+}
+.markdown-content .hljs-keyword,
+.markdown-content .hljs-name,
+.markdown-content .hljs-operator,
+.markdown-content .hljs-selector-tag,
+.markdown-content .hljs-tag {
+  color: #cf222e;
+}
+.markdown-content .hljs-attr,
+.markdown-content .hljs-regexp,
+.markdown-content .hljs-string,
+.markdown-content .hljs-template-variable {
+  color: #0a3069;
+}
+.markdown-content .hljs-bullet,
+.markdown-content .hljs-literal,
+.markdown-content .hljs-number,
+.markdown-content .hljs-symbol,
+.markdown-content .hljs-variable {
+  color: #0550ae;
+}
+.markdown-content .hljs-built_in,
+.markdown-content .hljs-title,
+.markdown-content .hljs-type {
+  color: #8250df;
+}
+.markdown-content .hljs-attribute,
+.markdown-content .hljs-meta,
+.markdown-content .hljs-selector-attr,
+.markdown-content .hljs-selector-class,
+.markdown-content .hljs-selector-id,
+.markdown-content .hljs-selector-pseudo {
+  color: #953800;
+}
+.markdown-content .hljs-addition {
+  color: #116329;
+}
+.markdown-content .hljs-deletion {
+  color: #82071e;
+}
+.markdown-content .hljs-emphasis {
+  font-style: italic;
+}
+.markdown-content .hljs-strong {
+  font-weight: 700;
+}
+.dark .markdown-content .hljs-comment,
+.dark .markdown-content .hljs-quote {
+  color: #a8b1bd;
+}
+.dark .markdown-content .hljs-keyword,
+.dark .markdown-content .hljs-name,
+.dark .markdown-content .hljs-operator,
+.dark .markdown-content .hljs-selector-tag,
+.dark .markdown-content .hljs-tag {
+  color: #ff7b72;
+}
+.dark .markdown-content .hljs-attr,
+.dark .markdown-content .hljs-regexp,
+.dark .markdown-content .hljs-string,
+.dark .markdown-content .hljs-template-variable {
+  color: #a5d6ff;
+}
+.dark .markdown-content .hljs-bullet,
+.dark .markdown-content .hljs-literal,
+.dark .markdown-content .hljs-number,
+.dark .markdown-content .hljs-symbol,
+.dark .markdown-content .hljs-variable {
+  color: #79c0ff;
+}
+.dark .markdown-content .hljs-built_in,
+.dark .markdown-content .hljs-title,
+.dark .markdown-content .hljs-type {
+  color: #d2a8ff;
+}
+.dark .markdown-content .hljs-attribute,
+.dark .markdown-content .hljs-meta,
+.dark .markdown-content .hljs-selector-attr,
+.dark .markdown-content .hljs-selector-class,
+.dark .markdown-content .hljs-selector-id,
+.dark .markdown-content .hljs-selector-pseudo {
+  color: #ffa657;
+}
+.dark .markdown-content .hljs-addition {
+  color: #7ee787;
+}
+.dark .markdown-content .hljs-deletion {
+  color: #ffa198;
 }
 .markdown-table {
   max-width: 100%;
@@ -1224,6 +1373,13 @@ mark {
     height: 44px !important;
     min-height: 44px !important;
     opacity: 0.8;
+  }
+  .markdown-content pre {
+    padding-top: 52px;
+  }
+  .markdown-code-copy {
+    width: 44px !important;
+    height: 44px !important;
   }
   .transcript-nav {
     right: 10px;

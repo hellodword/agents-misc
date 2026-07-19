@@ -455,6 +455,42 @@ describe("Agents Viewer UI", () => {
     expect(container.querySelector("table")).toBeInTheDocument();
     expect(container.querySelector("code")).toHaveTextContent("code");
   });
+  it("copies inline and fenced code while applying language highlighting", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, "writeText");
+    const { container } = render(
+      <SafeMarkdown
+        text={
+          "Use `foo` here.\n\n```typescript\nconst answer: number = 42;\nconsole.log(answer);\n```"
+        }
+      />,
+    );
+
+    const inline = screen.getByRole("button", {
+      name: "Copy inline code: foo",
+    });
+    expect(inline).toHaveTextContent("foo");
+    await user.click(inline);
+    expect(writeText).toHaveBeenNthCalledWith(1, "foo");
+    expect(inline).toHaveAttribute("data-copy-state", "copied");
+
+    const highlighted = container.querySelector(
+      "pre code.hljs.language-typescript",
+    );
+    expect(highlighted).toBeInTheDocument();
+    expect(highlighted?.querySelector(".hljs-keyword")).toHaveTextContent(
+      "const",
+    );
+    expect(container.querySelector("pre button")).toBeNull();
+
+    const copyBlock = screen.getByRole("button", { name: "Copy code" });
+    await user.click(copyBlock);
+    expect(writeText).toHaveBeenNthCalledWith(
+      2,
+      "const answer: number = 42;\nconsole.log(answer);",
+    );
+    expect(copyBlock).toHaveAttribute("data-copy-state", "copied");
+  });
   it("does not request session filters until Apply", async () => {
     const user = userEvent.setup();
     render(

@@ -149,6 +149,16 @@ export const test = base.extend<Runtime & Options>({
         },
       }),
     ).join("\n");
+    const markdown = JSON.stringify({
+      timestamp: "2025-01-02T03:07:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "agent_message",
+        message:
+          "Markdown copy fixture: `viewerInline`\n\n```typescript\nconst viewerValue: number = 42;\nconsole.log(viewerValue);\n```",
+        phase: "final",
+      },
+    });
     await writeFile(
       resolve(
         sourceHome,
@@ -224,7 +234,7 @@ export const test = base.extend<Runtime & Options>({
         .map((record) => JSON.stringify(record))
         .join("\n") + "\n",
     );
-    await writeFile(rollout, `${base.trimEnd()}\n${pagination}\n`);
+    await writeFile(rollout, `${base.trimEnd()}\n${pagination}\n${markdown}\n`);
     await use(rollout);
   },
   process: async (

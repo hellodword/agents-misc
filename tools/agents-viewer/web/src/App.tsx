@@ -13,14 +13,19 @@ import {
   X,
 } from "lucide-react";
 import {
+  createContext,
+  isValidElement,
   useCallback,
+  useContext,
   useEffect,
   useRef,
   useState,
+  type ComponentProps,
   type FormEvent,
+  type ReactNode,
 } from "react";
 import { useTranslation } from "react-i18next";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type ExtraProps } from "react-markdown";
 import {
   Link,
   Navigate,
@@ -31,6 +36,7 @@ import {
   useParams,
   useSearchParams,
 } from "react-router-dom";
+import rehypeHighlight from "rehype-highlight";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { Badge } from "@/components/ui/badge";
@@ -2346,13 +2352,151 @@ async function fullPrimaryText(entry: EntryListItem, signal?: AbortSignal) {
   }
 }
 
+type ClipboardCopyState = "idle" | "copying" | "copied" | "failed";
+
+function useClipboardCopy() {
+  const [state, setState] = useState<ClipboardCopyState>("idle");
+  useEffect(() => {
+    if (state !== "copied" && state !== "failed") return;
+    const timer = window.setTimeout(() => setState("idle"), 1600);
+    return () => window.clearTimeout(timer);
+  }, [state]);
+  const copyText = useCallback(async (text: string) => {
+    setState("copying");
+    try {
+      await navigator.clipboard.writeText(text);
+      setState("copied");
+    } catch {
+      setState("failed");
+    }
+  }, []);
+  return { copyText, state };
+}
+
+function copyStateLabel(
+  state: ClipboardCopyState,
+  idle: string,
+  copying: string,
+  copied: string,
+  failed: string,
+) {
+  if (state === "copying") return copying;
+  if (state === "copied") return copied;
+  if (state === "failed") return failed;
+  return idle;
+}
+
+function reactNodeText(node: ReactNode): string {
+  if (
+    typeof node === "string" ||
+    typeof node === "number" ||
+    typeof node === "bigint"
+  )
+    return String(node);
+  if (Array.isArray(node)) return node.map(reactNodeText).join("");
+  if (isValidElement<{ children?: ReactNode }>(node))
+    return reactNodeText(node.props.children);
+  return "";
+}
+
+const MarkdownCodeBlockContext = createContext(false);
+
+function MarkdownCodeBlock({
+  node: _node,
+  children,
+  ...props
+}: ComponentProps<"pre"> & ExtraProps) {
+  const { t } = useTranslation();
+  const { copyText, state } = useClipboardCopy();
+  const text = reactNodeText(children).replace(/\n$/, "");
+  const label = copyStateLabel(
+    state,
+    t("copyCode"),
+    t("copying"),
+    t("copied"),
+    t("copyFailed"),
+  );
+  return (
+    <div className="markdown-code-block">
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        className="markdown-code-copy"
+        data-copy-state={state}
+        disabled={state === "copying"}
+        aria-label={label}
+        title={label}
+        onClick={() => void copyText(text)}
+      >
+        {state === "copied" ? <Check size={14} /> : <Copy size={14} />}
+      </Button>
+      <MarkdownCodeBlockContext.Provider value>
+        <pre {...props}>{children}</pre>
+      </MarkdownCodeBlockContext.Provider>
+      {state !== "idle" && (
+        <span className="sr-only" role="status" aria-live="polite">
+          {label}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function MarkdownCode({
+  node: _node,
+  children,
+  className,
+  ...props
+}: ComponentProps<"code"> & ExtraProps) {
+  const block = useContext(MarkdownCodeBlockContext);
+  const { t } = useTranslation();
+  const { copyText, state } = useClipboardCopy();
+  if (block)
+    return (
+      <code className={className} {...props}>
+        {children}
+      </code>
+    );
+
+  const text = reactNodeText(children);
+  const label = copyStateLabel(
+    state,
+    t("copyInlineCode", { code: text }),
+    t("copying"),
+    t("copied"),
+    t("copyFailed"),
+  );
+  return (
+    <>
+      <button
+        type="button"
+        className="markdown-inline-code"
+        data-copy-state={state}
+        disabled={state === "copying"}
+        aria-label={label}
+        title={label}
+        onClick={() => void copyText(text)}
+      >
+        <code className={className} {...props}>
+          {children}
+        </code>
+      </button>
+      {state !== "idle" && (
+        <span className="sr-only" role="status" aria-live="polite">
+          {label}
+        </span>
+      )}
+    </>
+  );
+}
+
 export function SafeMarkdown({ text }: { text: string }) {
   const { t } = useTranslation();
   return (
     <div className="markdown-content">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeSanitize]}
+        rehypePlugins={[rehypeSanitize, [rehypeHighlight, { detect: true }]]}
         skipHtml
         components={{
           img: ({ alt }) => (
@@ -2368,6 +2512,8 @@ export function SafeMarkdown({ text }: { text: string }) {
               <table>{children}</table>
             </div>
           ),
+          pre: MarkdownCodeBlock,
+          code: MarkdownCode,
         }}
       >
         {text}
