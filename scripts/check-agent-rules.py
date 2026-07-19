@@ -403,6 +403,7 @@ def _validate_evals(root: Path, errors: list[str]) -> None:
                 "id",
                 "task",
                 "expected_rules",
+                "forbidden_rules",
                 "expected_skills",
                 "forbidden_skills",
                 "expected_behavior",
@@ -421,25 +422,44 @@ def _validate_evals(root: Path, errors: list[str]) -> None:
                 if not isinstance(value, str) or not value.strip():
                     errors.append(f"{path}:{line_number}: {field} must be a non-empty string")
 
-            rules = _string_list(record, "expected_rules", path, line_number, errors)
-            expected = _string_list(record, "expected_skills", path, line_number, errors)
-            forbidden = _string_list(record, "forbidden_skills", path, line_number, errors)
-            for rule in rules:
+            expected_rules = _string_list(
+                record, "expected_rules", path, line_number, errors
+            )
+            forbidden_rules = _string_list(
+                record, "forbidden_rules", path, line_number, errors
+            )
+            expected_skills = _string_list(
+                record, "expected_skills", path, line_number, errors
+            )
+            forbidden_skills = _string_list(
+                record, "forbidden_skills", path, line_number, errors
+            )
+            for rule in expected_rules:
                 if rule not in valid_rule_paths:
                     errors.append(f"{path}:{line_number}: unknown rule path: {rule}")
                 else:
                     covered_rules.add(rule)
-            for name in expected + forbidden:
+            for rule in forbidden_rules:
+                if rule not in valid_rule_paths:
+                    errors.append(f"{path}:{line_number}: unknown rule path: {rule}")
+            rule_overlap = set(expected_rules) & set(forbidden_rules)
+            if rule_overlap:
+                errors.append(
+                    f"{path}:{line_number}: rules cannot be expected and forbidden: "
+                    f"{sorted(rule_overlap)}"
+                )
+            for name in expected_skills + forbidden_skills:
                 if name not in SKILL_NAMES:
                     errors.append(f"{path}:{line_number}: unknown skill name: {name}")
-            overlap = set(expected) & set(forbidden)
-            if overlap:
+            skill_overlap = set(expected_skills) & set(forbidden_skills)
+            if skill_overlap:
                 errors.append(
-                    f"{path}:{line_number}: skills cannot be expected and forbidden: {sorted(overlap)}"
+                    f"{path}:{line_number}: skills cannot be expected and forbidden: "
+                    f"{sorted(skill_overlap)}"
                 )
             if filename == "skills.jsonl":
-                skill_file_positive.update(expected)
-                skill_file_negative.update(forbidden)
+                skill_file_positive.update(expected_skills)
+                skill_file_negative.update(forbidden_skills)
 
     for duplicate in _duplicates(all_ids):
         errors.append(f"duplicate eval id: {duplicate}")

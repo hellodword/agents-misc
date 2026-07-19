@@ -183,6 +183,89 @@ class CheckAgentRulesTests(unittest.TestCase):
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         self.assertTrue(any("unknown rule path" in error for error in self.errors()))
 
+    def test_invalid_forbidden_eval_rule_fails(self) -> None:
+        path = self.root / "tests" / "evals" / "routing.jsonl"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        record = json.loads(lines[0])
+        record["forbidden_rules"] = [".agents/rules/missing.md"]
+        lines[0] = json.dumps(record)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.assertTrue(any("unknown rule path" in error for error in self.errors()))
+
+    def test_duplicate_forbidden_eval_rule_fails(self) -> None:
+        path = self.root / "tests" / "evals" / "routing.jsonl"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        record = json.loads(lines[0])
+        record["forbidden_rules"] = [
+            ".agents/rules/formatting.md",
+            ".agents/rules/formatting.md",
+        ]
+        lines[0] = json.dumps(record)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.assertTrue(
+            any("forbidden_rules contains duplicates" in error for error in self.errors())
+        )
+
+    def test_expected_and_forbidden_eval_rule_overlap_fails(self) -> None:
+        path = self.root / "tests" / "evals" / "routing.jsonl"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        record = json.loads(lines[0])
+        record["forbidden_rules"] = [record["expected_rules"][0]]
+        lines[0] = json.dumps(record)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.assertTrue(
+            any("rules cannot be expected and forbidden" in error for error in self.errors())
+        )
+
+    def test_missing_forbidden_rules_field_fails(self) -> None:
+        path = self.root / "tests" / "evals" / "routing.jsonl"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        record = json.loads(lines[0])
+        del record["forbidden_rules"]
+        lines[0] = json.dumps(record)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.assertTrue(any("eval fields must be exactly" in error for error in self.errors()))
+
+    def test_non_list_forbidden_rules_fails(self) -> None:
+        path = self.root / "tests" / "evals" / "routing.jsonl"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        record = json.loads(lines[0])
+        record["forbidden_rules"] = ".agents/rules/formatting.md"
+        lines[0] = json.dumps(record)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.assertTrue(
+            any("forbidden_rules must be an array of strings" in error for error in self.errors())
+        )
+
+    def test_empty_eval_task_fails(self) -> None:
+        path = self.root / "tests" / "evals" / "routing.jsonl"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        record = json.loads(lines[0])
+        record["task"] = " "
+        lines[0] = json.dumps(record)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.assertTrue(any("task must be a non-empty string" in error for error in self.errors()))
+
+    def test_missing_rule_coverage_fails(self) -> None:
+        path = self.root / "tests" / "evals" / "routing.jsonl"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for index, line in enumerate(lines):
+            record = json.loads(line)
+            record["expected_rules"] = [
+                rule
+                for rule in record["expected_rules"]
+                if rule != ".agents/rules/flutter-rust.md"
+            ]
+            lines[index] = json.dumps(record)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.assertTrue(
+            any(
+                "eval corpus missing rule coverage" in error
+                and "flutter-rust.md" in error
+                for error in self.errors()
+            )
+        )
+
     def test_invalid_eval_skill_fails(self) -> None:
         path = self.root / "tests" / "evals" / "skills.jsonl"
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -191,6 +274,17 @@ class CheckAgentRulesTests(unittest.TestCase):
         lines[0] = json.dumps(record)
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         self.assertTrue(any("unknown skill name" in error for error in self.errors()))
+
+    def test_expected_and_forbidden_eval_skill_overlap_fails(self) -> None:
+        path = self.root / "tests" / "evals" / "skills.jsonl"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        record = json.loads(lines[0])
+        record["forbidden_skills"] = [record["expected_skills"][0]]
+        lines[0] = json.dumps(record)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.assertTrue(
+            any("skills cannot be expected and forbidden" in error for error in self.errors())
+        )
 
     def test_missing_skill_positive_coverage_fails(self) -> None:
         path = self.root / "tests" / "evals" / "skills.jsonl"
