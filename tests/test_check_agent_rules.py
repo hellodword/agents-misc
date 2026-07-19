@@ -246,6 +246,61 @@ class CheckAgentRulesTests(unittest.TestCase):
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         self.assertTrue(any("task must be a non-empty string" in error for error in self.errors()))
 
+    def test_missing_behavior_checks_fails(self) -> None:
+        path = self.root / "tests" / "evals" / "routing.jsonl"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        record = json.loads(lines[0])
+        del record["behavior_checks"]
+        lines[0] = json.dumps(record)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.assertTrue(any("eval fields must be exactly" in error for error in self.errors()))
+
+    def test_behavior_checks_require_both_boolean_expectations(self) -> None:
+        path = self.root / "tests" / "evals" / "routing.jsonl"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        record = json.loads(lines[0])
+        for check in record["behavior_checks"]:
+            check["expected"] = True
+        lines[0] = json.dumps(record)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.assertTrue(
+            any(
+                "behavior_checks must contain both true and false expectations" in error
+                for error in self.errors()
+            )
+        )
+
+    def test_behavior_check_ids_must_be_unique(self) -> None:
+        path = self.root / "tests" / "evals" / "routing.jsonl"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        record = json.loads(lines[0])
+        record["behavior_checks"][1]["id"] = record["behavior_checks"][0]["id"]
+        lines[0] = json.dumps(record)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.assertTrue(
+            any("duplicate behavior check ids" in error for error in self.errors())
+        )
+
+    def test_behavior_check_expected_must_be_boolean(self) -> None:
+        path = self.root / "tests" / "evals" / "routing.jsonl"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        record = json.loads(lines[0])
+        record["behavior_checks"][0]["expected"] = "true"
+        lines[0] = json.dumps(record)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.assertTrue(any("expected must be a boolean" in error for error in self.errors()))
+
+    def test_runtime_contract_tool_shape_is_schema_validated(self) -> None:
+        path = self.root / "tests" / "evals" / "codex-runtime-contract.json"
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["codex_versions"]["codex-cli 0.144.1"]["allowed_tools"][0][
+            "unexpected"
+        ] = True
+        path.write_text(json.dumps(value), encoding="utf-8")
+        self.assertTrue(
+            any("runtime contract schema failure" in error for error in self.errors())
+        )
+
     def test_missing_rule_coverage_fails(self) -> None:
         path = self.root / "tests" / "evals" / "routing.jsonl"
         lines = path.read_text(encoding="utf-8").splitlines()

@@ -89,7 +89,12 @@
       };
 
       devShells = import ./nix/dev-shells.nix {
-        inherit lib nixpkgs supportedSystems;
+        inherit
+          lib
+          nixpkgs
+          supportedSystems
+          codexFor
+          ;
       };
 
       formatter = import ./nix/formatter.nix {

@@ -1,0 +1,2070 @@
+#!/usr/bin/env python3
+"""Run isolated, two-stage Codex evaluations for the Agent Rules Kit."""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import dataclasses
+import datetime as dt
+import fcntl
+import http.server
+import json
+import os
+import re
+import secrets
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import tomllib
+from collections.abc import Callable, Iterator, Sequence
+from pathlib import Path
+from typing import Any
+from urllib.parse import unquote, urlsplit
+
+
+SCHEMA_VERSION = 1
+EVAL_FILES = ("routing.jsonl", "skills.jsonl", "safety.jsonl")
+EVAL_FIELDS = {
+    "id",
+    "task",
+    "expected_rules",
+    "forbidden_rules",
+    "expected_skills",
+    "forbidden_skills",
+    "expected_behavior",
+    "behavior_checks",
+}
+APPROVAL_POLICIES = ("inherit", "untrusted", "on-request", "never")
+SANDBOX_MODES = ("inherit", "read-only", "workspace-write", "danger-full-access")
+REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+EVAL_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+BEHAVIOR_ID_PATTERN = EVAL_ID_PATTERN
+MARKDOWN_LINK_PATTERN = re.compile(r"(?<!!)\[[^\]]*\]\(([^)]+)\)")
+SKILL_ENTRY_PATTERN = re.compile(
+    r"^- ([a-z0-9]+(?:-[a-z0-9]+)*):.*"
+    r"\((file|environment resource|orchestrator resource|custom resource): ([^)]+)\)$",
+    re.MULTILINE,
+)
+MAX_TEXT_BYTES = 2 * 1024 * 1024
+MAX_PROCESS_OUTPUT_BYTES = 16 * 1024 * 1024
+MAX_HTTP_REQUEST_BYTES = 16 * 1024 * 1024
+
+# Every feature that can add an execution, network, browser, plugin, MCP, or
+# delegation surface is disabled. The versioned preflight contract catches any
+# stock tool that remains or any new tool introduced by a Codex upgrade.
+DISABLED_FEATURES = (
+    "apply_patch_freeform",
+    "apps",
+    "auth_elicitation",
+    "browser_use",
+    "browser_use_external",
+    "browser_use_full_cdp_access",
+    "code_mode",
+    "code_mode_host",
+    "code_mode_only",
+    "collaboration_modes",
+    "computer_use",
+    "default_mode_request_user_input",
+    "deferred_executor",
+    "enable_fanout",
+    "enable_mcp_apps",
+    "exec_permission_approvals",
+    "goals",
+    "hooks",
+    "image_generation",
+    "in_app_browser",
+    "js_repl",
+    "js_repl_tools_only",
+    "memories",
+    "multi_agent",
+    "multi_agent_mode",
+    "multi_agent_v2",
+    "plugin_hooks",
+    "plugin_sharing",
+    "plugins",
+    "remote_control",
+    "remote_plugin",
+    "request_permissions_tool",
+    "request_rule",
+    "search_tool",
+    "shell_tool",
+    "standalone_web_search",
+    "tool_call_mcp_elicitation",
+    "tool_search",
+    "tool_suggest",
+    "unified_exec",
+    "workspace_dependencies",
+)
+SAFE_ENV_KEYS = (
+    "ALL_PROXY",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "LANG",
+    "LC_ALL",
+    "NO_PROXY",
+    "PATH",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "TZ",
+    "all_proxy",
+    "https_proxy",
+    "http_proxy",
+    "no_proxy",
+)
+
+
+class EvalInputError(Exception):
+    """The caller or checked-in eval contract is invalid."""
+
+
+class EvalRuntimeError(Exception):
+    """An isolated runtime or Codex invocation failed."""
+
+
+@dataclasses.dataclass(frozen=True)
+class Policy:
+    approval_policy: str
+    sandbox_mode: str
+    sandbox_workspace_write: dict[str, Any]
+    approval_source: str
+    sandbox_source: str
+
+    def public(self) -> dict[str, Any]:
+        return {
+            "approval_policy": self.approval_policy,
+            "sandbox_mode": self.sandbox_mode,
+            "approval_source": self.approval_source,
+            "sandbox_source": self.sandbox_source,
+        }
+
+
+@dataclasses.dataclass(frozen=True)
+class EvalCase:
+    corpus: str
+    id: str
+    task: str
+    expected_rules: tuple[str, ...]
+    forbidden_rules: tuple[str, ...]
+    expected_skills: tuple[str, ...]
+    forbidden_skills: tuple[str, ...]
+    expected_behavior: str
+    behavior_checks: tuple[dict[str, Any], ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class ProcessResult:
+    returncode: int
+    stdout: str
+    stderr: str
+    duration_seconds: float
+    timed_out: bool = False
+
+
+@dataclasses.dataclass
+class Runtime:
+    temporary: tempfile.TemporaryDirectory[str]
+    root: Path
+    home: Path
+    codex_home: Path
+    fixture: Path
+    config_path: Path
+    model_catalog_path: Path
+    external_skill_paths: tuple[Path, ...] = ()
+
+    def cleanup(self) -> None:
+        self.temporary.cleanup()
+
+
+def _diagnostic(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
+
+
+def _toml_string(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _toml_string_array(values: Sequence[str]) -> str:
+    return "[" + ", ".join(_toml_string(value) for value in values) + "]"
+
+
+def _is_relative_to(path: Path, base: Path) -> bool:
+    try:
+        path.relative_to(base)
+    except ValueError:
+        return False
+    return True
+
+
+def _read_utf8(path: Path, *, limit: int = MAX_TEXT_BYTES) -> str:
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise EvalInputError(f"cannot read {path}: {exc}") from exc
+    if len(data) > limit:
+        raise EvalInputError(f"{path} exceeds the {limit}-byte input limit")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise EvalInputError(f"{path} must be UTF-8: {exc}") from exc
+
+
+def _read_json_object(path: Path, *, runtime: bool = False) -> dict[str, Any]:
+    error_type = EvalRuntimeError if runtime else EvalInputError
+    try:
+        value = json.loads(_read_utf8(path))
+    except json.JSONDecodeError as exc:
+        raise error_type(f"{path} contains invalid JSON: {exc}") from exc
+    except EvalInputError as exc:
+        raise error_type(str(exc)) from exc
+    if not isinstance(value, dict):
+        raise error_type(f"{path} must contain a JSON object")
+    return value
+
+
+def _validate_owned_regular_file(path: Path, label: str) -> os.stat_result:
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise EvalInputError(f"cannot inspect {label} {path}: {exc}") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise EvalInputError(f"{label} must be a regular, non-symlink file: {path}")
+    if hasattr(os, "getuid") and info.st_uid != os.getuid():
+        raise EvalInputError(f"{label} must be owned by the current user: {path}")
+    return info
+
+
+def _validate_private_file(path: Path, label: str) -> dict[str, Any]:
+    info = _validate_owned_regular_file(path, label)
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        raise EvalInputError(f"{label} permissions must not grant group or other access: {path}")
+    value = _read_json_object(path)
+    if not value:
+        raise EvalInputError(f"{label} must not be an empty JSON object: {path}")
+    return value
+
+
+def _validate_chatgpt_auth_file(path: Path, label: str) -> dict[str, Any]:
+    value = _validate_private_file(path, label)
+    if value.get("auth_mode") != "chatgpt":
+        raise EvalInputError(f"{label} must use Codex ChatGPT authentication: {path}")
+    tokens = value.get("tokens")
+    if not isinstance(tokens, dict) or not tokens:
+        raise EvalInputError(f"{label} must contain a non-empty ChatGPT tokens object: {path}")
+    if value.get("OPENAI_API_KEY") not in (None, ""):
+        raise EvalInputError(f"{label} must not select API-key authentication: {path}")
+    return value
+
+
+def _ensure_private_dir(path: Path) -> None:
+    created = not path.exists()
+    try:
+        path.mkdir(parents=True, mode=0o700, exist_ok=True)
+        info = path.lstat()
+    except OSError as exc:
+        raise EvalInputError(f"cannot create state directory {path}: {exc}") from exc
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise EvalInputError(f"state directory must be a non-symlink directory: {path}")
+    if hasattr(os, "getuid") and info.st_uid != os.getuid():
+        raise EvalInputError(f"state directory must be owned by the current user: {path}")
+    if created:
+        path.chmod(0o700)
+        info = path.stat()
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        raise EvalInputError(
+            f"state directory permissions must not grant group or other access: {path}"
+        )
+
+
+def _atomic_write_bytes(path: Path, data: bytes, mode: int) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, mode)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        path.chmod(mode)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
+
+
+def _atomic_write_json(path: Path, value: Any, mode: int = 0o644) -> None:
+    data = (json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode()
+    _atomic_write_bytes(path, data, mode)
+
+
+def _write_model_output_schema(source: Path, destination: Path) -> None:
+    schema = _read_json_object(source)
+    # API structured-output schemas do not need dialect metadata. Keep the
+    # checked-in files self-describing while sending only the model contract.
+    schema.pop("$schema", None)
+    schema.pop("$id", None)
+    _atomic_write_json(destination, schema, mode=0o600)
+
+
+@contextlib.contextmanager
+def _credential_lock(state_dir: Path) -> Iterator[None]:
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(state_dir / "auth.lock", flags, 0o600)
+    except OSError as exc:
+        raise EvalRuntimeError(f"cannot open credential lock: {exc}") from exc
+    try:
+        os.fchmod(descriptor, 0o600)
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise EvalRuntimeError("credential lock must be a regular file")
+        if hasattr(os, "getuid") and info.st_uid != os.getuid():
+            raise EvalRuntimeError("credential lock must be owned by the current user")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _auth_init(source: Path, state_dir: Path, replace: bool) -> dict[str, Any]:
+    source = source.expanduser()
+    state_dir = state_dir.expanduser()
+    _validate_chatgpt_auth_file(source, "source credential file")
+    _ensure_private_dir(state_dir)
+    destination = state_dir / "auth.json"
+    with _credential_lock(state_dir):
+        destination_present = os.path.lexists(destination)
+        if destination_present and not replace:
+            raise EvalInputError(
+                f"credential vault already exists at {destination}; pass --replace to replace it"
+            )
+        if destination_present:
+            info = _validate_owned_regular_file(destination, "credential vault")
+            if stat.S_IMODE(info.st_mode) & 0o077:
+                raise EvalInputError(
+                    "credential vault permissions must not grant group or other access: "
+                    f"{destination}"
+                )
+        _atomic_write_bytes(destination, source.read_bytes(), 0o600)
+        _validate_chatgpt_auth_file(destination, "credential vault")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": "initialized",
+        "credential_vault": str(destination),
+        "replaced": destination_present,
+    }
+
+
+def _load_policy(
+    config_path: Path, approval_override: str, sandbox_override: str
+) -> Policy:
+    config_path = config_path.expanduser()
+    config: dict[str, Any] = {}
+    if config_path.exists():
+        _validate_owned_regular_file(config_path, "policy config")
+        try:
+            config = tomllib.loads(_read_utf8(config_path))
+        except tomllib.TOMLDecodeError as exc:
+            raise EvalInputError(f"policy config is invalid TOML: {config_path}: {exc}") from exc
+        if not isinstance(config, dict):
+            raise EvalInputError(f"policy config must be a TOML table: {config_path}")
+
+    inherited_approval = config.get("approval_policy", "on-request")
+    inherited_sandbox = config.get("sandbox_mode", "read-only")
+    approval = inherited_approval if approval_override == "inherit" else approval_override
+    sandbox = inherited_sandbox if sandbox_override == "inherit" else sandbox_override
+    if approval not in APPROVAL_POLICIES[1:]:
+        raise EvalInputError(
+            "inherited approval_policy must be one of " + ", ".join(APPROVAL_POLICIES[1:])
+        )
+    if sandbox not in SANDBOX_MODES[1:]:
+        raise EvalInputError(
+            "inherited sandbox_mode must be one of " + ", ".join(SANDBOX_MODES[1:])
+        )
+
+    workspace: dict[str, Any] = {}
+    raw_workspace = config.get("sandbox_workspace_write", {})
+    if sandbox == "workspace-write" and sandbox_override == "inherit":
+        if not isinstance(raw_workspace, dict):
+            raise EvalInputError("sandbox_workspace_write must be a TOML table")
+        allowed = {
+            "exclude_slash_tmp",
+            "exclude_tmpdir_env_var",
+            "network_access",
+            "writable_roots",
+        }
+        unknown = set(raw_workspace) - allowed
+        if unknown:
+            raise EvalInputError(
+                f"sandbox_workspace_write contains unsupported fields: {sorted(unknown)}"
+            )
+        for key in ("exclude_slash_tmp", "exclude_tmpdir_env_var", "network_access"):
+            value = raw_workspace.get(key, False)
+            if not isinstance(value, bool):
+                raise EvalInputError(f"sandbox_workspace_write.{key} must be a boolean")
+            workspace[key] = value
+        roots = raw_workspace.get("writable_roots", [])
+        if not isinstance(roots, list) or any(not isinstance(item, str) for item in roots):
+            raise EvalInputError("sandbox_workspace_write.writable_roots must be strings")
+        if any(not Path(item).is_absolute() for item in roots):
+            raise EvalInputError(
+                "sandbox_workspace_write.writable_roots must contain absolute paths"
+            )
+        workspace["writable_roots"] = roots
+
+    return Policy(
+        approval_policy=approval,
+        sandbox_mode=sandbox,
+        sandbox_workspace_write=workspace,
+        approval_source=(
+            str(config_path)
+            if approval_override == "inherit" and "approval_policy" in config
+            else ("safe-default" if approval_override == "inherit" else "command-line")
+        ),
+        sandbox_source=(
+            str(config_path)
+            if sandbox_override == "inherit" and "sandbox_mode" in config
+            else ("safe-default" if sandbox_override == "inherit" else "command-line")
+        ),
+    )
+
+
+def _render_config(
+    *,
+    model: str,
+    reasoning_effort: str,
+    policy: Policy,
+    model_catalog_path: Path,
+    include_skill_instructions: bool,
+    disabled_skill_paths: Sequence[Path] = (),
+    provider: tuple[str, str] | None = None,
+) -> str:
+    lines = [
+        f"model = {_toml_string(model)}",
+        f"model_catalog_json = {_toml_string(str(model_catalog_path))}",
+        f"model_reasoning_effort = {_toml_string(reasoning_effort)}",
+        'model_reasoning_summary = "none"',
+        'model_verbosity = "low"',
+        'personality = "none"',
+        f"approval_policy = {_toml_string(policy.approval_policy)}",
+        f"sandbox_mode = {_toml_string(policy.sandbox_mode)}",
+        'web_search = "disabled"',
+        "project_root_markers = []",
+    ]
+    if provider is not None:
+        provider_name, base_url = provider
+        lines.append(f"model_provider = {_toml_string(provider_name)}")
+    if policy.sandbox_mode == "workspace-write" and policy.sandbox_workspace_write:
+        workspace = policy.sandbox_workspace_write
+        lines.extend(
+            [
+                "",
+                "[sandbox_workspace_write]",
+                f"exclude_slash_tmp = {str(workspace['exclude_slash_tmp']).lower()}",
+                "exclude_tmpdir_env_var = "
+                + str(workspace["exclude_tmpdir_env_var"]).lower(),
+                f"network_access = {str(workspace['network_access']).lower()}",
+                "writable_roots = " + _toml_string_array(workspace["writable_roots"]),
+            ]
+        )
+    lines.extend(["", "[shell_environment_policy]", 'inherit = "none"'])
+    lines.extend(["", "[features]"])
+    lines.extend(f"{name} = false" for name in DISABLED_FEATURES)
+    lines.extend(
+        [
+            "",
+            "[skills]",
+            f"include_instructions = {str(include_skill_instructions).lower()}",
+        ]
+    )
+    for path in disabled_skill_paths:
+        lines.extend(
+            [
+                "",
+                "[[skills.config]]",
+                f"path = {_toml_string(str(path))}",
+                "enabled = false",
+            ]
+        )
+    if provider is not None:
+        provider_name, base_url = provider
+        lines.extend(
+            [
+                "",
+                f"[model_providers.{provider_name}]",
+                'name = "Agent eval tool-surface probe"',
+                f"base_url = {_toml_string(base_url)}",
+                'env_key = "AGENT_EVAL_FAKE_KEY"',
+                "requires_openai_auth = false",
+                'wire_api = "responses"',
+                "request_max_retries = 0",
+                "stream_max_retries = 0",
+            ]
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _isolated_environment(runtime: Runtime, additions: dict[str, str] | None = None) -> dict[str, str]:
+    environment = {key: os.environ[key] for key in SAFE_ENV_KEYS if key in os.environ}
+    environment.update(
+        {
+            "CI": "1",
+            "CODEX_HOME": str(runtime.codex_home),
+            "HOME": str(runtime.home),
+            "TERM": "dumb",
+            "XDG_CACHE_HOME": str(runtime.home / ".cache"),
+            "XDG_CONFIG_HOME": str(runtime.home / ".config"),
+            "XDG_DATA_HOME": str(runtime.home / ".local" / "share"),
+            "XDG_STATE_HOME": str(runtime.home / ".local" / "state"),
+        }
+    )
+    if additions:
+        environment.update(additions)
+    return environment
+
+
+def _loopback_environment(runtime: Runtime) -> dict[str, str]:
+    environment = _isolated_environment(
+        runtime, {"AGENT_EVAL_FAKE_KEY": "non-secret-probe-value"}
+    )
+    for key in (
+        "ALL_PROXY",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "all_proxy",
+        "https_proxy",
+        "http_proxy",
+    ):
+        environment.pop(key, None)
+    environment["NO_PROXY"] = "127.0.0.1,localhost"
+    environment["no_proxy"] = "127.0.0.1,localhost"
+    return environment
+
+
+def _run_owned_process(
+    argv: Sequence[str],
+    *,
+    cwd: Path,
+    environment: dict[str, str],
+    timeout: int,
+    stdin: str | None = None,
+) -> ProcessResult:
+    started = time.monotonic()
+    try:
+        process = subprocess.Popen(
+            list(argv),
+            cwd=cwd,
+            env=environment,
+            stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        raise EvalRuntimeError(f"cannot start {argv[0]}: {exc}") from exc
+    timed_out = False
+    try:
+        stdout, stderr = process.communicate(input=stdin, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGTERM)
+        try:
+            stdout, stderr = process.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            stdout, stderr = process.communicate()
+    for name, value in (("stdout", stdout), ("stderr", stderr)):
+        if len(value.encode("utf-8", errors="replace")) > MAX_PROCESS_OUTPUT_BYTES:
+            raise EvalRuntimeError(f"{argv[0]} {name} exceeded the output limit")
+    return ProcessResult(
+        returncode=process.returncode,
+        stdout=stdout,
+        stderr=stderr,
+        duration_seconds=time.monotonic() - started,
+        timed_out=timed_out,
+    )
+
+
+def _copy_payload(source_root: Path, destination: Path) -> None:
+    source_root = source_root.resolve()
+    agents_file = source_root / "AGENTS.md"
+    agents_dir = source_root / ".agents"
+    if not agents_file.is_file() or not agents_dir.is_dir():
+        raise EvalInputError("repository root must contain AGENTS.md and .agents/")
+    destination.mkdir(mode=0o755)
+
+    sources = [agents_file, agents_dir, *sorted(agents_dir.rglob("*"))]
+    for source in sources:
+        try:
+            info = source.lstat()
+        except OSError as exc:
+            raise EvalInputError(f"cannot inspect payload path {source}: {exc}") from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise EvalInputError(f"payload must not contain symlinks: {source}")
+        relative = source.relative_to(source_root)
+        target = destination / relative
+        if stat.S_ISDIR(info.st_mode):
+            target.mkdir(mode=0o755, exist_ok=True)
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            raise EvalInputError(f"payload path must be a regular file or directory: {source}")
+        _read_utf8(source)
+        target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+        shutil.copyfile(source, target, follow_symlinks=False)
+        target.chmod(0o444)
+
+    top_level = {path.name for path in destination.iterdir()}
+    if top_level != {"AGENTS.md", ".agents"}:
+        raise EvalRuntimeError(f"synthetic repository has unexpected entries: {sorted(top_level)}")
+
+
+def _write_restricted_model_catalog(
+    codex_bin: Path,
+    runtime: Runtime,
+    model: str,
+    reasoning_effort: str,
+    timeout: int,
+) -> None:
+    result = _run_owned_process(
+        [str(codex_bin), "debug", "models", "--bundled"],
+        cwd=runtime.fixture,
+        environment=_isolated_environment(runtime),
+        timeout=timeout,
+    )
+    if result.timed_out or result.returncode != 0:
+        raise EvalRuntimeError(
+            "could not read the bundled Codex model catalog: " + result.stderr.strip()[:1000]
+        )
+    try:
+        catalog = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise EvalRuntimeError(f"bundled Codex model catalog is invalid JSON: {exc}") from exc
+    restricted = _restrict_model_catalog(catalog, model, reasoning_effort)
+    _atomic_write_json(runtime.model_catalog_path, restricted, mode=0o600)
+
+
+def _restrict_model_catalog(
+    catalog: Any, model: str, reasoning_effort: str
+) -> dict[str, Any]:
+    models = catalog.get("models") if isinstance(catalog, dict) else None
+    if not isinstance(models, list):
+        raise EvalRuntimeError("bundled Codex model catalog has no models array")
+    selected = next(
+        (
+            item
+            for item in models
+            if isinstance(item, dict) and item.get("slug") == model
+        ),
+        None,
+    )
+    if selected is None:
+        raise EvalInputError(
+            f"model {model!r} is not advertised by this Codex binary's bundled catalog"
+        )
+    levels = selected.get("supported_reasoning_levels")
+    if not isinstance(levels, list):
+        raise EvalRuntimeError(
+            f"model {model!r} has no supported_reasoning_levels array"
+        )
+    supported_efforts = {
+        item.get("effort")
+        for item in levels
+        if isinstance(item, dict) and isinstance(item.get("effort"), str)
+    }
+    if supported_efforts and reasoning_effort not in supported_efforts:
+        raise EvalInputError(
+            f"model {model!r} does not advertise reasoning effort {reasoning_effort!r}; "
+            f"supported values: {sorted(supported_efforts)}"
+        )
+
+    # The field is optional in Codex's catalog contract. Null removes the
+    # apply_patch capability while preserving the binary's own instructions and
+    # every other model property byte-for-byte.
+    restricted_model = dict(selected)
+    restricted_model["apply_patch_tool_type"] = None
+    return {"models": [restricted_model]}
+
+
+def _extract_skill_entries(prompt_value: Any) -> list[tuple[str, str, str]]:
+    text = _flatten_prompt_text(prompt_value)
+    return [tuple(match.groups()) for match in SKILL_ENTRY_PATTERN.finditer(text)]
+
+
+def _flatten_prompt_text(value: Any) -> str:
+    parts: list[str] = []
+
+    def visit(item: Any) -> None:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict):
+            for nested in item.values():
+                visit(nested)
+        elif isinstance(item, list):
+            for nested in item:
+                visit(nested)
+
+    visit(value)
+    return "\n".join(parts)
+
+
+def _debug_prompt(
+    codex_bin: Path, runtime: Runtime, prompt: str, timeout: int
+) -> tuple[Any, ProcessResult]:
+    result = _run_owned_process(
+        [str(codex_bin), "debug", "prompt-input", prompt],
+        cwd=runtime.fixture,
+        environment=_isolated_environment(runtime),
+        timeout=timeout,
+    )
+    if result.timed_out:
+        raise EvalRuntimeError("codex debug prompt-input timed out")
+    if result.returncode != 0:
+        raise EvalRuntimeError(
+            "codex debug prompt-input failed: " + result.stderr.strip()[:1000]
+        )
+    try:
+        return json.loads(result.stdout), result
+    except json.JSONDecodeError as exc:
+        raise EvalRuntimeError(f"codex debug prompt-input returned invalid JSON: {exc}") from exc
+
+
+def _prepare_runtime(
+    *,
+    source_root: Path,
+    codex_bin: Path,
+    model: str,
+    reasoning_effort: str,
+    policy: Policy,
+    timeout: int,
+    provider: tuple[str, str] | None = None,
+    include_skill_instructions: bool = True,
+) -> Runtime:
+    temporary = tempfile.TemporaryDirectory(prefix="agent-evals-runtime-")
+    root = Path(temporary.name)
+    runtime = Runtime(
+        temporary=temporary,
+        root=root,
+        home=root / "home",
+        codex_home=root / "codex-home",
+        fixture=root / "fixture",
+        config_path=root / "codex-home" / "config.toml",
+        model_catalog_path=root / "model-catalog.json",
+    )
+    try:
+        runtime.home.mkdir(mode=0o700)
+        runtime.codex_home.mkdir(mode=0o700)
+        _copy_payload(source_root, runtime.fixture)
+        _write_restricted_model_catalog(
+            codex_bin,
+            runtime,
+            model,
+            reasoning_effort,
+            min(timeout, 30),
+        )
+        runtime.config_path.write_text(
+            _render_config(
+                model=model,
+                reasoning_effort=reasoning_effort,
+                policy=policy,
+                model_catalog_path=runtime.model_catalog_path,
+                include_skill_instructions=True,
+                provider=provider,
+            ),
+            encoding="utf-8",
+        )
+        runtime.config_path.chmod(0o600)
+
+        preliminary, _ = _debug_prompt(codex_bin, runtime, "source-discovery-probe", timeout)
+        fixture_skills = (runtime.fixture / ".agents" / "skills").resolve()
+        external: set[Path] = set()
+        for _name, locator_type, locator in _extract_skill_entries(preliminary):
+            if locator_type != "file":
+                continue
+            candidate = Path(locator).resolve()
+            if not _is_relative_to(candidate, fixture_skills):
+                external.add(candidate)
+        runtime.external_skill_paths = tuple(sorted(external))
+        runtime.config_path.write_text(
+            _render_config(
+                model=model,
+                reasoning_effort=reasoning_effort,
+                policy=policy,
+                model_catalog_path=runtime.model_catalog_path,
+                include_skill_instructions=include_skill_instructions,
+                disabled_skill_paths=runtime.external_skill_paths,
+                provider=provider,
+            ),
+            encoding="utf-8",
+        )
+        runtime.config_path.chmod(0o600)
+        return runtime
+    except Exception:
+        runtime.cleanup()
+        raise
+
+
+def _verify_prompt_sources(
+    codex_bin: Path, runtime: Runtime, source_root: Path, timeout: int
+) -> dict[str, Any]:
+    value, _ = _debug_prompt(codex_bin, runtime, "prompt-source-isolation-probe", timeout)
+    serialized = _flatten_prompt_text(value)
+    entries = _extract_skill_entries(value)
+    fixture_skills = (runtime.fixture / ".agents" / "skills").resolve()
+    expected_paths = {
+        path.resolve()
+        for path in (runtime.fixture / ".agents" / "skills").glob("*/SKILL.md")
+    }
+    actual_paths: set[Path] = set()
+    non_file_entries: list[str] = []
+    for name, locator_type, locator in entries:
+        if locator_type != "file":
+            non_file_entries.append(f"{name}:{locator_type}:{locator}")
+            continue
+        candidate = Path(locator).resolve()
+        if not _is_relative_to(candidate, fixture_skills):
+            raise EvalRuntimeError(f"prompt contains an external skill source: {candidate}")
+        actual_paths.add(candidate)
+    if non_file_entries:
+        raise EvalRuntimeError(
+            f"prompt contains non-file skill sources: {sorted(non_file_entries)}"
+        )
+    if actual_paths != expected_paths:
+        raise EvalRuntimeError(
+            "prompt skill sources differ from the synthetic payload: "
+            f"missing={sorted(str(path) for path in expected_paths - actual_paths)}, "
+            f"unexpected={sorted(str(path) for path in actual_paths - expected_paths)}"
+        )
+
+    agents_text = _read_utf8(source_root / "AGENTS.md").strip()
+    if agents_text not in serialized:
+        raise EvalRuntimeError("synthetic AGENTS.md content is absent from model-visible input")
+    source_root_text = str(source_root.resolve())
+    if source_root_text != str(runtime.fixture.resolve()) and source_root_text in serialized:
+        raise EvalRuntimeError("model-visible input contains the maintenance repository path")
+    if "# Agent Rules Kit Upstream" in serialized:
+        raise EvalRuntimeError("model-visible input contains the project maintenance overlay")
+
+    return {
+        "status": "passed",
+        "agents_md": "AGENTS.md",
+        "skill_count": len(actual_paths),
+        "skill_sources": sorted(str(path.relative_to(runtime.fixture)) for path in actual_paths),
+        "disabled_external_skill_count": len(runtime.external_skill_paths),
+    }
+
+
+def _verify_behavior_prompt_sources(
+    codex_bin: Path, runtime: Runtime, source_root: Path, timeout: int
+) -> dict[str, Any]:
+    value, _ = _debug_prompt(
+        codex_bin, runtime, "behavior-prompt-source-isolation-probe", timeout
+    )
+    serialized = _flatten_prompt_text(value)
+    entries = _extract_skill_entries(value)
+    if entries:
+        raise EvalRuntimeError(
+            "behavior-stage prompt must not contain automatic skill metadata"
+        )
+    agents_text = _read_utf8(source_root / "AGENTS.md").strip()
+    if agents_text not in serialized:
+        raise EvalRuntimeError(
+            "synthetic AGENTS.md content is absent from behavior-stage input"
+        )
+    if "# Agent Rules Kit Upstream" in serialized:
+        raise EvalRuntimeError(
+            "behavior-stage input contains the project maintenance overlay"
+        )
+    return {"status": "passed", "automatic_skill_count": 0}
+
+
+class _CaptureHandler(http.server.BaseHTTPRequestHandler):
+    requests: list[dict[str, Any]]
+
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0 or length > MAX_HTTP_REQUEST_BYTES:
+            self.send_error(413)
+            return
+        raw = self.rfile.read(length)
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            value = {"invalid_json": True}
+        if isinstance(value, dict):
+            self.requests.append(value)
+        self.send_response(400)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"error":{"message":"intentional tool-surface probe stop"}}')
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+
+def _load_runtime_contract(source_root: Path, codex_version: str) -> set[tuple[str, str]]:
+    path = source_root / "tests" / "evals" / "codex-runtime-contract.json"
+    value = _read_json_object(path)
+    if value.get("schema_version") != SCHEMA_VERSION:
+        raise EvalInputError(f"unsupported runtime contract schema in {path}")
+    versions = value.get("codex_versions")
+    if set(value) != {"$schema", "schema_version", "codex_versions"}:
+        raise EvalInputError(f"invalid top-level runtime contract fields in {path}")
+    if not isinstance(versions, dict) or codex_version not in versions:
+        raise EvalRuntimeError(
+            f"Codex version {codex_version!r} has no reviewed tool-surface contract"
+        )
+    version = versions[codex_version]
+    if not isinstance(version, dict) or set(version) != {"allowed_tools"}:
+        raise EvalInputError(f"invalid Codex version contract for {codex_version}")
+    tools = version["allowed_tools"]
+    if not isinstance(tools, list):
+        raise EvalInputError("runtime allowed_tools must be an array")
+    result: set[tuple[str, str]] = set()
+    for item in tools:
+        if not isinstance(item, dict) or set(item) != {"type", "name"}:
+            raise EvalInputError("each runtime allowed tool must contain only type and name")
+        tool_type = item["type"]
+        name = item["name"]
+        if not isinstance(tool_type, str) or not isinstance(name, str):
+            raise EvalInputError("runtime tool type and name must be strings")
+        result.add((tool_type, name))
+    if len(result) != len(tools):
+        raise EvalInputError("runtime allowed_tools contains duplicates")
+    return result
+
+
+def _validate_tool_surface_request(
+    request: dict[str, Any], allowed: set[tuple[str, str]]
+) -> set[tuple[str, str]]:
+    if request.get("invalid_json") is True:
+        raise EvalRuntimeError("Responses request body was not valid JSON")
+    raw_tools = request.get("tools", [])
+    if not isinstance(raw_tools, list):
+        raise EvalRuntimeError("Responses request tools must be an array when present")
+    actual: set[tuple[str, str]] = set()
+    for item in raw_tools:
+        if not isinstance(item, dict):
+            raise EvalRuntimeError("Responses request contained a non-object tool")
+        tool_type = item.get("type")
+        name = item.get("name")
+        if not isinstance(tool_type, str) or not isinstance(name, str):
+            raise EvalRuntimeError("Responses request contained a tool without type/name")
+        tool = (tool_type, name)
+        if tool in actual:
+            raise EvalRuntimeError(f"Responses request contained a duplicate tool: {tool}")
+        actual.add(tool)
+    unexpected = actual - allowed
+    if unexpected:
+        raise EvalRuntimeError(
+            "Codex tool surface exceeds the reviewed allowlist: "
+            f"unexpected={sorted(unexpected)}, allowed={sorted(allowed)}"
+        )
+    return actual
+
+
+def _probe_tool_surface(
+    *,
+    source_root: Path,
+    codex_bin: Path,
+    codex_version: str,
+    model: str,
+    reasoning_effort: str,
+    policy: Policy,
+    timeout: int,
+) -> dict[str, Any]:
+    captured: list[dict[str, Any]] = []
+    handler = type("CaptureHandler", (_CaptureHandler,), {"requests": captured})
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    address = f"http://127.0.0.1:{server.server_address[1]}/v1"
+    runtime: Runtime | None = None
+    try:
+        runtime = _prepare_runtime(
+            source_root=source_root,
+            codex_bin=codex_bin,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            policy=policy,
+            timeout=min(timeout, 30),
+            provider=("agent_eval_probe", address),
+        )
+        result = _run_owned_process(
+            [
+                str(codex_bin),
+                "exec",
+                "--ephemeral",
+                "--ignore-rules",
+                "--strict-config",
+                "--skip-git-repo-check",
+                "--json",
+                "-C",
+                str(runtime.fixture),
+                "tool-surface-probe",
+            ],
+            cwd=runtime.fixture,
+            environment=_loopback_environment(runtime),
+            timeout=min(timeout, 30),
+        )
+        if result.timed_out:
+            raise EvalRuntimeError("Codex tool-surface probe timed out")
+        if not captured:
+            raise EvalRuntimeError(
+                "Codex tool-surface probe sent no Responses request: "
+                + result.stderr.strip()[:1000]
+            )
+        probe_item_errors = _item_error_messages(_parse_events(result.stdout))
+        if probe_item_errors:
+            raise EvalRuntimeError(
+                "Codex tool-surface probe emitted error items: "
+                + _summarize_event_messages(probe_item_errors)
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+        if runtime is not None:
+            runtime.cleanup()
+
+    request = captured[0]
+    allowed = _load_runtime_contract(source_root, codex_version)
+    actual = _validate_tool_surface_request(request, allowed)
+    return {
+        "status": "passed",
+        "tools": [
+            {"type": tool_type, "name": name} for tool_type, name in sorted(actual)
+        ],
+    }
+
+
+def _resolve_codex_binary(value: str) -> Path:
+    candidate = shutil.which(value)
+    if candidate is None:
+        raise EvalInputError(f"Codex executable was not found: {value}")
+    path = Path(candidate).resolve()
+    if not path.is_file():
+        raise EvalInputError(f"Codex executable is not a regular file: {path}")
+    return path
+
+
+def _codex_version(codex_bin: Path, timeout: int) -> str:
+    result = _run_owned_process(
+        [str(codex_bin), "--version"],
+        cwd=Path.cwd(),
+        environment={key: os.environ[key] for key in SAFE_ENV_KEYS if key in os.environ},
+        timeout=min(timeout, 30),
+    )
+    version = result.stdout.strip()
+    if result.returncode != 0 or result.timed_out or not version or "\n" in version:
+        raise EvalRuntimeError("could not determine a stable Codex version")
+    return version
+
+
+def _string_tuple(record: dict[str, Any], field: str, location: str) -> tuple[str, ...]:
+    value = record.get(field)
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise EvalInputError(f"{location}: {field} must be an array of strings")
+    if len(value) != len(set(value)):
+        raise EvalInputError(f"{location}: {field} contains duplicates")
+    return tuple(value)
+
+
+def _parse_eval_case(corpus: str, record: Any, location: str) -> EvalCase:
+    if not isinstance(record, dict) or set(record) != EVAL_FIELDS:
+        raise EvalInputError(f"{location}: eval fields must be exactly {sorted(EVAL_FIELDS)}")
+    eval_id = record["id"]
+    task = record["task"]
+    expected_behavior = record["expected_behavior"]
+    if not isinstance(eval_id, str) or not EVAL_ID_PATTERN.fullmatch(eval_id):
+        raise EvalInputError(f"{location}: id must use lowercase kebab-case")
+    if not isinstance(task, str) or not task.strip():
+        raise EvalInputError(f"{location}: task must be a non-empty string")
+    if not isinstance(expected_behavior, str) or not expected_behavior.strip():
+        raise EvalInputError(f"{location}: expected_behavior must be a non-empty string")
+    checks = record["behavior_checks"]
+    if not isinstance(checks, list) or not checks:
+        raise EvalInputError(f"{location}: behavior_checks must be a non-empty array")
+    parsed_checks: list[dict[str, Any]] = []
+    check_ids: set[str] = set()
+    expected_values: set[bool] = set()
+    for index, check in enumerate(checks):
+        check_location = f"{location}:behavior_checks[{index}]"
+        if not isinstance(check, dict) or set(check) != {"id", "question", "expected"}:
+            raise EvalInputError(
+                f"{check_location}: fields must be exactly id, question, expected"
+            )
+        check_id = check["id"]
+        question = check["question"]
+        expected = check["expected"]
+        if not isinstance(check_id, str) or not BEHAVIOR_ID_PATTERN.fullmatch(check_id):
+            raise EvalInputError(f"{check_location}: id must use lowercase kebab-case")
+        if check_id in check_ids:
+            raise EvalInputError(f"{location}: duplicate behavior check id: {check_id}")
+        if not isinstance(question, str) or not question.strip():
+            raise EvalInputError(f"{check_location}: question must be a non-empty string")
+        if not isinstance(expected, bool):
+            raise EvalInputError(f"{check_location}: expected must be a boolean")
+        check_ids.add(check_id)
+        expected_values.add(expected)
+        parsed_checks.append({"id": check_id, "question": question, "expected": expected})
+    if expected_values != {False, True}:
+        raise EvalInputError(
+            f"{location}: behavior_checks must contain both true and false expectations"
+        )
+    return EvalCase(
+        corpus=corpus,
+        id=eval_id,
+        task=task,
+        expected_rules=_string_tuple(record, "expected_rules", location),
+        forbidden_rules=_string_tuple(record, "forbidden_rules", location),
+        expected_skills=_string_tuple(record, "expected_skills", location),
+        forbidden_skills=_string_tuple(record, "forbidden_skills", location),
+        expected_behavior=expected_behavior,
+        behavior_checks=tuple(parsed_checks),
+    )
+
+
+def _load_eval_cases(
+    source_root: Path, corpora: Sequence[str] | None, ids: Sequence[str] | None
+) -> list[EvalCase]:
+    selected_files = set(corpora or (Path(name).stem for name in EVAL_FILES))
+    requested_ids = set(ids or ())
+    cases: list[EvalCase] = []
+    seen_ids: set[str] = set()
+    for filename in EVAL_FILES:
+        corpus = Path(filename).stem
+        if corpus not in selected_files:
+            continue
+        path = source_root / "tests" / "evals" / filename
+        text = _read_utf8(path)
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if not line.strip():
+                raise EvalInputError(f"{path}:{line_number}: blank JSONL line")
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise EvalInputError(f"{path}:{line_number}: invalid JSON: {exc}") from exc
+            case = _parse_eval_case(corpus, record, f"{path}:{line_number}")
+            if case.id in seen_ids:
+                raise EvalInputError(f"duplicate eval id: {case.id}")
+            seen_ids.add(case.id)
+            if not requested_ids or case.id in requested_ids:
+                cases.append(case)
+    valid_rules = {
+        str(path.relative_to(source_root))
+        for path in (source_root / ".agents" / "rules").glob("*.md")
+    }
+    valid_skills = {
+        path.parent.name
+        for path in (source_root / ".agents" / "skills").glob("*/SKILL.md")
+    }
+    for case in cases:
+        unknown_rules = (
+            set(case.expected_rules) | set(case.forbidden_rules)
+        ) - valid_rules
+        unknown_skills = (
+            set(case.expected_skills) | set(case.forbidden_skills)
+        ) - valid_skills
+        if unknown_rules:
+            raise EvalInputError(
+                f"eval {case.id} contains unknown rule paths: {sorted(unknown_rules)}"
+            )
+        if unknown_skills:
+            raise EvalInputError(
+                f"eval {case.id} contains unknown skills: {sorted(unknown_skills)}"
+            )
+        if set(case.expected_rules) & set(case.forbidden_rules):
+            raise EvalInputError(f"eval {case.id} expects and forbids the same rule")
+        if set(case.expected_skills) & set(case.forbidden_skills):
+            raise EvalInputError(f"eval {case.id} expects and forbids the same skill")
+
+    missing = requested_ids - {case.id for case in cases}
+    if missing:
+        raise EvalInputError(f"unknown or filtered eval ids: {sorted(missing)}")
+    if not cases:
+        raise EvalInputError("eval selection is empty")
+    return cases
+
+
+def _routing_prompt(case: EvalCase, index_text: str) -> str:
+    inputs = {"task": case.task, "rule_index": index_text}
+    return (
+        "Perform a routing evaluation. Do not call any tool, read any file, browse, "
+        "delegate, or execute a command. Use only the automatic AGENTS.md instructions, "
+        "the automatic skill metadata, and the JSON inputs below. Match every applicable "
+        "route and exclusion in the rule index. Return every required rule as its "
+        "repository-relative .agents/rules/*.md path, always including "
+        ".agents/rules/index.md. Return only skills whose trigger conditions apply. "
+        "The response must satisfy the supplied JSON Schema.\n\n"
+        "ROUTING INPUTS (JSON DATA)\n"
+        + json.dumps(inputs, ensure_ascii=False, indent=2)
+    )
+
+
+def _direct_skill_resources(skill_path: Path) -> list[Path]:
+    text = _read_utf8(skill_path)
+    skill_root = skill_path.parent.resolve()
+    resources: set[Path] = set()
+    for match in MARKDOWN_LINK_PATTERN.finditer(text):
+        raw = match.group(1).strip()
+        if raw.startswith("<") and raw.endswith(">"):
+            raw = raw[1:-1].strip()
+        if " " in raw and not raw.startswith(("http://", "https://")):
+            raw = raw.split(" ", 1)[0]
+        parts = urlsplit(raw)
+        if parts.scheme or parts.netloc or not parts.path:
+            continue
+        target = skill_path.parent / unquote(parts.path)
+        try:
+            info = target.lstat()
+            resolved = target.resolve(strict=True)
+        except OSError as exc:
+            raise EvalInputError(f"cannot resolve skill resource {target}: {exc}") from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise EvalInputError(f"skill resource must be a regular non-symlink file: {target}")
+        if not _is_relative_to(resolved, skill_root):
+            raise EvalInputError(f"skill resource escapes its owner directory: {target}")
+        resources.add(resolved)
+    return sorted(resources)
+
+
+def _behavior_prompt(case: EvalCase, fixture: Path, route: dict[str, Any]) -> str:
+    selected_rules = route["selected_rules"]
+    selected_skills = route["selected_skills"]
+    sources: list[dict[str, str]] = []
+    seen: set[Path] = set()
+    for relative in selected_rules:
+        path = (fixture / relative).resolve()
+        rules_root = (fixture / ".agents" / "rules").resolve()
+        if not _is_relative_to(path, rules_root) or not path.is_file() or path.is_symlink():
+            raise EvalRuntimeError(f"routed rule is outside the synthetic rules tree: {relative}")
+        if path not in seen:
+            sources.append({"path": relative, "content": _read_utf8(path)})
+            seen.add(path)
+    for name in selected_skills:
+        skill_path = (fixture / ".agents" / "skills" / name / "SKILL.md").resolve()
+        skills_root = (fixture / ".agents" / "skills").resolve()
+        if not _is_relative_to(skill_path, skills_root) or not skill_path.is_file():
+            raise EvalRuntimeError(f"routed skill is outside the synthetic skills tree: {name}")
+        skill_files = [skill_path, *_direct_skill_resources(skill_path)]
+        for path in skill_files:
+            if path not in seen:
+                sources.append(
+                    {
+                        "path": str(path.relative_to(fixture)),
+                        "content": _read_utf8(path),
+                    }
+                )
+                seen.add(path)
+    questions = [
+        {"id": check["id"], "question": check["question"]}
+        for check in case.behavior_checks
+    ]
+    inputs = {"task": case.task, "sources": sources, "questions": questions}
+    return (
+        "Perform a behavior evaluation. Do not call any tool, read any file, browse, "
+        "delegate, or execute a command. Treat the supplied sources as the complete "
+        "applicable rule and skill instructions. For each question, answer true only "
+        "when the proposed behavior should be followed for this task, and give concise "
+        "evidence grounded in a supplied source. Do not infer an expected answer from "
+        "question order or wording. Return exactly one decision per question and satisfy "
+        "the supplied JSON Schema.\n\n"
+        "BEHAVIOR INPUTS (JSON DATA)\n"
+        + json.dumps(inputs, ensure_ascii=False, indent=2)
+    )
+
+
+def _assert_no_expectation_leak(prompt: str) -> None:
+    forbidden_markers = (
+        '"expected_rules"',
+        '"forbidden_rules"',
+        '"expected_skills"',
+        '"forbidden_skills"',
+        '"expected_behavior"',
+        '"expected":',
+    )
+    found = [marker for marker in forbidden_markers if marker in prompt]
+    if found:
+        raise EvalRuntimeError(f"model prompt contains eval expectation fields: {found}")
+
+
+def _preflight_prompts(source_root: Path, cases: Sequence[EvalCase]) -> dict[str, Any]:
+    index_text = _read_utf8(source_root / ".agents" / "rules" / "index.md")
+    for case in cases:
+        if any(
+            case.expected_behavior in check["question"]
+            for check in case.behavior_checks
+        ):
+            raise EvalInputError(
+                f"eval {case.id} copies expected_behavior into a model question"
+            )
+        _assert_no_expectation_leak(_routing_prompt(case, index_text))
+        synthetic_route = {
+            "selected_rules": list(case.expected_rules),
+            "selected_skills": list(case.expected_skills),
+        }
+        _assert_no_expectation_leak(_behavior_prompt(case, source_root, synthetic_route))
+    return {"status": "passed", "case_count": len(cases)}
+
+
+def _tool_call_in_events(events: Sequence[Any]) -> bool:
+    suspicious_types = {
+        "command_execution",
+        "computer_action",
+        "dynamic_tool_call",
+        "file_change",
+        "function_call",
+        "image_generation",
+        "image_view",
+        "mcp_tool_call",
+        "plan_update",
+        "request_user_input",
+        "tool_call",
+        "view_image",
+        "web_search",
+    }
+
+    def visit(value: Any) -> bool:
+        if isinstance(value, dict):
+            item_type = value.get("type")
+            if isinstance(item_type, str) and item_type.lower() in suspicious_types:
+                return True
+            if any(key in value for key in ("tool_call_id", "tool_name")):
+                return True
+            return any(visit(item) for item in value.values())
+        if isinstance(value, list):
+            return any(visit(item) for item in value)
+        return False
+
+    for event in events:
+        if isinstance(event, dict):
+            event_type = event.get("type")
+            item = event.get("item")
+            if (
+                isinstance(event_type, str)
+                and event_type.startswith("item.")
+                and isinstance(item, dict)
+                and item.get("type") not in {"agent_message", "error", "reasoning"}
+            ):
+                return True
+        if visit(event):
+            return True
+    return False
+
+
+def _item_error_messages(events: Sequence[Any]) -> list[str]:
+    messages: list[str] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        event_type = event.get("type")
+        item = event.get("item")
+        if (
+            isinstance(event_type, str)
+            and event_type.startswith("item.")
+            and isinstance(item, dict)
+            and item.get("type") == "error"
+        ):
+            message = item.get("message")
+            messages.append(
+                message if isinstance(message, str) and message else "error item"
+            )
+    return messages
+
+
+def _event_failure_messages(events: Sequence[Any]) -> list[str]:
+    messages = _item_error_messages(events)
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        event_type = event.get("type")
+        if event_type not in {"error", "turn.failed", "turn.cancelled"}:
+            continue
+        message: Any = event.get("message")
+        if not isinstance(message, str) or not message:
+            error = event.get("error")
+            if isinstance(error, dict):
+                message = error.get("message")
+        messages.append(
+            message if isinstance(message, str) and message else str(event_type)
+        )
+    return messages
+
+
+def _summarize_event_messages(messages: Sequence[str], limit: int = 1000) -> str:
+    unique = list(dict.fromkeys(messages))
+    summary = "; ".join(unique)
+    return summary if len(summary) <= limit else summary[: limit - 3] + "..."
+
+
+def _failed_event_in_events(events: Sequence[Any]) -> bool:
+    return bool(_event_failure_messages(events))
+
+
+def _parse_events(text: str) -> list[Any]:
+    events: list[Any] = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError as exc:
+            raise EvalRuntimeError(f"Codex event line {line_number} is invalid JSON: {exc}") from exc
+    return events
+
+
+def _secret_values(value: Any) -> set[str]:
+    found: set[str] = set()
+    if isinstance(value, dict):
+        for item in value.values():
+            found.update(_secret_values(item))
+    elif isinstance(value, list):
+        for item in value:
+            found.update(_secret_values(item))
+    elif isinstance(value, str) and len(value) >= 8:
+        found.add(value)
+    return found
+
+
+def _redact(text: str, secret_values: set[str], runtime_root: Path) -> str:
+    result = text.replace(str(runtime_root), "<isolated-runtime>")
+    for value in sorted(secret_values, key=len, reverse=True):
+        result = result.replace(value, "<redacted>")
+    result = re.sub(
+        r"(?i)(authorization\s*:\s*bearer\s+)[^\s]+", r"\1<redacted>", result
+    )
+    return result
+
+
+def _copy_vault_to_runtime(vault: Path, runtime: Runtime) -> set[str]:
+    credentials = _validate_chatgpt_auth_file(vault, "credential vault")
+    destination = runtime.codex_home / "auth.json"
+    _atomic_write_bytes(destination, vault.read_bytes(), 0o600)
+    return _secret_values(credentials)
+
+
+def _sync_runtime_auth(runtime: Runtime, vault: Path) -> set[str]:
+    source = runtime.codex_home / "auth.json"
+    credentials = _validate_chatgpt_auth_file(source, "runtime credential file")
+    _atomic_write_bytes(vault, source.read_bytes(), 0o600)
+    return _secret_values(credentials)
+
+
+def _run_codex_stage(
+    *,
+    codex_bin: Path,
+    runtime: Runtime,
+    model: str,
+    prompt: str,
+    schema_path: Path,
+    output_path: Path,
+    events_path: Path,
+    stderr_path: Path,
+    timeout: int,
+    secrets_to_redact: set[str],
+) -> tuple[dict[str, Any], list[Any], ProcessResult]:
+    _assert_no_expectation_leak(prompt)
+    result = _run_owned_process(
+        [
+            str(codex_bin),
+            "exec",
+            "--ephemeral",
+            "--ignore-rules",
+            "--strict-config",
+            "--skip-git-repo-check",
+            "--output-schema",
+            str(schema_path),
+            "--json",
+            "-o",
+            str(output_path),
+            "--model",
+            model,
+            "-C",
+            str(runtime.fixture),
+            "-",
+        ],
+        cwd=runtime.fixture,
+        environment=_isolated_environment(runtime),
+        timeout=timeout,
+        stdin=prompt,
+    )
+    runtime_auth = runtime.codex_home / "auth.json"
+    if runtime_auth.exists():
+        with contextlib.suppress(EvalInputError):
+            secrets_to_redact.update(
+                _secret_values(
+                    _validate_chatgpt_auth_file(
+                        runtime_auth, "runtime credential file"
+                    )
+                )
+            )
+    safe_stdout = _redact(result.stdout, secrets_to_redact, runtime.root)
+    safe_stderr = _redact(result.stderr, secrets_to_redact, runtime.root)
+    events_path.write_text(safe_stdout, encoding="utf-8")
+    stderr_path.write_text(safe_stderr, encoding="utf-8")
+    if result.timed_out:
+        raise EvalRuntimeError(f"Codex stage timed out after {timeout} seconds")
+    if result.returncode != 0:
+        raise EvalRuntimeError(
+            f"Codex stage exited with {result.returncode}; see {stderr_path}"
+        )
+    events = _parse_events(safe_stdout)
+    event_failures = _event_failure_messages(events)
+    if event_failures:
+        raise EvalRuntimeError(
+            "Codex emitted an error event during the eval stage: "
+            + _summarize_event_messages(event_failures)
+        )
+    if _tool_call_in_events(events):
+        raise EvalRuntimeError("Codex attempted a tool call during a no-tool eval stage")
+    try:
+        final = json.loads(
+            _redact(_read_utf8(output_path), secrets_to_redact, runtime.root)
+        )
+    except json.JSONDecodeError as exc:
+        raise EvalRuntimeError(f"Codex final output is invalid JSON: {exc}") from exc
+    if not isinstance(final, dict):
+        raise EvalRuntimeError("Codex final output must be a JSON object")
+    _atomic_write_json(output_path, final)
+    return final, events, result
+
+
+def _run_fresh_codex_stage(
+    *,
+    source_root: Path,
+    codex_bin: Path,
+    model: str,
+    reasoning_effort: str,
+    policy: Policy,
+    vault: Path,
+    prompt_builder: Callable[[Runtime], str],
+    schema_filename: str,
+    output_path: Path,
+    events_path: Path,
+    stderr_path: Path,
+    timeout: int,
+    secrets_to_redact: set[str],
+    include_skill_instructions: bool,
+) -> tuple[dict[str, Any], list[Any], ProcessResult]:
+    runtime = _prepare_runtime(
+        source_root=source_root,
+        codex_bin=codex_bin,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        policy=policy,
+        timeout=min(timeout, 30),
+        include_skill_instructions=include_skill_instructions,
+    )
+    auth_loaded = False
+    try:
+        secrets_to_redact.update(_copy_vault_to_runtime(vault, runtime))
+        auth_loaded = True
+        schema_path = runtime.root / schema_filename
+        _write_model_output_schema(
+            source_root / "tests" / "evals" / "schemas" / schema_filename,
+            schema_path,
+        )
+        result = _run_codex_stage(
+            codex_bin=codex_bin,
+            runtime=runtime,
+            model=model,
+            prompt=prompt_builder(runtime),
+            schema_path=schema_path,
+            output_path=output_path,
+            events_path=events_path,
+            stderr_path=stderr_path,
+            timeout=timeout,
+            secrets_to_redact=secrets_to_redact,
+        )
+    except Exception:
+        if auth_loaded:
+            with contextlib.suppress(EvalInputError):
+                secrets_to_redact.update(_sync_runtime_auth(runtime, vault))
+        raise
+    else:
+        secrets_to_redact.update(_sync_runtime_auth(runtime, vault))
+        return result
+    finally:
+        runtime.cleanup()
+
+
+def _score_route(case: EvalCase, actual: dict[str, Any]) -> dict[str, Any]:
+    if set(actual) != {"selected_rules", "selected_skills", "rationale"}:
+        raise EvalRuntimeError("route result fields do not match the route schema")
+    rules = actual["selected_rules"]
+    skills = actual["selected_skills"]
+    rationale = actual["rationale"]
+    if (
+        not isinstance(rules, list)
+        or any(not isinstance(item, str) for item in rules)
+        or not isinstance(skills, list)
+        or any(not isinstance(item, str) for item in skills)
+        or not isinstance(rationale, str)
+        or not rationale.strip()
+    ):
+        raise EvalRuntimeError("route result contains invalid value types")
+    if len(rules) != len(set(rules)) or len(skills) != len(set(skills)):
+        raise EvalRuntimeError("route result contains duplicate rules or skills")
+    expected_rules = set(case.expected_rules)
+    expected_skills = set(case.expected_skills)
+    actual_rules = set(rules)
+    actual_skills = set(skills)
+    score = {
+        "passed": actual_rules == expected_rules and actual_skills == expected_skills,
+        "missing_rules": sorted(expected_rules - actual_rules),
+        "unexpected_rules": sorted(actual_rules - expected_rules),
+        "forbidden_rules_selected": sorted(actual_rules & set(case.forbidden_rules)),
+        "missing_skills": sorted(expected_skills - actual_skills),
+        "unexpected_skills": sorted(actual_skills - expected_skills),
+        "forbidden_skills_selected": sorted(actual_skills & set(case.forbidden_skills)),
+    }
+    return score
+
+
+def _score_behavior(case: EvalCase, actual: dict[str, Any]) -> dict[str, Any]:
+    if set(actual) != {"decisions", "summary"}:
+        raise EvalRuntimeError("behavior result fields do not match the behavior schema")
+    decisions = actual["decisions"]
+    if not isinstance(decisions, list) or not isinstance(actual["summary"], str):
+        raise EvalRuntimeError("behavior result contains invalid value types")
+    actual_answers: dict[str, bool] = {}
+    evidence: dict[str, str] = {}
+    duplicate_ids: list[str] = []
+    for decision in decisions:
+        if not isinstance(decision, dict) or set(decision) != {"id", "answer", "evidence"}:
+            raise EvalRuntimeError("behavior decision fields do not match the schema")
+        check_id = decision["id"]
+        answer = decision["answer"]
+        decision_evidence = decision["evidence"]
+        if (
+            not isinstance(check_id, str)
+            or not isinstance(answer, bool)
+            or not isinstance(decision_evidence, str)
+            or not decision_evidence.strip()
+        ):
+            raise EvalRuntimeError("behavior decision contains invalid value types")
+        if check_id in actual_answers:
+            duplicate_ids.append(check_id)
+        actual_answers[check_id] = answer
+        evidence[check_id] = decision_evidence
+    expected = {check["id"]: check["expected"] for check in case.behavior_checks}
+    wrong = {
+        check_id: {"expected": expected[check_id], "actual": actual_answers[check_id]}
+        for check_id in sorted(expected.keys() & actual_answers.keys())
+        if expected[check_id] != actual_answers[check_id]
+    }
+    missing = sorted(expected.keys() - actual_answers.keys())
+    unexpected = sorted(actual_answers.keys() - expected.keys())
+    passed = not wrong and not missing and not unexpected and not duplicate_ids
+    return {
+        "passed": passed,
+        "wrong_answers": wrong,
+        "missing_decisions": missing,
+        "unexpected_decisions": unexpected,
+        "duplicate_decisions": sorted(set(duplicate_ids)),
+        "evidence": evidence,
+    }
+
+
+def _artifact_base(source_root: Path, value: Path | None) -> Path:
+    ignore_path = source_root / ".gitignore"
+    ignore_lines = {
+        line.strip()
+        for line in _read_utf8(ignore_path).splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    if "tmp/" not in ignore_lines:
+        raise EvalInputError(f"{ignore_path} must ignore tmp/ before eval artifacts are written")
+    unresolved_permitted = source_root / "tmp" / "agent"
+    for candidate in (source_root / "tmp", unresolved_permitted):
+        if os.path.lexists(candidate) and candidate.is_symlink():
+            raise EvalInputError(f"artifacts path must not contain symlinks: {candidate}")
+    permitted = unresolved_permitted.resolve()
+    if value is None:
+        selected = (permitted / "evals").resolve()
+    else:
+        requested = value.expanduser()
+        selected = (
+            requested if requested.is_absolute() else source_root / requested
+        ).resolve()
+    if not _is_relative_to(selected, permitted):
+        raise EvalInputError(f"artifacts directory must stay under {permitted}")
+    current = permitted
+    for part in selected.relative_to(permitted).parts:
+        current = current / part
+        if current.exists() and current.is_symlink():
+            raise EvalInputError(f"artifacts path must not contain symlinks: {current}")
+    selected.mkdir(parents=True, exist_ok=True)
+    return selected
+
+
+def _perform_preflight(
+    *,
+    source_root: Path,
+    codex_bin: Path,
+    model: str,
+    reasoning_effort: str,
+    policy: Policy,
+    timeout: int,
+    cases: Sequence[EvalCase],
+) -> dict[str, Any]:
+    codex_version = _codex_version(codex_bin, timeout)
+    # Fail on unsupported versions before constructing any runtime with credentials.
+    _load_runtime_contract(source_root, codex_version)
+    runtime = _prepare_runtime(
+        source_root=source_root,
+        codex_bin=codex_bin,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        policy=policy,
+        timeout=min(timeout, 30),
+    )
+    try:
+        prompt_sources = _verify_prompt_sources(
+            codex_bin, runtime, source_root, min(timeout, 30)
+        )
+    finally:
+        runtime.cleanup()
+    behavior_runtime = _prepare_runtime(
+        source_root=source_root,
+        codex_bin=codex_bin,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        policy=policy,
+        timeout=min(timeout, 30),
+        include_skill_instructions=False,
+    )
+    try:
+        behavior_prompt_sources = _verify_behavior_prompt_sources(
+            codex_bin, behavior_runtime, source_root, min(timeout, 30)
+        )
+    finally:
+        behavior_runtime.cleanup()
+    prompt_contract = _preflight_prompts(source_root, cases)
+    tool_surface = _probe_tool_surface(
+        source_root=source_root,
+        codex_bin=codex_bin,
+        codex_version=codex_version,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        policy=policy,
+        timeout=timeout,
+    )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": "passed",
+        "codex_version": codex_version,
+        "model": model,
+        "reasoning_effort": reasoning_effort,
+        "policy": policy.public(),
+        "checks": {
+            "prompt_sources": prompt_sources,
+            "behavior_prompt_sources": behavior_prompt_sources,
+            "prompt_expectations": prompt_contract,
+            "tool_surface": tool_surface,
+        },
+    }
+
+
+def _run_suite(
+    *,
+    source_root: Path,
+    codex_bin: Path,
+    model: str,
+    reasoning_effort: str,
+    policy: Policy,
+    timeout: int,
+    state_dir: Path,
+    artifacts_dir: Path | None,
+    cases: Sequence[EvalCase],
+    repeat: int,
+) -> tuple[dict[str, Any], int]:
+    preflight = _perform_preflight(
+        source_root=source_root,
+        codex_bin=codex_bin,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        policy=policy,
+        timeout=timeout,
+        cases=cases,
+    )
+    state_dir = state_dir.expanduser()
+    _ensure_private_dir(state_dir)
+    vault = state_dir / "auth.json"
+    if not vault.exists():
+        raise EvalInputError(
+            f"credential vault is missing at {vault}; run the auth-init subcommand first"
+        )
+    _validate_chatgpt_auth_file(vault, "credential vault")
+
+    artifact_root = _artifact_base(source_root, artifacts_dir)
+    run_id = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + secrets.token_hex(4)
+    run_dir = artifact_root / run_id
+    run_dir.mkdir(mode=0o755)
+    results: list[dict[str, Any]] = []
+    summary: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "run_id": run_id,
+        "status": "running",
+        "codex_version": preflight["codex_version"],
+        "model": model,
+        "reasoning_effort": reasoning_effort,
+        "policy": policy.public(),
+        "repeat": repeat,
+        "preflight": preflight["checks"],
+        "totals": {"attempts": len(cases) * repeat, "passed": 0, "failed": 0},
+        "results": results,
+        "artifacts_dir": str(run_dir),
+    }
+    _atomic_write_json(run_dir / "summary.json", summary)
+
+    with _credential_lock(state_dir):
+        secret_values: set[str] = set()
+        for attempt in range(1, repeat + 1):
+            for case in cases:
+                _diagnostic(f"eval {case.id} attempt {attempt}/{repeat}")
+                case_dir = run_dir / f"{case.id}--{attempt}"
+                case_dir.mkdir(mode=0o755)
+                result_record: dict[str, Any] = {
+                    "id": case.id,
+                    "corpus": case.corpus,
+                    "attempt": attempt,
+                    "status": "failed",
+                    "route": None,
+                    "behavior": {"status": "skipped"},
+                }
+                try:
+                    route, _events, route_process = _run_fresh_codex_stage(
+                        source_root=source_root,
+                        codex_bin=codex_bin,
+                        model=model,
+                        reasoning_effort=reasoning_effort,
+                        policy=policy,
+                        vault=vault,
+                        prompt_builder=lambda runtime, current=case: _routing_prompt(
+                            current,
+                            _read_utf8(
+                                runtime.fixture / ".agents" / "rules" / "index.md"
+                            ),
+                        ),
+                        schema_filename="route-result.schema.json",
+                        output_path=case_dir / "route.final.json",
+                        events_path=case_dir / "route.events.jsonl",
+                        stderr_path=case_dir / "route.stderr.txt",
+                        timeout=timeout,
+                        secrets_to_redact=secret_values,
+                        include_skill_instructions=True,
+                    )
+                    route_score = _score_route(case, route)
+                    _atomic_write_json(case_dir / "route.score.json", route_score)
+                    result_record["route"] = {
+                        "status": "passed" if route_score["passed"] else "failed",
+                        "duration_seconds": round(route_process.duration_seconds, 3),
+                        "score": route_score,
+                    }
+                    if route_score["passed"]:
+                        behavior, _events, behavior_process = _run_fresh_codex_stage(
+                            source_root=source_root,
+                            codex_bin=codex_bin,
+                            model=model,
+                            reasoning_effort=reasoning_effort,
+                            policy=policy,
+                            vault=vault,
+                            prompt_builder=lambda runtime, current=case, selected=route: _behavior_prompt(
+                                current, runtime.fixture, selected
+                            ),
+                            schema_filename="behavior-result.schema.json",
+                            output_path=case_dir / "behavior.final.json",
+                            events_path=case_dir / "behavior.events.jsonl",
+                            stderr_path=case_dir / "behavior.stderr.txt",
+                            timeout=timeout,
+                            secrets_to_redact=secret_values,
+                            include_skill_instructions=False,
+                        )
+                        behavior_score = _score_behavior(case, behavior)
+                        _atomic_write_json(
+                            case_dir / "behavior.score.json", behavior_score
+                        )
+                        result_record["behavior"] = {
+                            "status": (
+                                "passed" if behavior_score["passed"] else "failed"
+                            ),
+                            "duration_seconds": round(
+                                behavior_process.duration_seconds, 3
+                            ),
+                            "score": behavior_score,
+                        }
+                        if behavior_score["passed"]:
+                            result_record["status"] = "passed"
+                except (EvalInputError, EvalRuntimeError) as exc:
+                    result_record["error"] = str(exc)
+                results.append(result_record)
+                summary["totals"][
+                    "passed" if result_record["status"] == "passed" else "failed"
+                ] += 1
+                _atomic_write_json(case_dir / "result.json", result_record)
+                _atomic_write_json(run_dir / "summary.json", summary)
+
+    summary["status"] = "passed" if summary["totals"]["failed"] == 0 else "failed"
+    _atomic_write_json(run_dir / "summary.json", summary)
+    return summary, 0 if summary["status"] == "passed" else 1
+
+
+def _default_state_dir() -> Path:
+    value = os.environ.get("XDG_STATE_HOME")
+    if value:
+        return Path(value) / "agents-misc" / "agent-evals"
+    return Path.home() / ".local" / "state" / "agents-misc" / "agent-evals"
+
+
+def _add_runtime_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--root", type=Path, default=Path.cwd(), help="repository root")
+    parser.add_argument("--codex-bin", default="codex", help="Codex executable")
+    parser.add_argument("--model", required=True, help="model passed to codex exec")
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=REASONING_EFFORTS,
+        default="high",
+        help="model reasoning effort (default: high)",
+    )
+    parser.add_argument(
+        "--approval-policy",
+        choices=APPROVAL_POLICIES,
+        default="inherit",
+        help="approval policy; inherit reads only this field from --policy-config",
+    )
+    parser.add_argument(
+        "--sandbox-mode",
+        choices=SANDBOX_MODES,
+        default="inherit",
+        help="sandbox policy; inherit reads only sandbox fields from --policy-config",
+    )
+    parser.add_argument(
+        "--policy-config",
+        type=Path,
+        default=Path.home() / ".codex" / "config.toml",
+        help="source for selectively inherited approval/sandbox policy",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=_positive_int,
+        default=300,
+        help="per-stage timeout in seconds (default: 300)",
+    )
+    parser.add_argument(
+        "--corpus",
+        action="append",
+        choices=tuple(Path(name).stem for name in EVAL_FILES),
+        help="limit to a corpus; repeat to select multiple",
+    )
+    parser.add_argument("--id", action="append", help="limit to an eval id; repeatable")
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    auth = subparsers.add_parser("auth-init", help="seed the independent ChatGPT auth vault")
+    auth.add_argument(
+        "--source",
+        type=Path,
+        default=Path.home() / ".codex" / "auth.json",
+        help="private ChatGPT auth.json source",
+    )
+    auth.add_argument("--state-dir", type=Path, default=_default_state_dir())
+    auth.add_argument(
+        "--replace", action="store_true", help="replace an existing independent vault"
+    )
+
+    preflight = subparsers.add_parser(
+        "preflight", help="verify prompt sources and the no-execution-tool surface"
+    )
+    _add_runtime_arguments(preflight)
+
+    run = subparsers.add_parser("run", help="run the isolated two-stage eval suite")
+    _add_runtime_arguments(run)
+    run.add_argument("--state-dir", type=Path, default=_default_state_dir())
+    run.add_argument(
+        "--artifacts-dir",
+        type=Path,
+        help="ignored output directory under <root>/tmp/agent (default: tmp/agent/evals)",
+    )
+    run.add_argument("--repeat", type=_positive_int, default=1)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "auth-init":
+            result = _auth_init(args.source, args.state_dir, args.replace)
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+            return 0
+
+        source_root = args.root.resolve()
+        codex_bin = _resolve_codex_binary(args.codex_bin)
+        policy = _load_policy(
+            args.policy_config, args.approval_policy, args.sandbox_mode
+        )
+        cases = _load_eval_cases(source_root, args.corpus, args.id)
+        if args.command == "preflight":
+            result = _perform_preflight(
+                source_root=source_root,
+                codex_bin=codex_bin,
+                model=args.model,
+                reasoning_effort=args.reasoning_effort,
+                policy=policy,
+                timeout=args.timeout,
+                cases=cases,
+            )
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+            return 0
+        summary, status = _run_suite(
+            source_root=source_root,
+            codex_bin=codex_bin,
+            model=args.model,
+            reasoning_effort=args.reasoning_effort,
+            policy=policy,
+            timeout=args.timeout,
+            state_dir=args.state_dir,
+            artifacts_dir=args.artifacts_dir,
+            cases=cases,
+            repeat=args.repeat,
+        )
+        print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+        return status
+    except EvalInputError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except EvalRuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"error: runtime I/O failure: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

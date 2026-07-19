@@ -24,6 +24,18 @@ check-agent-rules:
   nix develop .#dev --command python3 scripts/check-agent-rules.py --root .
   nix develop .#dev --command python3 -m unittest discover -s tests -p 'test_*.py'
 
+# Seed the independent Agent eval ChatGPT credential vault.
+agent-evals-auth-init *args:
+  nix develop .#dev --command python3 scripts/run-agent-evals.py auth-init "$@"
+
+# Verify Agent eval prompt sources and the versioned no-execution-tool surface.
+agent-evals-preflight *args:
+  nix develop .#dev --command python3 scripts/run-agent-evals.py preflight "$@"
+
+# Run isolated two-stage Agent route and behavior evals.
+agent-evals *args:
+  nix develop .#dev --command python3 scripts/run-agent-evals.py run "$@"
+
 # Build the default patched Codex package.
 build:
   nix build .#default

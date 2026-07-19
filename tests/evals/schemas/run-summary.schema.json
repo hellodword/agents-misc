@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agents-misc.invalid/evals/run-summary.schema.json",
+  "title": "Agent eval run summary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "status",
+    "codex_version",
+    "model",
+    "reasoning_effort",
+    "policy",
+    "repeat",
+    "preflight",
+    "totals",
+    "results",
+    "artifacts_dir"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "run_id": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["running", "passed", "failed"] },
+    "codex_version": { "type": "string", "minLength": 1 },
+    "model": { "type": "string", "minLength": 1 },
+    "reasoning_effort": { "type": "string", "minLength": 1 },
+    "policy": { "$ref": "#/$defs/policy" },
+    "repeat": { "type": "integer", "minimum": 1 },
+    "preflight": { "type": "object" },
+    "totals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attempts", "passed", "failed"],
+      "properties": {
+        "attempts": { "type": "integer", "minimum": 1 },
+        "passed": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "results": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/result" }
+    },
+    "artifacts_dir": { "type": "string", "minLength": 1 }
+  },
+  "$defs": {
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "approval_policy",
+        "sandbox_mode",
+        "approval_source",
+        "sandbox_source"
+      ],
+      "properties": {
+        "approval_policy": { "enum": ["untrusted", "on-request", "never"] },
+        "sandbox_mode": {
+          "enum": ["read-only", "workspace-write", "danger-full-access"]
+        },
+        "approval_source": { "type": "string", "minLength": 1 },
+        "sandbox_source": { "type": "string", "minLength": 1 }
+      }
+    },
+    "result": {
+      "type": "object",
+      "required": ["id", "corpus", "attempt", "status", "route", "behavior"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "corpus": { "enum": ["routing", "skills", "safety"] },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "status": { "enum": ["passed", "failed"] },
+        "route": { "type": ["object", "null"] },
+        "behavior": { "type": "object" },
+        "error": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    }
+  }
+}

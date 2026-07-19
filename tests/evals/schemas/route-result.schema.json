@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agents-misc.invalid/evals/route-result.schema.json",
+  "title": "Agent eval routing result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["selected_rules", "selected_skills", "rationale"],
+  "properties": {
+    "selected_rules": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "selected_skills": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "rationale": {
+      "type": "string"
+    }
+  }
+}

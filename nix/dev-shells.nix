@@ -2,6 +2,7 @@
   lib,
   nixpkgs,
   supportedSystems,
+  codexFor,
 }:
 
 lib.genAttrs supportedSystems (
@@ -13,19 +14,21 @@ lib.genAttrs supportedSystems (
       pythonPackages.pyyaml
     ]);
     devShell = pkgs.mkShell {
-      packages = with pkgs; [
-        cargo
-        coreutils
-        diffutils
-        git
-        gnupatch
-        jq
-        just
-        nixfmt
-        pkg-config
-        agentRulesPython
-        rustc
-      ];
+      packages =
+        (with pkgs; [
+          cargo
+          coreutils
+          diffutils
+          git
+          gnupatch
+          jq
+          just
+          nixfmt
+          pkg-config
+          agentRulesPython
+          rustc
+        ])
+        ++ [ (codexFor system) ];
 
       OPENSSL_INCLUDE_DIR = "${lib.getDev pkgs.openssl}/include";
       OPENSSL_LIB_DIR = "${lib.getLib pkgs.openssl}/lib";

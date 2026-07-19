@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agents-misc.invalid/evals/runtime-contract.schema.json",
+  "title": "Codex eval runtime contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "codex_versions"],
+  "properties": {
+    "$schema": {
+      "const": "./schemas/runtime-contract.schema.json"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "codex_versions": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["allowed_tools"],
+        "properties": {
+          "allowed_tools": {
+            "type": "array",
+            "description": "Maximum reviewed tool set; a request may expose any subset, including none.",
+            "uniqueItems": true,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["type", "name"],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

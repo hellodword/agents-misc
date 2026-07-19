@@ -1,0 +1,13 @@
+{
+  "$schema": "./schemas/runtime-contract.schema.json",
+  "schema_version": 1,
+  "codex_versions": {
+    "codex-cli 0.144.1": {
+      "allowed_tools": [
+        { "type": "function", "name": "request_user_input" },
+        { "type": "function", "name": "update_plan" },
+        { "type": "function", "name": "view_image" }
+      ]
+    }
+  }
+}

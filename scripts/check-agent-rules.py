@@ -72,6 +72,14 @@ PAYLOAD_MARKERS = (
     "tests/evals/",
 )
 EVAL_FILES = ("routing.jsonl", "skills.jsonl", "safety.jsonl")
+EVAL_SCHEMA_NAMES = {
+    "behavior-result.schema.json",
+    "eval-record.schema.json",
+    "route-result.schema.json",
+    "run-summary.schema.json",
+    "runtime-contract.schema.json",
+}
+EVAL_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
 def _read_text(path: Path, errors: list[str]) -> str | None:
@@ -327,7 +335,14 @@ def _validate_forbidden_paths(root: Path, errors: list[str]) -> None:
 
 
 def _validate_schemas(root: Path, errors: list[str]) -> None:
-    for path in sorted((root / ".agents").rglob("*.schema.json")):
+    schema_paths = list((root / ".agents").rglob("*.schema.json"))
+    eval_schema_dir = root / "tests" / "evals" / "schemas"
+    schema_paths.extend(eval_schema_dir.glob("*.schema.json"))
+    present_eval_schemas = {path.name for path in schema_paths if path.parent == eval_schema_dir}
+    missing_eval_schemas = EVAL_SCHEMA_NAMES - present_eval_schemas
+    if missing_eval_schemas:
+        errors.append(f"{eval_schema_dir}: missing eval schemas: {sorted(missing_eval_schemas)}")
+    for path in sorted(schema_paths):
         value = _read_json(path, errors)
         if not isinstance(value, dict):
             if value is not None:
@@ -339,6 +354,22 @@ def _validate_schemas(root: Path, errors: list[str]) -> None:
             Draft202012Validator.check_schema(value)
         except SchemaError as exc:
             errors.append(f"{path}: invalid Draft 2020-12 schema: {exc.message}")
+
+    runtime_schema_path = eval_schema_dir / "runtime-contract.schema.json"
+    runtime_contract_path = root / "tests" / "evals" / "codex-runtime-contract.json"
+    schema = _read_json(runtime_schema_path, errors)
+    contract = _read_json(runtime_contract_path, errors)
+    if isinstance(schema, dict) and isinstance(contract, dict):
+        try:
+            Draft202012Validator.check_schema(schema)
+        except SchemaError:
+            return
+        for failure in Draft202012Validator(schema).iter_errors(contract):
+            location = "/".join(str(part) for part in failure.absolute_path) or "<root>"
+            errors.append(
+                f"{runtime_contract_path}: runtime contract schema failure at "
+                f"{location}: {failure.message}"
+            )
 
 
 def _validate_payload_boundary(root: Path, errors: list[str]) -> None:
@@ -407,14 +438,15 @@ def _validate_evals(root: Path, errors: list[str]) -> None:
                 "expected_skills",
                 "forbidden_skills",
                 "expected_behavior",
+                "behavior_checks",
             }
             if set(record) != required:
                 errors.append(
                     f"{path}:{line_number}: eval fields must be exactly {sorted(required)}"
                 )
             record_id = record.get("id")
-            if not isinstance(record_id, str) or not record_id.strip():
-                errors.append(f"{path}:{line_number}: id must be a non-empty string")
+            if not isinstance(record_id, str) or not EVAL_ID_PATTERN.fullmatch(record_id):
+                errors.append(f"{path}:{line_number}: id must use lowercase kebab-case")
             else:
                 all_ids.append(record_id)
             for field in ("task", "expected_behavior"):
@@ -457,6 +489,50 @@ def _validate_evals(root: Path, errors: list[str]) -> None:
                     f"{path}:{line_number}: skills cannot be expected and forbidden: "
                     f"{sorted(skill_overlap)}"
                 )
+            behavior_checks = record.get("behavior_checks")
+            if not isinstance(behavior_checks, list) or not behavior_checks:
+                errors.append(
+                    f"{path}:{line_number}: behavior_checks must be a non-empty array"
+                )
+            else:
+                behavior_ids: list[str] = []
+                expected_values: set[bool] = set()
+                for check_index, check in enumerate(behavior_checks):
+                    location = f"{path}:{line_number}:behavior_checks[{check_index}]"
+                    if not isinstance(check, dict) or set(check) != {
+                        "id",
+                        "question",
+                        "expected",
+                    }:
+                        errors.append(
+                            f"{location}: fields must be exactly id, question, expected"
+                        )
+                        continue
+                    behavior_id = check["id"]
+                    question = check["question"]
+                    expected = check["expected"]
+                    if not isinstance(behavior_id, str) or not EVAL_ID_PATTERN.fullmatch(
+                        behavior_id
+                    ):
+                        errors.append(f"{location}: id must use lowercase kebab-case")
+                    else:
+                        behavior_ids.append(behavior_id)
+                    if not isinstance(question, str) or not question.strip():
+                        errors.append(f"{location}: question must be a non-empty string")
+                    if not isinstance(expected, bool):
+                        errors.append(f"{location}: expected must be a boolean")
+                    else:
+                        expected_values.add(expected)
+                duplicates = _duplicates(behavior_ids)
+                if duplicates:
+                    errors.append(
+                        f"{path}:{line_number}: duplicate behavior check ids: {duplicates}"
+                    )
+                if expected_values != {False, True}:
+                    errors.append(
+                        f"{path}:{line_number}: behavior_checks must contain both true "
+                        "and false expectations"
+                    )
             if filename == "skills.jsonl":
                 skill_file_positive.update(expected_skills)
                 skill_file_negative.update(forbidden_skills)
