@@ -8,23 +8,51 @@
     "schema_version",
     "run_id",
     "status",
-    "codex_version",
-    "model",
-    "reasoning_effort",
+    "agent",
+    "subject",
+    "payload_sha256",
     "policy",
     "repeat",
     "preflight",
     "totals",
+    "case_results",
     "results",
+    "certification",
     "artifacts_dir"
   ],
   "properties": {
     "schema_version": { "const": 1 },
     "run_id": { "type": "string", "minLength": 1 },
     "status": { "enum": ["running", "passed", "failed"] },
-    "codex_version": { "type": "string", "minLength": 1 },
-    "model": { "type": "string", "minLength": 1 },
-    "reasoning_effort": { "type": "string", "minLength": 1 },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "codex" },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "reasoning_effort",
+        "judge_model",
+        "judge_reasoning_effort"
+      ],
+      "properties": {
+        "model": { "type": "string", "minLength": 1 },
+        "reasoning_effort": { "type": "string", "minLength": 1 },
+        "judge_model": { "type": "string", "minLength": 1 },
+        "judge_reasoning_effort": { "type": "string", "minLength": 1 }
+      }
+    },
+    "payload_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "policy": { "$ref": "#/$defs/policy" },
     "repeat": { "type": "integer", "minimum": 1 },
     "preflight": { "type": "object" },
@@ -38,9 +66,27 @@
         "failed": { "type": "integer", "minimum": 0 }
       }
     },
+    "case_results": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/case_result" }
+    },
     "results": {
       "type": "array",
       "items": { "$ref": "#/$defs/result" }
+    },
+    "certification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requested", "status", "dimensions", "warnings"],
+      "properties": {
+        "requested": { "type": "boolean" },
+        "status": { "enum": ["not-requested", "passed", "failed"] },
+        "dimensions": { "type": "object" },
+        "warnings": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
     },
     "artifacts_dir": { "type": "string", "minLength": 1 }
   },
@@ -63,9 +109,43 @@
         "sandbox_source": { "type": "string", "minLength": 1 }
       }
     },
+    "case_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "corpus",
+        "passed",
+        "route",
+        "behavior",
+        "baseline",
+        "failures"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "corpus": { "enum": ["routing", "skills", "safety"] },
+        "passed": { "type": "boolean" },
+        "route": { "type": "object" },
+        "behavior": { "type": "object" },
+        "baseline": { "type": "object" },
+        "failures": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
     "result": {
       "type": "object",
-      "required": ["id", "corpus", "attempt", "status", "route", "behavior"],
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "corpus",
+        "attempt",
+        "status",
+        "route",
+        "behavior",
+        "baseline"
+      ],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "corpus": { "enum": ["routing", "skills", "safety"] },
@@ -73,9 +153,9 @@
         "status": { "enum": ["passed", "failed"] },
         "route": { "type": ["object", "null"] },
         "behavior": { "type": "object" },
+        "baseline": { "type": "object" },
         "error": { "type": "string", "minLength": 1 }
-      },
-      "additionalProperties": false
+      }
     }
   }
 }

@@ -1,32 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agents-misc.invalid/evals/behavior-result.schema.json",
-  "title": "Agent eval behavior result",
+  "title": "Agent eval subject behavior response",
   "type": "object",
   "additionalProperties": false,
-  "required": ["decisions", "summary"],
+  "required": ["response"],
   "properties": {
-    "decisions": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["id", "answer", "evidence"],
-        "properties": {
-          "id": {
-            "type": "string"
-          },
-          "answer": {
-            "type": "boolean"
-          },
-          "evidence": {
-            "type": "string"
-          }
-        }
-      }
-    },
-    "summary": {
-      "type": "string"
-    }
+    "response": { "type": "string", "minLength": 1 }
   }
 }

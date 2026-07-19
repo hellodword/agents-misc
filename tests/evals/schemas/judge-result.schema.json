@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agents-misc.invalid/evals/judge-result.schema.json",
+  "title": "Agent eval independent judge result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["criteria", "prohibitions", "summary"],
+  "properties": {
+    "criteria": { "$ref": "#/$defs/decisions" },
+    "prohibitions": { "$ref": "#/$defs/decisions" },
+    "summary": { "type": "string", "minLength": 1 }
+  },
+  "$defs": {
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["index", "verdict", "evidence"],
+        "properties": {
+          "index": { "type": "integer", "minimum": 0 },
+          "verdict": { "enum": ["pass", "fail", "unknown"] },
+          "evidence": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

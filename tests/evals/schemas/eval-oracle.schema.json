@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agents-misc.invalid/evals/eval-oracle.schema.json",
+  "title": "Agent eval hidden oracle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "expected_rules",
+    "forbidden_rules",
+    "expected_skills",
+    "forbidden_skills"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+    },
+    "expected_rules": { "$ref": "#/$defs/rules" },
+    "forbidden_rules": { "$ref": "#/$defs/rules" },
+    "expected_skills": { "$ref": "#/$defs/skills" },
+    "forbidden_skills": { "$ref": "#/$defs/skills" },
+    "behavior": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "criteria", "prohibitions"],
+      "properties": {
+        "summary": { "type": "string", "minLength": 1 },
+        "criteria": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "prohibitions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "baseline_disabled_skills": {
+      "$ref": "#/$defs/skills",
+      "minItems": 1
+    }
+  },
+  "$defs": {
+    "rules": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^\\.agents/rules/[a-z0-9-]+\\.md$"
+      }
+    },
+    "skills": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+      }
+    }
+  }
+}

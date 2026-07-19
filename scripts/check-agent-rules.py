@@ -74,7 +74,9 @@ PAYLOAD_MARKERS = (
 EVAL_FILES = ("routing.jsonl", "skills.jsonl", "safety.jsonl")
 EVAL_SCHEMA_NAMES = {
     "behavior-result.schema.json",
+    "eval-oracle.schema.json",
     "eval-record.schema.json",
+    "judge-result.schema.json",
     "route-result.schema.json",
     "run-summary.schema.json",
     "runtime-contract.schema.json",
@@ -403,142 +405,249 @@ def _string_list(
 
 def _validate_evals(root: Path, errors: list[str]) -> None:
     eval_dir = root / "tests" / "evals"
+    oracle_dir = eval_dir / "oracles"
+    case_schema = _read_json(eval_dir / "schemas" / "eval-record.schema.json", errors)
+    oracle_schema = _read_json(eval_dir / "schemas" / "eval-oracle.schema.json", errors)
+    case_validator = (
+        Draft202012Validator(case_schema) if isinstance(case_schema, dict) else None
+    )
+    oracle_validator = (
+        Draft202012Validator(oracle_schema)
+        if isinstance(oracle_schema, dict)
+        else None
+    )
     all_ids: list[str] = []
+    all_oracle_ids: list[str] = []
     covered_rules: set[str] = set()
     skill_file_positive: set[str] = set()
     skill_file_negative: set[str] = set()
 
     valid_rule_paths = {f".agents/rules/{name}" for name in RULE_NAMES}
     for filename in EVAL_FILES:
-        path = eval_dir / filename
-        text = _read_text(path, errors)
-        if text is None:
+        case_path = eval_dir / filename
+        oracle_path = oracle_dir / filename
+        case_text = _read_text(case_path, errors)
+        oracle_text = _read_text(oracle_path, errors)
+        if case_text is None or oracle_text is None:
             continue
-        if not text.strip():
-            errors.append(f"{path}: eval file must not be empty")
+        if not case_text.strip():
+            errors.append(f"{case_path}: eval file must not be empty")
             continue
-        for line_number, line in enumerate(text.splitlines(), start=1):
+        if not oracle_text.strip():
+            errors.append(f"{oracle_path}: oracle file must not be empty")
+            continue
+
+        case_ids: list[str] = []
+        for line_number, line in enumerate(case_text.splitlines(), start=1):
             if not line.strip():
-                errors.append(f"{path}:{line_number}: blank JSONL lines are not allowed")
+                errors.append(
+                    f"{case_path}:{line_number}: blank JSONL lines are not allowed"
+                )
                 continue
             try:
                 record = json.loads(line)
             except json.JSONDecodeError as exc:
-                errors.append(f"{path}:{line_number}: invalid JSON: {exc}")
+                errors.append(f"{case_path}:{line_number}: invalid JSON: {exc}")
                 continue
             if not isinstance(record, dict):
-                errors.append(f"{path}:{line_number}: eval record must be an object")
+                errors.append(f"{case_path}:{line_number}: eval case must be an object")
                 continue
+            if case_validator is not None:
+                for failure in case_validator.iter_errors(record):
+                    location = "/".join(
+                        str(part) for part in failure.absolute_path
+                    ) or "<root>"
+                    errors.append(
+                        f"{case_path}:{line_number}: case schema failure at "
+                        f"{location}: {failure.message}"
+                    )
+            if set(record) != {"id", "task"}:
+                errors.append(
+                    f"{case_path}:{line_number}: eval case fields must be exactly "
+                    "['id', 'task']"
+                )
+            record_id = record.get("id")
+            if not isinstance(record_id, str) or not EVAL_ID_PATTERN.fullmatch(record_id):
+                errors.append(f"{case_path}:{line_number}: id must use lowercase kebab-case")
+            else:
+                case_ids.append(record_id)
+                all_ids.append(record_id)
+            task = record.get("task")
+            if not isinstance(task, str) or not task.strip():
+                errors.append(
+                    f"{case_path}:{line_number}: task must be a non-empty string"
+                )
 
+        oracle_ids: list[str] = []
+        for line_number, line in enumerate(oracle_text.splitlines(), start=1):
+            if not line.strip():
+                errors.append(
+                    f"{oracle_path}:{line_number}: blank JSONL lines are not allowed"
+                )
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                errors.append(f"{oracle_path}:{line_number}: invalid JSON: {exc}")
+                continue
+            if not isinstance(record, dict):
+                errors.append(f"{oracle_path}:{line_number}: eval oracle must be an object")
+                continue
+            if oracle_validator is not None:
+                for failure in oracle_validator.iter_errors(record):
+                    location = "/".join(
+                        str(part) for part in failure.absolute_path
+                    ) or "<root>"
+                    errors.append(
+                        f"{oracle_path}:{line_number}: oracle schema failure at "
+                        f"{location}: {failure.message}"
+                    )
             required = {
                 "id",
-                "task",
                 "expected_rules",
                 "forbidden_rules",
                 "expected_skills",
                 "forbidden_skills",
-                "expected_behavior",
-                "behavior_checks",
             }
-            if set(record) != required:
+            optional = {"behavior", "baseline_disabled_skills"}
+            if not required <= set(record) or set(record) - required - optional:
                 errors.append(
-                    f"{path}:{line_number}: eval fields must be exactly {sorted(required)}"
+                    f"{oracle_path}:{line_number}: eval oracle fields must contain "
+                    f"{sorted(required)} and only optional {sorted(optional)}"
                 )
             record_id = record.get("id")
             if not isinstance(record_id, str) or not EVAL_ID_PATTERN.fullmatch(record_id):
-                errors.append(f"{path}:{line_number}: id must use lowercase kebab-case")
+                errors.append(f"{oracle_path}:{line_number}: id must use lowercase kebab-case")
             else:
-                all_ids.append(record_id)
-            for field in ("task", "expected_behavior"):
-                value = record.get(field)
-                if not isinstance(value, str) or not value.strip():
-                    errors.append(f"{path}:{line_number}: {field} must be a non-empty string")
+                oracle_ids.append(record_id)
+                all_oracle_ids.append(record_id)
 
             expected_rules = _string_list(
-                record, "expected_rules", path, line_number, errors
+                record, "expected_rules", oracle_path, line_number, errors
             )
             forbidden_rules = _string_list(
-                record, "forbidden_rules", path, line_number, errors
+                record, "forbidden_rules", oracle_path, line_number, errors
             )
             expected_skills = _string_list(
-                record, "expected_skills", path, line_number, errors
+                record, "expected_skills", oracle_path, line_number, errors
             )
             forbidden_skills = _string_list(
-                record, "forbidden_skills", path, line_number, errors
+                record, "forbidden_skills", oracle_path, line_number, errors
             )
             for rule in expected_rules:
                 if rule not in valid_rule_paths:
-                    errors.append(f"{path}:{line_number}: unknown rule path: {rule}")
+                    errors.append(f"{oracle_path}:{line_number}: unknown rule path: {rule}")
                 else:
                     covered_rules.add(rule)
             for rule in forbidden_rules:
                 if rule not in valid_rule_paths:
-                    errors.append(f"{path}:{line_number}: unknown rule path: {rule}")
+                    errors.append(f"{oracle_path}:{line_number}: unknown rule path: {rule}")
             rule_overlap = set(expected_rules) & set(forbidden_rules)
             if rule_overlap:
                 errors.append(
-                    f"{path}:{line_number}: rules cannot be expected and forbidden: "
+                    f"{oracle_path}:{line_number}: rules cannot be expected and forbidden: "
                     f"{sorted(rule_overlap)}"
                 )
             for name in expected_skills + forbidden_skills:
                 if name not in SKILL_NAMES:
-                    errors.append(f"{path}:{line_number}: unknown skill name: {name}")
+                    errors.append(
+                        f"{oracle_path}:{line_number}: unknown skill name: {name}"
+                    )
             skill_overlap = set(expected_skills) & set(forbidden_skills)
             if skill_overlap:
                 errors.append(
-                    f"{path}:{line_number}: skills cannot be expected and forbidden: "
+                    f"{oracle_path}:{line_number}: skills cannot be expected and forbidden: "
                     f"{sorted(skill_overlap)}"
                 )
-            behavior_checks = record.get("behavior_checks")
-            if not isinstance(behavior_checks, list) or not behavior_checks:
-                errors.append(
-                    f"{path}:{line_number}: behavior_checks must be a non-empty array"
-                )
-            else:
-                behavior_ids: list[str] = []
-                expected_values: set[bool] = set()
-                for check_index, check in enumerate(behavior_checks):
-                    location = f"{path}:{line_number}:behavior_checks[{check_index}]"
-                    if not isinstance(check, dict) or set(check) != {
-                        "id",
-                        "question",
-                        "expected",
-                    }:
+
+            behavior = record.get("behavior")
+            if behavior is not None:
+                location = f"{oracle_path}:{line_number}:behavior"
+                if not isinstance(behavior, dict) or set(behavior) != {
+                    "summary",
+                    "criteria",
+                    "prohibitions",
+                }:
+                    errors.append(
+                        f"{location}: fields must be exactly criteria, prohibitions, summary"
+                    )
+                else:
+                    summary = behavior["summary"]
+                    if not isinstance(summary, str) or not summary.strip():
+                        errors.append(f"{location}: summary must be a non-empty string")
+                    criteria = _string_list(
+                        behavior, "criteria", oracle_path, line_number, errors
+                    )
+                    prohibitions = _string_list(
+                        behavior, "prohibitions", oracle_path, line_number, errors
+                    )
+                    if not criteria or any(not item.strip() for item in criteria):
                         errors.append(
-                            f"{location}: fields must be exactly id, question, expected"
+                            f"{location}: criteria must contain non-empty strings"
                         )
-                        continue
-                    behavior_id = check["id"]
-                    question = check["question"]
-                    expected = check["expected"]
-                    if not isinstance(behavior_id, str) or not EVAL_ID_PATTERN.fullmatch(
-                        behavior_id
-                    ):
-                        errors.append(f"{location}: id must use lowercase kebab-case")
-                    else:
-                        behavior_ids.append(behavior_id)
-                    if not isinstance(question, str) or not question.strip():
-                        errors.append(f"{location}: question must be a non-empty string")
-                    if not isinstance(expected, bool):
-                        errors.append(f"{location}: expected must be a boolean")
-                    else:
-                        expected_values.add(expected)
-                duplicates = _duplicates(behavior_ids)
-                if duplicates:
+                    if any(not item.strip() for item in prohibitions):
+                        errors.append(
+                            f"{location}: prohibitions must contain non-empty strings"
+                        )
+
+            baseline = record.get("baseline_disabled_skills")
+            baseline_skills: list[str] = []
+            if baseline is not None:
+                baseline_skills = _string_list(
+                    record,
+                    "baseline_disabled_skills",
+                    oracle_path,
+                    line_number,
+                    errors,
+                )
+                for name in baseline_skills:
+                    if name not in SKILL_NAMES:
+                        errors.append(
+                            f"{oracle_path}:{line_number}: unknown baseline skill: {name}"
+                        )
+                if not baseline_skills or not set(baseline_skills) <= set(expected_skills):
                     errors.append(
-                        f"{path}:{line_number}: duplicate behavior check ids: {duplicates}"
+                        f"{oracle_path}:{line_number}: baseline_disabled_skills must be "
+                        "a non-empty subset of expected_skills"
                     )
-                if expected_values != {False, True}:
-                    errors.append(
-                        f"{path}:{line_number}: behavior_checks must contain both true "
-                        "and false expectations"
-                    )
+
             if filename == "skills.jsonl":
                 skill_file_positive.update(expected_skills)
                 skill_file_negative.update(forbidden_skills)
+                if expected_skills and (behavior is None or not baseline_skills):
+                    errors.append(
+                        f"{oracle_path}:{line_number}: positive skill eval requires "
+                        "behavior and baseline_disabled_skills"
+                    )
+                if not expected_skills and (behavior is not None or baseline is not None):
+                    errors.append(
+                        f"{oracle_path}:{line_number}: negative skill eval must be "
+                        "route-only"
+                    )
+            elif filename == "safety.jsonl":
+                if behavior is None:
+                    errors.append(
+                        f"{oracle_path}:{line_number}: safety eval requires behavior"
+                    )
+                if baseline is not None:
+                    errors.append(
+                        f"{oracle_path}:{line_number}: safety eval must not define a baseline"
+                    )
+            elif behavior is not None or baseline is not None:
+                errors.append(
+                    f"{oracle_path}:{line_number}: routing eval must be route-only"
+                )
+
+        if case_ids != oracle_ids:
+            errors.append(
+                f"{case_path} and {oracle_path}: case/oracle IDs must match in order; "
+                f"cases={case_ids}, oracles={oracle_ids}"
+            )
 
     for duplicate in _duplicates(all_ids):
         errors.append(f"duplicate eval id: {duplicate}")
+    for duplicate in _duplicates(all_oracle_ids):
+        errors.append(f"duplicate eval oracle id: {duplicate}")
     missing_rules = sorted(valid_rule_paths - covered_rules)
     if missing_rules:
         errors.append(f"eval corpus missing rule coverage: {missing_rules}")

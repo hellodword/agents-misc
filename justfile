@@ -32,7 +32,7 @@ agent-evals-auth-init *args:
 agent-evals-preflight *args:
   nix develop .#dev --command python3 scripts/run-agent-evals.py preflight "$@"
 
-# Run isolated two-stage Agent route and behavior evals.
+# Run isolated Codex route, behavior, judge, and certification evals.
 agent-evals *args:
   nix develop .#dev --command python3 scripts/run-agent-evals.py run "$@"
 

@@ -55,33 +55,73 @@ class RunAgentEvalsTests(unittest.TestCase):
         path.chmod(0o600)
 
     def test_checked_in_eval_records_match_schema(self) -> None:
-        schema = json.loads(
+        case_schema = json.loads(
             (REPO_ROOT / "tests/evals/schemas/eval-record.schema.json").read_text(
                 encoding="utf-8"
             )
         )
-        validator = Draft202012Validator(schema)
-        count = 0
+        oracle_schema = json.loads(
+            (REPO_ROOT / "tests/evals/schemas/eval-oracle.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        case_validator = Draft202012Validator(case_schema)
+        oracle_validator = Draft202012Validator(oracle_schema)
+        case_count = 0
+        oracle_count = 0
         for path in sorted((REPO_ROOT / "tests/evals").glob("*.jsonl")):
             for line in path.read_text(encoding="utf-8").splitlines():
-                validator.validate(json.loads(line))
-                count += 1
-        self.assertEqual(59, count)
+                case_validator.validate(json.loads(line))
+                case_count += 1
+        for path in sorted((REPO_ROOT / "tests/evals/oracles").glob("*.jsonl")):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                oracle_validator.validate(json.loads(line))
+                oracle_count += 1
+        self.assertEqual(59, case_count)
+        self.assertEqual(59, oracle_count)
 
-    def test_all_cases_have_balanced_behavior_checks(self) -> None:
+    def test_route_model_schema_uses_canonical_payload_identifiers(self) -> None:
+        rules, skills = RUNNER._route_output_values(REPO_ROOT)
+        destination = self.root / "route-result.schema.json"
+        RUNNER._write_model_output_schema(
+            REPO_ROOT / "tests/evals/schemas/route-result.schema.json",
+            destination,
+            route_rules=rules,
+            route_skills=skills,
+        )
+        schema = json.loads(destination.read_text(encoding="utf-8"))
+        self.assertNotIn("$schema", schema)
+        self.assertNotIn("$id", schema)
+        rule_items = schema["properties"]["selected_rules"]["items"]
+        skill_items = schema["properties"]["selected_skills"]["items"]
+        self.assertEqual(rules, rule_items["enum"])
+        self.assertEqual(skills, skill_items["enum"])
+        self.assertTrue(
+            all(value.startswith(".agents/rules/") for value in rule_items["enum"])
+        )
+        self.assertTrue(all("/" not in value for value in skill_items["enum"]))
+        self.assertNotIn("uniqueItems", schema["properties"]["selected_rules"])
+        self.assertNotIn("uniqueItems", schema["properties"]["selected_skills"])
+
+    def test_behavior_and_baseline_scope_is_intentional(self) -> None:
         cases = RUNNER._load_eval_cases(REPO_ROOT, None, None)
         self.assertEqual(59, len(cases))
-        for case in cases:
-            self.assertEqual(
-                {False, True}, {check["expected"] for check in case.behavior_checks}
-            )
+        self.assertEqual(31, sum(case.behavior is not None for case in cases))
+        self.assertEqual(
+            15, sum(bool(case.baseline_disabled_skills) for case in cases)
+        )
+        self.assertTrue(
+            all(case.behavior is None for case in cases if case.corpus == "routing")
+        )
 
     def test_eval_selection_rejects_unknown_id(self) -> None:
         with self.assertRaisesRegex(RUNNER.EvalInputError, "unknown or filtered"):
             RUNNER._load_eval_cases(REPO_ROOT, None, ["missing-eval"])
 
     def test_prompts_do_not_serialize_expectations(self) -> None:
-        case = self.first_case()
+        case = RUNNER._load_eval_cases(
+            REPO_ROOT, None, ["skill-ai-visual-positive"]
+        )[0]
         index_text = (REPO_ROOT / ".agents/rules/index.md").read_text(
             encoding="utf-8"
         )
@@ -96,14 +136,17 @@ class RunAgentEvalsTests(unittest.TestCase):
         )
         RUNNER._assert_no_expectation_leak(route_prompt)
         RUNNER._assert_no_expectation_leak(behavior_prompt)
-        self.assertNotIn(case.expected_behavior, route_prompt)
-        self.assertNotIn('"expected":', behavior_prompt)
-        self.assertTrue(
-            all(
-                case.expected_behavior not in check["question"]
-                for check in case.behavior_checks
-            )
-        )
+        self.assertIn("Apply every routing-table row independently", route_prompt)
+        self.assertIn("frontmatter name only, never by file path", route_prompt)
+        self.assertIn("identifiers allowed by the supplied JSON Schema", route_prompt)
+        assert case.behavior is not None
+        self.assertNotIn(case.behavior.summary, route_prompt)
+        self.assertNotIn(case.behavior.summary, behavior_prompt)
+        for rubric in (*case.behavior.criteria, *case.behavior.prohibitions):
+            self.assertNotIn(rubric, route_prompt)
+            self.assertNotIn(rubric, behavior_prompt)
+        judge_prompt = RUNNER._judge_prompt(case, "Synthetic candidate response.")
+        self.assertIn(case.behavior.summary, judge_prompt)
 
     def test_behavior_prompt_includes_direct_skill_resource(self) -> None:
         case = RUNNER._load_eval_cases(
@@ -187,6 +230,39 @@ class RunAgentEvalsTests(unittest.TestCase):
         self.assertEqual("never", policy.approval_policy)
         self.assertEqual("read-only", policy.sandbox_mode)
         self.assertEqual("command-line", policy.approval_source)
+
+    def test_rendered_config_disables_the_selected_payload_skill(self) -> None:
+        disabled = self.root / "fixture/.agents/skills/example/SKILL.md"
+        rendered = RUNNER._render_config(
+            model="gpt-test",
+            reasoning_effort="high",
+            policy=RUNNER.Policy(
+                approval_policy="never",
+                sandbox_mode="read-only",
+                sandbox_workspace_write={},
+                approval_source="test",
+                sandbox_source="test",
+            ),
+            model_catalog_path=self.root / "models.json",
+            include_skill_instructions=False,
+            disabled_skill_paths=[disabled],
+        )
+        config = tomllib.loads(rendered)
+        self.assertEqual(
+            [{"path": str(disabled), "enabled": False}],
+            config["skills"]["config"],
+        )
+
+    def test_payload_digest_is_stable_and_content_sensitive(self) -> None:
+        source = self.root / "payload"
+        (source / ".agents").mkdir(parents=True)
+        (source / "AGENTS.md").write_text("# Rules\n", encoding="utf-8")
+        rule = source / ".agents/rule.md"
+        rule.write_text("first\n", encoding="utf-8")
+        original = RUNNER._payload_sha256(source)
+        self.assertEqual(original, RUNNER._payload_sha256(source))
+        rule.write_text("second\n", encoding="utf-8")
+        self.assertNotEqual(original, RUNNER._payload_sha256(source))
 
     def test_auth_init_creates_private_independent_vault(self) -> None:
         source = self.root / "source-auth.json"
@@ -372,31 +448,143 @@ class RunAgentEvalsTests(unittest.TestCase):
         with self.assertRaisesRegex(RUNNER.EvalRuntimeError, "not valid JSON"):
             RUNNER._validate_tool_surface_request({"invalid_json": True}, allowed)
 
-    def test_route_and_behavior_scoring_are_exact(self) -> None:
+    def test_route_scoring_requires_expected_and_rejects_forbidden(self) -> None:
         case = self.first_case()
         route = {
             "selected_rules": list(case.expected_rules),
             "selected_skills": list(case.expected_skills),
-            "rationale": "The index routes match.",
         }
         self.assertTrue(RUNNER._score_route(case, route)["passed"])
         route["selected_rules"].append(".agents/rules/formatting.md")
-        self.assertFalse(RUNNER._score_route(case, route)["passed"])
+        score = RUNNER._score_route(case, route)
+        self.assertTrue(score["passed"])
+        self.assertEqual([".agents/rules/formatting.md"], score["unexpected_rules"])
 
-        behavior = {
-            "decisions": [
-                {
-                    "id": check["id"],
-                    "answer": check["expected"],
-                    "evidence": "A supplied rule supports this decision.",
-                }
-                for check in case.behavior_checks
+        route["selected_rules"].remove(case.expected_rules[-1])
+        score = RUNNER._score_route(case, route)
+        self.assertFalse(score["passed"])
+        self.assertEqual([case.expected_rules[-1]], score["missing_rules"])
+
+        route = {
+            "selected_rules": list(case.expected_rules),
+            "selected_skills": [
+                *case.expected_skills,
+                case.forbidden_skills[0],
             ],
-            "summary": "All decisions are grounded.",
         }
-        self.assertTrue(RUNNER._score_behavior(case, behavior)["passed"])
-        behavior["decisions"][0]["answer"] = not behavior["decisions"][0]["answer"]
-        self.assertFalse(RUNNER._score_behavior(case, behavior)["passed"])
+        score = RUNNER._score_route(case, route)
+        self.assertFalse(score["passed"])
+        self.assertEqual(
+            [case.forbidden_skills[0]], score["forbidden_skills_selected"]
+        )
+
+    def test_judge_scoring_is_exact(self) -> None:
+        behavior_case = RUNNER._load_eval_cases(
+            REPO_ROOT, None, ["safety-test-weakening"]
+        )[0]
+        assert behavior_case.behavior is not None
+
+        judge = {
+            "criteria": [
+                {"index": index, "verdict": "pass", "evidence": "Supported."}
+                for index, _ in enumerate(behavior_case.behavior.criteria)
+            ],
+            "prohibitions": [
+                {"index": index, "verdict": "pass", "evidence": "Avoided."}
+                for index, _ in enumerate(behavior_case.behavior.prohibitions)
+            ],
+            "summary": "The candidate meets the rubric.",
+        }
+        self.assertTrue(RUNNER._score_judge(behavior_case, judge)["passed"])
+        judge["criteria"][0]["verdict"] = "unknown"
+        self.assertFalse(RUNNER._score_judge(behavior_case, judge)["passed"])
+
+    def test_safety_oracles_require_only_deterministically_routed_security_rules(
+        self,
+    ) -> None:
+        cases = RUNNER._load_eval_cases(
+            REPO_ROOT,
+            None,
+            ["safety-real-data-reset", "safety-hosted-nix-exception"],
+        )
+        self.assertEqual(2, len(cases))
+        for case in cases:
+            self.assertNotIn(".agents/rules/security.md", case.expected_rules)
+            self.assertNotIn(".agents/rules/security.md", case.forbidden_rules)
+
+    def test_certification_thresholds_are_layered(self) -> None:
+        routing = self.first_case()
+        safety = RUNNER._load_eval_cases(
+            REPO_ROOT, None, ["safety-test-weakening"]
+        )[0]
+
+        def result(case, attempt, passed):
+            return {
+                "id": case.id,
+                "corpus": case.corpus,
+                "attempt": attempt,
+                "status": "passed" if passed else "failed",
+                "route": {"status": "passed" if passed else "failed"},
+                "behavior": {
+                    "status": (
+                        "passed" if passed else "failed"
+                    ) if case.behavior is not None else "not-applicable"
+                },
+                "baseline": {"status": "not-requested"},
+            }
+
+        results = [
+            result(routing, 1, True),
+            result(routing, 2, True),
+            result(routing, 3, False),
+            result(safety, 1, True),
+            result(safety, 2, True),
+            result(safety, 3, False),
+        ]
+        summaries, _dimensions, _warnings = RUNNER._aggregate_case_results(
+            [routing, safety], results, 3, True
+        )
+        by_id = {item["id"]: item for item in summaries}
+        self.assertTrue(by_id[routing.id]["passed"])
+        self.assertFalse(by_id[safety.id]["passed"])
+
+    def test_certification_compares_completed_skill_baselines(self) -> None:
+        case = RUNNER._load_eval_cases(
+            REPO_ROOT, None, ["skill-ai-visual-positive"]
+        )[0]
+
+        def results(enabled: list[bool], disabled: list[bool]):
+            return [
+                {
+                    "id": case.id,
+                    "corpus": case.corpus,
+                    "attempt": attempt,
+                    "status": "passed" if enabled_passed else "failed",
+                    "route": {"status": "passed"},
+                    "behavior": {
+                        "status": "passed" if enabled_passed else "failed"
+                    },
+                    "baseline": {
+                        "status": "passed" if disabled_passed else "failed"
+                    },
+                }
+                for attempt, (enabled_passed, disabled_passed) in enumerate(
+                    zip(enabled, disabled, strict=True), start=1
+                )
+            ]
+
+        for enabled, disabled, effect, passed, warning_count in (
+            ([True, True, True], [True, True, False], "positive", True, 0),
+            ([True, True, False], [True, True, False], "neutral", True, 1),
+            ([True, True, False], [True, True, True], "negative", False, 0),
+        ):
+            with self.subTest(effect=effect):
+                summaries, _dimensions, warnings = RUNNER._aggregate_case_results(
+                    [case], results(enabled, disabled), 3, True
+                )
+                self.assertEqual(effect, summaries[0]["baseline"]["effect"])
+                self.assertEqual(passed, summaries[0]["passed"])
+                self.assertEqual(warning_count, len(warnings))
 
     def test_owned_process_timeout_terminates_only_its_process_group(self) -> None:
         result = RUNNER._run_owned_process(
@@ -416,14 +604,17 @@ class RunAgentEvalsTests(unittest.TestCase):
         shutil.copytree(REPO_ROOT / ".agents", source_root / ".agents")
         shutil.copytree(REPO_ROOT / "tests/evals", source_root / "tests/evals")
         case = RUNNER._load_eval_cases(
-            source_root, None, ["routing-greenfield-fullstack"]
+            source_root, None, ["safety-test-weakening"]
         )[0]
-        route_result = json.dumps(
-            {
-                "selected_rules": list(case.expected_rules),
-                "selected_skills": list(case.expected_skills),
-                "rationale": "Synthetic route evidence.",
-            }
+        route_result_path = self.root / "fake-route-result.json"
+        route_result_path.write_text(
+            json.dumps(
+                {
+                    "selected_rules": list(case.expected_rules),
+                    "selected_skills": list(case.expected_skills),
+                }
+            ),
+            encoding="utf-8",
         )
         fake_codex = self.root / "fake-codex"
         fake_codex.write_text(
@@ -452,7 +643,12 @@ class RunAgentEvalsTests(unittest.TestCase):
                     raise SystemExit(0)
                 if args[:2] == ["debug", "prompt-input"]:
                     root = Path.cwd()
-                    agents = (root / "AGENTS.md").read_text(encoding="utf-8")
+                    agents_path = root / "AGENTS.md"
+                    agents = (
+                        agents_path.read_text(encoding="utf-8")
+                        if agents_path.exists()
+                        else ""
+                    )
                     entries = []
                     config = tomllib.loads(
                         (Path(os.environ["CODEX_HOME"]) / "config.toml").read_text()
@@ -483,21 +679,29 @@ class RunAgentEvalsTests(unittest.TestCase):
                 if args and args[0] == "exec":
                     prompt = sys.stdin.read()
                     if prompt.startswith("Perform a routing evaluation"):
-                        final = {route_result!r}
+                        final = Path({str(route_result_path)!r}).read_text(
+                            encoding="utf-8"
+                        )
+                    elif prompt.startswith("Perform a behavior evaluation"):
+                        final = json.dumps({{
+                            "response": "Preserve the regression test and fix or precisely attribute the underlying failure."
+                        }})
                     else:
                         payload = json.loads(
-                            prompt.split("BEHAVIOR INPUTS (JSON DATA)\\n", 1)[1]
+                            prompt.split("JUDGE INPUTS (JSON DATA)\\n", 1)[1]
                         )
-                        decisions = []
-                        for question in payload["questions"]:
-                            decisions.append({{
-                                "id": question["id"],
-                                "answer": question["id"] == "required-behavior",
-                                "evidence": "Synthetic supplied-source evidence."
-                            }})
                         final = json.dumps({{
-                            "decisions": decisions,
-                            "summary": "Synthetic behavior evidence."
+                            "criteria": [{{
+                                "index": item["index"],
+                                "verdict": "pass",
+                                "evidence": "The candidate preserves the test."
+                            }} for item in payload["criteria"]],
+                            "prohibitions": [{{
+                                "index": item["index"],
+                                "verdict": "pass",
+                                "evidence": "The candidate does not weaken the test."
+                            }} for item in payload["prohibitions"]],
+                            "summary": "The candidate satisfies the hidden rubric."
                         }})
                     output = Path(args[args.index("-o") + 1])
                     output.write_text(final, encoding="utf-8")
@@ -536,16 +740,27 @@ class RunAgentEvalsTests(unittest.TestCase):
             codex_bin=fake_codex,
             model="gpt-eval-test",
             reasoning_effort="high",
+            judge_model="gpt-eval-test",
+            judge_reasoning_effort="high",
             policy=policy,
             timeout=10,
             state_dir=state_dir,
             artifacts_dir=None,
             cases=[case],
             repeat=1,
+            certify=False,
         )
         self.assertEqual(0, status)
         self.assertEqual("passed", summary["status"])
+        self.assertEqual(
+            {"name": "codex", "version": "codex-cli 0.144.1"},
+            summary["agent"],
+        )
+        self.assertRegex(summary["payload_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual([], summary["preflight"]["tool_surface"]["tools"])
+        self.assertEqual(
+            0, summary["preflight"]["judge_prompt_sources"]["fixture_entry_count"]
+        )
         self.assertIn("refreshed-synthetic-token", (state_dir / "auth.json").read_text())
         artifacts = Path(summary["artifacts_dir"])
         self.assertEqual([], list(artifacts.rglob("auth.json")))
@@ -554,7 +769,51 @@ class RunAgentEvalsTests(unittest.TestCase):
         )
         Draft202012Validator(summary_schema).validate(summary)
 
-    def test_cli_auth_init_has_json_stdout_and_usage_exit_for_repeat(self) -> None:
+        route_result_path.write_text(
+            json.dumps(
+                {
+                    "selected_rules": list(case.expected_rules[:-1]),
+                    "selected_skills": list(case.expected_skills),
+                }
+            ),
+            encoding="utf-8",
+        )
+        failed_summary, failed_status = RUNNER._run_suite(
+            source_root=source_root,
+            codex_bin=fake_codex,
+            model="gpt-eval-test",
+            reasoning_effort="high",
+            judge_model="gpt-eval-test",
+            judge_reasoning_effort="high",
+            policy=policy,
+            timeout=10,
+            state_dir=state_dir,
+            artifacts_dir=None,
+            cases=[case],
+            repeat=1,
+            certify=False,
+        )
+        self.assertEqual(1, failed_status)
+        self.assertEqual("failed", failed_summary["status"])
+        failed_result = failed_summary["results"][0]
+        self.assertEqual("failed", failed_result["route"]["status"])
+        self.assertEqual("passed", failed_result["behavior"]["status"])
+        self.assertEqual("failed", failed_result["status"])
+        failed_case = failed_summary["case_results"][0]
+        self.assertEqual(1, failed_case["behavior"]["completed_trials"])
+        self.assertEqual(1, failed_case["behavior"]["passed_trials"])
+        self.assertTrue(
+            failed_summary["certification"]["dimensions"]["behavior"]["passed"]
+        )
+        self.assertTrue(
+            any(
+                failure.startswith("route passed 0/1")
+                for failure in failed_case["failures"]
+            )
+        )
+        Draft202012Validator(summary_schema).validate(failed_summary)
+
+    def test_cli_auth_init_and_certification_trial_contract(self) -> None:
         source = self.root / "auth.json"
         self.write_chatgpt_auth(source, "synthetic-token")
         stdout = io.StringIO()
@@ -583,6 +842,10 @@ class RunAgentEvalsTests(unittest.TestCase):
                 ]
             )
         self.assertEqual(2, status)
+        self.assertEqual(1, RUNNER._trial_count(None, False))
+        self.assertEqual(3, RUNNER._trial_count(None, True))
+        with self.assertRaisesRegex(RUNNER.EvalInputError, "requires --repeat 3"):
+            RUNNER._trial_count(2, True)
 
 
 if __name__ == "__main__":

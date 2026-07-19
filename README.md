@@ -72,8 +72,8 @@ git status --short --ignored
 
 The deterministic checker validates structure, links, skill ownership, JSON Schemas, and the scenario-eval corpus. The eval cases are repository fixtures for human or fresh-agent regression; CI validates their structure and coverage without using an LLM as a gate. Maintenance checks require no new task-created temporary artifacts; pre-existing ignored work is preserved and disclosed rather than deleted incidentally.
 
-For repeatable live Agent behavior validation, including isolated ChatGPT
-authentication, model/reasoning selection, prompt-source checks, and the
-two-stage route/behavior protocol, see [the eval runner guide](tests/evals/README.md).
-Live model output remains diagnostic and is intentionally excluded from the
-deterministic Nix checks.
+For repeatable live agent behavior validation, including isolated ChatGPT
+authentication, model/reasoning selection, prompt-source checks, independent
+behavior judging, and skill-disabled certification baselines, see
+[the eval runner guide](tests/evals/README.md). Live model output remains
+diagnostic and is intentionally excluded from the deterministic Nix checks.

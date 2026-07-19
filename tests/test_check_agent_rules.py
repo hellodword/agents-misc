@@ -175,7 +175,7 @@ class CheckAgentRulesTests(unittest.TestCase):
         self.assertTrue(any("duplicate eval id" in error for error in self.errors()))
 
     def test_invalid_eval_rule_fails(self) -> None:
-        path = self.root / "tests" / "evals" / "routing.jsonl"
+        path = self.root / "tests" / "evals" / "oracles" / "routing.jsonl"
         lines = path.read_text(encoding="utf-8").splitlines()
         record = json.loads(lines[0])
         record["expected_rules"][0] = ".agents/rules/missing.md"
@@ -184,7 +184,7 @@ class CheckAgentRulesTests(unittest.TestCase):
         self.assertTrue(any("unknown rule path" in error for error in self.errors()))
 
     def test_invalid_forbidden_eval_rule_fails(self) -> None:
-        path = self.root / "tests" / "evals" / "routing.jsonl"
+        path = self.root / "tests" / "evals" / "oracles" / "routing.jsonl"
         lines = path.read_text(encoding="utf-8").splitlines()
         record = json.loads(lines[0])
         record["forbidden_rules"] = [".agents/rules/missing.md"]
@@ -193,7 +193,7 @@ class CheckAgentRulesTests(unittest.TestCase):
         self.assertTrue(any("unknown rule path" in error for error in self.errors()))
 
     def test_duplicate_forbidden_eval_rule_fails(self) -> None:
-        path = self.root / "tests" / "evals" / "routing.jsonl"
+        path = self.root / "tests" / "evals" / "oracles" / "routing.jsonl"
         lines = path.read_text(encoding="utf-8").splitlines()
         record = json.loads(lines[0])
         record["forbidden_rules"] = [
@@ -207,7 +207,7 @@ class CheckAgentRulesTests(unittest.TestCase):
         )
 
     def test_expected_and_forbidden_eval_rule_overlap_fails(self) -> None:
-        path = self.root / "tests" / "evals" / "routing.jsonl"
+        path = self.root / "tests" / "evals" / "oracles" / "routing.jsonl"
         lines = path.read_text(encoding="utf-8").splitlines()
         record = json.loads(lines[0])
         record["forbidden_rules"] = [record["expected_rules"][0]]
@@ -218,16 +218,16 @@ class CheckAgentRulesTests(unittest.TestCase):
         )
 
     def test_missing_forbidden_rules_field_fails(self) -> None:
-        path = self.root / "tests" / "evals" / "routing.jsonl"
+        path = self.root / "tests" / "evals" / "oracles" / "routing.jsonl"
         lines = path.read_text(encoding="utf-8").splitlines()
         record = json.loads(lines[0])
         del record["forbidden_rules"]
         lines[0] = json.dumps(record)
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        self.assertTrue(any("eval fields must be exactly" in error for error in self.errors()))
+        self.assertTrue(any("eval oracle fields must contain" in error for error in self.errors()))
 
     def test_non_list_forbidden_rules_fails(self) -> None:
-        path = self.root / "tests" / "evals" / "routing.jsonl"
+        path = self.root / "tests" / "evals" / "oracles" / "routing.jsonl"
         lines = path.read_text(encoding="utf-8").splitlines()
         record = json.loads(lines[0])
         record["forbidden_rules"] = ".agents/rules/formatting.md"
@@ -246,49 +246,54 @@ class CheckAgentRulesTests(unittest.TestCase):
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         self.assertTrue(any("task must be a non-empty string" in error for error in self.errors()))
 
-    def test_missing_behavior_checks_fails(self) -> None:
-        path = self.root / "tests" / "evals" / "routing.jsonl"
+    def test_case_and_oracle_ids_must_match(self) -> None:
+        path = self.root / "tests" / "evals" / "oracles" / "routing.jsonl"
         lines = path.read_text(encoding="utf-8").splitlines()
         record = json.loads(lines[0])
-        del record["behavior_checks"]
+        record["id"] = "different-id"
         lines[0] = json.dumps(record)
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        self.assertTrue(any("eval fields must be exactly" in error for error in self.errors()))
+        self.assertTrue(any("case/oracle IDs must match" in error for error in self.errors()))
 
-    def test_behavior_checks_require_both_boolean_expectations(self) -> None:
-        path = self.root / "tests" / "evals" / "routing.jsonl"
+    def test_safety_oracle_requires_behavior(self) -> None:
+        path = self.root / "tests" / "evals" / "oracles" / "safety.jsonl"
         lines = path.read_text(encoding="utf-8").splitlines()
         record = json.loads(lines[0])
-        for check in record["behavior_checks"]:
-            check["expected"] = True
+        del record["behavior"]
+        lines[0] = json.dumps(record)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.assertTrue(any("safety eval requires behavior" in error for error in self.errors()))
+
+    def test_behavior_criteria_must_not_be_empty(self) -> None:
+        path = self.root / "tests" / "evals" / "oracles" / "safety.jsonl"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        record = json.loads(lines[0])
+        record["behavior"]["criteria"] = []
+        lines[0] = json.dumps(record)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.assertTrue(any("criteria must contain" in error for error in self.errors()))
+
+    def test_positive_skill_oracle_requires_baseline(self) -> None:
+        path = self.root / "tests" / "evals" / "oracles" / "skills.jsonl"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        record = json.loads(lines[0])
+        del record["baseline_disabled_skills"]
         lines[0] = json.dumps(record)
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         self.assertTrue(
-            any(
-                "behavior_checks must contain both true and false expectations" in error
-                for error in self.errors()
-            )
+            any("positive skill eval requires behavior and baseline" in error for error in self.errors())
         )
 
-    def test_behavior_check_ids_must_be_unique(self) -> None:
-        path = self.root / "tests" / "evals" / "routing.jsonl"
+    def test_safety_oracle_rejects_skill_baseline(self) -> None:
+        path = self.root / "tests" / "evals" / "oracles" / "safety.jsonl"
         lines = path.read_text(encoding="utf-8").splitlines()
         record = json.loads(lines[0])
-        record["behavior_checks"][1]["id"] = record["behavior_checks"][0]["id"]
+        record["baseline_disabled_skills"] = record["expected_skills"]
         lines[0] = json.dumps(record)
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         self.assertTrue(
-            any("duplicate behavior check ids" in error for error in self.errors())
+            any("safety eval must not define a baseline" in error for error in self.errors())
         )
-
-    def test_behavior_check_expected_must_be_boolean(self) -> None:
-        path = self.root / "tests" / "evals" / "routing.jsonl"
-        lines = path.read_text(encoding="utf-8").splitlines()
-        record = json.loads(lines[0])
-        record["behavior_checks"][0]["expected"] = "true"
-        lines[0] = json.dumps(record)
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        self.assertTrue(any("expected must be a boolean" in error for error in self.errors()))
 
     def test_runtime_contract_tool_shape_is_schema_validated(self) -> None:
         path = self.root / "tests" / "evals" / "codex-runtime-contract.json"
@@ -302,7 +307,7 @@ class CheckAgentRulesTests(unittest.TestCase):
         )
 
     def test_missing_rule_coverage_fails(self) -> None:
-        path = self.root / "tests" / "evals" / "routing.jsonl"
+        path = self.root / "tests" / "evals" / "oracles" / "routing.jsonl"
         lines = path.read_text(encoding="utf-8").splitlines()
         for index, line in enumerate(lines):
             record = json.loads(line)
@@ -322,7 +327,7 @@ class CheckAgentRulesTests(unittest.TestCase):
         )
 
     def test_invalid_eval_skill_fails(self) -> None:
-        path = self.root / "tests" / "evals" / "skills.jsonl"
+        path = self.root / "tests" / "evals" / "oracles" / "skills.jsonl"
         lines = path.read_text(encoding="utf-8").splitlines()
         record = json.loads(lines[0])
         record["expected_skills"] = ["missing-skill"]
@@ -331,7 +336,7 @@ class CheckAgentRulesTests(unittest.TestCase):
         self.assertTrue(any("unknown skill name" in error for error in self.errors()))
 
     def test_expected_and_forbidden_eval_skill_overlap_fails(self) -> None:
-        path = self.root / "tests" / "evals" / "skills.jsonl"
+        path = self.root / "tests" / "evals" / "oracles" / "skills.jsonl"
         lines = path.read_text(encoding="utf-8").splitlines()
         record = json.loads(lines[0])
         record["forbidden_skills"] = [record["expected_skills"][0]]
@@ -342,7 +347,7 @@ class CheckAgentRulesTests(unittest.TestCase):
         )
 
     def test_missing_skill_positive_coverage_fails(self) -> None:
-        path = self.root / "tests" / "evals" / "skills.jsonl"
+        path = self.root / "tests" / "evals" / "oracles" / "skills.jsonl"
         records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
         for record in records:
             record["expected_skills"] = [
@@ -352,7 +357,7 @@ class CheckAgentRulesTests(unittest.TestCase):
         self.assertTrue(any("missing positive coverage: ai-visual-review" in error for error in self.errors()))
 
     def test_missing_skill_negative_coverage_fails(self) -> None:
-        path = self.root / "tests" / "evals" / "skills.jsonl"
+        path = self.root / "tests" / "evals" / "oracles" / "skills.jsonl"
         records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
         for record in records:
             record["forbidden_skills"] = [

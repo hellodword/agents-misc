@@ -1,71 +1,90 @@
 # Agent behavior evals
 
-This directory contains the Agent Rules Kit's routing, safety, and skill-trigger
-scenarios. The deterministic repository check validates their structure and
-coverage. `scripts/run-agent-evals.py` optionally sends them to a real Codex
-model; live model results are diagnostic and are not a `nix flake check` gate.
+This directory contains routing, safety, and skill-trigger scenarios for the
+Agent Rules Kit. The deterministic repository check validates their structure
+and coverage. `scripts/run-agent-evals.py` can additionally exercise the
+checked-in payload with a real Codex CLI; live results are manual diagnostics
+and never gate `nix flake check`.
 
-## What is tested
+Only Codex is implemented and certified. OpenCode has no adapter, placeholder,
+or implied support in this suite.
 
-Each JSONL record has two distinct contracts:
+## Case and oracle contract
 
-- `expected_rules`, `forbidden_rules`, `expected_skills`, and
-  `forbidden_skills` test routing as exact sets.
-- `behavior_checks` asks neutral yes/no questions after the routed rule and
-  skill bodies are loaded. Every record contains both a `true` and a `false`
-  expectation to expose agreement and ordering bias.
-- `expected_behavior` remains a concise human-readable scenario description.
-  The runner never serializes it, the expected route sets, or the expected
-  booleans into a model prompt.
+The subject-visible records are `routing.jsonl`, `skills.jsonl`, and
+`safety.jsonl`. They contain only a stable ID and a realistic task. Files with
+the same names under `oracles/` contain the hidden expected and forbidden rule
+and skill sets.
 
-The run has two independent, ephemeral `codex exec` turns per scenario, each
-with a fresh temporary home and synthetic repository. The route turn sees the
-task, the full rule index, automatic `AGENTS.md` instructions, and automatic
-skill metadata. Only an exactly correct route can advance. The behavior turn
-disables automatic skill metadata and sees only the task, selected rule and
-skill bodies, directly linked skill resources, and questions without answers.
+Every scenario receives a fresh route turn. At runtime, the route schema limits
+rules to canonical repository-relative paths and skills to canonical
+frontmatter names. A route passes when it selects every expected source and no
+forbidden source. Other canonical, non-forbidden selections are neutral: they
+remain visible in the existing `unexpected_rules` and `unexpected_skills`
+diagnostics but do not fail the route. Route output does not include a
+model-authored rationale.
+
+A second behavior turn is defined for:
+
+- all 16 safety scenarios; and
+- the 15 positive skill scenarios whose expected skill set is non-empty.
+
+The behavior subject sees the task and the sources actually selected by the
+route turn, but no rubric, question, expected answer, or semantic answer ID. It
+returns a concrete approach. A fresh independent judge runs without this
+repository's payload and scores the response against the hidden criteria and
+prohibitions. `unknown` verdicts fail. Once a route result is structurally
+valid, this diagnostic behavior turn still runs when route scoring fails; the
+case remains failed because its routing dimension failed. This preserves
+behavior evidence instead of masking it behind a route mismatch. Routing
+scenarios and negative skill scenarios do not pay for a redundant behavior
+turn.
+
+This suite evaluates Codex instruction discovery, routing, and response-level
+adherence. It does not execute changes in a consuming project or prove tool-use
+and end-state outcomes. Consumer projects should add their own task-specific
+end-to-end evals where those boundaries matter.
+
+Certification also runs positive skill scenarios with the oracle-selected
+skills disabled in the temporary Codex config and omitted from the controlled
+instruction sources. This provides a fresh-context no-skill baseline without
+changing `AGENTS.md` or `.agents/**`.
 
 ## Isolation contract
 
 Before any authenticated request, the runner:
 
-1. Creates a synthetic repository containing exactly `AGENTS.md` and
-   `.agents/**`; symlinks and non-UTF-8 payload files are rejected.
-2. Creates private temporary `HOME`, `CODEX_HOME`, and XDG directories. It does
-   not load the default `~/.codex` config, state, plugins, hooks, MCP servers,
-   rules, memories, or skills.
-3. Copies only `approval_policy`, `sandbox_mode`, and the bounded
-   `sandbox_workspace_write` table from `--policy-config` when their CLI values
-   are `inherit`. Model, feature, provider, and instruction settings are never
-   inherited.
-4. Uses the Codex bundled model catalog for the requested model, preserves its
-   built-in instructions, and removes the model's `apply_patch` capability.
-5. Disables shell, unified exec, web, browser, MCP/app/plugin, hook, image
-   generation, memory, and subagent feature surfaces.
-6. Runs `codex debug prompt-input` and rejects skill sources outside the
-   synthetic `.agents/skills` tree or a loaded maintenance overlay.
-7. Sends one unauthenticated request to a loopback-only fake Responses endpoint
-   and verifies that the outgoing tool list is a subset of the versioned
-   `allowed_tools` contract in `codex-runtime-contract.json`. A Codex upgrade
-   without a reviewed contract or any unreviewed tool fails closed.
+1. Copies exactly `AGENTS.md` and `.agents/**` to a synthetic repository;
+   symlinks, non-regular files, and non-UTF-8 payload files are rejected.
+2. Records a stable SHA-256 digest over payload paths and bytes so a result can
+   be tied to the exact tested content.
+3. Creates private temporary `HOME`, `CODEX_HOME`, and XDG directories. It does
+   not load the default user config, state, plugins, hooks, MCP servers, rules,
+   memories, or skills.
+4. Inherits only the explicitly bounded approval and sandbox fields when CLI
+   values request inheritance. Model, provider, feature, and instruction
+   settings are never inherited.
+5. Preserves the selected model's bundled instructions, removes its
+   `apply_patch` capability, and disables execution, shell, web, browser, MCP,
+   plugin, hook, image, memory, and subagent surfaces.
+6. Uses `codex debug prompt-input` to verify that route turns contain only the
+   synthetic AGENTS and skill sources, behavior turns contain no automatic
+   skill metadata, and judge turns discover no tested `AGENTS.md` or `.agents`
+   payload.
+7. Probes a loopback fake Responses endpoint and fails closed if either the
+   subject or judge model exposes a tool outside the reviewed Codex-version
+   allowlist.
+8. Rejects tool/action events, redacts credentials and temporary paths, and
+   writes diagnostics only below the confirmed ignored `tmp/agent/evals/`.
 
-The Codex 0.144.1 allowlist contains the non-execution helpers
-`request_user_input`, `update_plan`, and `view_image`. A model may expose any
-subset: Responses Lite models can omit the `tools` field after code mode is
-disabled, which is treated as an empty and therefore safe tool set. Prompts
-prohibit every tool call, the runner rejects tool/action items in the JSONL
-event stream, and non-tool error items fail separately with their diagnostics.
-
-This is prompt-source and tool-surface isolation, not an OS filesystem or
-network sandbox around the Codex process. The model has no file or command tool
-with which to inspect other content, but the process itself runs under the
-selected/inherited Codex sandbox policy. Use a container or other external
-sandbox if process-level isolation is required.
+This verifies prompt-source and tool-surface isolation, not an OS-level
+filesystem or network sandbox around the Codex process. Use an external
+container or sandbox when process-level isolation is required.
 
 ## Authentication
 
 The runner never uses `~/.codex/auth.json` directly during an eval. Seed its
-independent persistent ChatGPT credential vault once:
+independent private ChatGPT credential vault once:
 
 ```sh
 just -- agent-evals-auth-init
@@ -74,58 +93,84 @@ just -- agent-evals-auth-init
 The default vault is
 `$XDG_STATE_HOME/agents-misc/agent-evals/auth.json`, or
 `~/.local/state/agents-misc/agent-evals/auth.json` when `XDG_STATE_HOME` is
-unset. The source and vault must be current-user-owned regular files without
-group or other access. Initialization refuses to overwrite a vault unless
-`--replace` is explicit. Runs lock the vault, copy it to the temporary
-`CODEX_HOME`, and atomically persist refreshed ChatGPT tokens back to the vault.
-Credentials are never written to eval artifacts or stdout.
+unset. Initialization refuses insecure ownership or permissions and will not
+replace a vault unless `--replace` is explicit. Refreshed credentials are
+atomically synchronized back to the vault and never written to eval artifacts
+or stdout.
 
 ## Run and inspect
 
-Run the local, unauthenticated isolation preflight first:
+Run the unauthenticated preflight first:
 
 ```sh
-just -- agent-evals-preflight --model gpt-5.4 --reasoning-effort high
+just -- agent-evals-preflight --model gpt-5.6-luna --reasoning-effort high
 ```
 
-Run one scenario, a corpus, or the full suite:
+Run a one-trial diagnostic for one scenario, one corpus, or the full suite:
 
 ```sh
-just -- agent-evals --model gpt-5.4 --reasoning-effort high --id routing-existing-vue
-just -- agent-evals --model gpt-5.4 --corpus safety --repeat 2
-just -- agent-evals --model gpt-5.4
+just -- agent-evals --model gpt-5.6-luna --id routing-existing-vue
+just -- agent-evals --model gpt-5.6-luna --corpus safety
+just -- agent-evals --model gpt-5.6-luna
 ```
 
-The model must be advertised by the pinned Codex binary's bundled catalog, and
-the selected reasoning effort must be supported by that model. Use
-`--approval-policy` and `--sandbox-mode` to replace selective inheritance; use
-`--policy-config` or `--state-dir` to select different explicit sources.
+Request a Codex certification run with three trials per selected case:
+
+```sh
+just -- agent-evals --model gpt-5.6-luna --reasoning-effort high --certify
+```
+
+`--certify` defaults to three trials and rejects `--repeat` below three. Use
+`--judge-model` and `--judge-reasoning-effort` to select an independent judge;
+otherwise the subject model and effort are reused in a fresh judge context.
+Safety and positive-skill cases with a structurally valid but incorrectly
+scored route still incur their behavior and judge requests.
+
+Certification applies these thresholds:
+
+- prompt discovery, isolation, reviewed tool surfaces, and every safety trial
+  must pass 100%;
+- routing, skill-trigger, and non-safety behavior cases must pass at least two
+  thirds of their trials; and
+- skill-enabled behavior must not score below its disabled baseline. Equal
+  scores pass with an explicit “incremental benefit not demonstrated” warning.
 
 Stdout is one JSON result object. Progress and actionable errors go to stderr.
-Exit status `0` means every selected attempt passed, `1` means a preflight,
-runtime, route, or behavior failure, and `2` means invalid CLI/input data.
-Ignored diagnostic artifacts are written beneath
-`tmp/agent/evals/<run-id>/`; each case records redacted events, final structured
-output, scores, and stderr. The final suite summary conforms to
-`schemas/run-summary.schema.json`.
+Exit status `0` means the selected diagnostic or certification thresholds
+passed, `1` means a runtime or scored failure, and `2` means invalid CLI or
+input data. The summary records the Codex version, subject and judge models,
+payload digest, per-case raw trials, dimension totals, baseline effects, and
+certification status.
 
-For a manual smoke test, verify that preflight reports exactly 11 route-stage
-skill sources, zero automatic behavior-stage skills, and only tools from the
-reviewed allowlist. An empty list is valid for a model that omits tools. Then
-run one positive and one near-miss skill case, inspect both stage scores, and
-confirm no `auth.json` exists below `tmp/agent/evals`.
+The local JSONL, CLI, and summary contracts were intentionally changed in
+place. Their `schema_version` remains `1`; there is no compatibility reader or
+migration for artifacts produced by the previous layout.
 
 ## Maintain the corpus
 
-Keep every ID globally unique and lowercase kebab-case. Add or update cases when
-rule routing or a skill trigger changes. Each skill needs a positive and a
-near-miss negative case, and every behavior record needs meaningful true and
-false decisions rather than restating only the route name. Validate structural
-changes with:
+Keep each case ID globally unique and lowercase kebab-case. A case and its
+oracle must have the same ID at the same line in their respective files. Add or
+update cases whenever rule routing or a skill trigger changes. Every skill must
+retain a positive and a near-miss negative skill-corpus case. Positive skill
+oracles require behavior criteria and an explicit disabled-skill baseline;
+safety oracles require behavior criteria; routing and negative skill oracles
+must stay route-only.
+
+Validate structural changes with:
 
 ```sh
 just check-agent-rules
 ```
 
-The schemas in `schemas/` are durable local contracts. Update the checker,
-runner, docs, fixtures, and tests atomically when changing them.
+## Practice references
+
+The suite follows these published practices:
+
+- [OpenAI evaluation best practices](https://developers.openai.com/api/docs/guides/evaluation-best-practices): use task-specific evals, evaluate continuously, automate scoring where possible, and calibrate automated graders with human review.
+- [OpenAI agent workflow evaluation](https://developers.openai.com/api/docs/guides/agent-evals): inspect routing, tool selection, instruction compliance, safety policy, and end-to-end behavior with traces, graders, datasets, and repeatable runs.
+- [Codex AGENTS.md discovery](https://learn.chatgpt.com/docs/agent-configuration/agents-md): verify the actual instruction chain and precedence used by Codex.
+- [Codex skill authoring](https://learn.chatgpt.com/docs/build-skills): test prompts against skill descriptions and account for explicit and implicit skill activation.
+- [Codex developer commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli): use `codex debug prompt-input` for model-visible source inspection and `codex exec` for ephemeral structured automation.
+- [Agent Skills output evaluation](https://agentskills.io/skill-creation/evaluating-skills): use realistic tasks, clean contexts, objective assertions, with/without-skill baselines, repeated trials, timing/cost data, and human review.
+- [Agent Skills trigger evaluation](https://agentskills.io/skill-creation/optimizing-descriptions): cover both should-trigger and should-not-trigger prompts with varied, realistic phrasing.
+- [Anthropic agent eval guidance](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents): distinguish the agent harness from the evaluation harness, isolate trials, combine code/model/human graders, and inspect traces rather than trusting aggregate scores alone.

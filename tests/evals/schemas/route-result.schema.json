@@ -4,7 +4,7 @@
   "title": "Agent eval routing result",
   "type": "object",
   "additionalProperties": false,
-  "required": ["selected_rules", "selected_skills", "rationale"],
+  "required": ["selected_rules", "selected_skills"],
   "properties": {
     "selected_rules": {
       "type": "array",
@@ -17,9 +17,6 @@
       "items": {
         "type": "string"
       }
-    },
-    "rationale": {
-      "type": "string"
     }
   }
 }
