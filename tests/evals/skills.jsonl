@@ -2,7 +2,7 @@
 {"id":"skill-ai-visual-negative","task":"A bug report happens to contain a screenshot."}
 {"id":"skill-atomic-positive","task":"The user asks to commit the verified change."}
 {"id":"skill-atomic-negative","task":"Tests passed, but nobody requested a commit."}
-{"id":"skill-browser-positive","task":"Add and run a durable Playwright regression for browser navigation behavior; the user does not request headful mode or browser reuse."}
+{"id":"skill-browser-positive","task":"Add and run a durable Playwright regression for browser navigation behavior using the project's existing Playwright configuration; the user does not request a display-mode override or browser reuse."}
 {"id":"skill-browser-negative","task":"Run an existing Vitest and React Testing Library component test for a button whose behavior does not depend on browser navigation, layout, or native browser APIs."}
 {"id":"skill-compat-positive","task":"Change an existing documented CLI exit code."}
 {"id":"skill-compat-negative","task":"Rename an unexported local variable."}

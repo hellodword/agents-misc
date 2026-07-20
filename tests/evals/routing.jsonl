@@ -3,15 +3,15 @@
 {"id":"routing-sqlite-migration","task":"Add a forward SQLite migration and prove backup restore for a real local database."}
 {"id":"routing-cli-subcommands","task":"Create a new Go CLI with subcommands and completion."}
 {"id":"routing-pure-nix","task":"Add a package and app output to an existing pure Nix flake."}
-{"id":"routing-heavy-nix-ci","task":"A GitHub-hosted Ubuntu image build is proven to exceed runner disk; add guarded Nix disk preparation."}
+{"id":"routing-heavy-nix-ci","task":"In a project-owned GitHub Actions workflow on a one-use GitHub-hosted Ubuntu runner, an image build is proven to exceed runner disk; add the guarded Nix workflow shell steps for disk preparation."}
 {"id":"routing-ordinary-screenshot","task":"Attach a screenshot to explain a frontend bug, then update the component test."}
 {"id":"routing-explicit-visual-review","task":"Perform AI screenshot visual QA for a web UI across desktop and mobile states without implementing fixes."}
 {"id":"routing-generated-flutter-bridge","task":"Regenerate a Flutter Rust bridge and verify both consumers."}
 {"id":"routing-dependency-update","task":"Update a runtime dependency through the project's declared dependency tool after checking its registry metadata, license, install behavior, and generated lockfile diff."}
-{"id":"routing-lockfile-documented-manual-exception","task":"The applicable project overlay explicitly requires one named manual operation on one active dependency lockfile, and the agent has read and verified that instruction before editing."}
+{"id":"routing-lockfile-documented-manual-exception","task":"Perform one named manual edit on one active dependency lockfile after reading and verifying that the applicable project overlay explicitly requires that exact operation."}
 {"id":"routing-environment-blocker","task":"The declared formatter is missing from the dev shell PATH and blocks validation."}
 {"id":"routing-rust-service","task":"Implement a new explicitly selected Rust HTTP service boundary that performs read-only queries against an existing concurrent SQLite schema; do not change schema, migrations, backup, restore, import/export, database path, or reset behavior."}
 {"id":"routing-pure-patch","task":"Refresh an ordered patch series in an existing Nix-backed patch repository against a pinned upstream revision without tracking the checkout."}
 {"id":"routing-go-concurrency-race","task":"Change an existing Go worker that shares a result map across goroutines."}
-{"id":"routing-contract-time-unicode","task":"Change an existing documented JSON API's filename-normalization and event-timestamp behavior."}
+{"id":"routing-contract-time-unicode","task":"Change an existing documented JSON API's normalization of untrusted client-provided filenames and its event-timestamp behavior."}
 {"id":"routing-nix-formatting","task":"Change treefmt configuration in an existing Nix repository and validate that repository-wide formatting introduces no unrelated churn."}

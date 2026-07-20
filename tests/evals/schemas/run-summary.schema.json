@@ -15,6 +15,7 @@
     "repeat",
     "preflight",
     "totals",
+    "usage",
     "case_results",
     "results",
     "certification",
@@ -66,6 +67,7 @@
         "failed": { "type": "integer", "minimum": 0 }
       }
     },
+    "usage": { "$ref": "#/$defs/usage_summary" },
     "case_results": {
       "type": "array",
       "items": { "$ref": "#/$defs/case_result" }
@@ -91,6 +93,34 @@
     "artifacts_dir": { "type": "string", "minLength": 1 }
   },
   "$defs": {
+    "usage_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "calls",
+        "input_tokens",
+        "cached_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens"
+      ],
+      "properties": {
+        "calls": { "type": "integer", "minimum": 0 },
+        "input_tokens": { "type": "integer", "minimum": 0 },
+        "cached_input_tokens": { "type": "integer", "minimum": 0 },
+        "output_tokens": { "type": "integer", "minimum": 0 },
+        "reasoning_output_tokens": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "usage_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["subject", "judge", "total"],
+      "properties": {
+        "subject": { "$ref": "#/$defs/usage_counts" },
+        "judge": { "$ref": "#/$defs/usage_counts" },
+        "total": { "$ref": "#/$defs/usage_counts" }
+      }
+    },
     "policy": {
       "type": "object",
       "additionalProperties": false,

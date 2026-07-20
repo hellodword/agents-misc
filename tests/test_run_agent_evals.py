@@ -147,6 +147,66 @@ class RunAgentEvalsTests(unittest.TestCase):
             self.assertNotIn(rubric, behavior_prompt)
         judge_prompt = RUNNER._judge_prompt(case, "Synthetic candidate response.")
         self.assertIn(case.behavior.summary, judge_prompt)
+        self.assertIn("response-level proposed-approach evaluation", judge_prompt)
+        self.assertIn("Do not require tool calls", judge_prompt)
+
+    def test_turn_usage_requires_one_complete_non_negative_record(self) -> None:
+        usage = {
+            "input_tokens": 100,
+            "cached_input_tokens": 20,
+            "output_tokens": 10,
+            "reasoning_output_tokens": 5,
+        }
+        self.assertEqual(
+            usage,
+            RUNNER._turn_usage([{"type": "turn.completed", "usage": usage}]),
+        )
+        with self.assertRaisesRegex(RUNNER.EvalRuntimeError, "expected 1"):
+            RUNNER._turn_usage([])
+        with self.assertRaisesRegex(RUNNER.EvalRuntimeError, "non-negative integer"):
+            RUNNER._turn_usage(
+                [
+                    {
+                        "type": "turn.completed",
+                        "usage": {**usage, "output_tokens": -1},
+                    }
+                ]
+            )
+
+    def test_eval_source_snapshot_freezes_payload_and_runtime_inputs(self) -> None:
+        source = self.root / "source"
+        source.mkdir()
+        shutil.copyfile(REPO_ROOT / "AGENTS.md", source / "AGENTS.md")
+        shutil.copytree(REPO_ROOT / ".agents", source / ".agents")
+        shutil.copytree(
+            REPO_ROOT / "tests/evals/schemas", source / "tests/evals/schemas"
+        )
+        shutil.copyfile(
+            REPO_ROOT / "tests/evals/codex-runtime-contract.json",
+            source / "tests/evals/codex-runtime-contract.json",
+        )
+        snapshot = self.root / "snapshot"
+        RUNNER._snapshot_eval_source(source, snapshot)
+        snapshot_digest = RUNNER._payload_sha256(snapshot)
+        self.assertEqual(RUNNER._payload_sha256(source), snapshot_digest)
+
+        (source / "AGENTS.md").write_text("changed after snapshot\n", encoding="utf-8")
+        self.assertEqual(snapshot_digest, RUNNER._payload_sha256(snapshot))
+        self.assertNotEqual(snapshot_digest, RUNNER._payload_sha256(source))
+        self.assertTrue(
+            (snapshot / "tests/evals/schemas/run-summary.schema.json").is_file()
+        )
+        self.assertTrue(
+            (snapshot / "tests/evals/codex-runtime-contract.json").is_file()
+        )
+
+        linked_source = self.root / "linked-source"
+        linked_source.mkdir()
+        shutil.copyfile(REPO_ROOT / "AGENTS.md", linked_source / "AGENTS.md")
+        shutil.copytree(REPO_ROOT / ".agents", linked_source / ".agents")
+        (linked_source / "tests").symlink_to(source / "tests", target_is_directory=True)
+        with self.assertRaisesRegex(RUNNER.EvalInputError, "non-symlink directory"):
+            RUNNER._snapshot_eval_source(linked_source, self.root / "bad-snapshot")
 
     def test_behavior_prompt_includes_direct_skill_resource(self) -> None:
         case = RUNNER._load_eval_cases(
@@ -715,7 +775,15 @@ class RunAgentEvalsTests(unittest.TestCase):
                         "type": "item.completed",
                         "item": {{"type": "agent_message", "text": final}}
                     }}))
-                    print(json.dumps({{"type": "turn.completed", "usage": {{}}}}))
+                    print(json.dumps({{
+                        "type": "turn.completed",
+                        "usage": {{
+                            "input_tokens": 100,
+                            "cached_input_tokens": 20,
+                            "output_tokens": 10,
+                            "reasoning_output_tokens": 5
+                        }}
+                    }}))
                     raise SystemExit(0)
                 raise SystemExit(2)
                 """
@@ -758,6 +826,32 @@ class RunAgentEvalsTests(unittest.TestCase):
         )
         self.assertRegex(summary["payload_sha256"], r"^[0-9a-f]{64}$")
         self.assertEqual([], summary["preflight"]["tool_surface"]["tools"])
+        self.assertEqual(
+            {
+                "subject": {
+                    "calls": 2,
+                    "input_tokens": 200,
+                    "cached_input_tokens": 40,
+                    "output_tokens": 20,
+                    "reasoning_output_tokens": 10,
+                },
+                "judge": {
+                    "calls": 1,
+                    "input_tokens": 100,
+                    "cached_input_tokens": 20,
+                    "output_tokens": 10,
+                    "reasoning_output_tokens": 5,
+                },
+                "total": {
+                    "calls": 3,
+                    "input_tokens": 300,
+                    "cached_input_tokens": 60,
+                    "output_tokens": 30,
+                    "reasoning_output_tokens": 15,
+                },
+            },
+            summary["usage"],
+        )
         self.assertEqual(
             0, summary["preflight"]["judge_prompt_sources"]["fixture_entry_count"]
         )

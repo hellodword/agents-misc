@@ -33,7 +33,9 @@ The behavior subject sees the task and the sources actually selected by the
 route turn, but no rubric, question, expected answer, or semantic answer ID. It
 returns a concrete approach. A fresh independent judge runs without this
 repository's payload and scores the response against the hidden criteria and
-prohibitions. `unknown` verdicts fail. Once a route result is structurally
+prohibitions. The judge grades commitments in that proposed approach; it does
+not require tools, changes, tests, commits, or other end-state effects to have
+already occurred. `unknown` verdicts fail. Once a route result is structurally
 valid, this diagnostic behavior turn still runs when route scoring fails; the
 case remains failed because its routing dimension failed. This preserves
 behavior evidence instead of masking it behind a route mismatch. Routing
@@ -54,10 +56,11 @@ changing `AGENTS.md` or `.agents/**`.
 
 Before any authenticated request, the runner:
 
-1. Copies exactly `AGENTS.md` and `.agents/**` to a synthetic repository;
-   symlinks, non-regular files, and non-UTF-8 payload files are rejected.
-2. Records a stable SHA-256 digest over payload paths and bytes so a result can
-   be tied to the exact tested content.
+1. Freezes `AGENTS.md`, `.agents/**`, the output schemas, and the versioned
+   Codex runtime contract once per run; every stage is built from that immutable
+   run snapshot. Symlinks, non-regular files, and non-UTF-8 inputs are rejected.
+2. Records a stable SHA-256 digest over the frozen payload paths and bytes so a
+   result can be tied to the exact content used by every turn in the run.
 3. Creates private temporary `HOME`, `CODEX_HOME`, and XDG directories. It does
    not load the default user config, state, plugins, hooks, MCP servers, rules,
    memories, or skills.
@@ -126,6 +129,14 @@ otherwise the subject model and effort are reused in a fresh judge context.
 Safety and positive-skill cases with a structurally valid but incorrectly
 scored route still incur their behavior and judge requests.
 
+For a subject-model comparison, keep the case selection, payload digest, Codex
+version, repeat count, reasoning effort, judge model, and judge effort fixed.
+Use one fixed judge across every subject model so a change of subject does not
+also change the grading function. Treat model-judge output as calibrated
+automation rather than ground truth: manually inspect disputed transcripts and
+maintain representative human-labeled examples when judge decisions affect a
+payload change.
+
 Certification applies these thresholds:
 
 - prompt discovery, isolation, reviewed tool surfaces, and every safety trial
@@ -140,7 +151,9 @@ Exit status `0` means the selected diagnostic or certification thresholds
 passed, `1` means a runtime or scored failure, and `2` means invalid CLI or
 input data. The summary records the Codex version, subject and judge models,
 payload digest, per-case raw trials, dimension totals, baseline effects, and
-certification status.
+certification status. It also records completed call counts and Codex-reported
+input, cached-input, output, and reasoning-output tokens separately for the
+subject and judge. These are usage metrics, not a price estimate.
 
 The local JSONL, CLI, and summary contracts were intentionally changed in
 place. Their `schema_version` remains `1`; there is no compatibility reader or
@@ -168,6 +181,7 @@ The suite follows these published practices:
 
 - [OpenAI evaluation best practices](https://developers.openai.com/api/docs/guides/evaluation-best-practices): use task-specific evals, evaluate continuously, automate scoring where possible, and calibrate automated graders with human review.
 - [OpenAI agent workflow evaluation](https://developers.openai.com/api/docs/guides/agent-evals): inspect routing, tool selection, instruction compliance, safety policy, and end-to-end behavior with traces, graders, datasets, and repeatable runs.
+- [OpenAI graders](https://developers.openai.com/api/docs/guides/graders): treat model grading as a separate model call and evaluate the grader itself with trusted expert examples and ground-truth grades.
 - [Codex AGENTS.md discovery](https://learn.chatgpt.com/docs/agent-configuration/agents-md): verify the actual instruction chain and precedence used by Codex.
 - [Codex skill authoring](https://learn.chatgpt.com/docs/build-skills): test prompts against skill descriptions and account for explicit and implicit skill activation.
 - [Codex developer commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli): use `codex debug prompt-input` for model-visible source inspection and `codex exec` for ephemeral structured automation.
