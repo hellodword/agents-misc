@@ -810,6 +810,51 @@ test("delivers appended entries over SSE and serves security headers", async ({
   await expect(
     page.getByText("Second live message while reading").first(),
   ).toBeVisible();
+  await expectTranscriptAtBottom(page);
+
+  const transcript = page.locator("#transcript-scroll");
+  await transcript.hover();
+  await page.mouse.wheel(0, -600);
+  await expect
+    .poll(() =>
+      transcript.evaluate(
+        (element) =>
+          element.scrollHeight - element.scrollTop - element.clientHeight,
+      ),
+    )
+    .toBeGreaterThan(80);
+  const readerPosition = await transcript.evaluate(
+    (element) => element.scrollTop,
+  );
+  await appendFile(
+    rollout,
+    '{"timestamp":"2025-01-02T03:06:30.000Z","type":"event_msg","payload":{"type":"agent_message","message":"Third live message after scrolling up","phase":"final"}}\n',
+  );
+  await expect(
+    page.getByRole("button", { name: /Go to 1 new item/ }),
+  ).toBeVisible({ timeout: 8_000 });
+  await expect
+    .poll(async () =>
+      Math.abs(
+        (await transcript.evaluate((element) => element.scrollTop)) -
+          readerPosition,
+      ),
+    )
+    .toBeLessThanOrEqual(3);
+  await expect(
+    page.getByText("Third live message after scrolling up").first(),
+  ).not.toBeVisible();
+
+  await transcript.hover();
+  await page.mouse.wheel(0, 100_000);
+  await expect(
+    page.getByText("Third live message after scrolling up").first(),
+  ).toBeVisible();
+  await expectTranscriptAtBottom(page);
+  await expect(
+    page.getByRole("button", { name: /Go to 1 new item/ }),
+  ).toHaveCount(0);
+
   await page.getByRole("button", { name: "Search" }).click();
   await page.getByRole("combobox", { name: "Search" }).fill("code_needle");
   await expect(

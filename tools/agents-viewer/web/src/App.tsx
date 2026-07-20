@@ -1313,14 +1313,19 @@ function Conversation({
   const [nextCursor, setNextCursor] = useState<string>();
   const [error, setError] = useState("");
   const [newCount, setNewCount] = useState(0);
+  const [pendingTailSequence, setPendingTailSequence] = useState<number>();
   const [visibilityReady, setVisibilityReady] = useState(false);
   const [deepLinkDisplayType, setDeepLinkDisplayType] =
     useState<ConversationDisplayType>();
   const [scrollTarget, setScrollTarget] = useState<ScrollTarget>();
   const viewport = useRef<ViewportState>({ atBottom: true });
   const requestSequence = useRef(0);
+  const pageEpoch = useRef(0);
   const targetSequence = useRef(0);
-  const loadingCursors = useRef(new Set<string>());
+  const loadingPages = useRef(
+    new Map<string, { token: symbol; promise: Promise<void> }>(),
+  );
+  const pendingTailSequenceRef = useRef<number | undefined>(undefined);
   const handledSignal = useRef(0);
   const refreshTimer = useRef<number | undefined>(undefined);
   const selectedConversationDisplayTypes = canonicalConversationDisplayTypes(
@@ -1337,12 +1342,16 @@ function Conversation({
 
   useEffect(() => {
     const controller = new AbortController();
+    pageEpoch.current += 1;
+    loadingPages.current.clear();
     setEntries([]);
     setPreviousCursor(undefined);
     setNextCursor(undefined);
     setDeepLinkDisplayType(undefined);
     onForceConversationDisplayType(undefined);
     setNewCount(0);
+    pendingTailSequenceRef.current = undefined;
+    setPendingTailSequence(undefined);
     viewport.current = { atBottom: !around };
     if (!around) {
       setVisibilityReady(true);
@@ -1381,6 +1390,8 @@ function Conversation({
       signal?: AbortSignal,
     ) => {
       const request = ++requestSequence.current;
+      pageEpoch.current += 1;
+      const pendingAtStart = pendingTailSequenceRef.current;
       const options =
         kind === "around" && id
           ? {
@@ -1399,12 +1410,20 @@ function Conversation({
           api.entries(sessionId, options, signal),
         ]);
         if (request !== requestSequence.current) return;
+        pageEpoch.current += 1;
         setSession(detail.summary);
         setEntries(page.data);
         setPreviousCursor(page.previousCursor);
         setNextCursor(page.nextCursor);
         setScrollTarget({ kind, id, token: ++targetSequence.current });
-        if (kind === "bottom") setNewCount(0);
+        if (
+          kind === "bottom" &&
+          pendingTailSequenceRef.current === pendingAtStart
+        ) {
+          pendingTailSequenceRef.current = undefined;
+          setPendingTailSequence(undefined);
+          setNewCount(0);
+        }
         setError("");
       } catch (f) {
         if (request === requestSequence.current && !(f instanceof DOMException))
@@ -1439,7 +1458,11 @@ function Conversation({
       if (viewport.current.atBottom) void replacePage("bottom");
       else if (resync && viewport.current.anchorId)
         void replacePage("around", viewport.current.anchorId);
-      else setNewCount((value) => value + 1);
+      else {
+        setNewCount((value) => value + 1);
+        pendingTailSequenceRef.current = eventSequence;
+        setPendingTailSequence(eventSequence);
+      }
     }, 100);
     return () => {
       if (refreshTimer.current !== undefined) {
@@ -1449,48 +1472,95 @@ function Conversation({
     };
   }, [eventSequence, replacePage, resyncSequence]);
 
-  const loadOlder = useCallback(async () => {
+  const loadOlder = useCallback(() => {
     const cursor = previousCursor;
-    if (!cursor || loadingCursors.current.has(cursor)) return;
-    loadingCursors.current.add(cursor);
-    try {
-      const page = await api.entries(sessionId, {
-        cursor,
-        limit: 100,
-        displayTypes: serializedConversationDisplayTypes,
-      });
-      setEntries((current) => mergeEntries(page.data, current));
-      setPreviousCursor(page.previousCursor);
-      setError("");
-    } catch (f) {
-      setError(message(f));
-    } finally {
-      loadingCursors.current.delete(cursor);
-    }
+    if (!cursor) return;
+    const key = `older:${cursor}`;
+    const existing = loadingPages.current.get(key);
+    if (existing) return existing.promise;
+    const token = Symbol(key);
+    const epoch = pageEpoch.current;
+    const promise = (async () => {
+      try {
+        const page = await api.entries(sessionId, {
+          cursor,
+          limit: 100,
+          displayTypes: serializedConversationDisplayTypes,
+        });
+        if (epoch !== pageEpoch.current) return;
+        setEntries((current) => mergeEntries(page.data, current));
+        setPreviousCursor(page.previousCursor);
+        setError("");
+      } catch (f) {
+        if (epoch === pageEpoch.current) setError(message(f));
+      } finally {
+        if (loadingPages.current.get(key)?.token === token)
+          loadingPages.current.delete(key);
+      }
+    })();
+    loadingPages.current.set(key, { token, promise });
+    return promise;
   }, [previousCursor, serializedConversationDisplayTypes, sessionId]);
 
-  const loadNewer = useCallback(async () => {
-    const cursor = nextCursor;
-    if (!cursor || loadingCursors.current.has(cursor)) return;
-    loadingCursors.current.add(cursor);
-    try {
-      const page = await api.entries(sessionId, {
-        cursor,
-        limit: 100,
-        displayTypes: serializedConversationDisplayTypes,
-      });
-      setEntries((current) => mergeEntries(current, page.data));
-      setNextCursor(page.nextCursor);
-      setError("");
-    } catch (f) {
-      setError(message(f));
-    } finally {
-      loadingCursors.current.delete(cursor);
-    }
-  }, [nextCursor, serializedConversationDisplayTypes, sessionId]);
+  const loadNewer = useCallback(
+    (background = false) => {
+      const cursor = nextCursor;
+      const anchor = entries.at(-1)?.id;
+      const pendingAtStart = pendingTailSequence;
+      if (!cursor && (pendingAtStart === undefined || !anchor)) return;
+      const key = cursor ? `newer:${cursor}` : `live-tail:${anchor}`;
+      const existing = loadingPages.current.get(key);
+      if (existing) return existing.promise;
+      const token = Symbol(key);
+      const epoch = pageEpoch.current;
+      const promise = (async () => {
+        try {
+          const page = await api.entries(sessionId, {
+            ...(cursor ? { cursor } : { aroundEntryId: anchor }),
+            limit: 100,
+            displayTypes: serializedConversationDisplayTypes,
+          });
+          if (epoch !== pageEpoch.current) return;
+          setEntries((current) => mergeEntries(page.data, current));
+          setNextCursor(page.nextCursor);
+          if (
+            pendingAtStart !== undefined &&
+            pendingTailSequenceRef.current === pendingAtStart
+          ) {
+            pendingTailSequenceRef.current = undefined;
+            setPendingTailSequence((current) =>
+              current === pendingAtStart ? undefined : current,
+            );
+          }
+          setError("");
+        } catch (f) {
+          if (!background && epoch === pageEpoch.current)
+            setError(message(f));
+        } finally {
+          if (loadingPages.current.get(key)?.token === token)
+            loadingPages.current.delete(key);
+        }
+      })();
+      loadingPages.current.set(key, { token, promise });
+      return promise;
+    },
+    [
+      entries,
+      nextCursor,
+      pendingTailSequence,
+      serializedConversationDisplayTypes,
+      sessionId,
+    ],
+  );
+
+  useEffect(() => {
+    if (pendingTailSequence === undefined) return;
+    void loadNewer(true);
+  }, [loadNewer, pendingTailSequence]);
 
   const updateViewport = useCallback((next: ViewportState) => {
     viewport.current = next;
+    if (next.atBottom) setNewCount(0);
   }, []);
   return (
     <>
@@ -1518,12 +1588,14 @@ function Conversation({
           entries={entries}
           around={around}
           hasOlder={Boolean(previousCursor)}
-          hasNewer={Boolean(nextCursor)}
+          hasNewer={
+            Boolean(nextCursor) || pendingTailSequence !== undefined
+          }
           newCount={newCount}
           scrollTarget={scrollTarget}
           onInspect={(id) => onInspect(sessionId, id)}
           onLoadOlder={loadOlder}
-          onLoadNewer={loadNewer}
+          onLoadNewer={() => loadNewer()}
           onJumpTop={() => replacePage("top")}
           onJumpBottom={() => replacePage("bottom")}
           onViewportChange={updateViewport}

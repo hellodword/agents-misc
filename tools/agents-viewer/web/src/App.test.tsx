@@ -73,6 +73,21 @@ const warningEntry: EntryListItem = {
   title: "Warning",
   primaryPreview: "Linked warning detail",
 };
+const liveEntry: EntryListItem = {
+  ...entry,
+  id: "e2",
+  sequence: 2,
+  presentation: "response",
+  role: "assistant",
+  title: "Assistant",
+  primaryPreview: "First live tail entry",
+};
+const laterLiveEntry: EntryListItem = {
+  ...liveEntry,
+  id: "e3",
+  sequence: 3,
+  primaryPreview: "Second live tail entry",
+};
 type EventSourceHarness = {
   instances: Array<{ emit: (name: string, data: unknown) => void }>;
 };
@@ -1052,6 +1067,101 @@ describe("Agents Viewer UI", () => {
       expect(callsFor("/api/v1/sessions/s1/entries")).toBe(entriesBefore + 1),
     );
     expect(callsFor("/api/v1/session-groups?")).toBe(listBefore + 1);
+  });
+  it("prefetches a stale live tail without moving the reader", async () => {
+    const fallback = vi.mocked(fetch);
+    let resolveFirstTail: (response: Response) => void = () => {};
+    const firstTail = new Promise<Response>((resolve) => {
+      resolveFirstTail = resolve;
+    });
+    const controlled = vi.fn(
+      (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("aroundEntryId=e1")) return firstTail;
+        if (url.includes("aroundEntryId=e2"))
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                data: [liveEntry, laterLiveEntry],
+                partial: false,
+              }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            ),
+          );
+        return fallback(input, init);
+      },
+    );
+    vi.stubGlobal("fetch", controlled);
+    render(
+      <MemoryRouter initialEntries={["/sessions/s1"]}>
+        <App />
+      </MemoryRouter>,
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Hello session" }),
+    ).toBeInTheDocument();
+    const transcript = document.getElementById("transcript-scroll")!;
+    Object.defineProperties(transcript, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, value: 1200 },
+    });
+    fireEvent.wheel(transcript, { deltaY: -100 });
+    fireEvent.scroll(transcript, { target: { scrollTop: 400 } });
+    const readerPosition = transcript.scrollTop;
+    const stream = eventSources().instances[0];
+
+    stream.emit("entryUpdated", {
+      generation: 2,
+      sessionId: "s1",
+      entryId: liveEntry.id,
+    });
+    await waitFor(() =>
+      expect(
+        controlled.mock.calls.filter(([input]) =>
+          String(input).includes("aroundEntryId=e1"),
+        ),
+      ).toHaveLength(1),
+    );
+    expect(
+      await screen.findByRole("button", { name: "Go to 1 new items" }),
+    ).toBeInTheDocument();
+
+    stream.emit("entryUpdated", {
+      generation: 3,
+      sessionId: "s1",
+      entryId: laterLiveEntry.id,
+    });
+    expect(
+      await screen.findByRole("button", { name: "Go to 2 new items" }),
+    ).toBeInTheDocument();
+    expect(
+      controlled.mock.calls.filter(([input]) =>
+        String(input).includes("aroundEntryId=e1"),
+      ),
+    ).toHaveLength(1);
+
+    resolveFirstTail(
+      new Response(
+        JSON.stringify({ data: [entry, liveEntry], partial: false }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        controlled.mock.calls.some(([input]) =>
+          String(input).includes("aroundEntryId=e2"),
+        ),
+      ).toBe(true),
+    );
+    expect(await screen.findByText("Second live tail entry")).toBeVisible();
+    expect(transcript.scrollTop).toBe(readerPosition);
+
+    fireEvent.scroll(transcript, { target: { scrollTop: 800 } });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: /new items?/ }),
+      ).not.toBeInTheDocument(),
+    );
   });
   it("allows only one in-flight request for a pagination cursor", async () => {
     const fallback = vi.mocked(fetch);
