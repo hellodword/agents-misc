@@ -1,0 +1,172 @@
+diff --git a/codex-rs/core/src/tools/handlers/request_user_input.rs b/codex-rs/core/src/tools/handlers/request_user_input.rs
+index 4f26865..cd5c49c 100644
+--- a/codex-rs/core/src/tools/handlers/request_user_input.rs
++++ b/codex-rs/core/src/tools/handlers/request_user_input.rs
+@@ -68,8 +68,8 @@ impl RequestUserInputHandler {
+         }
+ 
+         let args: RequestUserInputArgs = parse_arguments(&arguments)?;
+-        let args =
+-            normalize_request_user_input_args(args).map_err(FunctionCallError::RespondToModel)?;
++        let args = normalize_request_user_input_args(args, mode)
++            .map_err(FunctionCallError::RespondToModel)?;
+         let response = session
+             .request_user_input(turn.as_ref(), call_id, args)
+             .await
+diff --git a/codex-rs/core/src/tools/handlers/request_user_input_spec.rs b/codex-rs/core/src/tools/handlers/request_user_input_spec.rs
+index 0eba5ee..8f673fd 100644
+--- a/codex-rs/core/src/tools/handlers/request_user_input_spec.rs
++++ b/codex-rs/core/src/tools/handlers/request_user_input_spec.rs
+@@ -107,6 +107,7 @@ pub fn request_user_input_unavailable_message(
+ 
+ pub fn normalize_request_user_input_args(
+     mut args: RequestUserInputArgs,
++    mode: ModeKind,
+ ) -> Result<RequestUserInputArgs, String> {
+     let missing_options = args
+         .questions
+@@ -120,7 +121,9 @@ pub fn normalize_request_user_input_args(
+         question.is_other = true;
+     }
+ 
+-    if let Some(auto_resolution_ms) = args.auto_resolution_ms {
++    if mode == ModeKind::Plan {
++        args.auto_resolution_ms = None;
++    } else if let Some(auto_resolution_ms) = args.auto_resolution_ms {
+         let clamped_auto_resolution_ms =
+             auto_resolution_ms.clamp(MIN_AUTO_RESOLUTION_MS, MAX_AUTO_RESOLUTION_MS);
+         if clamped_auto_resolution_ms != auto_resolution_ms {
+diff --git a/codex-rs/core/src/tools/handlers/request_user_input_spec_tests.rs b/codex-rs/core/src/tools/handlers/request_user_input_spec_tests.rs
+index 2b532cd..885ab8f 100644
+--- a/codex-rs/core/src/tools/handlers/request_user_input_spec_tests.rs
++++ b/codex-rs/core/src/tools/handlers/request_user_input_spec_tests.rs
+@@ -131,7 +131,7 @@ fn normalize_request_user_input_args_clamps_out_of_range_auto_resolution_ms() {
+     };
+ 
+     assert_eq!(
+-        normalize_request_user_input_args(args.clone()),
++        normalize_request_user_input_args(args.clone(), ModeKind::Default),
+         Ok(RequestUserInputArgs {
+             questions: vec![RequestUserInputQuestion {
+                 is_other: true,
+@@ -141,10 +141,13 @@ fn normalize_request_user_input_args_clamps_out_of_range_auto_resolution_ms() {
+         })
+     );
+     assert_eq!(
+-        normalize_request_user_input_args(RequestUserInputArgs {
+-            auto_resolution_ms: Some(MAX_AUTO_RESOLUTION_MS + 1),
+-            ..args.clone()
+-        }),
++        normalize_request_user_input_args(
++            RequestUserInputArgs {
++                auto_resolution_ms: Some(MAX_AUTO_RESOLUTION_MS + 1),
++                ..args.clone()
++            },
++            ModeKind::Default,
++        ),
+         Ok(RequestUserInputArgs {
+             questions: vec![RequestUserInputQuestion {
+                 is_other: true,
+@@ -173,7 +176,7 @@ fn normalize_request_user_input_args_accepts_auto_resolution_boundaries() {
+     };
+ 
+     assert_eq!(
+-        normalize_request_user_input_args(args.clone()),
++        normalize_request_user_input_args(args.clone(), ModeKind::Default),
+         Ok(RequestUserInputArgs {
+             questions: vec![RequestUserInputQuestion {
+                 is_other: true,
+@@ -183,10 +186,13 @@ fn normalize_request_user_input_args_accepts_auto_resolution_boundaries() {
+         })
+     );
+     assert_eq!(
+-        normalize_request_user_input_args(RequestUserInputArgs {
+-            auto_resolution_ms: Some(MAX_AUTO_RESOLUTION_MS),
+-            ..args.clone()
+-        }),
++        normalize_request_user_input_args(
++            RequestUserInputArgs {
++                auto_resolution_ms: Some(MAX_AUTO_RESOLUTION_MS),
++                ..args.clone()
++            },
++            ModeKind::Default,
++        ),
+         Ok(RequestUserInputArgs {
+             questions: vec![RequestUserInputQuestion {
+                 is_other: true,
+@@ -197,6 +203,35 @@ fn normalize_request_user_input_args_accepts_auto_resolution_boundaries() {
+     );
+ }
+ 
++#[test]
++fn normalize_request_user_input_args_removes_auto_resolution_ms_in_plan_mode() {
++    let args = RequestUserInputArgs {
++        questions: vec![RequestUserInputQuestion {
++            id: "confirm".to_string(),
++            header: "Confirm".to_string(),
++            question: "Proceed?".to_string(),
++            is_other: false,
++            is_secret: false,
++            options: Some(vec![RequestUserInputQuestionOption {
++                label: "Yes (Recommended)".to_string(),
++                description: "Continue.".to_string(),
++            }]),
++        }],
++        auto_resolution_ms: Some(MIN_AUTO_RESOLUTION_MS),
++    };
++
++    assert_eq!(
++        normalize_request_user_input_args(args.clone(), ModeKind::Plan),
++        Ok(RequestUserInputArgs {
++            questions: vec![RequestUserInputQuestion {
++                is_other: true,
++                ..args.questions[0].clone()
++            }],
++            auto_resolution_ms: None,
++        })
++    );
++}
++
+ #[test]
+ fn request_user_input_unavailable_messages_respect_default_mode_feature_flag() {
+     assert_eq!(
+diff --git a/codex-rs/core/tests/suite/request_user_input.rs b/codex-rs/core/tests/suite/request_user_input.rs
+index 1348a87..6e919c7 100644
+--- a/codex-rs/core/tests/suite/request_user_input.rs
++++ b/codex-rs/core/tests/suite/request_user_input.rs
+@@ -72,7 +72,8 @@ async fn request_user_input_round_trip_resolves_pending() -> anyhow::Result<()>
+ }
+ 
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+-async fn request_user_input_round_trip_emits_auto_resolution_ms() -> anyhow::Result<()> {
++async fn request_user_input_round_trip_strips_auto_resolution_ms_in_plan_mode() -> anyhow::Result<()>
++{
+     request_user_input_round_trip_for_mode(ModeKind::Plan, Some(60_000)).await
+ }
+ 
+@@ -176,7 +177,12 @@ async fn request_user_input_round_trip_for_mode(
+     .await;
+     assert_eq!(request.call_id, call_id);
+     assert_eq!(request.questions.len(), 1);
+-    assert_eq!(request.auto_resolution_ms, auto_resolution_ms);
++    let expected_auto_resolution_ms = if mode == ModeKind::Plan {
++        None
++    } else {
++        auto_resolution_ms
++    };
++    assert_eq!(request.auto_resolution_ms, expected_auto_resolution_ms);
+     assert_eq!(request.questions[0].is_other, true);
+     assert!(
+         timeout(Duration::from_millis(200), async {
+@@ -450,8 +456,9 @@ async fn request_user_input_rejected_in_default_mode_by_default() -> anyhow::Res
+ }
+ 
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+-async fn request_user_input_round_trip_in_default_mode_with_feature() -> anyhow::Result<()> {
+-    request_user_input_round_trip_for_mode(ModeKind::Default, /*auto_resolution_ms*/ None).await
++async fn request_user_input_round_trip_emits_auto_resolution_ms_in_default_mode_with_feature()
++-> anyhow::Result<()> {
++    request_user_input_round_trip_for_mode(ModeKind::Default, Some(60_000)).await
+ }
+ 
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
