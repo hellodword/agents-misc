@@ -663,6 +663,37 @@ describe("Agents Viewer UI", () => {
     );
     expect(isDefaultVisible(command)).toBe(true);
   });
+  it("renders localized attachment counts without rendering or copying payloads", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, "writeText");
+    const attached = {
+      ...entry,
+      id: "attachment-only",
+      primaryPreview: "",
+      primaryBytes: 0,
+      metadata: {
+        attachmentCount: 4,
+        imageAttachmentCount: 2,
+        audioAttachmentCount: 1,
+        imageUrl: "data:image/png;base64,must-not-render",
+        audioUrl: "data:audio/wav;base64,must-not-render",
+      },
+    };
+    const { container } = render(
+      <VirtualTranscript entries={[attached]} onInspect={vi.fn()} />,
+    );
+
+    expect(screen.getByRole("list", { name: "Attachments" })).toBeInTheDocument();
+    expect(screen.getByText("Images: 2")).toBeInTheDocument();
+    expect(screen.getByText("Audio: 1")).toBeInTheDocument();
+    expect(screen.getByText("Other: 1")).toBeInTheDocument();
+    expect(container.querySelector("img")).not.toBeInTheDocument();
+    expect(container.querySelector("audio")).not.toBeInTheDocument();
+    expect(screen.queryByText(/must-not-render/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Copy message" }));
+    expect(writeText).toHaveBeenCalledWith("");
+  });
   it("renders each request_user_input question as an incoming poll message", async () => {
     const user = userEvent.setup();
     const inspect = vi.fn();

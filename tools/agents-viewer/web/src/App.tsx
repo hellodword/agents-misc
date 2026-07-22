@@ -2189,6 +2189,7 @@ function MessageBubbleContent({
         {entry.presentation === "user" ? t("user") : t("assistant")}:{" "}
       </span>
       <SafeMarkdown text={text} />
+      <MessageAttachmentBadges metadata={entry.metadata} />
       {loadState === "loading" && (
         <p className="message-load-status" role="status">
           {t("loadingFullMessage")}
@@ -2222,6 +2223,48 @@ function MessageBubbleContent({
       </footer>
     </>
   );
+}
+
+function MessageAttachmentBadges({
+  metadata,
+}: {
+  metadata: Record<string, unknown>;
+}) {
+  const { t } = useTranslation();
+  const imageCount = attachmentCount(metadata, "imageAttachmentCount");
+  const audioCount = attachmentCount(metadata, "audioAttachmentCount");
+  const totalCount = attachmentCount(metadata, "attachmentCount");
+  const otherCount = Math.max(0, totalCount - imageCount - audioCount);
+  if (imageCount === 0 && audioCount === 0 && otherCount === 0) return null;
+
+  return (
+    <div className="message-attachments" role="list" aria-label={t("attachments")}>
+      {imageCount > 0 && (
+        <span className="message-attachment-badge" role="listitem">
+          {t("imageAttachments", { count: imageCount })}
+        </span>
+      )}
+      {audioCount > 0 && (
+        <span className="message-attachment-badge" role="listitem">
+          {t("audioAttachments", { count: audioCount })}
+        </span>
+      )}
+      {otherCount > 0 && (
+        <span className="message-attachment-badge" role="listitem">
+          {t("otherAttachments", { count: otherCount })}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function attachmentCount(metadata: Record<string, unknown>, key: string) {
+  const value = metadata[key];
+  return typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value > 0
+    ? value
+    : 0;
 }
 
 function RequestUserInputMessages({

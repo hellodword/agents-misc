@@ -80,6 +80,8 @@ The compatibility promise is for Codex CLI rollout records. Source metadata prod
 
 For paginated subagent rollouts, records before `subagent_history_start_ordinal` remain available as raw records with the `inherited` status but are not projected into the child's conversation. Ordinal gaps are valid. A non-null `history_base` points at content outside the current rollout, so the viewer marks that session partial instead of pretending the referenced prefix was indexed.
 
+Message image and audio attachments are represented only by localized count badges. The transcript does not render attachment URLs, data URIs, ciphertext, or media players; copying a message copies its text only.
+
 Fixtures cover Codex 0.120, the 0.144 legacy baseline, the 0.145 compatibility baseline and subagent-history boundary, deduplication, malformed input, source classification, parent/fork metadata, and plan handoff grouping.
 
 ## Following upstream Codex

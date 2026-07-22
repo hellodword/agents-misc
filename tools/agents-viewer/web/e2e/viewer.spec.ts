@@ -654,6 +654,60 @@ test("renders multiple request_user_input questions as responsive poll messages"
   await expect(page.locator("#entry-inspector")).toBeVisible();
 });
 
+test("renders attachment-only messages as safe count badges", async ({
+  page,
+  rollout,
+}) => {
+  const externalRequests: string[] = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (!["127.0.0.1", "localhost", "[::1]"].includes(url.hostname))
+      externalRequests.push(request.url());
+  });
+  const record = {
+    timestamp: "2025-01-02T03:11:00.000Z",
+    type: "event_msg",
+    payload: {
+      type: "item_completed",
+      thread_id: "11111111-1111-4111-8111-111111111111",
+      turn_id: "turn-browser-attachments",
+      completed_at_ms: 1_735_787_460_000,
+      item: {
+        type: "UserMessage",
+        id: "item-browser-attachments",
+        content: [
+          {
+            type: "image",
+            image_url: "https://invalid.example/image-must-not-load.png",
+          },
+          {
+            type: "audio",
+            audio_url: "https://invalid.example/audio-must-not-load.wav",
+          },
+        ],
+      },
+    },
+  };
+  await appendFile(rollout, `\n${JSON.stringify(record)}\n`);
+
+  const attachmentList = page.getByRole("list", { name: "Attachments" });
+  await expect(attachmentList).toBeVisible();
+  await expect(attachmentList.getByText("Images: 1")).toBeVisible();
+  await expect(attachmentList.getByText("Audio: 1")).toBeVisible();
+  const bubble = page.locator(".message-bubble").filter({
+    has: attachmentList,
+  });
+  await expect(bubble.locator("img")).toHaveCount(0);
+  await expect(bubble.locator("audio")).toHaveCount(0);
+  await expect(bubble).not.toContainText("invalid.example");
+  expect(externalRequests).toEqual([]);
+
+  await bubble.getByRole("button", { name: "Copy message" }).click();
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe("");
+});
+
 test("supports locale, theme, keyboard focus, responsive sheets, and accessibility", async ({
   page,
 }) => {
@@ -843,7 +897,7 @@ test("delivers appended entries over SSE and serves security headers", async ({
     .toBeLessThanOrEqual(3);
   await expect(
     page.getByText("Third live message after scrolling up").first(),
-  ).not.toBeVisible();
+  ).not.toBeInViewport();
 
   await transcript.hover();
   await page.mouse.wheel(0, 100_000);
