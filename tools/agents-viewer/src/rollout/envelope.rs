@@ -3,6 +3,7 @@ use serde_json::Value;
 #[derive(Clone, Debug)]
 pub struct Envelope {
     pub timestamp: Option<String>,
+    pub ordinal: Option<u64>,
     pub kind: String,
     pub payload: Value,
 }
@@ -13,6 +14,7 @@ impl Envelope {
         let Some(object) = value.as_object() else {
             return Ok(Self {
                 timestamp: None,
+                ordinal: None,
                 kind: String::new(),
                 payload: Value::Null,
             });
@@ -22,6 +24,7 @@ impl Envelope {
                 .get("timestamp")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
+            ordinal: object.get("ordinal").and_then(Value::as_u64),
             kind: object
                 .get("type")
                 .and_then(Value::as_str)

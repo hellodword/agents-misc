@@ -29,13 +29,14 @@ async fn status_sessions_entries_content_raw_and_search_follow_contract() {
         .await
         .unwrap();
     let page = support::json(response).await;
-    let session_id = page["data"][0]["id"].as_str().unwrap();
+    assert_eq!(page["data"].as_array().unwrap().len(), 1);
     assert!(
         page["data"][0]["updatedAt"]
             .as_str()
             .unwrap()
             .ends_with('Z')
     );
+    let session_id = "11111111-1111-4111-8111-111111111111";
     let response = router
         .clone()
         .oneshot(support::request(

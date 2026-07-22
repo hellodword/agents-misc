@@ -30,7 +30,7 @@ export type SearchField = "sessionTitle" | "entryTitle" | "primary" | "secondary
 
 export type RawEncoding = "utf8" | "binary";
 
-export type RawParseStatus = "valid" | "invalidJson" | "invalidUtf8" | "oversize" | "incompleteTail" | "unknown";
+export type RawParseStatus = "valid" | "inherited" | "invalidJson" | "invalidUtf8" | "oversize" | "incompleteTail" | "unknown";
 
 export type SseEventType = "indexProgress" | "sessionUpdated" | "entryUpdated" | "diagnostic" | "resync" | "heartbeat";
 

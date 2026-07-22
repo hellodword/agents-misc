@@ -65,29 +65,35 @@ The viewer reads only:
 
 The compatibility promise is for Codex CLI rollout records. Source metadata produced inside the Codex ecosystem is also classified as interactive CLI, VS Code, `codex exec`, review, subagent, app-server/integration, or unknown so mixed Codex homes remain understandable. This classification is not a compatibility promise for unrelated agent products.
 
-| Persisted concept                              | Viewer behavior                                                                  |
-| ---------------------------------------------- | -------------------------------------------------------------------------------- |
-| `session_meta`                                 | Stable session ID, source, cwd, parent/fork, version, provider, and Git metadata |
-| `turn_context`, `world_state`                  | Collapsed technical context, excluded from default search                        |
-| known `event_msg` payloads                     | Messages, reasoning, tool lifecycle, plans, and diagnostics                      |
-| known `response_item` payloads                 | Messages, reasoning summaries, tool calls/results, and attachments               |
-| compacted history                              | Ordered technical/context entry with raw provenance                              |
-| unknown envelope or payload                    | Browsable raw reference plus diagnostic; the session continues                   |
-| malformed JSON, invalid UTF-8, incomplete tail | Partial-session diagnostic while stable records remain available                 |
-| oversized complete record                      | Bounded metadata/raw reference; the content API refuses an oversized read        |
+| Persisted concept                              | Viewer behavior                                                                                 |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `session_meta`                                 | Stable session ID, source, cwd, parent/fork, version, provider, Git, and paginated-history data |
+| `turn_context`, `world_state`                  | Collapsed technical context, excluded from default search                                       |
+| `event_msg.item_completed`                     | All Codex 0.145 turn-item families, including extension-owned display items                     |
+| other known `event_msg` payloads               | Messages, reasoning, tool lifecycle, plans, settings, and diagnostics                           |
+| known `response_item` payloads                 | Messages, reasoning summaries, inter-agent messages, tool calls/results, and attachments        |
+| inter-agent communication and delivery metadata | One collapsed technical message with merged delivery metadata                                 |
+| compacted history                              | Ordered technical/context entry with raw provenance                                             |
+| unknown envelope or payload                    | Browsable raw reference plus diagnostic; the session continues                                  |
+| malformed JSON, invalid UTF-8, incomplete tail | Partial-session diagnostic while stable records remain available                                |
+| oversized complete record                      | Bounded metadata/raw reference; the content API refuses an oversized read                       |
 
-Fixtures cover Codex 0.120, the 0.144 compatibility baseline, deduplication, malformed input, source classification, parent/fork metadata, and plan handoff grouping.
+For paginated subagent rollouts, records before `subagent_history_start_ordinal` remain available as raw records with the `inherited` status but are not projected into the child's conversation. Ordinal gaps are valid. A non-null `history_base` points at content outside the current rollout, so the viewer marks that session partial instead of pretending the referenced prefix was indexed.
+
+Fixtures cover Codex 0.120, the 0.144 legacy baseline, the 0.145 compatibility baseline and subagent-history boundary, deduplication, malformed input, source classification, parent/fork metadata, and plan handoff grouping.
 
 ## Following upstream Codex
 
-The declared compatibility baseline is OpenAI Codex tag [`rust-v0.144.1`](https://github.com/openai/codex/tree/rust-v0.144.1). The important boundary is the persisted rollout, not the shape of an internal crate API.
+The declared compatibility baseline is OpenAI Codex tag [`rust-v0.145.0`](https://github.com/openai/codex/tree/rust-v0.145.0). The important boundary is the persisted rollout, not the shape of an internal crate API.
 
 Upstream references for the baseline are:
 
-- [`codex-rs/protocol/src/protocol.rs`](https://github.com/openai/codex/blob/rust-v0.144.1/codex-rs/protocol/src/protocol.rs) for protocol events and response items;
-- [`codex-rs/rollout/src/recorder.rs`](https://github.com/openai/codex/blob/rust-v0.144.1/codex-rs/rollout/src/recorder.rs) for `RolloutRecorder`, `RolloutLine`, `RolloutItem`, and resume behavior;
-- [`codex-rs/state/src/runtime.rs`](https://github.com/openai/codex/blob/rust-v0.144.1/codex-rs/state/src/runtime.rs) for the state boundary that the viewer must not open;
-- [`codex-rs/file-watcher/src/lib.rs`](https://github.com/openai/codex/blob/rust-v0.144.1/codex-rs/file-watcher/src/lib.rs) for comparison with the viewer's narrower rollout-root watcher.
+- [`codex-rs/protocol/src/protocol.rs`](https://github.com/openai/codex/blob/rust-v0.145.0/codex-rs/protocol/src/protocol.rs) for rollout envelopes, session metadata, events, and inter-agent communication;
+- [`codex-rs/protocol/src/items.rs`](https://github.com/openai/codex/blob/rust-v0.145.0/codex-rs/protocol/src/items.rs) for durable `TurnItem` families;
+- [`codex-rs/protocol/src/models.rs`](https://github.com/openai/codex/blob/rust-v0.145.0/codex-rs/protocol/src/models.rs) for response items and structured attachment content;
+- [`codex-rs/rollout/src/recorder.rs`](https://github.com/openai/codex/blob/rust-v0.145.0/codex-rs/rollout/src/recorder.rs) for `RolloutRecorder`, `RolloutLine`, ordinals, and resume behavior;
+- [`codex-rs/state/src/runtime.rs`](https://github.com/openai/codex/blob/rust-v0.145.0/codex-rs/state/src/runtime.rs) for the state boundary that the viewer must not open;
+- [`codex-rs/file-watcher/src/lib.rs`](https://github.com/openai/codex/blob/rust-v0.145.0/codex-rs/file-watcher/src/lib.rs) for comparison with the viewer's narrower rollout-root watcher.
 
 Advancing the baseline is an evidence-driven maintenance task:
 

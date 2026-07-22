@@ -114,6 +114,7 @@ fn fixed_enums_use_contract_json_values() {
         RawEncoding::Utf8 => "utf8",
         RawEncoding::Binary => "binary",
         RawParseStatus::Valid => "valid",
+        RawParseStatus::Inherited => "inherited",
         RawParseStatus::InvalidJson => "invalidJson",
         RawParseStatus::InvalidUtf8 => "invalidUtf8",
         RawParseStatus::Oversize => "oversize",

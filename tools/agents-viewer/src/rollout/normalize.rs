@@ -103,6 +103,17 @@ fn parse_rollout_inner<R: BufRead, S: ParseSink>(
         || SessionBuilder::new(context, initial_session_id.clone()),
         |value| SessionBuilder::from_record(value.session.clone()),
     );
+    if let Some(source_id) = seed.as_ref().and_then(|value| {
+        value
+            .recent
+            .iter()
+            .rev()
+            .map(|(_, entry)| entry)
+            .find(|entry| entry.title == "Inter-agent message")
+            .and_then(source_item_id)
+    }) {
+        session.last_inter_agent_source_id = Some(source_id.to_owned());
+    }
     let mut deduper = seed
         .as_ref()
         .map_or_else(|| Deduper::new(initial_session_id), Deduper::from_seed);
@@ -254,13 +265,22 @@ fn parse_rollout_inner<R: BufRead, S: ParseSink>(
         }
         let raw_id = raw_ref_id(&session.id, line.byte_offset, line.byte_length);
         let known_envelope = is_known_envelope(&envelope.kind);
+        let inherited =
+            envelope.kind != "session_meta" && session.is_inherited_ordinal(envelope.ordinal);
         sink.emit(ParserOutput::Raw(RawRecord {
             id: raw_id.clone(),
             line_no: line.line_no,
             byte_offset: line.byte_offset,
             byte_length: line.byte_length,
             envelope_type: envelope.kind.clone(),
-            parse_status: if known_envelope { "valid" } else { "unknown" }.into(),
+            parse_status: if inherited {
+                "inherited"
+            } else if known_envelope {
+                "valid"
+            } else {
+                "unknown"
+            }
+            .into(),
             content_hash: line.content_hash,
             utf8: true,
             oversize: false,
@@ -283,6 +303,31 @@ fn parse_rollout_inner<R: BufRead, S: ParseSink>(
             );
         }
 
+        if envelope.kind == "session_meta"
+            && envelope
+                .payload
+                .get("history_base")
+                .is_some_and(|value| !value.is_null())
+        {
+            partial = true;
+            emit_diagnostic(
+                sink,
+                &mut session,
+                DiagnosticSeverity::Warning,
+                "unsupported_history_base",
+                "history_base references another rollout; only this rollout's local records are indexed",
+                Some(line.line_no),
+                Some(raw_id.clone()),
+            );
+        }
+
+        if known_envelope {
+            recognized_record_count = recognized_record_count.saturating_add(1);
+        }
+        if inherited {
+            continue;
+        }
+
         let normalized = normalize_envelope(
             &envelope,
             timestamp_micros,
@@ -290,9 +335,6 @@ fn parse_rollout_inner<R: BufRead, S: ParseSink>(
             line.line_no,
             &mut session,
         );
-        if known_envelope {
-            recognized_record_count = recognized_record_count.saturating_add(1);
-        }
         match normalized {
             NormalizeResult::None => {}
             NormalizeResult::Entry(candidate) => {
@@ -366,6 +408,39 @@ fn normalize_envelope(
             timestamp_micros,
             raw_id,
         )),
+        "inter_agent_communication" => {
+            let entry =
+                inter_agent_communication_entry(&envelope.payload, timestamp_micros, raw_id);
+            session.last_inter_agent_source_id = source_item_id(&entry).map(str::to_owned);
+            NormalizeResult::Entry(entry)
+        }
+        "inter_agent_communication_metadata" => {
+            let mut entry = simple_entry(
+                EntryKind::Context,
+                "Inter-agent delivery metadata",
+                String::new(),
+                timestamp_micros,
+                raw_id,
+                EntryOrigin::Derived,
+                false,
+                true,
+            );
+            if let Some(source_id) = &session.last_inter_agent_source_id {
+                entry
+                    .metadata
+                    .insert("sourceItemId".into(), Value::String(source_id.clone()));
+            }
+            if let Some(trigger_turn) = envelope
+                .payload
+                .get("trigger_turn")
+                .and_then(Value::as_bool)
+            {
+                entry
+                    .metadata
+                    .insert("triggerTurn".into(), Value::Bool(trigger_turn));
+            }
+            NormalizeResult::Entry(entry)
+        }
         "event_msg" => normalize_event(&envelope.payload, timestamp_micros, raw_id),
         "response_item" => {
             normalize_response_item(&envelope.payload, timestamp_micros, raw_id, session)
@@ -438,6 +513,24 @@ fn normalize_event(
             true,
         )),
         "agent_reasoning_raw_content" | "reasoning_raw_content_delta" => NormalizeResult::None,
+        "item_completed" => normalize_item_completed(payload, timestamp_micros, raw_id),
+        "thread_settings_applied" => {
+            let mut entry = simple_entry(
+                EntryKind::Context,
+                "Thread settings applied",
+                pretty_value(payload.get("thread_settings")),
+                timestamp_micros,
+                raw_id,
+                EntryOrigin::EventPresentation,
+                false,
+                true,
+            );
+            entry.metadata.insert(
+                "eventType".into(),
+                Value::String("thread_settings_applied".into()),
+            );
+            NormalizeResult::Entry(entry)
+        }
         "plan_update" | "plan_delta" => NormalizeResult::Entry(simple_entry(
             EntryKind::Plan,
             "Plan",
@@ -538,6 +631,365 @@ fn normalize_event(
     }
 }
 
+fn normalize_item_completed(
+    payload: &Value,
+    timestamp_micros: Option<i64>,
+    raw_id: &str,
+) -> NormalizeResult {
+    let item = payload.get("item").unwrap_or(&Value::Null);
+    let kind = item.get("type").and_then(Value::as_str).unwrap_or_default();
+    let mut entry = match kind {
+        "UserMessage" | "user_message" => {
+            let mut entry = message_entry(
+                MessageRole::User,
+                None,
+                user_input_text(item.get("content")),
+                timestamp_micros,
+                raw_id,
+                EntryOrigin::ItemCompleted,
+            );
+            add_attachment_metadata(&mut entry, item);
+            entry
+        }
+        "HookPrompt" | "hook_prompt" => simple_entry(
+            EntryKind::Context,
+            "Hook prompt",
+            content_text(item.get("fragments")),
+            timestamp_micros,
+            raw_id,
+            EntryOrigin::ItemCompleted,
+            false,
+            true,
+        ),
+        "AgentMessage" | "agent_message" => message_entry(
+            MessageRole::Assistant,
+            phase_field(item),
+            content_text(item.get("content")),
+            timestamp_micros,
+            raw_id,
+            EntryOrigin::ItemCompleted,
+        ),
+        "Plan" | "plan" => simple_entry(
+            EntryKind::Plan,
+            "Plan",
+            string_field(item, &["text"]),
+            timestamp_micros,
+            raw_id,
+            EntryOrigin::ItemCompleted,
+            true,
+            false,
+        ),
+        "Reasoning" | "reasoning" => {
+            let text = content_text(item.get("summary_text"));
+            let mut entry =
+                reasoning_entry(text.clone(), timestamp_micros, raw_id, !text.is_empty());
+            entry.origin = EntryOrigin::ItemCompleted;
+            entry
+        }
+        "CommandExecution" | "command_execution" => tool_entry(
+            ToolKind::Command,
+            "Command",
+            string_array(item.get("command"), " "),
+            joined_fields(
+                item,
+                &["formatted_output", "aggregated_output", "stdout", "stderr"],
+            ),
+            item_id(item),
+            status_field(item),
+            timestamp_micros,
+            raw_id,
+            EntryOrigin::ItemCompleted,
+        ),
+        "DynamicToolCall" | "dynamic_tool_call" => {
+            let status = if item.get("success").and_then(Value::as_bool) == Some(false) {
+                Some(ToolStatus::Failed)
+            } else {
+                status_field(item)
+            };
+            let mut entry = tool_entry(
+                ToolKind::Dynamic,
+                &string_field(item, &["tool"]),
+                pretty_value(item.get("arguments")),
+                joined_fields(item, &["content_items", "error"]),
+                item_id(item),
+                status,
+                timestamp_micros,
+                raw_id,
+                EntryOrigin::ItemCompleted,
+            );
+            add_attachment_metadata(&mut entry, item);
+            entry
+        }
+        "CollabAgentToolCall" | "collab_agent_tool_call" => tool_entry(
+            ToolKind::Other,
+            "Collaboration",
+            string_field(item, &["prompt", "tool"]),
+            joined_fields(
+                item,
+                &["receiver_agents", "receiver_thread_ids", "agents_states"],
+            ),
+            item_id(item),
+            status_field(item),
+            timestamp_micros,
+            raw_id,
+            EntryOrigin::ItemCompleted,
+        ),
+        "SubAgentActivity" | "sub_agent_activity" => simple_entry(
+            EntryKind::Marker,
+            "Sub-agent activity",
+            string_field(item, &["kind", "agent_path"]),
+            timestamp_micros,
+            raw_id,
+            EntryOrigin::ItemCompleted,
+            true,
+            true,
+        ),
+        "WebSearch" | "web_search" => tool_entry(
+            ToolKind::WebSearch,
+            "Web search",
+            string_field(item, &["query"]),
+            joined_fields(item, &["action", "results"]),
+            item_id(item),
+            Some(ToolStatus::Succeeded),
+            timestamp_micros,
+            raw_id,
+            EntryOrigin::ItemCompleted,
+        ),
+        "ImageView" | "image_view" => tool_entry(
+            ToolKind::ViewImage,
+            "Image attachment",
+            string_field(item, &["path"]),
+            String::new(),
+            item_id(item),
+            Some(ToolStatus::Succeeded),
+            timestamp_micros,
+            raw_id,
+            EntryOrigin::ItemCompleted,
+        ),
+        "Extension" | "extension" => {
+            match normalize_extension_item(item, timestamp_micros, raw_id) {
+                NormalizeResult::Entry(entry) => entry,
+                other => return other,
+            }
+        }
+        "ImageGeneration" | "image_generation" => {
+            let mut entry = tool_entry(
+                ToolKind::Other,
+                "Image generation",
+                string_field(item, &["revised_prompt", "revisedPrompt"]),
+                string_field(item, &["saved_path", "savedPath"]),
+                item_id(item),
+                status_field(item),
+                timestamp_micros,
+                raw_id,
+                EntryOrigin::ItemCompleted,
+            );
+            add_attachment_counts(&mut entry, 1, 0);
+            entry
+        }
+        "EnteredReviewMode" | "entered_review_mode" => simple_entry(
+            EntryKind::Marker,
+            "Review started",
+            string_field(item, &["user_facing_hint"]),
+            timestamp_micros,
+            raw_id,
+            EntryOrigin::ItemCompleted,
+            true,
+            true,
+        ),
+        "ExitedReviewMode" | "exited_review_mode" => simple_entry(
+            EntryKind::Marker,
+            "Review completed",
+            pretty_value(item.get("review_output")),
+            timestamp_micros,
+            raw_id,
+            EntryOrigin::ItemCompleted,
+            true,
+            true,
+        ),
+        "FileChange" | "file_change" => tool_entry(
+            ToolKind::Patch,
+            "Patch",
+            pretty_value(item.get("changes")),
+            joined_fields(item, &["stdout", "stderr"]),
+            item_id(item),
+            status_field(item).or(Some(ToolStatus::Succeeded)),
+            timestamp_micros,
+            raw_id,
+            EntryOrigin::ItemCompleted,
+        ),
+        "McpToolCall" | "mcp_tool_call" => {
+            let server = string_field(item, &["server"]);
+            let tool = string_field(item, &["tool"]);
+            let title = if server.is_empty() && tool.is_empty() {
+                "MCP tool".into()
+            } else {
+                format!("{server}/{tool}")
+            };
+            tool_entry(
+                ToolKind::Mcp,
+                &title,
+                pretty_value(item.get("arguments")),
+                joined_fields(item, &["result", "error"]),
+                item_id(item),
+                status_field(item),
+                timestamp_micros,
+                raw_id,
+                EntryOrigin::ItemCompleted,
+            )
+        }
+        "ContextCompaction" | "context_compaction" => simple_entry(
+            EntryKind::Marker,
+            "Conversation compacted",
+            String::new(),
+            timestamp_micros,
+            raw_id,
+            EntryOrigin::ItemCompleted,
+            false,
+            true,
+        ),
+        _ => {
+            return NormalizeResult::Unknown(
+                simple_entry(
+                    EntryKind::Unknown,
+                    if kind.is_empty() {
+                        "Unknown item"
+                    } else {
+                        kind
+                    },
+                    String::new(),
+                    timestamp_micros,
+                    raw_id,
+                    EntryOrigin::Derived,
+                    false,
+                    true,
+                ),
+                "unknown_turn_item",
+            );
+        }
+    };
+    add_source_item_id(&mut entry, item);
+    if let Some(turn_id) = string_option(payload, "turn_id") {
+        entry
+            .metadata
+            .insert("turnId".into(), Value::String(turn_id));
+    }
+    NormalizeResult::Entry(entry)
+}
+
+fn normalize_extension_item(
+    item: &Value,
+    timestamp_micros: Option<i64>,
+    raw_id: &str,
+) -> NormalizeResult {
+    let kind = item.get("kind").and_then(Value::as_str).unwrap_or_default();
+    let mut entry = match kind {
+        "clock.sleep" => tool_entry(
+            ToolKind::Other,
+            "Sleep",
+            item.get("durationMs")
+                .or_else(|| item.get("duration_ms"))
+                .and_then(Value::as_u64)
+                .map(|duration| format!("{duration} ms"))
+                .unwrap_or_default(),
+            String::new(),
+            item_id(item),
+            Some(ToolStatus::Succeeded),
+            timestamp_micros,
+            raw_id,
+            EntryOrigin::ItemCompleted,
+        ),
+        "web.search" => tool_entry(
+            ToolKind::WebSearch,
+            "Web search",
+            string_field(item, &["query"]),
+            joined_fields(item, &["action", "results"]),
+            item_id(item),
+            Some(ToolStatus::Succeeded),
+            timestamp_micros,
+            raw_id,
+            EntryOrigin::ItemCompleted,
+        ),
+        "image_gen.generation" => {
+            let mut entry = tool_entry(
+                ToolKind::Other,
+                "Image generation",
+                string_field(item, &["revisedPrompt", "revised_prompt"]),
+                string_field(item, &["savedPath", "saved_path"]),
+                item_id(item),
+                status_field(item),
+                timestamp_micros,
+                raw_id,
+                EntryOrigin::ItemCompleted,
+            );
+            add_attachment_counts(&mut entry, 1, 0);
+            entry
+        }
+        _ => {
+            return NormalizeResult::Unknown(
+                simple_entry(
+                    EntryKind::Unknown,
+                    if kind.is_empty() {
+                        "Unknown extension"
+                    } else {
+                        kind
+                    },
+                    String::new(),
+                    timestamp_micros,
+                    raw_id,
+                    EntryOrigin::Derived,
+                    false,
+                    true,
+                ),
+                "unknown_extension_item",
+            );
+        }
+    };
+    add_source_item_id(&mut entry, item);
+    NormalizeResult::Entry(entry)
+}
+
+fn inter_agent_communication_entry(
+    payload: &Value,
+    timestamp_micros: Option<i64>,
+    raw_id: &str,
+) -> NormalizedEntry {
+    let plaintext = string_field(payload, &["content"]);
+    let encrypted = has_encrypted_content(payload);
+    let mut entry = message_entry(
+        MessageRole::Assistant,
+        None,
+        if encrypted {
+            "Encrypted inter-agent message".into()
+        } else {
+            plaintext
+        },
+        timestamp_micros,
+        raw_id,
+        EntryOrigin::ResponseItem,
+    );
+    entry.presentation = EntryPresentation::Technical;
+    entry.title = "Inter-agent message".into();
+    entry.default_collapsed = true;
+    entry.searchable = !encrypted && !entry.primary_text.is_empty();
+    add_source_item_id(&mut entry, payload);
+    for (source, target) in [
+        ("author", "author"),
+        ("recipient", "recipient"),
+        ("other_recipients", "otherRecipients"),
+    ] {
+        if let Some(value) = payload.get(source).filter(|value| !value.is_null()) {
+            entry.metadata.insert(target.into(), value.clone());
+        }
+    }
+    if let Some(trigger_turn) = payload.get("trigger_turn").and_then(Value::as_bool) {
+        entry
+            .metadata
+            .insert("triggerTurn".into(), Value::Bool(trigger_turn));
+    }
+    entry
+}
+
 fn normalize_response_item(
     payload: &Value,
     timestamp_micros: Option<i64>,
@@ -566,6 +1018,12 @@ fn normalize_response_item(
                 entry.searchable = false;
             }
             add_attachment_metadata(&mut entry, payload);
+            add_source_item_id(&mut entry, payload);
+            NormalizeResult::Entry(entry)
+        }
+        "agent_message" => {
+            let mut entry = inter_agent_communication_entry(payload, timestamp_micros, raw_id);
+            entry.origin = EntryOrigin::ResponseItem;
             NormalizeResult::Entry(entry)
         }
         "reasoning" => {
@@ -581,7 +1039,10 @@ fn normalize_response_item(
             } else {
                 String::new()
             };
-            NormalizeResult::Entry(reasoning_entry(text, timestamp_micros, raw_id, searchable))
+            let mut entry = reasoning_entry(text, timestamp_micros, raw_id, searchable);
+            entry.origin = EntryOrigin::ResponseItem;
+            add_source_item_id(&mut entry, payload);
+            NormalizeResult::Entry(entry)
         }
         "function_call" | "custom_tool_call" | "tool_search_call" => {
             let name = string_field(payload, &["name", "execution"]);
@@ -600,12 +1061,19 @@ fn normalize_response_item(
             if entry.tool_kind == Some(ToolKind::RequestUserInput) {
                 add_request_user_input_questions_from_text(&mut entry, &primary);
             }
+            add_source_item_id(&mut entry, payload);
             NormalizeResult::Entry(entry)
         }
         "function_call_output" | "custom_tool_call_output" | "tool_search_output" => {
-            let secondary = value_text(payload.get("output"))
-                .or_else(|| value_text(payload.get("execution")))
-                .unwrap_or_default();
+            let secondary = [
+                output_text(payload.get("output")),
+                value_text(payload.get("execution")).unwrap_or_default(),
+                pretty_value(payload.get("tools")),
+            ]
+            .into_iter()
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
             let mut entry = tool_entry(
                 ToolKind::Function,
                 "Tool output",
@@ -618,30 +1086,40 @@ fn normalize_response_item(
                 EntryOrigin::ResponseItem,
             );
             add_request_user_input_response_from_text(&mut entry, &secondary);
+            add_attachment_metadata(&mut entry, payload);
+            add_source_item_id(&mut entry, payload);
             NormalizeResult::Entry(entry)
         }
-        "local_shell_call" => NormalizeResult::Entry(tool_entry(
-            ToolKind::Command,
-            "Command",
-            pretty_value(payload.get("action")),
-            String::new(),
-            call_id(payload),
-            status_field(payload).or(Some(ToolStatus::Running)),
-            timestamp_micros,
-            raw_id,
-            EntryOrigin::ResponseItem,
-        )),
-        "web_search_call" => NormalizeResult::Entry(tool_entry(
-            ToolKind::WebSearch,
-            "Web search",
-            pretty_value(payload.get("action")),
-            String::new(),
-            call_id(payload).or_else(|| string_option(payload, "id")),
-            status_field(payload),
-            timestamp_micros,
-            raw_id,
-            EntryOrigin::ResponseItem,
-        )),
+        "local_shell_call" => {
+            let mut entry = tool_entry(
+                ToolKind::Command,
+                "Command",
+                pretty_value(payload.get("action")),
+                String::new(),
+                call_id(payload),
+                status_field(payload).or(Some(ToolStatus::Running)),
+                timestamp_micros,
+                raw_id,
+                EntryOrigin::ResponseItem,
+            );
+            add_source_item_id(&mut entry, payload);
+            NormalizeResult::Entry(entry)
+        }
+        "web_search_call" => {
+            let mut entry = tool_entry(
+                ToolKind::WebSearch,
+                "Web search",
+                pretty_value(payload.get("action")),
+                String::new(),
+                call_id(payload).or_else(|| string_option(payload, "id")),
+                status_field(payload),
+                timestamp_micros,
+                raw_id,
+                EntryOrigin::ResponseItem,
+            );
+            add_source_item_id(&mut entry, payload);
+            NormalizeResult::Entry(entry)
+        }
         "image_generation_call" => {
             let mut entry = tool_entry(
                 ToolKind::Other,
@@ -654,13 +1132,12 @@ fn normalize_response_item(
                 raw_id,
                 EntryOrigin::ResponseItem,
             );
-            entry
-                .metadata
-                .insert("attachment".into(), Value::Bool(true));
+            add_attachment_counts(&mut entry, 1, 0);
+            add_source_item_id(&mut entry, payload);
             NormalizeResult::Entry(entry)
         }
         "compaction" | "compaction_summary" | "context_compaction" | "compaction_trigger" => {
-            NormalizeResult::Entry(simple_entry(
+            let mut entry = simple_entry(
                 EntryKind::Marker,
                 "Conversation compacted",
                 String::new(),
@@ -669,7 +1146,9 @@ fn normalize_response_item(
                 EntryOrigin::Derived,
                 false,
                 true,
-            ))
+            );
+            add_source_item_id(&mut entry, payload);
+            NormalizeResult::Entry(entry)
         }
         _ => NormalizeResult::Unknown(
             simple_entry(
@@ -895,13 +1374,17 @@ fn tool_event_entry(
 ) -> NormalizedEntry {
     let kind = tool_event_kind(event).unwrap_or(ToolKind::Other);
     let title = string_field(payload, &["name", "server", "query"]);
-    let primary = string_field(payload, &["command", "input", "arguments", "query"]);
-    let secondary = ["delta", "output", "stdout", "stderr"]
-        .iter()
-        .filter_map(|key| value_text(payload.get(*key)))
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let primary = string_field(
+        payload,
+        &["command", "input", "arguments", "query", "revised_prompt"],
+    );
+    let secondary_fields: &[&str] = match event {
+        "mcp_tool_call_end" => &["result"],
+        "web_search_end" => &["action", "results"],
+        "image_generation_end" => &["saved_path"],
+        _ => &["delta", "output", "stdout", "stderr"],
+    };
+    let secondary = joined_fields(payload, secondary_fields);
     let status = if event.ends_with("_end") || event.ends_with("_response") {
         status_field(payload).or(Some(
             if payload.get("success").and_then(Value::as_bool) == Some(false) {
@@ -913,7 +1396,7 @@ fn tool_event_entry(
     } else {
         Some(ToolStatus::Running)
     };
-    tool_entry(
+    let mut entry = tool_entry(
         kind,
         if title.is_empty() {
             event_title(event)
@@ -927,7 +1410,12 @@ fn tool_event_entry(
         timestamp_micros,
         raw_id,
         EntryOrigin::EventPresentation,
-    )
+    );
+    add_attachment_metadata(&mut entry, payload);
+    if event == "image_generation_end" {
+        add_attachment_counts(&mut entry, 1, 0);
+    }
+    entry
 }
 
 fn request_user_input_event_entry(
@@ -1037,6 +1525,8 @@ struct SessionBuilder {
     entry_count: u64,
     diagnostic_count: u64,
     saw_user: bool,
+    subagent_history_start_ordinal: Option<u64>,
+    last_inter_agent_source_id: Option<String>,
 }
 
 impl SessionBuilder {
@@ -1065,6 +1555,8 @@ impl SessionBuilder {
             entry_count: 0,
             diagnostic_count: 0,
             saw_user: false,
+            subagent_history_start_ordinal: None,
+            last_inter_agent_source_id: None,
         }
     }
 
@@ -1092,6 +1584,8 @@ impl SessionBuilder {
             entry_count: record.entry_count,
             diagnostic_count: record.diagnostic_count,
             saw_user,
+            subagent_history_start_ordinal: None,
+            last_inter_agent_source_id: None,
         }
     }
 
@@ -1114,6 +1608,10 @@ impl SessionBuilder {
         self.cli_version =
             string_option(payload, "cli_version").or_else(|| self.cli_version.take());
         self.provider = string_option(payload, "model_provider").or_else(|| self.provider.take());
+        self.subagent_history_start_ordinal = payload
+            .get("subagent_history_start_ordinal")
+            .and_then(Value::as_u64)
+            .or(self.subagent_history_start_ordinal);
         self.source = source_kind(payload);
         self.history_line = payload
             .get("history_line")
@@ -1134,6 +1632,13 @@ impl SessionBuilder {
             self.git_commit =
                 string_option(git, "commit_hash").or_else(|| string_option(git, "commit"));
         }
+    }
+
+    fn is_inherited_ordinal(&self, ordinal: Option<u64>) -> bool {
+        ordinal.is_some_and(|ordinal| {
+            self.subagent_history_start_ordinal
+                .is_some_and(|start| ordinal < start)
+        })
     }
 
     fn observe_entry(&mut self, entry: &NormalizedEntry) {
@@ -1395,7 +1900,7 @@ fn status_field(payload: &Value) -> Option<ToolStatus> {
         "in_progress" | "running" => Some(ToolStatus::Running),
         "completed" | "succeeded" | "success" => Some(ToolStatus::Succeeded),
         "failed" | "error" => Some(ToolStatus::Failed),
-        "interrupted" | "cancelled" | "canceled" => Some(ToolStatus::Interrupted),
+        "interrupted" | "cancelled" | "canceled" | "declined" => Some(ToolStatus::Interrupted),
         _ => Some(ToolStatus::Unknown),
     }
 }
@@ -1403,6 +1908,22 @@ fn status_field(payload: &Value) -> Option<ToolStatus> {
 fn call_id(payload: &Value) -> Option<String> {
     string_option(payload, "call_id")
         .or_else(|| string_option(payload, "id").filter(|id| id.starts_with("call")))
+}
+
+fn item_id(payload: &Value) -> Option<String> {
+    string_option(payload, "id").filter(|id| !id.is_empty())
+}
+
+fn add_source_item_id(entry: &mut NormalizedEntry, payload: &Value) {
+    if let Some(id) = item_id(payload) {
+        entry
+            .metadata
+            .insert("sourceItemId".into(), Value::String(id));
+    }
+}
+
+fn source_item_id(entry: &NormalizedEntry) -> Option<&str> {
+    entry.metadata.get("sourceItemId").and_then(Value::as_str)
 }
 
 fn string_option(payload: &Value, key: &str) -> Option<String> {
@@ -1419,6 +1940,164 @@ fn content_text(value: Option<&Value>) -> String {
     value_text(value).unwrap_or_default()
 }
 
+fn user_input_text(value: Option<&Value>) -> String {
+    let Some(items) = value.and_then(Value::as_array) else {
+        return content_text(value);
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let kind = item.get("type").and_then(Value::as_str).unwrap_or_default();
+            match kind {
+                "text" | "input_text" => {
+                    item.get("text").and_then(Value::as_str).map(str::to_owned)
+                }
+                "skill" => item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(|name| format!("[skill: {name}]")),
+                "mention" => item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(|name| format!("[mention: {name}]")),
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn string_array(value: Option<&Value>, separator: &str) -> String {
+    match value {
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(separator),
+        Some(Value::String(value)) => value.clone(),
+        _ => String::new(),
+    }
+}
+
+fn joined_fields(payload: &Value, keys: &[&str]) -> String {
+    keys.iter()
+        .filter_map(|key| payload.get(*key))
+        .filter_map(display_value)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn output_text(value: Option<&Value>) -> String {
+    value.and_then(display_value).unwrap_or_default()
+}
+
+fn display_value(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(text) => (!is_media_data_uri(text)).then(|| text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Array(items) => {
+            let typed_content = items.iter().any(|item| {
+                item.get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_content_item_kind)
+            });
+            if typed_content {
+                value_text(Some(value))
+            } else if items.iter().all(Value::is_string) {
+                Some(
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                )
+            } else {
+                pretty_sanitized(value)
+            }
+        }
+        Value::Object(object) => {
+            if let Some(content) = object
+                .get("content")
+                .or_else(|| object.get("content_items"))
+                .or_else(|| object.get("contentItems"))
+            {
+                let text = output_text(Some(content));
+                return (!text.is_empty()).then_some(text);
+            }
+            object
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| pretty_sanitized(value))
+        }
+    }
+}
+
+fn pretty_sanitized(value: &Value) -> Option<String> {
+    let sanitized = sanitize_for_display(value);
+    (!sanitized.is_null())
+        .then(|| serde_json::to_string_pretty(&sanitized).ok())
+        .flatten()
+}
+
+fn sanitize_for_display(value: &Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.iter().map(sanitize_for_display).collect()),
+        Value::Object(object) => {
+            let attachment_payload =
+                object
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| {
+                        let kind = kind.to_ascii_lowercase();
+                        kind.contains("image")
+                            || kind.contains("audio")
+                            || kind.contains("encrypted")
+                    });
+            let sanitized = object
+                .iter()
+                .filter(|(key, _)| {
+                    !(matches!(
+                        key.as_str(),
+                        "image_url"
+                            | "imageUrl"
+                            | "audio_url"
+                            | "audioUrl"
+                            | "encrypted_content"
+                            | "encryptedContent"
+                    ) || attachment_payload
+                        && matches!(key.as_str(), "data" | "blob" | "base64" | "b64_json"))
+                })
+                .map(|(key, value)| (key.clone(), sanitize_for_display(value)))
+                .collect();
+            Value::Object(sanitized)
+        }
+        other => other.clone(),
+    }
+}
+
+fn is_content_item_kind(kind: &str) -> bool {
+    let kind = kind.to_ascii_lowercase();
+    kind.contains("text")
+        || kind.contains("image")
+        || kind.contains("audio")
+        || kind.contains("encrypted")
+}
+
+fn is_media_data_uri(value: &str) -> bool {
+    let value = value.trim_start();
+    ["data:image/", "data:audio/", "data:video/"]
+        .iter()
+        .any(|prefix| {
+            value
+                .get(..prefix.len())
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
+        })
+}
+
 fn value_text(value: Option<&Value>) -> Option<String> {
     match value? {
         Value::String(text) => Some(text.clone()),
@@ -1429,7 +2108,12 @@ fn value_text(value: Option<&Value>) -> Option<String> {
                     if item
                         .get("type")
                         .and_then(Value::as_str)
-                        .is_some_and(|kind| kind.contains("image") || kind.contains("encrypted"))
+                        .is_some_and(|kind| {
+                            let kind = kind.to_ascii_lowercase();
+                            kind.contains("image")
+                                || kind.contains("audio")
+                                || kind.contains("encrypted")
+                        })
                     {
                         None
                     } else {
@@ -1471,22 +2155,110 @@ fn plan_text(payload: &Value) -> String {
 }
 
 fn add_attachment_metadata(entry: &mut NormalizedEntry, payload: &Value) {
-    let count = ["images", "local_images", "content"]
+    let (image_count, audio_count) = attachment_counts(payload);
+    add_attachment_counts(entry, image_count, audio_count);
+}
+
+fn attachment_counts(payload: &Value) -> (usize, usize) {
+    let mut image_count = ["images", "local_images", "localImages"]
         .iter()
         .filter_map(|key| payload.get(*key).and_then(Value::as_array))
-        .flatten()
-        .filter(|item| {
-            item.get("type")
-                .and_then(Value::as_str)
-                .is_some_and(|kind| kind.contains("image"))
-                || item.is_string()
-        })
-        .count();
-    if count > 0 {
+        .map(Vec::len)
+        .sum();
+    let mut audio_count = [
+        "audio",
+        "local_audio",
+        "localAudio",
+        "audios",
+        "local_audios",
+        "localAudios",
+    ]
+    .iter()
+    .filter_map(|key| payload.get(*key).and_then(Value::as_array))
+    .map(Vec::len)
+    .sum();
+
+    for items in ["content", "content_items", "contentItems"]
+        .iter()
+        .filter_map(|key| payload.get(*key).and_then(Value::as_array))
+    {
+        let (content_images, content_audio) = content_attachment_counts(items);
+        image_count += content_images;
+        audio_count += content_audio;
+    }
+
+    for nested in ["output", "result", "Ok", "ok"]
+        .iter()
+        .filter_map(|key| payload.get(*key))
+    {
+        let (nested_images, nested_audio) = if let Some(items) = nested.as_array() {
+            content_attachment_counts(items)
+        } else if nested.is_object() {
+            attachment_counts(nested)
+        } else {
+            (0, 0)
+        };
+        image_count += nested_images;
+        audio_count += nested_audio;
+    }
+    (image_count, audio_count)
+}
+
+fn content_attachment_counts(items: &[Value]) -> (usize, usize) {
+    let mut image_count = 0;
+    let mut audio_count = 0;
+    for item in items {
+        let kind = item
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if kind.contains("image") {
+            image_count += 1;
+        } else if kind.contains("audio") {
+            audio_count += 1;
+        }
+    }
+    (image_count, audio_count)
+}
+
+fn add_attachment_counts(entry: &mut NormalizedEntry, image_count: usize, audio_count: usize) {
+    let attachment_count = image_count.saturating_add(audio_count);
+    if attachment_count > 0 {
         entry
             .metadata
-            .insert("attachmentCount".into(), Value::from(count));
+            .insert("attachmentCount".into(), Value::from(attachment_count));
     }
+    if image_count > 0 {
+        entry
+            .metadata
+            .insert("imageAttachmentCount".into(), Value::from(image_count));
+    }
+    if audio_count > 0 {
+        entry
+            .metadata
+            .insert("audioAttachmentCount".into(), Value::from(audio_count));
+    }
+}
+
+fn has_encrypted_content(payload: &Value) -> bool {
+    payload
+        .get("encrypted_content")
+        .or_else(|| payload.get("encryptedContent"))
+        .is_some_and(|value| !value.is_null())
+        || ["content", "content_items", "contentItems"]
+            .iter()
+            .filter_map(|key| payload.get(*key).and_then(Value::as_array))
+            .flatten()
+            .any(|item| {
+                item.get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind.to_ascii_lowercase().contains("encrypted"))
+                    || item
+                        .get("encrypted_content")
+                        .or_else(|| item.get("encryptedContent"))
+                        .is_some_and(|value| !value.is_null())
+            })
 }
 
 fn truncate_graphemes(value: &str, max: usize) -> String {
@@ -1525,6 +2297,8 @@ fn is_known_envelope(kind: &str) -> bool {
         "session_meta"
             | "turn_context"
             | "world_state"
+            | "inter_agent_communication"
+            | "inter_agent_communication_metadata"
             | "event_msg"
             | "response_item"
             | "compacted"

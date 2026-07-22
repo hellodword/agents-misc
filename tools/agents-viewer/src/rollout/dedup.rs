@@ -65,6 +65,29 @@ impl Deduper {
         candidate.primary_text = normalize_text(&candidate.primary_text);
         candidate.secondary_text = normalize_text(&candidate.secondary_text);
 
+        if let Some(candidate_source_id) = source_item_id(&candidate)
+            && let Some(index) = self
+                .recent
+                .iter()
+                .rposition(|tracked| source_item_id(&tracked.entry) == Some(candidate_source_id))
+        {
+            let mut tracked = self.recent.remove(index).expect("index came from recent");
+            let previous_call_id = tracked.entry.call_id.clone();
+            merge_entries(&mut tracked.entry, &candidate);
+            tracked.line_no = line_no;
+            let result = tracked.entry.clone();
+            self.track_recent(tracked.clone());
+            if let Some(call_id) = previous_call_id {
+                self.active_tools.remove(&call_id);
+            }
+            if let Some(call_id) = result.call_id.clone()
+                && !is_terminal(&result)
+            {
+                self.active_tools.insert(call_id, tracked);
+            }
+            return result;
+        }
+
         if let Some(call_id) = candidate.call_id.clone() {
             if let Some(mut tracked) = self.active_tools.remove(&call_id) {
                 merge_entries(&mut tracked.entry, &candidate);
@@ -199,18 +222,31 @@ fn merge_entries(existing: &mut NormalizedEntry, candidate: &NormalizedEntry) {
         }
     }
 
-    let candidate_preferred = candidate.origin == EntryOrigin::EventPresentation
-        && existing.origin != EntryOrigin::EventPresentation;
+    let candidate_preferred = origin_rank(candidate.origin) > origin_rank(existing.origin);
     let candidate_is_final = is_streaming_prefix(&existing.primary_text, &candidate.primary_text)
         && candidate.primary_text.len() > existing.primary_text.len();
-    if candidate_preferred || candidate_is_final {
+    if candidate_preferred {
+        existing.kind = candidate.kind;
         existing.title.clone_from(&candidate.title);
         existing.primary_text.clone_from(&candidate.primary_text);
-        existing.metadata.clone_from(&candidate.metadata);
+        existing
+            .secondary_text
+            .clone_from(&candidate.secondary_text);
         existing.presentation = candidate.presentation;
+        existing.role = candidate.role;
+        existing.phase = candidate.phase;
+        existing.tool_kind = candidate.tool_kind;
+        existing.tool_status = candidate.tool_status;
+        existing.call_id.clone_from(&candidate.call_id);
+        existing
+            .parent_entry_id
+            .clone_from(&candidate.parent_entry_id);
         existing.origin = candidate.origin;
         existing.searchable = candidate.searchable;
         existing.default_collapsed = candidate.default_collapsed;
+    }
+    if candidate_is_final {
+        existing.primary_text.clone_from(&candidate.primary_text);
     }
     if existing.primary_text.is_empty() && !candidate.primary_text.is_empty() {
         existing.primary_text.clone_from(&candidate.primary_text);
@@ -231,7 +267,50 @@ fn merge_entries(existing: &mut NormalizedEntry, candidate: &NormalizedEntry) {
     if existing.title.is_empty() && !candidate.title.is_empty() {
         existing.title.clone_from(&candidate.title);
     }
-    existing.metadata.extend(candidate.metadata.clone());
+    merge_metadata(existing, candidate);
+}
+
+fn merge_metadata(existing: &mut NormalizedEntry, candidate: &NormalizedEntry) {
+    for (key, value) in &candidate.metadata {
+        if is_attachment_count(key) {
+            let merged = existing
+                .metadata
+                .get(key)
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default()
+                .max(value.as_u64().unwrap_or_default());
+            if merged > 0 {
+                existing
+                    .metadata
+                    .insert(key.clone(), serde_json::Value::from(merged));
+            }
+        } else {
+            existing.metadata.insert(key.clone(), value.clone());
+        }
+    }
+}
+
+fn is_attachment_count(key: &str) -> bool {
+    matches!(
+        key,
+        "attachmentCount" | "imageAttachmentCount" | "audioAttachmentCount"
+    )
+}
+
+fn source_item_id(entry: &NormalizedEntry) -> Option<&str> {
+    entry
+        .metadata
+        .get("sourceItemId")
+        .and_then(serde_json::Value::as_str)
+}
+
+const fn origin_rank(origin: EntryOrigin) -> u8 {
+    match origin {
+        EntryOrigin::ItemCompleted => 3,
+        EntryOrigin::EventPresentation => 2,
+        EntryOrigin::ResponseItem => 1,
+        EntryOrigin::Derived => 0,
+    }
 }
 
 fn is_terminal(entry: &NormalizedEntry) -> bool {

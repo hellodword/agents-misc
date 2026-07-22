@@ -7,7 +7,7 @@ use crate::model::{
     SessionParentRelation, SourceKind, ToolKind, ToolStatus,
 };
 
-pub const PARSER_VERSION: u32 = 2;
+pub const PARSER_VERSION: u32 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RootKind {
@@ -28,6 +28,7 @@ pub struct ParseContext {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EntryOrigin {
     EventPresentation,
+    ItemCompleted,
     ResponseItem,
     Derived,
 }

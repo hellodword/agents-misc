@@ -113,6 +113,7 @@ contract_enum!(SearchField {
 contract_enum!(RawEncoding { Utf8, Binary });
 contract_enum!(RawParseStatus {
     Valid,
+    Inherited,
     InvalidJson,
     InvalidUtf8,
     Oversize,

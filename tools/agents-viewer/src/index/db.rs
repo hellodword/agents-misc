@@ -465,6 +465,50 @@ mod tests {
         database.close().await;
     }
 
+    #[tokio::test]
+    async fn parser_version_change_resets_all_source_checkpoints_for_reindex() {
+        let temp = TempDir::new().unwrap();
+        let cache = temp.path().join("cache");
+        crate::permissions::prepare_cache_directory(&cache).unwrap();
+        let path = cache.join("index.sqlite3");
+        let database = Database::open_or_recover(&path, "source").await.unwrap();
+        sqlx::query(
+            "INSERT INTO source_files( \
+                id, root_kind, relative_path, file_key, size_bytes, mtime_ns, \
+                checkpoint_offset, checkpoint_line, checkpoint_hash, scan_state \
+             ) VALUES (1, 'active', 'fixture.jsonl', 'fixture-key', 100, 200, 90, 7, \
+                'checkpoint-hash', 'ready')",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query("UPDATE app_meta SET value = '2' WHERE key = 'parser_version'")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        database.close().await;
+
+        let reopened = Database::open_or_recover(&path, "source").await.unwrap();
+        let state = sqlx::query_as::<_, (String, i64, i64, Option<String>)>(
+            "SELECT scan_state, checkpoint_offset, checkpoint_line, checkpoint_hash \
+             FROM source_files WHERE id = 1",
+        )
+        .fetch_one(reopened.pool())
+        .await
+        .unwrap();
+        assert_eq!(state, ("pending".into(), 0, 0, None));
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT value FROM app_meta WHERE key = 'parser_version'",
+            )
+            .fetch_one(reopened.pool())
+            .await
+            .unwrap(),
+            PARSER_VERSION.to_string()
+        );
+        reopened.close().await;
+    }
+
     #[test]
     fn zero_and_all_windows_have_explicit_semantics() {
         let zero = InitialIndexPolicy::new(0, 123).unwrap();
