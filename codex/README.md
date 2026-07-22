@@ -115,8 +115,9 @@ Built-in provider IDs in this baseline are:
 Built-in provider override rules are narrower than user-defined provider rules:
 
 - `model_providers.openai` may override the five network fields listed above.
-- `model_providers.amazon-bedrock` may only override `aws.profile` and
-  `aws.region`; setting `compact_request_timeout_ms` there is rejected.
+- `model_providers.amazon-bedrock` may override `base_url`, `auth`,
+  `http_headers`, `aws.profile`, and `aws.region`; setting
+  `compact_request_timeout_ms` there is rejected.
 - `model_providers.ollama` and `model_providers.lmstudio` are existing
   built-ins. Define a distinct custom provider ID when customized OSS provider
   settings are needed.

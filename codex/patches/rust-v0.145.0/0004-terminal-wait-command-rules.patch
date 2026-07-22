@@ -414,7 +414,7 @@ index 8b54e1f..e27b90a 100644
      Pending {
          content_items: Vec<OutputItem>,
 diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
-index 40a027f..c5baf7c 100644
+index 40a027f..75ad0de 100644
 --- a/codex-rs/config/src/config_toml.rs
 +++ b/codex-rs/config/src/config_toml.rs
 @@ -7,6 +7,7 @@ use std::path::Path;
