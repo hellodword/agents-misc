@@ -125,43 +125,72 @@ Built-in provider override rules are narrower than user-defined provider rules:
 ### Terminal Wait Command Rules
 
 Codex accepts root-level `terminal_wait.commands` entries for command-specific
-unified exec wait behavior. Profile-scoped `terminal_wait` is not supported in
-this patch series.
+supervised unified exec waits. There is one behavior rather than selectable
+wait modes. Profile-scoped `terminal_wait` is not supported in this patch
+series.
 
-| Field               | Required      | Default         | Notes                                                                    |
-| ------------------- | ------------- | --------------- | ------------------------------------------------------------------------ |
-| `pattern`           | yes           | none            | `regex-lite` pattern matched against the original `exec_command.cmd`.    |
-| `mode`              | yes           | none            | `wait_until_exit` or `long_poll`.                                        |
-| `name`              | no            | none            | Human-readable label for the rule.                                       |
-| `enabled`           | no            | `true`          | Disabled rules are skipped.                                              |
-| `cwd_pattern`       | no            | none            | `regex-lite` pattern matched against the effective cwd string.           |
-| `allow_tty`         | no            | `false`         | TTY commands match only when this is `true`.                             |
-| `max_output_tokens` | no            | request/default | Positive model-visible output token cap for this command.                |
-| `wait_timeout_ms`   | mode-specific | none            | Positive timeout for `wait_until_exit`; forbidden for `long_poll`.       |
-| `poll_interval_ms`  | mode-specific | none            | Positive poll interval for `long_poll`; forbidden for `wait_until_exit`. |
+| Field               | Required | Default         | Notes                                                                 |
+| ------------------- | -------- | --------------- | --------------------------------------------------------------------- |
+| `pattern`           | yes      | none            | `regex-lite` pattern matched against the original `exec_command.cmd`. |
+| `poll_interval_ms`  | yes      | none            | Positive runtime-controlled interval between decision points.         |
+| `name`              | no       | none            | Human-readable label for the rule.                                    |
+| `enabled`           | no       | `true`          | Disabled rules are skipped.                                           |
+| `cwd_pattern`       | no       | none            | `regex-lite` pattern matched against the effective cwd string.        |
+| `max_output_tokens` | no       | request/default | Positive model-visible output token cap for this command.             |
 
 Rules are evaluated in TOML order and the first enabled match wins. `pattern`
 matches the raw command string from the tool request. `cwd_pattern` matches the
 native absolute cwd string when one is available, otherwise the `PathUri`
-string. TTY requests are ignored unless `allow_tty = true`.
+string. TTY requests never match; managed waits use non-TTY processes only.
 
-`wait_until_exit` applies to the initial `exec_command` response and to later
-empty `write_stdin` polls for the same process. Without `wait_timeout_ms`, the
-wait has no deadline but still ends on process exit, cancellation, output
-closure, or failure. With `wait_timeout_ms`, the wait may exceed the normal
-30-second initial clamp and returns a live process if the timeout expires first.
+For a matching command, `poll_interval_ms` replaces the tool-request
+`yield_time_ms` for the initial wait. The runtime returns immediately if the
+process exits. If it is still running at the end of the interval, the result
+has `terminal_wait_state = "decision_required"` and offers exactly three
+actions through `terminal_wait_control`:
 
-`long_poll` leaves the initial `exec_command` wait unchanged. It changes only
-empty `write_stdin` polls, which wait for `poll_interval_ms`; a smaller
-tool-request `yield_time_ms` does not shorten that interval. Non-empty stdin
-writes keep the existing interactive response cap.
+- `continue` waits for a fresh, complete `poll_interval_ms`.
+- `interrupt` sends a gentle interrupt and waits up to a fixed 10-second grace
+  period.
+- `terminate` performs confirmed process-tree termination.
 
-The same rule semantics apply when unified exec is called from code mode. A
-matching `wait_until_exit` call, or a matching empty `write_stdin` poll using
-either mode, also defers code mode's outer timer-generated `exec`/`wait` yield
-until the rule-controlled wait returns. Explicit JavaScript `yield_control()`,
-termination, and cancellation still take precedence. No separate
-`codex-code-mode-host` configuration is required.
+The managed process is implicit, so `terminal_wait_control` takes no session or
+process ID. For compatibility, empty `write_stdin` on that process acts as
+`continue`, and a Ctrl-C write acts as `interrupt`. Other stdin writes are
+rejected because managed processes are non-TTY.
+
+Only one managed process may exist in a Codex Session, across environments and
+Code Mode cells. Its gate is reserved before approval and spawning and remains
+held until the managed result is consumed. If the process exits naturally after
+returning `decision_required`, the next control action consumes its final output
+and returns `completed`; it does not lose the implicit target or report
+`NoTerminalWaitDecision`. A control action is otherwise permitted only from
+`decision_required`. While the gate is held, Codex rejects new built-in terminal
+starts through `exec_command` or legacy `shell_command`, and rejects interaction
+with other built-in terminal sessions. A normal terminal command already
+admitted before the reservation may continue in the background, but cannot be
+interacted with until the managed gate clears. Non-terminal tools remain
+available.
+
+Turn or Code Mode cell cancellation does not terminate a stored managed
+process. It returns the gate to `decision_required`, allowing the next turn to
+continue, interrupt, or terminate it. `/stop` remains the hard-stop path: it
+terminates all built-in terminal processes and clears the managed gate.
+
+These restrictions are session-local and cover Codex's built-in terminal
+tools. They do not govern another Codex Session, a child agent's separate
+Session, MCP tools, or external processes.
+
+The same wait and decision semantics apply inside Code Mode. A matching call
+holds a Code Mode terminal-wait lease, so outer timer-generated `exec`/`wait`
+yields cannot return control early. No separate `codex-code-mode-host`
+configuration is required. When at least one rule is enabled,
+`terminal_wait_control` is exposed in normal, Code Mode, and guardian tool
+plans, even if the current command does not match.
+
+Managed results report `terminal_wait_state` as `decision_required`,
+`completed`, or `terminated`, along with `poll_interval_ms`. The
+`available_actions` array is present only for `decision_required`.
 
 `max_output_tokens` affects only the model-visible tool result. UI streaming and
 terminal transcript events are not truncated by this setting.
@@ -179,20 +208,18 @@ Example:
 name = "workspace cargo tests"
 pattern = "^cargo test( |$)"
 cwd_pattern = "/workspaces/my-project"
-mode = "wait_until_exit"
-wait_timeout_ms = 600000
+poll_interval_ms = 600000
 max_output_tokens = 20000
 
 [[terminal_wait.commands]]
 name = "vite dev server"
 pattern = "npm run dev"
-mode = "long_poll"
 poll_interval_ms = 60000
-allow_tty = true
 ```
 
-When `terminal_wait` is unset or no rule matches, the `rust-v0.142.5` terminal
-wait and background polling behavior is unchanged.
+`mode`, `wait_timeout_ms`, and `allow_tty` are removed and rejected as unknown
+fields. When `terminal_wait` is unset, all rules are disabled, or no rule
+matches, ordinary terminal wait and background polling behavior is unchanged.
 
 ### Model Request Failure Hooks
 

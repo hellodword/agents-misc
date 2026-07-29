@@ -117,7 +117,7 @@ index 7a8e4ce..7ee63fe 100644
              supports_websockets: true,
              aws: None,
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index 1bbc849..de190d5 100644
+index 1bbc849..7ca67e2 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
 @@ -1672,6 +1686,12 @@

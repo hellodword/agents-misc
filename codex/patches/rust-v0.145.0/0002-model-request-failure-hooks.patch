@@ -389,7 +389,7 @@ index 10b6c1c..176dbf3 100644
      changed |= append_vec(&mut existing.session_end, session_end);
      changed |= append_vec(&mut existing.user_prompt_submit, user_prompt_submit);
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index 1bbc849..de190d5 100644
+index 1bbc849..7ca67e2 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
 @@ -1278,6 +1278,13 @@
