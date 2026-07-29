@@ -11,9 +11,96 @@ CATEGORY_LABELS = {
     "documentation": "Documentation",
 }
 
+PROFILE_PATH_PREFIX = "profiles.<name>."
+FIELD_SEMANTIC_KEYS = (
+    "kind",
+    "types",
+    "required",
+    "hasDefault",
+    "default",
+    "enum",
+    "description",
+    "deprecated",
+    "additionalPropertiesMode",
+)
+
 
 def _field_index(fields: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {field["path"]: field for field in fields}
+
+
+def _change_without_path(change: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in change.items() if key != "path"}
+
+
+def _field_semantics(field: dict[str, Any] | None) -> dict[str, Any] | None:
+    if field is None:
+        return None
+    return {key: field.get(key) for key in FIELD_SEMANTIC_KEYS}
+
+
+def _is_duplicate_profile_change(
+    change: dict[str, Any],
+    base_changes: list[dict[str, Any]],
+    before: dict[str, dict[str, Any]],
+    after: dict[str, dict[str, Any]],
+    base_path: str,
+) -> bool:
+    if not any(
+        _change_without_path(candidate) == _change_without_path(change)
+        for candidate in base_changes
+    ):
+        return False
+
+    path = change["path"]
+    kind = change["kind"]
+    if kind == "field_added":
+        return _field_semantics(after.get(path)) == _field_semantics(
+            after.get(base_path)
+        )
+    if kind == "field_removed":
+        return _field_semantics(before.get(path)) == _field_semantics(
+            before.get(base_path)
+        )
+    if kind == "description_changed":
+        profile_descriptions = (
+            (before.get(path) or {}).get("description") or "",
+            (after.get(path) or {}).get("description") or "",
+        )
+        base_descriptions = (
+            (before.get(base_path) or {}).get("description") or "",
+            (after.get(base_path) or {}).get("description") or "",
+        )
+        return profile_descriptions == base_descriptions
+    return True
+
+
+def _suppress_duplicate_profile_changes(
+    changes: list[dict[str, Any]],
+    before: dict[str, dict[str, Any]],
+    after: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    changes_by_path: dict[str, list[dict[str, Any]]] = {}
+    for change in changes:
+        changes_by_path.setdefault(change["path"], []).append(change)
+
+    visible_changes = []
+    for change in changes:
+        path = change["path"]
+        if not path.startswith(PROFILE_PATH_PREFIX):
+            visible_changes.append(change)
+            continue
+
+        base_path = path.removeprefix(PROFILE_PATH_PREFIX)
+        if not _is_duplicate_profile_change(
+            change,
+            changes_by_path.get(base_path, []),
+            before,
+            after,
+            base_path,
+        ):
+            visible_changes.append(change)
+    return visible_changes
 
 
 def _additional_properties_rank(mode: str | None) -> int:
@@ -208,6 +295,7 @@ def build_schema_diff(
                 }
             )
 
+    changes = _suppress_duplicate_profile_changes(changes, before, after)
     summary = {
         "breakingLike": sum(item["category"] == "breakingLike" for item in changes),
         "behavior": sum(item["category"] == "behavior" for item in changes),

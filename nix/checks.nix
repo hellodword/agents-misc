@@ -27,6 +27,7 @@ lib.genAttrs supportedSystems (
     codex-config-atlas-registry = codexConfigAtlas.checkConfigAtlasRegistry;
     codex-config-atlas-data = codexConfigAtlas.checkConfigAtlasData;
     codex-config-atlas-site = codexConfigAtlas.checkConfigAtlasSite;
+    codex-config-atlas-tests = codexConfigAtlas.checkConfigAtlasTests;
     agents-viewer = agentsViewer;
     agents-viewer-web = agentsViewer.frontend;
   }

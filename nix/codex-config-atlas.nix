@@ -116,6 +116,7 @@ let
 
   checkConfigAtlasSite = pkgs.runCommand "check-codex-config-atlas-site-${codexVersion}" { } ''
     test -f ${codexConfigAtlasSite}/index.html
+    test -f ${codexConfigAtlasSite}/diff_helpers.mjs
     test -f ${codexConfigAtlasSite}/data/versions.json
     test -d ${codexConfigAtlasSite}/data/versions
     test ! -e ${codexConfigAtlasSite}/data/current.json
@@ -124,6 +125,24 @@ let
     mkdir -p "$out"
     touch "$out/ok"
   '';
+
+  checkConfigAtlasTests =
+    pkgs.runCommand "check-codex-config-atlas-tests-${codexVersion}"
+      {
+        nativeBuildInputs = [
+          pkgs.nodejs_24
+          pkgs.python3
+        ];
+      }
+      ''
+        export PYTHONPATH=${toolSource}/src
+        python3 -m unittest discover -s ${toolSource}/tests -p 'test_*.py'
+        node --input-type=module --check < ${toolSource}/web/app.js
+        node --test ${toolSource}/tests/test_web_diff.mjs
+
+        mkdir -p "$out"
+        touch "$out/ok"
+      '';
 in
 {
   inherit
@@ -134,5 +153,6 @@ in
     checkConfigAtlasRegistry
     checkConfigAtlasData
     checkConfigAtlasSite
+    checkConfigAtlasTests
     ;
 }

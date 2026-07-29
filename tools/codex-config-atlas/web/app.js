@@ -1,3 +1,10 @@
+import {
+  formatDeveloperDiff,
+  renderFieldValue,
+  stableValueKey,
+  suppressDuplicateProfileChanges,
+} from "./diff_helpers.mjs";
+
 const state = {
   meta: null,
   versionCache: new Map(),
@@ -83,54 +90,6 @@ function normalizeSelection(fromVersion, toVersion) {
   }
 
   return { fromVersion: from, toVersion: to };
-}
-
-function formatValue(value) {
-  if (typeof value === "undefined") {
-    return "—";
-  }
-  return JSON.stringify(value);
-}
-
-function formatTypeList(types) {
-  return types && types.length ? types.join(" | ") : "—";
-}
-
-function renderFieldValue(field, rowKey) {
-  if (!field) {
-    return "-";
-  }
-
-  switch (rowKey) {
-    case "type":
-      return formatTypeList(field.types);
-    case "default":
-      return field.hasDefault ? formatValue(field.default) : "-";
-    case "enum":
-      return field.enum && field.enum.length ? field.enum.join(", ") : "-";
-    case "optional":
-      return field.required ? "no" : "yes";
-    case "description":
-      return field.description || "-";
-    default:
-      return "-";
-  }
-}
-
-function stableValueKey(value) {
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => stableValueKey(item)).join(",")}]`;
-  }
-
-  if (value && typeof value === "object") {
-    return `{${Object.keys(value)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${stableValueKey(value[key])}`)
-      .join(",")}}`;
-  }
-
-  const encoded = JSON.stringify(value);
-  return typeof encoded === "string" ? encoded : String(value);
 }
 
 function compareStableValues(left, right) {
@@ -353,11 +312,16 @@ function buildSchemaDiff(fromVersion, toVersion, fromPayload, toPayload) {
     }
   }
 
+  const visibleChanges = suppressDuplicateProfileChanges(
+    changes,
+    before,
+    after,
+  );
   return {
     from: fromVersion,
     to: toVersion,
-    summary: summarizeChanges(changes),
-    changes,
+    summary: summarizeChanges(visibleChanges),
+    changes: visibleChanges,
   };
 }
 
@@ -571,14 +535,7 @@ function renderDiffSection(section) {
   `;
 }
 
-function renderDiffContent(
-  fromVersion,
-  toVersion,
-  fromPayload,
-  toPayload,
-  diffPayload,
-) {
-  const groups = groupChanges(diffPayload, fromPayload, toPayload);
+function renderDiffContent(fromVersion, toVersion, diffPayload, groups) {
   const sections = partitionGroups(groups);
   const diffCards = sections.length
     ? sections.map((section) => renderDiffSection(section)).join("")
@@ -616,6 +573,8 @@ async function renderApp() {
       fromVersion === toVersion
         ? emptyDiffPayload(fromVersion, toVersion)
         : getDiffPayload(fromVersion, toVersion, fromPayload, toPayload);
+    const groups = groupChanges(diffPayload, fromPayload, toPayload);
+    console.log(formatDeveloperDiff(groups));
 
     document.getElementById("app").innerHTML = `
       <section class="stack">
@@ -641,13 +600,7 @@ async function renderApp() {
             <span class="chip">${state.meta.versions.length} tagged versions</span>
           </div>
         </div>
-        ${renderDiffContent(
-          fromVersion,
-          toVersion,
-          fromPayload,
-          toPayload,
-          diffPayload,
-        )}
+        ${renderDiffContent(fromVersion, toVersion, diffPayload, groups)}
       </section>
     `;
 

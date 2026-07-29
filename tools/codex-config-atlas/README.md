@@ -87,6 +87,10 @@ requested `--out` path. Diagnostics are written to stderr and failures return a
 non-zero exit status. `sync-schema` is the only command that accesses the
 network.
 
+Schema diffs omit a `profiles.<name>.<path>` event only when the corresponding
+`<path>` event has the same semantic change. Profile-only changes and profile
+changes with different values or field metadata remain visible.
+
 ## Following upstream Codex
 
 Register an explicit upstream version:
@@ -116,7 +120,9 @@ nix build --no-link .#codex-config-atlas-site
 ```
 
 The GitHub Pages workflow publishes `.#codex-config-atlas-site`. For local
-validation, use the documented CLI commands above followed by:
+inspection, each selected comparison also writes a copyable `新增` / `移除` /
+`变更` diff to the browser developer console. For local validation, use the
+documented CLI commands above followed by:
 
 ```bash
 nix flake check
