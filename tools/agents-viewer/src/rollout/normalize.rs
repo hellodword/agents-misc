@@ -869,6 +869,8 @@ fn normalize_item_completed(
         }
     };
     add_source_item_id(&mut entry, item);
+    add_execution_attribution_metadata(&mut entry, item);
+    add_event_timing_metadata(&mut entry, payload);
     if let Some(turn_id) = string_option(payload, "turn_id") {
         entry
             .metadata
@@ -1412,6 +1414,8 @@ fn tool_event_entry(
         EntryOrigin::EventPresentation,
     );
     add_attachment_metadata(&mut entry, payload);
+    add_execution_attribution_metadata(&mut entry, payload);
+    add_event_timing_metadata(&mut entry, payload);
     if event == "image_generation_end" {
         add_attachment_counts(&mut entry, 1, 0);
     }
@@ -1919,6 +1923,29 @@ fn add_source_item_id(entry: &mut NormalizedEntry, payload: &Value) {
         entry
             .metadata
             .insert("sourceItemId".into(), Value::String(id));
+    }
+}
+
+fn add_execution_attribution_metadata(entry: &mut NormalizedEntry, payload: &Value) {
+    for (source, target) in [("plugin_id", "pluginId"), ("script_path", "scriptPath")] {
+        if let Some(value) = string_option(payload, source).filter(|value| !value.is_empty()) {
+            entry.metadata.insert(target.into(), Value::String(value));
+        }
+    }
+}
+
+fn add_event_timing_metadata(entry: &mut NormalizedEntry, payload: &Value) {
+    for (snake_case, camel_case) in [
+        ("started_at_ms", "startedAtMs"),
+        ("completed_at_ms", "completedAtMs"),
+    ] {
+        if let Some(value) = payload
+            .get(snake_case)
+            .or_else(|| payload.get(camel_case))
+            .and_then(Value::as_i64)
+        {
+            entry.metadata.insert(camel_case.into(), Value::from(value));
+        }
     }
 }
 

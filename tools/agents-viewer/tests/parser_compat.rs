@@ -14,6 +14,7 @@ const V120: &[u8] = include_bytes!("fixtures/rollouts/v0_120.jsonl");
 const V144: &[u8] = include_bytes!("fixtures/rollouts/v0_144.jsonl");
 const V145: &[u8] = include_bytes!("fixtures/rollouts/v0_145.jsonl");
 const V145_SUBAGENT: &[u8] = include_bytes!("fixtures/rollouts/v0_145_subagent.jsonl");
+const V146: &[u8] = include_bytes!("fixtures/rollouts/v0_146.jsonl");
 const DEDUP: &[u8] = include_bytes!("fixtures/rollouts/dedup.jsonl");
 const MALFORMED: &[u8] = include_bytes!("fixtures/rollouts/malformed.jsonl");
 const REVIEW: &[u8] = include_bytes!("fixtures/rollouts/subagent_review.jsonl");
@@ -326,6 +327,42 @@ fn preserves_v145_legacy_audio_and_search_results_without_exposing_payloads() {
     assert_eq!(mcp.metadata["attachmentCount"], 1);
     assert_eq!(mcp.metadata["audioAttachmentCount"], 1);
     assert!(!mcp.secondary_text.contains("must-not-render"));
+}
+
+#[test]
+fn parses_v146_command_attribution_and_timing_across_legacy_and_durable_events() {
+    let parsed = parse(
+        V146,
+        "rollout-2026-07-29T10-00-00-14614614-6146-4146-8146-146146146146.jsonl",
+        1024 * 1024,
+    );
+
+    assert_eq!(
+        parsed.summary.session.cli_version.as_deref(),
+        Some("0.146.0")
+    );
+    assert_eq!(parsed.summary.recognized_record_count, 4);
+    assert!(parsed.diagnostics.is_empty());
+
+    let command = parsed
+        .entries
+        .iter()
+        .find(|entry| {
+            entry
+                .metadata
+                .get("sourceItemId")
+                .and_then(serde_json::Value::as_str)
+                == Some("exec-146")
+        })
+        .expect("0.146 command execution");
+    assert_eq!(command.tool_kind, Some(ToolKind::Command));
+    assert_eq!(command.tool_status, Some(ToolStatus::Succeeded));
+    assert_eq!(command.raw_refs.len(), 3);
+    assert_eq!(command.metadata["pluginId"], "sample@openai-curated");
+    assert_eq!(command.metadata["scriptPath"], "scripts/run.py");
+    assert_eq!(command.metadata["startedAtMs"], 1_785_319_201_000_i64);
+    assert_eq!(command.metadata["completedAtMs"], 1_785_319_202_000_i64);
+    assert!(command.secondary_text.contains("synthetic 0.146 output"));
 }
 
 #[test]
