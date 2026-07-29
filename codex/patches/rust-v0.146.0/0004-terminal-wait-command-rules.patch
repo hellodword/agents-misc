@@ -1789,10 +1789,10 @@ index fc48f1e..3901329 100644
              Err(err) => Err(FunctionCallError::RespondToModel(format!(
 diff --git a/codex-rs/core/src/tools/handlers/unified_exec/terminal_wait_control.rs b/codex-rs/core/src/tools/handlers/unified_exec/terminal_wait_control.rs
 new file mode 100644
-index 0000000..98432b3
+index 0000000..d241597
 --- /dev/null
 +++ b/codex-rs/core/src/tools/handlers/unified_exec/terminal_wait_control.rs
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,109 @@
 +use crate::function_tool::FunctionCallError;
 +use crate::tools::context::ToolCallSource;
 +use crate::tools::context::ToolInvocation;
@@ -1804,8 +1804,7 @@ index 0000000..98432b3
 +use crate::tools::registry::PreToolUsePayload;
 +use crate::tools::registry::ToolExecutor;
 +use crate::unified_exec::TerminalWaitControlRequest;
-+use codex_protocol::protocol::EventMsg;
-+use codex_protocol::protocol::TerminalInteractionEvent;
++use crate::unified_exec::WriteStdinInteractionEvent;
 +use codex_tools::ToolName;
 +use codex_tools::ToolSpec;
 +use serde::Deserialize;
@@ -1866,11 +1865,14 @@ index 0000000..98432b3
 +            ToolCallSource::Direct => (None, None),
 +        };
 +        let manager = &session.services.unified_exec_manager;
-+        let target_process_id = manager.active_terminal_wait_process_id();
 +        let response = manager
 +            .terminal_wait_control(TerminalWaitControlRequest {
 +                action: args.action,
 +                truncation_policy: turn.model_info.truncation_policy.into(),
++                interaction_event: Some(WriteStdinInteractionEvent {
++                    session: &session,
++                    turn: &turn,
++                }),
 +                code_mode_cell_id,
 +                code_mode_tool_call_id,
 +            })
@@ -1878,21 +1880,6 @@ index 0000000..98432b3
 +            .map_err(|err| {
 +                FunctionCallError::RespondToModel(format!("terminal_wait_control failed: {err}"))
 +            })?;
-+
-+        if args.action == TerminalWaitAction::Interrupt
-+            && let Some(process_id) = target_process_id
-+        {
-+            session
-+                .send_event(
-+                    turn.as_ref(),
-+                    EventMsg::TerminalInteraction(TerminalInteractionEvent {
-+                        call_id: response.event_call_id.clone(),
-+                        process_id: process_id.to_string(),
-+                        stdin: "\u{3}".to_string(),
-+                    }),
-+                )
-+                .await;
-+        }
 +
 +        Ok(boxed_tool_output(response))
 +    }
@@ -2198,10 +2185,10 @@ index 87be4d9..b78101c 100644
  async fn shell_zsh_fork_stays_standalone_until_unified_exec_composition_is_enabled() {
      let standalone = probe(|turn| {
 diff --git a/codex-rs/core/src/unified_exec/errors.rs b/codex-rs/core/src/unified_exec/errors.rs
-index dd40104..ef31d70 100644
+index dd40104..ac350f9 100644
 --- a/codex-rs/core/src/unified_exec/errors.rs
 +++ b/codex-rs/core/src/unified_exec/errors.rs
-@@ -18,6 +18,16 @@ pub(crate) enum UnifiedExecError {
+@@ -18,6 +18,18 @@ pub(crate) enum UnifiedExecError {
          "stdin is closed for this session; rerun exec_command with tty=true to keep stdin open"
      )]
      StdinClosed,
@@ -2215,11 +2202,13 @@ index dd40104..ef31d70 100644
 +        "managed terminal process {process_id} is in phase {phase}; terminal_wait_control actions are only valid in phase decision_required"
 +    )]
 +    TerminalWaitDecisionUnavailable { process_id: i32, phase: String },
++    #[error("managed terminal start was cancelled before it became active")]
++    TerminalWaitStartCancelled,
      #[error("missing command line for unified exec request")]
      MissingCommandLine,
      #[error("Command denied by sandbox: {message}")]
 diff --git a/codex-rs/core/src/unified_exec/mod.rs b/codex-rs/core/src/unified_exec/mod.rs
-index e8dd31c..11dfb49 100644
+index e8dd31c..f136be6 100644
 --- a/codex-rs/core/src/unified_exec/mod.rs
 +++ b/codex-rs/core/src/unified_exec/mod.rs
 @@ -25,8 +25,10 @@
@@ -2282,7 +2271,7 @@ index e8dd31c..11dfb49 100644
  }
  
  pub(crate) struct WriteStdinInteractionEvent<'a> {
-@@ -130,6 +151,30 @@ impl std::fmt::Debug for WriteStdinInteractionEvent<'_> {
+@@ -130,6 +151,31 @@ impl std::fmt::Debug for WriteStdinInteractionEvent<'_> {
      }
  }
  
@@ -2303,9 +2292,10 @@ index e8dd31c..11dfb49 100644
 +}
 +
 +#[derive(Debug)]
-+pub(crate) struct TerminalWaitControlRequest {
++pub(crate) struct TerminalWaitControlRequest<'a> {
 +    pub action: TerminalWaitAction,
 +    pub truncation_policy: TruncationPolicy,
++    pub interaction_event: Option<WriteStdinInteractionEvent<'a>>,
 +    pub code_mode_cell_id: Option<String>,
 +    pub code_mode_tool_call_id: Option<String>,
 +}
@@ -2313,7 +2303,7 @@ index e8dd31c..11dfb49 100644
  #[derive(Default)]
  pub(crate) struct ProcessStore {
      processes: HashMap<i32, ProcessEntry>,
-@@ -146,14 +191,25 @@ impl ProcessStore {
+@@ -146,14 +192,25 @@ impl ProcessStore {
  pub(crate) struct UnifiedExecProcessManager {
      process_store: Mutex<ProcessStore>,
      max_write_stdin_yield_time_ms: u64,
@@ -2339,11 +2329,12 @@ index e8dd31c..11dfb49 100644
          }
      }
  }
-@@ -172,11 +228,256 @@ struct ProcessEntry {
+@@ -172,11 +229,308 @@ struct ProcessEntry {
      initial_exec_command_active: Arc<std::sync::atomic::AtomicBool>,
      hook_command: String,
      tty: bool,
 +    terminal_wait_rule: Option<Arc<TerminalWaitCommandRule>>,
++    terminal_wait_generation: Option<u64>,
      network_approval: Option<DeferredNetworkApproval>,
      session: Weak<Session>,
      last_used: tokio::time::Instant,
@@ -2388,22 +2379,29 @@ index e8dd31c..11dfb49 100644
 +    process_id: i32,
 +    poll_interval_ms: u64,
 +    phase: TerminalWaitPhase,
++    generation: u64,
++}
++
++#[derive(Default)]
++struct TerminalWaitGateState {
++    active: Option<TerminalWaitGateSnapshot>,
++    generation: u64,
 +}
 +
 +#[derive(Default)]
 +struct TerminalWaitGate {
-+    state: StdMutex<Option<TerminalWaitGateSnapshot>>,
++    state: StdMutex<TerminalWaitGateState>,
 +}
 +
 +impl TerminalWaitGate {
-+    fn lock_state(&self) -> std::sync::MutexGuard<'_, Option<TerminalWaitGateSnapshot>> {
++    fn lock_state(&self) -> std::sync::MutexGuard<'_, TerminalWaitGateState> {
 +        self.state
 +            .lock()
 +            .unwrap_or_else(std::sync::PoisonError::into_inner)
 +    }
 +
 +    fn snapshot(&self) -> Option<TerminalWaitGateSnapshot> {
-+        *self.lock_state()
++        self.lock_state().active
 +    }
 +
 +    fn ensure_terminal_available(&self) -> Result<(), UnifiedExecError> {
@@ -2422,20 +2420,24 @@ index e8dd31c..11dfb49 100644
 +        poll_interval_ms: u64,
 +    ) -> Result<TerminalWaitOperationGuard, UnifiedExecError> {
 +        let mut state = self.lock_state();
-+        if let Some(active) = *state {
++        if let Some(active) = state.active {
 +            return Err(UnifiedExecError::TerminalWaitActive {
 +                process_id: active.process_id,
 +                phase: active.phase.to_string(),
 +            });
 +        }
-+        *state = Some(TerminalWaitGateSnapshot {
++        state.generation = state.generation.wrapping_add(1).max(1);
++        let generation = state.generation;
++        state.active = Some(TerminalWaitGateSnapshot {
 +            process_id,
 +            poll_interval_ms,
 +            phase: TerminalWaitPhase::PendingStart,
++            generation,
 +        });
 +        Ok(TerminalWaitOperationGuard {
 +            gate: Arc::clone(self),
 +            process_id,
++            generation,
 +            drop_action: TerminalWaitDropAction::Release,
 +            resolved: false,
 +        })
@@ -2444,11 +2446,20 @@ index e8dd31c..11dfb49 100644
 +    fn begin_action(
 +        self: &Arc<Self>,
 +        action: TerminalWaitAction,
++        expected: Option<TerminalWaitGateSnapshot>,
 +    ) -> Result<(TerminalWaitGateSnapshot, TerminalWaitOperationGuard), UnifiedExecError> {
 +        let mut state = self.lock_state();
-+        let Some(mut active) = *state else {
++        let Some(mut active) = state.active else {
 +            return Err(UnifiedExecError::NoTerminalWaitDecision);
 +        };
++        if expected.is_some_and(|expected| {
++            expected.process_id != active.process_id || expected.generation != active.generation
++        }) {
++            return Err(UnifiedExecError::TerminalWaitActive {
++                process_id: active.process_id,
++                phase: active.phase.to_string(),
++            });
++        }
 +        if active.phase != TerminalWaitPhase::DecisionRequired {
 +            return Err(UnifiedExecError::TerminalWaitDecisionUnavailable {
 +                process_id: active.process_id,
@@ -2460,39 +2471,50 @@ index e8dd31c..11dfb49 100644
 +            TerminalWaitAction::Interrupt => TerminalWaitPhase::Interrupting,
 +            TerminalWaitAction::Terminate => TerminalWaitPhase::Terminating,
 +        };
-+        *state = Some(active);
++        state.active = Some(active);
 +        Ok((
 +            active,
 +            TerminalWaitOperationGuard {
 +                gate: Arc::clone(self),
 +                process_id: active.process_id,
++                generation: active.generation,
 +                drop_action: TerminalWaitDropAction::DecisionRequired,
 +                resolved: false,
 +            },
 +        ))
 +    }
 +
-+    fn set_phase(&self, process_id: i32, phase: TerminalWaitPhase) {
++    fn set_phase(&self, process_id: i32, generation: u64, phase: TerminalWaitPhase) -> bool {
 +        let mut state = self.lock_state();
-+        if let Some(active) = state.as_mut()
++        if let Some(active) = state.active.as_mut()
 +            && active.process_id == process_id
++            && active.generation == generation
 +        {
 +            active.phase = phase;
++            true
++        } else {
++            false
 +        }
 +    }
 +
-+    fn release(&self, process_id: i32) {
++    fn release(&self, process_id: i32, generation: u64) -> bool {
 +        let mut state = self.lock_state();
 +        if state
++            .active
 +            .as_ref()
-+            .is_some_and(|active| active.process_id == process_id)
++            .is_some_and(|active| {
++                active.process_id == process_id && active.generation == generation
++            })
 +        {
-+            *state = None;
++            state.active = None;
++            true
++        } else {
++            false
 +        }
 +    }
 +
 +    fn clear(&self) {
-+        *self.lock_state() = None;
++        self.lock_state().active = None;
 +    }
 +}
 +
@@ -2505,25 +2527,39 @@ index e8dd31c..11dfb49 100644
 +struct TerminalWaitOperationGuard {
 +    gate: Arc<TerminalWaitGate>,
 +    process_id: i32,
++    generation: u64,
 +    drop_action: TerminalWaitDropAction,
 +    resolved: bool,
 +}
 +
 +impl TerminalWaitOperationGuard {
-+    fn mark_process_stored(&mut self) {
-+        self.drop_action = TerminalWaitDropAction::DecisionRequired;
-+        self.gate
-+            .set_phase(self.process_id, TerminalWaitPhase::Waiting);
++    fn generation(&self) -> u64 {
++        self.generation
++    }
++
++    fn mark_process_stored(&mut self) -> bool {
++        let stored = self.gate.set_phase(
++            self.process_id,
++            self.generation,
++            TerminalWaitPhase::Waiting,
++        );
++        if stored {
++            self.drop_action = TerminalWaitDropAction::DecisionRequired;
++        }
++        stored
 +    }
 +
 +    fn finish_decision_required(mut self) {
-+        self.gate
-+            .set_phase(self.process_id, TerminalWaitPhase::DecisionRequired);
++        self.gate.set_phase(
++            self.process_id,
++            self.generation,
++            TerminalWaitPhase::DecisionRequired,
++        );
 +        self.resolved = true;
 +    }
 +
 +    fn finish_released(mut self) {
-+        self.gate.release(self.process_id);
++        self.gate.release(self.process_id, self.generation);
 +        self.resolved = true;
 +    }
 +}
@@ -2534,10 +2570,16 @@ index e8dd31c..11dfb49 100644
 +            return;
 +        }
 +        match self.drop_action {
-+            TerminalWaitDropAction::Release => self.gate.release(self.process_id),
-+            TerminalWaitDropAction::DecisionRequired => self
-+                .gate
-+                .set_phase(self.process_id, TerminalWaitPhase::DecisionRequired),
++            TerminalWaitDropAction::Release => {
++                self.gate.release(self.process_id, self.generation);
++            }
++            TerminalWaitDropAction::DecisionRequired => {
++                self.gate.set_phase(
++                    self.process_id,
++                    self.generation,
++                    TerminalWaitPhase::DecisionRequired,
++                );
++            }
 +        }
 +    }
 +}
@@ -2597,10 +2639,10 @@ index e8dd31c..11dfb49 100644
      let yield_time_ms = if cfg!(windows) {
          yield_time_ms.max(WINDOWS_INITIAL_EXEC_YIELD_TIME_FLOOR_MS)
 diff --git a/codex-rs/core/src/unified_exec/mod_tests.rs b/codex-rs/core/src/unified_exec/mod_tests.rs
-index acf6d7d..f577241 100644
+index acf6d7d..4d98afc 100644
 --- a/codex-rs/core/src/unified_exec/mod_tests.rs
 +++ b/codex-rs/core/src/unified_exec/mod_tests.rs
-@@ -42,6 +42,102 @@ async fn test_session_and_turn() -> (Arc<Session>, Arc<TurnContext>) {
+@@ -42,6 +42,148 @@ async fn test_session_and_turn() -> (Arc<Session>, Arc<TurnContext>) {
      (Arc::new(session), Arc::new(turn))
  }
  
@@ -2617,6 +2659,7 @@ index acf6d7d..f577241 100644
 +            process_id: 41,
 +            poll_interval_ms: 2_000,
 +            phase: TerminalWaitPhase::PendingStart,
++            generation: 1,
 +        })
 +    );
 +    assert!(matches!(
@@ -2638,7 +2681,7 @@ index acf6d7d..f577241 100644
 +    let mut reservation = gate
 +        .reserve(/*process_id*/ 41, /*poll_interval_ms*/ 2_000)
 +        .expect("managed command should reserve the gate");
-+    reservation.mark_process_stored();
++    assert!(reservation.mark_process_stored());
 +    assert_eq!(
 +        gate.snapshot().map(|snapshot| snapshot.phase),
 +        Some(TerminalWaitPhase::Waiting)
@@ -2651,10 +2694,10 @@ index acf6d7d..f577241 100644
 +    );
 +
 +    let (_, control) = gate
-+        .begin_action(TerminalWaitAction::Continue)
++        .begin_action(TerminalWaitAction::Continue, /*expected*/ None)
 +        .expect("decision should accept one control action");
 +    assert!(matches!(
-+        gate.begin_action(TerminalWaitAction::Interrupt),
++        gate.begin_action(TerminalWaitAction::Interrupt, /*expected*/ None),
 +        Err(UnifiedExecError::TerminalWaitDecisionUnavailable { process_id: 41, .. })
 +    ));
 +    drop(control);
@@ -2670,19 +2713,64 @@ index acf6d7d..f577241 100644
 +    let mut reservation = gate
 +        .reserve(/*process_id*/ 41, /*poll_interval_ms*/ 2_000)
 +        .expect("managed command should reserve the gate");
-+    reservation.mark_process_stored();
++    assert!(reservation.mark_process_stored());
 +    reservation.finish_decision_required();
 +
 +    let (_, control) = gate
-+        .begin_action(TerminalWaitAction::Terminate)
++        .begin_action(TerminalWaitAction::Terminate, /*expected*/ None)
 +        .expect("decision should accept terminate");
 +    control.finish_released();
 +
 +    assert_eq!(gate.snapshot(), None);
 +    assert!(matches!(
-+        gate.begin_action(TerminalWaitAction::Continue),
++        gate.begin_action(TerminalWaitAction::Continue, /*expected*/ None),
 +        Err(UnifiedExecError::NoTerminalWaitDecision)
 +    ));
++}
++
++#[test]
++fn terminal_wait_gate_rejects_a_store_after_the_gate_is_cleared() {
++    let gate = Arc::new(TerminalWaitGate::default());
++    let mut reservation = gate
++        .reserve(/*process_id*/ 41, /*poll_interval_ms*/ 2_000)
++        .expect("managed command should reserve the gate");
++
++    gate.clear();
++
++    assert!(!reservation.mark_process_stored());
++    drop(reservation);
++    assert_eq!(gate.snapshot(), None);
++}
++
++#[test]
++fn terminal_wait_gate_rejects_a_rebound_compatibility_target() {
++    let gate = Arc::new(TerminalWaitGate::default());
++    let mut first_reservation = gate
++        .reserve(/*process_id*/ 41, /*poll_interval_ms*/ 2_000)
++        .expect("first managed command should reserve the gate");
++    assert!(first_reservation.mark_process_stored());
++    first_reservation.finish_decision_required();
++    let first = gate.snapshot().expect("first decision should be active");
++
++    let (_, first_control) = gate
++        .begin_action(TerminalWaitAction::Terminate, Some(first))
++        .expect("first decision should accept terminate");
++    first_control.finish_released();
++
++    let mut rebound_reservation = gate
++        .reserve(/*process_id*/ 41, /*poll_interval_ms*/ 2_000)
++        .expect("rebound command should reserve the released process id");
++    assert!(rebound_reservation.mark_process_stored());
++    rebound_reservation.finish_decision_required();
++    let rebound = gate.snapshot().expect("rebound decision should be active");
++
++    assert_ne!(first.generation, rebound.generation);
++    assert!(matches!(
++        gate.begin_action(TerminalWaitAction::Continue, Some(first)),
++        Err(UnifiedExecError::TerminalWaitActive { process_id: 41, .. })
++    ));
++    assert!(!gate.release(first.process_id, first.generation));
++    assert_eq!(gate.snapshot(), Some(rebound));
 +}
 +
 +#[tokio::test]
@@ -2692,7 +2780,7 @@ index acf6d7d..f577241 100644
 +        .terminal_wait_gate
 +        .reserve(/*process_id*/ 41, /*poll_interval_ms*/ 2_000)
 +        .expect("managed command should reserve the gate");
-+    reservation.mark_process_stored();
++    assert!(reservation.mark_process_stored());
 +    drop(reservation);
 +
 +    manager.terminate_all_processes().await;
@@ -2703,15 +2791,16 @@ index acf6d7d..f577241 100644
  async fn exec_command(
      session: &Arc<Session>,
      turn: &Arc<TurnContext>,
-@@ -137,6 +233,7 @@ async fn exec_command_with_tty(
+@@ -137,6 +279,8 @@ async fn exec_command_with_tty(
              initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
              hook_command: cmd.to_string(),
              tty,
 +            terminal_wait_rule: None,
++            terminal_wait_generation: None,
              network_approval: None,
              session: Arc::downgrade(session),
              last_used: started_at,
-@@ -207,6 +304,7 @@ async fn exec_command_with_tty(
+@@ -207,6 +351,7 @@ async fn exec_command_with_tty(
          original_token_count: Some(original_token_count),
          output_omitted_bytes,
          hook_command: Some(cmd.to_string()),
@@ -2719,7 +2808,7 @@ index acf6d7d..f577241 100644
      })
  }
  
-@@ -324,6 +422,8 @@ async fn write_stdin(
+@@ -324,6 +469,8 @@ async fn write_stdin(
              max_output_tokens: None,
              truncation_policy: TruncationPolicy::Tokens(10_000),
              interaction_event: None,
@@ -2728,24 +2817,26 @@ index acf6d7d..f577241 100644
          })
          .await
  }
-@@ -620,6 +720,7 @@ async fn terminating_initial_exec_command_rechecks_initial_response_state() -> a
+@@ -620,6 +767,8 @@ async fn terminating_initial_exec_command_rechecks_initial_response_state() -> a
              initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
              hook_command: "sleep 60".to_string(),
              tty: true,
 +            terminal_wait_rule: None,
++            terminal_wait_generation: None,
              network_approval: None,
              session: Arc::downgrade(&session),
              last_used: Instant::now(),
-@@ -693,6 +794,7 @@ async fn terminating_during_stdin_poll_returns_exited_response() -> anyhow::Resu
+@@ -693,6 +842,8 @@ async fn terminating_during_stdin_poll_returns_exited_response() -> anyhow::Resu
              initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
              hook_command: "sleep 60".to_string(),
              tty: true,
 +            terminal_wait_rule: None,
++            terminal_wait_generation: None,
              network_approval: None,
              session: Arc::downgrade(&session),
              last_used,
 diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
-index 098c70f..b726d89 100644
+index 098c70f..96ebc9e 100644
 --- a/codex-rs/core/src/unified_exec/process_manager.rs
 +++ b/codex-rs/core/src/unified_exec/process_manager.rs
 @@ -23,6 +23,7 @@ use crate::sandboxing::ExecOptions;
@@ -2756,18 +2847,20 @@ index 098c70f..b726d89 100644
  use crate::tools::events::ToolEmitter;
  use crate::tools::events::ToolEventCtx;
  use crate::tools::events::ToolEventStage;
-@@ -42,6 +43,10 @@ use crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS;
+@@ -42,6 +43,12 @@ use crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS;
  use crate::unified_exec::MIN_YIELD_TIME_MS;
  use crate::unified_exec::ProcessEntry;
  use crate::unified_exec::ProcessStore;
 +use crate::unified_exec::TerminalWaitAction;
 +use crate::unified_exec::TerminalWaitCommandRule;
 +use crate::unified_exec::TerminalWaitControlRequest;
++use crate::unified_exec::TerminalWaitGateSnapshot;
++use crate::unified_exec::TerminalWaitOperationGuard;
 +use crate::unified_exec::TerminalWaitToolState;
  use crate::unified_exec::UnifiedExecContext;
  use crate::unified_exec::UnifiedExecError;
  use crate::unified_exec::UnifiedExecProcessManager;
-@@ -70,6 +75,7 @@ use codex_protocol::protocol::TerminalInteractionEvent;
+@@ -70,6 +77,7 @@ use codex_protocol::protocol::TerminalInteractionEvent;
  use codex_sandboxing::SandboxCommand;
  use codex_tools::ToolName;
  use codex_utils_output_truncation::approx_tokens_from_byte_count;
@@ -2775,15 +2868,28 @@ index 098c70f..b726d89 100644
  use codex_utils_path_uri::PathUri;
  
  const UNIFIED_EXEC_ENV: [(&str, &str); 10] = [
-@@ -87,6 +93,7 @@ const UNIFIED_EXEC_ENV: [(&str, &str); 10] = [
+@@ -87,8 +95,20 @@ const UNIFIED_EXEC_ENV: [(&str, &str); 10] = [
  const NETWORK_ACCESS_DENIED_MESSAGE: &str =
      "Network access was denied by the Codex sandbox network proxy.";
  const LATE_NETWORK_DENIAL_GRACE_PERIOD: Duration = Duration::from_millis(100);
 +const TERMINAL_WAIT_INTERRUPT_GRACE_PERIOD: Duration = Duration::from_secs(10);
  const INTERRUPT: &str = "\u{3}";
  
++fn terminal_wait_interaction_input(
++    action: TerminalWaitAction,
++    process_remains_alive: bool,
++) -> Option<&'static str> {
++    match action {
++        TerminalWaitAction::Continue if process_remains_alive => Some(""),
++        TerminalWaitAction::Interrupt => Some(INTERRUPT),
++        TerminalWaitAction::Continue | TerminalWaitAction::Terminate => None,
++    }
++}
++
  /// Test-only override for deterministic unified exec process IDs.
-@@ -207,6 +214,53 @@ fn exec_server_params_for_request(
+ ///
+ /// In production builds this value should remain at its default (`false`) and
+@@ -207,6 +227,53 @@ fn exec_server_params_for_request(
      }
  }
  
@@ -2837,7 +2943,7 @@ index 098c70f..b726d89 100644
  /// Borrowed process state prepared for a `write_stdin` or poll operation.
  struct PreparedProcessHandles {
      process: Arc<UnifiedExecProcess>,
-@@ -222,6 +276,7 @@ struct PreparedProcessHandles {
+@@ -222,6 +289,7 @@ struct PreparedProcessHandles {
      hook_command: String,
      process_id: i32,
      tty: bool,
@@ -2845,7 +2951,7 @@ index 098c70f..b726d89 100644
  }
  
  struct InitialExecCommandGuard {
-@@ -382,6 +437,16 @@ fn terminate_process_on_network_denial(
+@@ -382,6 +450,10 @@ fn terminate_process_on_network_denial(
  }
  
  impl UnifiedExecProcessManager {
@@ -2853,24 +2959,93 @@ index 098c70f..b726d89 100644
 +        self.terminal_wait_gate.ensure_terminal_available()
 +    }
 +
-+    pub(crate) fn active_terminal_wait_process_id(&self) -> Option<i32> {
-+        self.terminal_wait_gate
-+            .snapshot()
-+            .map(|active| active.process_id)
-+    }
-+
      pub(crate) async fn allocate_process_id(&self) -> i32 {
          loop {
              let mut store = self.process_store.lock().await;
-@@ -410,6 +475,7 @@ impl UnifiedExecProcessManager {
+@@ -410,21 +482,135 @@ impl UnifiedExecProcessManager {
      }
  
      pub(crate) async fn release_process_id(&self, process_id: i32) {
-+        self.terminal_wait_gate.release(process_id);
++        self.release_process_id_for_start(process_id, /*terminal_wait_generation*/ None)
++            .await;
++    }
++
++    async fn release_process_id_for_start(
++        &self,
++        process_id: i32,
++        terminal_wait_generation: Option<u64>,
++    ) {
          let removed = {
              let mut store = self.process_store.lock().await;
-             store.remove(process_id)
-@@ -425,6 +491,50 @@ impl UnifiedExecProcessManager {
+-            store.remove(process_id)
++            // A stop can clear reservations while an older start is still
++            // unwinding. Only that exact terminal-wait generation may release
++            // the reused process id.
++            let terminal_wait_matches = terminal_wait_generation.is_none_or(|generation| {
++                self.terminal_wait_gate.snapshot().is_some_and(|active| {
++                    active.process_id == process_id && active.generation == generation
++                })
++            });
++            if terminal_wait_matches {
++                store.remove(process_id)
++            } else {
++                None
++            }
+         };
+         if let Some(entry) = removed {
++            self.release_terminal_wait_for_entry(&entry);
+             unregister_network_approval_for_entry(&entry).await;
+         }
+     }
+ 
++    async fn release_process_if_matches(
++        &self,
++        process_id: i32,
++        expected_process: &Arc<UnifiedExecProcess>,
++    ) {
++        let removed = {
++            let mut store = self.process_store.lock().await;
++            let matches = store
++                .processes
++                .get(&process_id)
++                .is_some_and(|entry| Arc::ptr_eq(&entry.process, expected_process));
++            if matches {
++                store.remove(process_id)
++            } else {
++                None
++            }
++        };
++        if let Some(entry) = removed {
++            self.release_terminal_wait_for_entry(&entry);
++            unregister_network_approval_for_entry(&entry).await;
++        }
++    }
++
++    async fn release_initial_process(
++        &self,
++        process_id: i32,
++        process: &Arc<UnifiedExecProcess>,
++        process_started_alive: bool,
++        terminal_wait_generation: Option<u64>,
++    ) {
++        if process_started_alive {
++            self.release_process_if_matches(process_id, process).await;
++        } else {
++            self.release_process_id_for_start(process_id, terminal_wait_generation)
++                .await;
++        }
++    }
++
++    fn release_terminal_wait_for_entry(&self, entry: &ProcessEntry) {
++        if let Some(generation) = entry.terminal_wait_generation {
++            self.terminal_wait_gate
++                .release(entry.process_id, generation);
++        }
++    }
++
+     pub(crate) async fn exec_command(
+         &self,
+         request: ExecCommandRequest,
          context: &UnifiedExecContext,
      ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
          let cwd = request.cwd.clone();
@@ -2897,6 +3072,9 @@ index 098c70f..b726d89 100644
 +                return Err(err);
 +            }
 +        };
++        let terminal_wait_generation = terminal_wait_guard
++            .as_ref()
++            .map(TerminalWaitOperationGuard::generation);
 +        let _terminal_wait_lease = match (
 +            terminal_wait_rule.as_ref(),
 +            context.code_mode_cell_id.as_deref(),
@@ -2921,24 +3099,81 @@ index 098c70f..b726d89 100644
          let process = self
              .open_session_with_sandbox(&request, cwd.clone(), context)
              .await;
-@@ -484,12 +594,16 @@ impl UnifiedExecProcessManager {
-                 start,
-                 request.process_id,
-                 request.tty,
-+                terminal_wait_rule.clone(),
-                 deferred_network_approval.clone(),
-                 network_denial_monitor,
-                 Arc::clone(&transcript),
-                 Arc::clone(&initial_exec_command_active),
-             )
-             .await;
-+            if let Some(guard) = terminal_wait_guard.as_mut() {
-+                guard.mark_process_stored();
+@@ -434,7 +620,8 @@ impl UnifiedExecProcessManager {
+                 (Arc::new(process), deferred_network_approval)
+             }
+             Err(err) => {
+-                self.release_process_id(request.process_id).await;
++                self.release_process_id_for_start(request.process_id, terminal_wait_generation)
++                    .await;
+                 return Err(err);
+             }
+         };
+@@ -474,22 +661,47 @@ impl UnifiedExecProcessManager {
+         let process_started_alive = !process.has_exited() && process.exit_code().is_none();
+         let _initial_exec_command_guard = if process_started_alive {
+             let initial_exec_command_active = Arc::new(AtomicBool::new(true));
+-            self.store_process(
+-                Arc::clone(&process),
+-                context,
+-                &request.command,
+-                request.hook_command.clone(),
+-                cwd.clone(),
+-                plugin_attribution.clone(),
+-                start,
+-                request.process_id,
+-                request.tty,
+-                deferred_network_approval.clone(),
+-                network_denial_monitor,
+-                Arc::clone(&transcript),
+-                Arc::clone(&initial_exec_command_active),
+-            )
+-            .await;
++            let pruned_entry = self
++                .store_process(
++                    Arc::clone(&process),
++                    context,
++                    &request.command,
++                    request.hook_command.clone(),
++                    cwd.clone(),
++                    plugin_attribution.clone(),
++                    start,
++                    request.process_id,
++                    request.tty,
++                    terminal_wait_rule.clone(),
++                    terminal_wait_generation,
++                    deferred_network_approval.clone(),
++                    network_denial_monitor,
++                    Arc::clone(&transcript),
++                    Arc::clone(&initial_exec_command_active),
++                )
++                .await;
++            let terminal_wait_stored = match terminal_wait_guard.as_mut() {
++                Some(guard) => guard.mark_process_stored(),
++                None => true,
++            };
++            if !terminal_wait_stored {
++                // The gate was cleared after spawn (for example by /stop).
++                // Do not let the just-created process escape without a gate.
++                let termination_result = process.terminate_confirmed().await;
++                if termination_result.is_err() {
++                    process.terminate();
++                }
++                self.release_process_if_matches(request.process_id, &process)
++                    .await;
++                if let Some(pruned_entry) = pruned_entry {
++                    self.cleanup_pruned_process(pruned_entry).await;
++                }
++                termination_result?;
++                return Err(UnifiedExecError::TerminalWaitStartCancelled);
++            }
++            if let Some(pruned_entry) = pruned_entry {
++                self.cleanup_pruned_process(pruned_entry).await;
 +            }
              Some(InitialExecCommandGuard {
                  active: initial_exec_command_active,
              })
-@@ -497,7 +611,6 @@ impl UnifiedExecProcessManager {
+@@ -497,7 +709,6 @@ impl UnifiedExecProcessManager {
              None
          };
  
@@ -2946,7 +3181,7 @@ index 098c70f..b726d89 100644
          // For the initial exec_command call, we both stream output to events
          // (via start_streaming_output above) and collect a snapshot here for
          // the tool response body.
-@@ -508,7 +621,8 @@ impl UnifiedExecProcessManager {
+@@ -508,7 +719,8 @@ impl UnifiedExecProcessManager {
              output_closed_notify,
              cancellation_token,
          } = process.output_handles();
@@ -2956,7 +3191,76 @@ index 098c70f..b726d89 100644
          let collected_output = Self::collect_output_until_deadline(
              &output_buffer,
              &output_notify,
-@@ -661,28 +775,272 @@ impl UnifiedExecProcessManager {
+@@ -550,7 +762,13 @@ impl UnifiedExecProcessManager {
+                 wall_time,
+             )
+             .await;
+-            self.release_process_id(request.process_id).await;
++            self.release_initial_process(
++                request.process_id,
++                &process,
++                process_started_alive,
++                terminal_wait_generation,
++            )
++            .await;
+             return Err(fail_process_with_message(process.as_ref(), message));
+         }
+         if let Some(message) = process.failure_message() {
+@@ -571,7 +789,13 @@ impl UnifiedExecProcessManager {
+                 wall_time,
+             )
+             .await;
+-            self.release_process_id(request.process_id).await;
++            self.release_initial_process(
++                request.process_id,
++                &process,
++                process_started_alive,
++                terminal_wait_generation,
++            )
++            .await;
+             if let Err(message) = finish_result {
+                 return Err(fail_process_with_message(process.as_ref(), message));
+             }
+@@ -579,7 +803,7 @@ impl UnifiedExecProcessManager {
+         }
+         let process_id = request.process_id;
+         let (response_process_id, exit_code) = if process_started_alive {
+-            match self.refresh_process_state(process_id).await {
++            match self.refresh_process_state(process_id, &process).await {
+                 ProcessStatus::Alive {
+                     exit_code,
+                     process_id,
+@@ -631,7 +855,13 @@ impl UnifiedExecProcessManager {
+                     wall_time,
+                 )
+                 .await;
+-                self.release_process_id(request.process_id).await;
++                self.release_initial_process(
++                    request.process_id,
++                    &process,
++                    process_started_alive,
++                    terminal_wait_generation,
++                )
++                .await;
+                 return Err(fail_process_with_message(process.as_ref(), message));
+             }
+             let exit_code = process.exit_code();
+@@ -651,7 +881,13 @@ impl UnifiedExecProcessManager {
+             )
+             .await;
+ 
+-            self.release_process_id(request.process_id).await;
++            self.release_initial_process(
++                request.process_id,
++                &process,
++                process_started_alive,
++                terminal_wait_generation,
++            )
++            .await;
+             process
+                 .check_for_sandbox_denial_with_text(&text)
+                 .await
+@@ -661,19 +897,267 @@ impl UnifiedExecProcessManager {
              (None, exit_code)
          };
  
@@ -2994,19 +3298,21 @@ index 098c70f..b726d89 100644
              output_omitted_bytes,
              hook_command: Some(request.hook_command.clone()),
 +            terminal_wait,
-         };
- 
-         Ok(response)
-     }
- 
++        };
++
++        Ok(response)
++    }
++
 +    pub(crate) async fn terminal_wait_control(
 +        &self,
-+        request: TerminalWaitControlRequest,
++        request: TerminalWaitControlRequest<'_>,
 +    ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
 +        self.run_terminal_wait_action(
 +            request.action,
++            /*expected*/ None,
 +            request.truncation_policy,
 +            /*request_max_output_tokens*/ None,
++            request.interaction_event,
 +            request.code_mode_cell_id,
 +            request.code_mode_tool_call_id,
 +        )
@@ -3016,12 +3322,15 @@ index 098c70f..b726d89 100644
 +    async fn run_terminal_wait_action(
 +        &self,
 +        action: TerminalWaitAction,
++        expected: Option<TerminalWaitGateSnapshot>,
 +        truncation_policy: codex_utils_output_truncation::TruncationPolicy,
 +        request_max_output_tokens: Option<usize>,
++        interaction_event: Option<WriteStdinInteractionEvent<'_>>,
 +        code_mode_cell_id: Option<String>,
 +        code_mode_tool_call_id: Option<String>,
 +    ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
-+        let (managed, terminal_wait_guard) = self.terminal_wait_gate.begin_action(action)?;
++        let (managed, terminal_wait_guard) =
++            self.terminal_wait_gate.begin_action(action, expected)?;
 +        let process_id = managed.process_id;
 +
 +        let locked_process = {
@@ -3030,6 +3339,10 @@ index 098c70f..b726d89 100644
 +                terminal_wait_guard.finish_released();
 +                return Err(UnifiedExecError::UnknownProcessId { process_id });
 +            };
++            if entry.terminal_wait_generation != Some(managed.generation) {
++                terminal_wait_guard.finish_released();
++                return Err(UnifiedExecError::UnknownProcessId { process_id });
++            }
 +            Arc::clone(&entry.process)
 +        };
 +        let _interaction_guard = locked_process.interaction_lock().lock_owned().await;
@@ -3062,7 +3375,7 @@ index 098c70f..b726d89 100644
 +            )
 +        } else {
 +            None
-+        };
+         };
 +        if let Some(session) = session.as_ref() {
 +            session
 +                .services
@@ -3118,7 +3431,7 @@ index 098c70f..b726d89 100644
 +            let message =
 +                network_denial_message_for_session(session.as_ref(), network_approval.clone())
 +                    .await;
-+            self.release_process_id(process_id).await;
++            self.release_process_if_matches(process_id, &process).await;
 +            return Err(fail_process_with_message(process.as_ref(), message));
 +        }
 +        if let Some(message) = process.failure_message() {
@@ -3127,14 +3440,14 @@ index 098c70f..b726d89 100644
 +                network_approval.clone(),
 +            )
 +            .await;
-+            self.release_process_id(process_id).await;
++            self.release_process_if_matches(process_id, &process).await;
 +            if let Err(message) = finish_result {
 +                return Err(fail_process_with_message(process.as_ref(), message));
 +            }
 +            return Err(UnifiedExecError::process_failed(message));
 +        }
 +
-+        let status = self.refresh_process_state(process_id).await;
++        let status = self.refresh_process_state(process_id, &process).await;
 +        let (response_process_id, exit_code, event_call_id, terminal_wait_state) = match status {
 +            ProcessStatus::Alive {
 +                exit_code,
@@ -3178,7 +3491,7 @@ index 098c70f..b726d89 100644
 +            }
 +        };
 +
-+        Ok(ExecCommandToolOutput {
++        let response = ExecCommandToolOutput {
 +            event_call_id,
 +            chunk_id,
 +            wall_time,
@@ -3197,11 +3510,26 @@ index 098c70f..b726d89 100644
 +                state: terminal_wait_state,
 +                poll_interval_ms: managed.poll_interval_ms,
 +            }),
-+        })
-+    }
++        };
 +
-     pub(crate) async fn write_stdin(
-         &self,
++        let interaction_input =
++            terminal_wait_interaction_input(action, response.process_id.is_some());
++        if let Some(input) = interaction_input
++            && let Some(WriteStdinInteractionEvent { session, turn }) = interaction_event
++        {
++            let interaction = TerminalInteractionEvent {
++                call_id: response.event_call_id.clone(),
++                process_id: managed.process_id.to_string(),
++                stdin: input.to_string(),
++            };
++            session
++                .send_event(turn.as_ref(), EventMsg::TerminalInteraction(interaction))
++                .await;
++        }
+ 
+         Ok(response)
+     }
+@@ -683,6 +1167,30 @@ impl UnifiedExecProcessManager {
          request: WriteStdinRequest<'_>,
      ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
          let process_id = request.process_id;
@@ -3220,8 +3548,10 @@ index 098c70f..b726d89 100644
 +            return self
 +                .run_terminal_wait_action(
 +                    action,
++                    Some(managed),
 +                    request.truncation_policy,
 +                    request.max_output_tokens,
++                    request.interaction_event,
 +                    request.code_mode_cell_id,
 +                    request.code_mode_tool_call_id,
 +                )
@@ -3230,7 +3560,7 @@ index 098c70f..b726d89 100644
  
          // Different terminal sessions can be polled concurrently, but reads and
          // writes against one terminal must not overlap because they share a
-@@ -711,10 +1069,34 @@ impl UnifiedExecProcessManager {
+@@ -711,10 +1219,34 @@ impl UnifiedExecProcessManager {
              hook_command,
              process_id,
              tty,
@@ -3265,7 +3595,22 @@ index 098c70f..b726d89 100644
          let mut status_after_write = None;
  
          if !request.input.is_empty() {
-@@ -747,18 +1129,13 @@ impl UnifiedExecProcessManager {
+@@ -732,12 +1264,12 @@ impl UnifiedExecProcessManager {
+                         tokio::time::sleep(Duration::from_millis(100)).await;
+                     }
+                     Err(err) => {
+-                        let status = self.refresh_process_state(process_id).await;
++                        let status = self.refresh_process_state(process_id, &process).await;
+                         if matches!(status, ProcessStatus::Exited { .. }) {
+                             status_after_write = Some(status);
+                         } else if matches!(err, UnifiedExecError::ProcessFailed { .. }) {
+                             process.terminate();
+-                            self.release_process_id(process_id).await;
++                            self.release_process_if_matches(process_id, &process).await;
+                             return Err(err);
+                         } else {
+                             return Err(err);
+@@ -747,18 +1279,13 @@ impl UnifiedExecProcessManager {
              }
          }
  
@@ -3290,7 +3635,34 @@ index 098c70f..b726d89 100644
          let collected_output = Self::collect_output_until_deadline(
              &output_buffer,
              &output_notify,
-@@ -842,12 +1219,16 @@ impl UnifiedExecProcessManager {
+@@ -785,7 +1312,7 @@ impl UnifiedExecProcessManager {
+             let message =
+                 network_denial_message_for_session(session.as_ref(), network_approval.clone())
+                     .await;
+-            self.release_process_id(process_id).await;
++            self.release_process_if_matches(process_id, &process).await;
+             return Err(fail_process_with_message(process.as_ref(), message));
+         }
+         if let Some(message) = process.failure_message() {
+@@ -794,7 +1321,7 @@ impl UnifiedExecProcessManager {
+                 network_approval.clone(),
+             )
+             .await;
+-            self.release_process_id(process_id).await;
++            self.release_process_if_matches(process_id, &process).await;
+             if let Err(message) = finish_result {
+                 return Err(fail_process_with_message(process.as_ref(), message));
+             }
+@@ -808,7 +1335,7 @@ impl UnifiedExecProcessManager {
+         let status = if let Some(status) = status_after_write {
+             status
+         } else {
+-            self.refresh_process_state(process_id).await
++            self.refresh_process_state(process_id, &process).await
+         };
+         let (process_id, exit_code, event_call_id) = match status {
+             ProcessStatus::Alive {
+@@ -842,12 +1369,16 @@ impl UnifiedExecProcessManager {
              wall_time,
              raw_output: collected,
              truncation_policy: request.truncation_policy,
@@ -3308,10 +3680,11 @@ index 098c70f..b726d89 100644
          };
  
          let should_emit_interaction = !request.input.is_empty() || response.process_id.is_some();
-@@ -870,6 +1251,33 @@ impl UnifiedExecProcessManager {
+@@ -870,11 +1401,45 @@ impl UnifiedExecProcessManager {
          Ok(response)
      }
  
+-    async fn refresh_process_state(&self, process_id: i32) -> ProcessStatus {
 +    fn write_stdin_deadline(
 +        &self,
 +        start: Instant,
@@ -3339,18 +3712,30 @@ index 098c70f..b726d89 100644
 +        }
 +    }
 +
-     async fn refresh_process_state(&self, process_id: i32) -> ProcessStatus {
++    async fn refresh_process_state(
++        &self,
++        process_id: i32,
++        expected_process: &Arc<UnifiedExecProcess>,
++    ) -> ProcessStatus {
          let mut store = self.process_store.lock().await;
          let Some(entry) = store.processes.get_mut(&process_id) else {
-@@ -883,6 +1291,7 @@ impl UnifiedExecProcessManager {
+             return ProcessStatus::Unknown;
+         };
++        if !Arc::ptr_eq(&entry.process, expected_process) {
++            return ProcessStatus::Unknown;
++        }
+ 
+         let exit_code = entry.process.exit_code();
+         let process_id = entry.process_id;
+@@ -883,6 +1448,7 @@ impl UnifiedExecProcessManager {
              let Some(entry) = store.remove(process_id) else {
                  return ProcessStatus::Unknown;
              };
-+            self.terminal_wait_gate.release(process_id);
++            self.release_terminal_wait_for_entry(&entry);
              ProcessStatus::Exited {
                  exit_code,
                  entry: Box::new(entry),
-@@ -937,6 +1346,7 @@ impl UnifiedExecProcessManager {
+@@ -937,6 +1503,7 @@ impl UnifiedExecProcessManager {
              hook_command: entry.hook_command.clone(),
              process_id: entry.process_id,
              tty: entry.tty,
@@ -3358,37 +3743,62 @@ index 098c70f..b726d89 100644
          })
      }
  
-@@ -952,6 +1362,7 @@ impl UnifiedExecProcessManager {
+@@ -952,11 +1519,13 @@ impl UnifiedExecProcessManager {
          started_at: Instant,
          process_id: i32,
          tty: bool,
 +        terminal_wait_rule: Option<Arc<TerminalWaitCommandRule>>,
++        terminal_wait_generation: Option<u64>,
          network_approval: Option<DeferredNetworkApproval>,
          network_denial_monitor: Option<tokio::task::JoinHandle<()>>,
          transcript: Arc<tokio::sync::Mutex<HeadTailBuffer>>,
-@@ -965,6 +1376,7 @@ impl UnifiedExecProcessManager {
+         initial_exec_command_active: Arc<AtomicBool>,
+-    ) {
++    ) -> Option<ProcessEntry> {
+         let entry = ProcessEntry {
+             process: Arc::clone(&process),
+             call_id: context.call_id.clone(),
+@@ -965,6 +1534,8 @@ impl UnifiedExecProcessManager {
              initial_exec_command_active,
              hook_command,
              tty,
 +            terminal_wait_rule,
++            terminal_wait_generation,
              network_approval,
              session: Arc::downgrade(&context.session),
              last_used: started_at,
-@@ -978,10 +1390,13 @@ impl UnifiedExecProcessManager {
-         // prune_processes_if_needed runs while holding process_store; do async
-         // network-approval cleanup only after dropping that lock.
-         if let Some(pruned_entry) = pruned_entry {
-+            self.terminal_wait_gate.release(pruned_entry.process_id);
-             unregister_network_approval_for_entry(&pruned_entry).await;
-             pruned_entry.process.terminate();
-         }
+@@ -975,13 +1546,9 @@ impl UnifiedExecProcessManager {
+             store.processes.insert(process_id, entry);
+             pruned_entry
+         };
+-        // prune_processes_if_needed runs while holding process_store; do async
+-        // network-approval cleanup only after dropping that lock.
+-        if let Some(pruned_entry) = pruned_entry {
+-            unregister_network_approval_for_entry(&pruned_entry).await;
+-            pruned_entry.process.terminate();
+-        }
  
 +        // The watcher reports process completion but must not release the terminal-wait gate:
 +        // a decision remains the implicit control target until its final output is consumed.
          spawn_exit_watcher(
              Arc::clone(&process),
              Arc::clone(&context.session),
-@@ -1289,15 +1704,16 @@ impl UnifiedExecProcessManager {
+@@ -995,6 +1562,14 @@ impl UnifiedExecProcessManager {
+             started_at,
+             network_denial_monitor,
+         );
++
++        pruned_entry
++    }
++
++    async fn cleanup_pruned_process(&self, entry: ProcessEntry) {
++        self.release_terminal_wait_for_entry(&entry);
++        unregister_network_approval_for_entry(&entry).await;
++        entry.process.terminate();
+     }
+ 
+     #[allow(clippy::too_many_arguments)]
+@@ -1289,15 +1864,16 @@ impl UnifiedExecProcessManager {
                  {
                      break;
                  }
@@ -3409,7 +3819,7 @@ index 098c70f..b726d89 100644
                      let close_wait_remaining = close_wait_deadline.saturating_duration_since(now);
                      if close_wait_remaining == Duration::ZERO {
                          break;
-@@ -1449,6 +1865,7 @@ impl UnifiedExecProcessManager {
+@@ -1449,6 +2025,7 @@ impl UnifiedExecProcessManager {
      }
  
      pub(crate) async fn terminate_all_processes(&self) {
@@ -3417,16 +3827,35 @@ index 098c70f..b726d89 100644
          let entries: Vec<ProcessEntry> = {
              let mut processes = self.process_store.lock().await;
              let entries: Vec<ProcessEntry> = processes
-@@ -1497,6 +1914,7 @@ impl UnifiedExecProcessManager {
+@@ -1486,17 +2063,24 @@ impl UnifiedExecProcessManager {
+     }
+ 
+     pub(crate) async fn terminate_process(&self, process_id: i32) -> bool {
+-        let (process, already_exited) = {
++        let (process, already_exited, terminal_wait_generation) = {
+             let store = self.process_store.lock().await;
+             let Some(entry) = store.processes.get(&process_id) else {
+                 return false;
+             };
+-            (Arc::clone(&entry.process), entry.process.has_exited())
++            (
++                Arc::clone(&entry.process),
++                entry.process.has_exited(),
++                entry.terminal_wait_generation,
++            )
+         };
+ 
          if !already_exited && process.terminate_confirmed().await.is_err() {
              return false;
          }
-+        self.terminal_wait_gate.release(process_id);
++        if let Some(generation) = terminal_wait_generation {
++            self.terminal_wait_gate.release(process_id, generation);
++        }
  
          let entry = {
              let mut store = self.process_store.lock().await;
 diff --git a/codex-rs/core/src/unified_exec/process_manager_tests.rs b/codex-rs/core/src/unified_exec/process_manager_tests.rs
-index ced5188..161d2a0 100644
+index ced5188..b86751d 100644
 --- a/codex-rs/core/src/unified_exec/process_manager_tests.rs
 +++ b/codex-rs/core/src/unified_exec/process_manager_tests.rs
 @@ -1,7 +1,12 @@
@@ -3442,7 +3871,7 @@ index ced5188..161d2a0 100644
  use tokio::time::Duration;
  use tokio::time::Instant;
  
-@@ -248,6 +253,319 @@ fn initial_exec_yield_time_has_no_platform_floor() {
+@@ -248,6 +253,430 @@ fn initial_exec_yield_time_has_no_platform_floor() {
      );
  }
  
@@ -3630,6 +4059,75 @@ index ced5188..161d2a0 100644
 +    assert_eq!(terminal_wait_max_output_tokens(None, Some(456)), Some(456));
 +}
 +
++#[test]
++fn terminal_wait_interactions_match_write_stdin_event_semantics() {
++    assert_eq!(
++        terminal_wait_interaction_input(TerminalWaitAction::Continue, true),
++        Some("")
++    );
++    assert_eq!(
++        terminal_wait_interaction_input(TerminalWaitAction::Continue, false),
++        None
++    );
++    assert_eq!(
++        terminal_wait_interaction_input(TerminalWaitAction::Interrupt, true),
++        Some(INTERRUPT)
++    );
++    assert_eq!(
++        terminal_wait_interaction_input(TerminalWaitAction::Interrupt, false),
++        Some(INTERRUPT)
++    );
++    assert_eq!(
++        terminal_wait_interaction_input(TerminalWaitAction::Terminate, true),
++        None
++    );
++}
++
++#[tokio::test]
++async fn stale_terminal_start_does_not_release_a_rebound_reservation() {
++    let manager = UnifiedExecProcessManager::default();
++    let first = manager
++        .terminal_wait_gate
++        .reserve(/*process_id*/ 41, /*poll_interval_ms*/ 2_000)
++        .expect("first managed command should reserve the gate");
++    let first_generation = first.generation();
++    manager.terminal_wait_gate.clear();
++    drop(first);
++
++    let rebound = manager
++        .terminal_wait_gate
++        .reserve(/*process_id*/ 41, /*poll_interval_ms*/ 2_000)
++        .expect("rebound managed command should reserve the gate");
++    let rebound_snapshot = manager
++        .terminal_wait_gate
++        .snapshot()
++        .expect("rebound reservation should be active");
++    manager
++        .process_store
++        .lock()
++        .await
++        .reserved_process_ids
++        .insert(41);
++
++    manager
++        .release_process_id_for_start(41, Some(first_generation))
++        .await;
++
++    assert!(
++        manager
++            .process_store
++            .lock()
++            .await
++            .reserved_process_ids
++            .contains(&41)
++    );
++    assert_eq!(
++        manager.terminal_wait_gate.snapshot(),
++        Some(rebound_snapshot)
++    );
++    drop(rebound);
++}
++
 +#[cfg(unix)]
 +#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 +async fn terminal_wait_actions_consume_a_process_that_exited_after_the_decision()
@@ -3721,14 +4219,36 @@ index ced5188..161d2a0 100644
 +            "natural exit must retain the implicit target until {action_name} consumes it"
 +        );
 +
-+        let completed = manager
-+            .terminal_wait_control(TerminalWaitControlRequest {
-+                action,
-+                truncation_policy: codex_utils_output_truncation::TruncationPolicy::Tokens(10_000),
-+                code_mode_cell_id: None,
-+                code_mode_tool_call_id: None,
-+            })
-+            .await?;
++        let truncation_policy =
++            codex_utils_output_truncation::TruncationPolicy::Tokens(10_000);
++        let interaction_event = Some(WriteStdinInteractionEvent {
++            session: &session,
++            turn: &turn,
++        });
++        let completed = if action == TerminalWaitAction::Interrupt {
++            manager
++                .write_stdin(WriteStdinRequest {
++                    process_id,
++                    input: INTERRUPT,
++                    yield_time_ms: 1,
++                    max_output_tokens: None,
++                    truncation_policy,
++                    interaction_event,
++                    code_mode_cell_id: None,
++                    code_mode_tool_call_id: None,
++                })
++                .await?
++        } else {
++            manager
++                .terminal_wait_control(TerminalWaitControlRequest {
++                    action,
++                    truncation_policy,
++                    interaction_event,
++                    code_mode_cell_id: None,
++                    code_mode_tool_call_id: None,
++                })
++                .await?
++        };
 +
 +        assert_eq!(completed.process_id, None);
 +        assert_eq!(completed.exit_code, Some(0));
@@ -3745,6 +4265,26 @@ index ced5188..161d2a0 100644
 +            completed.truncated_output(crate::unified_exec::DEFAULT_MAX_OUTPUT_TOKENS),
 +            final_output
 +        );
++        if action == TerminalWaitAction::Interrupt {
++            let interaction = tokio::time::timeout(Duration::from_secs(1), async {
++                loop {
++                    let event = rx_event
++                        .recv()
++                        .await
++                        .expect("event channel should stay open");
++                    if let codex_protocol::protocol::EventMsg::TerminalInteraction(interaction) =
++                        event.msg
++                    {
++                        break interaction;
++                    }
++                }
++            })
++            .await
++            .expect("compatibility interrupt should emit TerminalInteraction");
++            assert_eq!(interaction.call_id, call_id);
++            assert_eq!(interaction.process_id, process_id.to_string());
++            assert_eq!(interaction.stdin, INTERRUPT);
++        }
 +        assert_eq!(manager.terminal_wait_gate.snapshot(), None);
 +        assert!(
 +            !manager
@@ -3762,6 +4302,15 @@ index ced5188..161d2a0 100644
  #[tokio::test]
  async fn output_collection_stays_bounded_across_repeated_drains() {
      let output_buffer = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
+@@ -546,6 +975,8 @@ async fn pruning_does_not_evict_live_process_while_exited_process_is_finalizing(
+                 initial_exec_command_active: Arc::new(AtomicBool::new(false)),
+                 hook_command: format!("command-{process_id}"),
+                 tty: false,
++                terminal_wait_rule: None,
++                terminal_wait_generation: None,
+                 network_approval: None,
+                 session: std::sync::Weak::new(),
+                 last_used: if is_exited {
 diff --git a/codex-rs/core/tests/suite/code_mode.rs b/codex-rs/core/tests/suite/code_mode.rs
 index 1003534..e66e642 100644
 --- a/codex-rs/core/tests/suite/code_mode.rs
