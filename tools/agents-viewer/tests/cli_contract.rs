@@ -167,6 +167,56 @@ fn warm_start_keeps_background_reconcile_off_stderr() {
 }
 
 #[cfg(unix)]
+#[test]
+fn shutdown_closes_an_incomplete_http_request_after_the_grace_period() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("source");
+    std::fs::create_dir_all(source.join("sessions")).unwrap();
+    let data = temp.path().join("data");
+    let config = temp.path().join("config.toml");
+    write_config(&config, &source, &data);
+    let binary = assert_cmd::cargo::cargo_bin!("agents-viewer");
+    let mut child = Command::new(binary)
+        .args(["--config", config.to_str().unwrap()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let url = line.trim();
+    assert!(url.starts_with("http://127.0.0.1:"));
+    let authority = url.strip_prefix("http://").unwrap();
+    let mut stream = std::net::TcpStream::connect(authority).unwrap();
+    stream
+        .write_all(format!("GET /api/v1/status HTTP/1.1\r\nHost: {authority}").as_bytes())
+        .unwrap();
+
+    stop_process(&mut child);
+    let started = Instant::now();
+    let exit = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > Duration::from_secs(3) {
+            let _ = child.kill();
+            panic!("agents-viewer did not close an incomplete HTTP request during shutdown");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(exit.code(), Some(0));
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert!(!stderr.contains("graceful shutdown exceeded"), "{stderr}");
+}
+
+#[cfg(unix)]
 fn stop_process(child: &mut std::process::Child) {
     let status = Command::new("kill")
         .args(["-TERM", &child.id().to_string()])

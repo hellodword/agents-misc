@@ -242,11 +242,14 @@ pub async fn scan_source(
             })
         }
         Ok(_) => {
-            writer.abort(scan_token).await?;
+            // A cancelled process is about to close this database. Deleting a large staged
+            // scan here can exceed the shutdown deadline; startup already clears all staging.
             bail!("index scan cancelled")
         }
         Err(error) => {
-            writer.abort(scan_token).await?;
+            if !shutdown.is_cancelled() {
+                writer.abort(scan_token).await?;
+            }
             Err(error)
         }
     }

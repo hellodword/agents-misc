@@ -1,7 +1,8 @@
-use std::io::{BufReader, Cursor};
+use std::io::{BufReader, BufWriter, Cursor, Write as _};
 
 use agents_viewer::index::Database;
 use agents_viewer::index::coordinator::{IndexCoordinator, IndexUpdate};
+use agents_viewer::index::scanner::{discover_sources, scan_source};
 use agents_viewer::index::search::{ArchiveFilter, SearchFilters};
 use agents_viewer::index::search::{SearchRequest, search};
 use agents_viewer::index::writer::{ScanMode, SourceFileRecord, spawn_writer};
@@ -332,6 +333,102 @@ async fn incompatible_schema_and_stale_staging_recover_safely() {
             })
     );
     recovered.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelled_scan_defers_staging_cleanup_until_reopen() {
+    let temp = TempDir::new().unwrap();
+    let source_home = temp.path().join("codex-home");
+    let sessions = source_home.join("sessions/2026/07/30");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let rollout =
+        sessions.join("rollout-2026-07-30T00-00-00-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl");
+    let mut file = BufWriter::new(std::fs::File::create(&rollout).unwrap());
+    writeln!(
+        file,
+        r#"{{"timestamp":"2026-07-30T00:00:00Z","type":"session_meta","payload":{{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}}}}"#
+    )
+    .unwrap();
+    for index in 0..25_000 {
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-07-30T00:00:01Z","type":"event_msg","payload":{{"type":"agent_message","message":"response {index}","phase":"final"}}}}"#
+        )
+        .unwrap();
+    }
+    file.flush().unwrap();
+
+    let roots = agents_viewer::paths::resolve_source_roots(&source_home).unwrap();
+    let discovered = discover_sources(
+        &roots,
+        1024 * 1024,
+        1,
+        chrono::Utc::now().timestamp_micros(),
+        agents_viewer::index::InitialIndexPolicy::all(),
+    )
+    .sources
+    .pop()
+    .unwrap();
+    let cache = temp.path().join("cache");
+    agents_viewer::permissions::prepare_cache_directory(&cache).unwrap();
+    let database_path = cache.join("index.sqlite3");
+    let database = Database::open_or_recover(&database_path, "cancelled-source")
+        .await
+        .unwrap();
+    let (writer, writer_task) = spawn_writer(database.clone());
+    let shutdown = CancellationToken::new();
+    let scan_task = tokio::spawn(scan_source(
+        database.clone(),
+        writer.clone(),
+        discovered,
+        1024 * 1024,
+        chrono::Utc::now().timestamp_micros(),
+        shutdown.clone(),
+    ));
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let staged = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM staged_raw_records")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+            if staged > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    shutdown.cancel();
+    let error = tokio::time::timeout(std::time::Duration::from_secs(2), scan_task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("cancelled"));
+    assert!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM staged_raw_records")
+            .fetch_one(database.pool())
+            .await
+            .unwrap()
+            > 0
+    );
+
+    writer.shutdown().await.unwrap();
+    writer_task.wait().await.unwrap();
+    database.close().await;
+    let reopened = Database::open_or_recover(&database_path, "cancelled-source")
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM staged_raw_records")
+            .fetch_one(reopened.pool())
+            .await
+            .unwrap(),
+        0
+    );
+    reopened.close().await;
 }
 
 #[tokio::test]

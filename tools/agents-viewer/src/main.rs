@@ -1,3 +1,5 @@
+mod shutdown_io;
+
 use std::io::{IsTerminal as _, Write as _};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -14,8 +16,12 @@ use agents_viewer::server::{self, AppState};
 use agents_viewer::watch::start_watcher;
 use anyhow::{Context as _, Result};
 use clap::Parser as _;
+use shutdown_io::ShutdownListener;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+// Axum's graceful shutdown has no deadline and can wait forever on an incomplete request.
+const HTTP_SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -113,8 +119,9 @@ async fn run(config: Config) -> Result<()> {
     ));
     let heartbeat_task = tokio::spawn(heartbeat(state.clone(), shutdown.clone()));
     let server_shutdown = shutdown.clone();
+    let forced_server_shutdown = CancellationToken::new();
     let server = axum::serve(
-        listener,
+        ShutdownListener::new(listener, forced_server_shutdown.clone()),
         server::router(state.clone(), bound, &config.password),
     )
     .with_graceful_shutdown(async move { server_shutdown.cancelled().await });
@@ -129,15 +136,23 @@ async fn run(config: Config) -> Result<()> {
     }
     eprintln!("agents-viewer: shutting down...");
     let cleanup = async {
-        watcher.shutdown().await;
-        coordinator_task
-            .await
-            .context("coordinator task panicked")??;
-        writer.shutdown().await?;
-        writer_task.wait().await?;
-        let _ = update_task.await;
-        let _ = heartbeat_task.await;
-        server_task.await.context("server task panicked")??;
+        let background_cleanup = async {
+            watcher.shutdown().await;
+            coordinator_task
+                .await
+                .context("coordinator task panicked")??;
+            writer.shutdown().await?;
+            writer_task.wait().await?;
+            let _ = update_task.await;
+            let _ = heartbeat_task.await;
+            Result::<()>::Ok(())
+        };
+        let (background_result, server_result) = tokio::join!(
+            background_cleanup,
+            drain_http_server(server_task, forced_server_shutdown)
+        );
+        background_result?;
+        server_result?;
         database.close().await;
         Result::<()>::Ok(())
     };
@@ -151,6 +166,20 @@ async fn run(config: Config) -> Result<()> {
             anyhow::bail!("second shutdown signal forced termination")
         }
     }
+}
+
+async fn drain_http_server(
+    mut server_task: tokio::task::JoinHandle<Result<()>>,
+    forced_shutdown: CancellationToken,
+) -> Result<()> {
+    match tokio::time::timeout(HTTP_SHUTDOWN_GRACE, &mut server_task).await {
+        Ok(result) => result.context("server task panicked")??,
+        Err(_) => {
+            forced_shutdown.cancel();
+            server_task.await.context("server task panicked")??;
+        }
+    }
+    Ok(())
 }
 
 async fn rebuild_database(
