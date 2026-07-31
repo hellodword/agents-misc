@@ -2,6 +2,7 @@
 
 - Preserve deliberately tracked `.devcontainer/**` and `.vscode/**` configuration when it affects the task.
 - Discover project tools through the project's declared environment and ordinary environment capabilities through `PATH`.
+- Treat a browser executable used by durable E2E as a project tool, not an ordinary host capability. Preserve explicit project configuration; otherwise prefer an exact executable supplied by the project's locked Nix environment, and do not discover host browsers through `PATH` or silently download one.
 - Do not hardcode machine-specific absolute paths when tool discovery or project configuration can provide them.
 - Do not assume KVM, a graphical display, a Docker daemon, GPU access, mobile simulators, signing credentials, network access, or privileged mounts.
 - Treat a missing environment capability as a diagnosable blocker, not as permission to mutate the host.

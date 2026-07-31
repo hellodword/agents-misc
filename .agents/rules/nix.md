@@ -10,6 +10,7 @@ Apply this rule when Nix/Just is established, explicitly requested, or used as a
 - Use treefmt-nix for every Nix project and expose it through the flake formatter and checks.
 - Put durable imperative orchestration in checked-in scripts and call it from thin documented Just recipes.
 - Run project tools through the named development shell. Preserve established shell names and public flake outputs unless the task changes them.
+- For Playwright and other durable browser E2E, prefer `pkgs.chromium` from the project's locked nixpkgs and pass `lib.getExe` through explicit project configuration. Do not discover a host browser through `PATH` or silently download one. Use `pkgs.google-chrome` only when branded Chrome is required, its supported systems fit the project, and the unfree dependency is explicitly authorized.
 - Do not use a `path:` flake reference to bypass Git source filtering in a Git worktree.
 - If a durable, non-secret, non-temporary, non-ignored untracked file is required by a Git-backed flake, use only `git add -N -- <file>`, leave intent-to-add in place, and report it.
 - Run focused output validation first; use `nix flake show` for public output changes and `nix flake check` for broad flake/check wiring.

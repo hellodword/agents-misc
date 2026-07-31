@@ -10,13 +10,21 @@ from jsonschema import Draft202012Validator
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-BROWSER_HELPER = (
+NIX_BROWSER_HELPER = (
     REPO_ROOT
     / ".agents"
     / "skills"
     / "browser-e2e"
     / "assets"
-    / "playwright-system-browser.ts"
+    / "playwright-nix-browser.ts"
+)
+NIX_BROWSER_REFERENCE = (
+    REPO_ROOT
+    / ".agents"
+    / "skills"
+    / "browser-e2e"
+    / "references"
+    / "nix-browser.md"
 )
 VISUAL_ASSETS = REPO_ROOT / ".agents" / "skills" / "ai-visual-review" / "assets"
 NIX_GITHUB_ACTIONS_REFERENCE = (
@@ -32,21 +40,26 @@ NIX_GITHUB_ACTIONS_REFERENCE = (
 class BrowserAssetTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.source = BROWSER_HELPER.read_text(encoding="utf-8")
+        cls.source = NIX_BROWSER_HELPER.read_text(encoding="utf-8")
+        cls.reference = NIX_BROWSER_REFERENCE.read_text(encoding="utf-8")
 
-    def test_browser_order_is_exact(self) -> None:
-        match = re.search(r"const BROWSER_NAMES = \[(.*?)\] as const;", self.source, re.DOTALL)
-        self.assertIsNotNone(match)
-        assert match is not None
-        self.assertEqual(
-            ["google-chrome", "chromium", "microsoft-edge"],
-            re.findall(r'"([^"]+)"', match.group(1)),
+    def test_browser_path_requires_explicit_nix_environment_value(self) -> None:
+        self.assertIn(
+            'NIX_BROWSER_PATH_VARIABLE = "PLAYWRIGHT_NIX_BROWSER_PATH"',
+            self.source,
         )
+        self.assertIn("environment[NIX_BROWSER_PATH_VARIABLE]?.trim()", self.source)
+        self.assertIn("must be an absolute executable path supplied by Nix", self.source)
+        self.assertIn("does not search PATH, use a host browser, or download one", self.source)
+        self.assertIn("return statSync(path).isFile()", self.source)
+        self.assertNotIn("BROWSER_NAMES", self.source)
+        self.assertNotIn("findSystemBrowser", self.source)
+        self.assertNotIn("environment.PATH", self.source)
 
     def test_headless_defaults_true_with_explicit_headful_opt_in(self) -> None:
         self.assertIn("headful?: boolean;", self.source)
         self.assertIn("headless: boolean;", self.source)
-        self.assertIn("policy: SystemBrowserLaunchPolicy = {}", self.source)
+        self.assertIn("policy: NixBrowserLaunchPolicy = {}", self.source)
         self.assertIn("const headful = policy.headful === true;", self.source)
         self.assertIn("if (headful) requireHeadfulDisplay(environment);", self.source)
         self.assertIn("headless: !headful,", self.source)
@@ -80,6 +93,24 @@ class BrowserAssetTests(unittest.TestCase):
         outside = self.source[: match.start()] + self.source[match.end() :]
         self.assertNotIn('args.push("--no-sandbox")', outside)
         self.assertNotIn('args.push("--disable-dev-shm-usage")', outside)
+
+    def test_reference_pins_nix_browser_and_playwright_together(self) -> None:
+        for token in (
+            "flake.lock",
+            "package-manager lock",
+            "pkgs.lib.getExe pkgs.chromium",
+            'PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1"',
+            "nix develop .#e2e",
+            "nixBrowserLaunchOptions",
+            "focused real-browser smoke flow",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, self.reference)
+        self.assertIn("explicit authorization for the unfree dependency", self.reference)
+        self.assertIn("report incompatibility instead of falling back", self.reference)
+        self.assertIn("Migrate the previous helper", self.reference)
+        self.assertIn("systemBrowserLaunchOptions", self.reference)
+        self.assertIn("nixBrowserLaunchOptions", self.reference)
 
 
 class NixGitHubActionsReferenceTests(unittest.TestCase):
