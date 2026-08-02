@@ -5,7 +5,8 @@ use agents_viewer::model::{
     ToolKind, ToolStatus,
 };
 use agents_viewer::rollout::{
-    CollectingSink, ParseContext, RootKind, checkpoint_for_file, parse_rollout, verify_checkpoint,
+    CollectingSink, EntryOrigin, ParseContext, RootKind, checkpoint_for_file, parse_rollout,
+    verify_checkpoint,
 };
 use pretty_assertions::assert_eq;
 use tempfile::NamedTempFile;
@@ -15,6 +16,7 @@ const V144: &[u8] = include_bytes!("fixtures/rollouts/v0_144.jsonl");
 const V145: &[u8] = include_bytes!("fixtures/rollouts/v0_145.jsonl");
 const V145_SUBAGENT: &[u8] = include_bytes!("fixtures/rollouts/v0_145_subagent.jsonl");
 const V146: &[u8] = include_bytes!("fixtures/rollouts/v0_146.jsonl");
+const PLANS: &[u8] = include_bytes!("fixtures/rollouts/plans.jsonl");
 const DEDUP: &[u8] = include_bytes!("fixtures/rollouts/dedup.jsonl");
 const MALFORMED: &[u8] = include_bytes!("fixtures/rollouts/malformed.jsonl");
 const REVIEW: &[u8] = include_bytes!("fixtures/rollouts/subagent_review.jsonl");
@@ -366,6 +368,88 @@ fn parses_v146_command_attribution_and_timing_across_legacy_and_durable_events()
 }
 
 #[test]
+fn extracts_assistant_plan_blocks_and_merges_the_authoritative_plan_item() {
+    let parsed = parse(
+        PLANS,
+        "rollout-2026-07-30T00-00-00-74747474-7474-4474-8474-747474747474.jsonl",
+        1024 * 1024,
+    );
+
+    let plans = parsed
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == EntryKind::Plan)
+        .collect::<Vec<_>>();
+    assert_eq!(plans.len(), 1);
+    let plan = plans[0];
+    assert_eq!(plan.primary_text, "# Shared plan\nShip it");
+    assert!(!plan.primary_text.contains("proposed_plan"));
+    assert_eq!(plan.origin, EntryOrigin::ItemCompleted);
+    assert_eq!(plan.raw_refs.len(), 6);
+    assert_eq!(
+        plan.metadata["sourceItemId"],
+        serde_json::Value::String("item-plan-authoritative".into())
+    );
+    let plan_lines = plan
+        .raw_refs
+        .iter()
+        .map(|raw_ref| {
+            parsed
+                .raw_records
+                .iter()
+                .find(|raw| &raw.id == raw_ref)
+                .expect("plan raw ref")
+                .line_no
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(plan_lines, vec![4, 5, 6, 7, 8, 9]);
+
+    let developer = parsed
+        .entries
+        .iter()
+        .find(|entry| {
+            entry
+                .metadata
+                .get("sourceItemId")
+                .and_then(serde_json::Value::as_str)
+                == Some("developer-plan-template")
+        })
+        .expect("developer plan template");
+    assert_eq!(developer.presentation, EntryPresentation::Internal);
+    assert!(developer.primary_text.contains("# Template plan"));
+    assert!(!plan.raw_refs.contains(&developer.raw_refs[0]));
+
+    let surrounding = parsed
+        .entries
+        .iter()
+        .find(|entry| {
+            entry
+                .metadata
+                .get("sourceItemId")
+                .and_then(serde_json::Value::as_str)
+                == Some("assistant-plan-surrounding")
+        })
+        .expect("assistant text outside plan block");
+    assert_eq!(surrounding.kind, EntryKind::Message);
+    assert_eq!(surrounding.primary_text, "Before plan\nAfter plan");
+
+    let inline = parsed
+        .entries
+        .iter()
+        .find(|entry| {
+            entry
+                .metadata
+                .get("sourceItemId")
+                .and_then(serde_json::Value::as_str)
+                == Some("assistant-plan-inline")
+        })
+        .expect("invalid inline plan tag remains a message");
+    assert_eq!(inline.kind, EntryKind::Message);
+    assert!(inline.primary_text.contains("prefix <proposed_plan>"));
+    assert!(inline.primary_text.contains("</proposed_plan> suffix"));
+}
+
+#[test]
 fn excludes_v145_inherited_subagent_prefix_by_ordinal_even_with_gaps() {
     let parsed = parse(
         V145_SUBAGENT,
@@ -671,6 +755,20 @@ fn maps_forks_and_hashes_exact_plan_handoffs() {
     );
     assert!(parsed_parent.summary.session.proposed_plan_hash.is_some());
     assert!(parsed_child.summary.session.parent_thread_id.is_none());
+
+    let item_parent = br##"{"timestamp":"2026-07-01T00:04:00Z","type":"session_meta","payload":{"id":"dddddddd-dddd-4ddd-8ddd-dddddddddddd","cwd":"/work/example"}}
+{"timestamp":"2026-07-01T00:05:00Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"Plan","id":"plan-only-item","text":"# Exact plan\nImplement it"}}}
+"##;
+    let parsed_item_parent = parse(
+        item_parent,
+        "rollout-2026-07-01T00-04-00-dddddddd-dddd-4ddd-8ddd-dddddddddddd.jsonl",
+        1024 * 1024,
+    );
+    assert_eq!(
+        parsed_item_parent.summary.session.proposed_plan_hash,
+        parsed_child.summary.session.handoff_plan_hash,
+        "a durable Plan item must independently support handoff grouping"
+    );
 }
 
 #[test]

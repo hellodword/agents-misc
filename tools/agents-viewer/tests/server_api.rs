@@ -68,6 +68,73 @@ async fn status_sessions_entries_content_raw_and_search_follow_contract() {
         plan_group["root"]["children"][0]["session"]["parentRelation"],
         "planHandoff"
     );
+
+    let plan_session_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let plan_entries = support::json(
+        router
+            .clone()
+            .oneshot(support::request(&format!(
+                "/api/v1/sessions/{plan_session_id}/entries?limit=1&displayTypes=plan"
+            )))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(plan_entries["data"].as_array().unwrap().len(), 1);
+    assert!(plan_entries["nextCursor"].is_null());
+    assert!(plan_entries["previousCursor"].is_null());
+    assert_eq!(plan_entries["data"][0]["kind"], "plan");
+    assert_eq!(
+        plan_entries["data"][0]["primaryPreview"],
+        "# Group sessions\nImplement the tree"
+    );
+    assert_eq!(plan_entries["data"][0]["rawRefCount"], 2);
+    assert!(
+        !plan_entries["data"][0]["primaryPreview"]
+            .as_str()
+            .unwrap()
+            .contains("proposed_plan")
+    );
+    let plan_entry_id = plan_entries["data"][0]["id"].as_str().unwrap();
+    let around_plan = support::json(
+        router
+            .clone()
+            .oneshot(support::request(&format!(
+                "/api/v1/sessions/{plan_session_id}/entries?limit=1&displayTypes=plan&aroundEntryId={plan_entry_id}"
+            )))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(around_plan["data"][0]["id"], plan_entry_id);
+    let received = support::json(
+        router
+            .clone()
+            .oneshot(support::request(&format!(
+                "/api/v1/sessions/{plan_session_id}/entries?limit=10&displayTypes=received"
+            )))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(received["data"].as_array().unwrap().is_empty());
+    let plan_search = support::json(
+        router
+            .clone()
+            .oneshot(support::request(
+                "/api/v1/search?q=Implement&limit=10&allTypes=true",
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        plan_search["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hit| hit["entryId"] == plan_entry_id && hit["kind"] == "plan")
+    );
     let exec_groups = support::json(
         router
             .clone()

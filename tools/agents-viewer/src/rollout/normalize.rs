@@ -345,6 +345,16 @@ fn parse_rollout_inner<R: BufRead, S: ParseSink>(
                 }
                 sink.emit(ParserOutput::EntryUpsert(entry));
             }
+            NormalizeResult::Entries(candidates) => {
+                for candidate in candidates {
+                    let entry = deduper.accept(candidate, line.line_no);
+                    session.observe_entry(&entry);
+                    if entry.sequence > seed_next_sequence {
+                        new_entry_ids.insert(entry.id.clone());
+                    }
+                    sink.emit(ParserOutput::EntryUpsert(entry));
+                }
+            }
             NormalizeResult::Unknown(candidate, code) => {
                 partial = true;
                 let entry = deduper.accept(candidate, line.line_no);
@@ -381,6 +391,7 @@ fn parse_rollout_inner<R: BufRead, S: ParseSink>(
 enum NormalizeResult {
     None,
     Entry(NormalizedEntry),
+    Entries(Vec<NormalizedEntry>),
     Unknown(NormalizedEntry, &'static str),
 }
 
@@ -498,8 +509,7 @@ fn normalize_event(
             add_attachment_metadata(&mut entry, payload);
             NormalizeResult::Entry(entry)
         }
-        "agent_message" => NormalizeResult::Entry(message_entry(
-            MessageRole::Assistant,
+        "agent_message" => NormalizeResult::Entries(assistant_message_entries(
             phase_field(payload),
             string_field(payload, &["message"]),
             timestamp_micros,
@@ -638,6 +648,28 @@ fn normalize_item_completed(
 ) -> NormalizeResult {
     let item = payload.get("item").unwrap_or(&Value::Null);
     let kind = item.get("type").and_then(Value::as_str).unwrap_or_default();
+    if matches!(kind, "AgentMessage" | "agent_message") {
+        let mut entries = assistant_message_entries(
+            phase_field(item),
+            content_text(item.get("content")),
+            timestamp_micros,
+            raw_id,
+            EntryOrigin::ItemCompleted,
+        );
+        for entry in &mut entries {
+            if entry.kind == EntryKind::Message {
+                add_source_item_id(entry, item);
+            }
+            add_execution_attribution_metadata(entry, item);
+            add_event_timing_metadata(entry, payload);
+            if let Some(turn_id) = string_option(payload, "turn_id") {
+                entry
+                    .metadata
+                    .insert("turnId".into(), Value::String(turn_id));
+            }
+        }
+        return NormalizeResult::Entries(entries);
+    }
     let mut entry = match kind {
         "UserMessage" | "user_message" => {
             let mut entry = message_entry(
@@ -660,14 +692,6 @@ fn normalize_item_completed(
             EntryOrigin::ItemCompleted,
             false,
             true,
-        ),
-        "AgentMessage" | "agent_message" => message_entry(
-            MessageRole::Assistant,
-            phase_field(item),
-            content_text(item.get("content")),
-            timestamp_micros,
-            raw_id,
-            EntryOrigin::ItemCompleted,
         ),
         "Plan" | "plan" => simple_entry(
             EntryKind::Plan,
@@ -1007,6 +1031,22 @@ fn normalize_response_item(
             let role = role_field(payload).unwrap_or(MessageRole::Assistant);
             let startup_context =
                 !session.saw_user && matches!(role, MessageRole::System | MessageRole::Developer);
+            if role == MessageRole::Assistant {
+                let mut entries = assistant_message_entries(
+                    phase_field(payload),
+                    content_text(payload.get("content")),
+                    timestamp_micros,
+                    raw_id,
+                    EntryOrigin::ResponseItem,
+                );
+                for entry in &mut entries {
+                    if entry.kind == EntryKind::Message {
+                        add_attachment_metadata(entry, payload);
+                        add_source_item_id(entry, payload);
+                    }
+                }
+                return NormalizeResult::Entries(entries);
+            }
             let mut entry = message_entry(
                 role,
                 phase_field(payload),
@@ -1231,6 +1271,81 @@ fn message_entry(
         origin,
         id_basis: String::new(),
     }
+}
+
+struct ProposedPlanParts {
+    visible_text: String,
+    plan_text: String,
+}
+
+fn assistant_message_entries(
+    phase: Option<Phase>,
+    text: String,
+    timestamp_micros: Option<i64>,
+    raw_id: &str,
+    origin: EntryOrigin,
+) -> Vec<NormalizedEntry> {
+    let Some(parts) = split_proposed_plan_blocks(&text) else {
+        return vec![message_entry(
+            MessageRole::Assistant,
+            phase,
+            text,
+            timestamp_micros,
+            raw_id,
+            origin,
+        )];
+    };
+
+    let mut entries = Vec::with_capacity(2);
+    if !parts.visible_text.trim().is_empty() {
+        entries.push(message_entry(
+            MessageRole::Assistant,
+            phase,
+            parts.visible_text,
+            timestamp_micros,
+            raw_id,
+            origin,
+        ));
+    }
+    entries.push(simple_entry(
+        EntryKind::Plan,
+        "Plan",
+        parts.plan_text,
+        timestamp_micros,
+        raw_id,
+        origin,
+        true,
+        false,
+    ));
+    entries
+}
+
+fn split_proposed_plan_blocks(text: &str) -> Option<ProposedPlanParts> {
+    const OPEN_TAG: &str = "<proposed_plan>";
+    const CLOSE_TAG: &str = "</proposed_plan>";
+
+    let mut visible_text = String::with_capacity(text.len());
+    let mut active_plan: Option<String> = None;
+    let mut last_plan = None;
+    for line in text.split_inclusive('\n') {
+        let slug = line.strip_suffix('\n').unwrap_or(line).trim();
+        if active_plan.is_none() && slug == OPEN_TAG {
+            active_plan = Some(String::new());
+        } else if active_plan.is_some() && slug == CLOSE_TAG {
+            last_plan = active_plan.take();
+        } else if let Some(plan) = active_plan.as_mut() {
+            plan.push_str(line);
+        } else {
+            visible_text.push_str(line);
+        }
+    }
+    if active_plan.is_some() {
+        last_plan = active_plan;
+    }
+    last_plan.map(|plan_text| ProposedPlanParts {
+        visible_text,
+        plan_text,
+    })
 }
 
 fn message_presentation(role: MessageRole, text: &str) -> EntryPresentation {
@@ -1646,9 +1761,8 @@ impl SessionBuilder {
     }
 
     fn observe_entry(&mut self, entry: &NormalizedEntry) {
-        if entry.presentation == EntryPresentation::Response
-            && entry.role == Some(MessageRole::Assistant)
-            && let Some(hash) = proposed_plan_hash(&entry.primary_text)
+        if entry.kind == EntryKind::Plan
+            && let Some(hash) = normalized_plan_hash(&entry.primary_text)
         {
             self.proposed_plan_hash = Some(hash);
             self.proposed_plan_at_micros =
@@ -1726,14 +1840,6 @@ impl SessionBuilder {
 }
 
 const PLAN_HANDOFF_PREFIX: &str = "A previous agent produced the plan below to accomplish the user's task. Implement the plan in a fresh context. Treat the plan as the source of user intent, re-read files as needed, and carry the work through implementation and verification.";
-
-fn proposed_plan_hash(text: &str) -> Option<String> {
-    let normalized = normalize_plan_text(text);
-    let close = normalized.rfind("</proposed_plan>")?;
-    let before_close = &normalized[..close];
-    let open = before_close.rfind("<proposed_plan>")? + "<proposed_plan>".len();
-    normalized_plan_hash(&before_close[open..])
-}
 
 fn handoff_plan_hash(text: &str) -> Option<String> {
     let normalized = normalize_plan_text(text);

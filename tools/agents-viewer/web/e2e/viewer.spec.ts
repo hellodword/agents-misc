@@ -437,6 +437,7 @@ test("persists normalized conversation display types", async ({
     "Received replies",
     "Sent messages",
     "request_user_input",
+    "Plans",
   ]) {
     const required = settings.getByRole("checkbox", { name });
     await expect(required).toBeChecked();
@@ -464,6 +465,7 @@ test("persists normalized conversation display types", async ({
         "sent",
         "requestUserInput",
         "exec",
+        "plan",
         "warning",
       ]),
     );

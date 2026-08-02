@@ -26,6 +26,7 @@ impl TestApp {
                 "{\"timestamp\":\"2024-01-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"cwd\":\"/work/plan\",\"source\":\"cli\"}}\n",
                 "{\"timestamp\":\"2024-01-01T00:00:30Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Plan session grouping\"}]}}\n",
                 "{\"timestamp\":\"2024-01-01T00:01:00Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"<proposed_plan>\\n# Group sessions\\nImplement the tree\\n</proposed_plan>\"}]}}\n",
+                "{\"timestamp\":\"2024-01-01T00:01:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"Plan\",\"id\":\"group-sessions-plan\",\"text\":\"# Group sessions\\nImplement the tree\"}}}\n",
             ),
         )
         .unwrap();

@@ -482,7 +482,7 @@ mod tests {
         .execute(database.pool())
         .await
         .unwrap();
-        sqlx::query("UPDATE app_meta SET value = '2' WHERE key = 'parser_version'")
+        sqlx::query("UPDATE app_meta SET value = '4' WHERE key = 'parser_version'")
             .execute(database.pool())
             .await
             .unwrap();

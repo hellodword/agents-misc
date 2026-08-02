@@ -831,3 +831,86 @@ async fn coordinator_prefers_active_duplicate_skips_unchanged_and_reconciles_app
     writer_task.wait().await.unwrap();
     database.close().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn append_merges_an_explicit_plan_with_the_preceding_assistant_block() {
+    let temp = TempDir::new().unwrap();
+    let source_home = temp.path().join("codex-home");
+    let sessions = source_home.join("sessions/2026/07/30");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let rollout =
+        sessions.join("rollout-2026-07-30T01-00-00-75757575-7575-4575-8575-757575757575.jsonl");
+    std::fs::write(
+        &rollout,
+        concat!(
+            "{\"timestamp\":\"2026-07-30T01:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"75757575-7575-4575-8575-757575757575\",\"cwd\":\"/synthetic/append-plan\"}}\n",
+            "{\"timestamp\":\"2026-07-30T01:00:01Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"<proposed_plan>\\n# Appended plan\\nVerify it\\n</proposed_plan>\"}]}}\n",
+        ),
+    )
+    .unwrap();
+
+    let roots = agents_viewer::paths::resolve_source_roots(&source_home).unwrap();
+    let cache = temp.path().join("cache");
+    agents_viewer::permissions::prepare_cache_directory(&cache).unwrap();
+    let database = Database::open_or_recover(&cache.join("index.sqlite3"), "append-plan-source")
+        .await
+        .unwrap();
+    let (writer, writer_task) = spawn_writer(database.clone());
+    let coordinator = IndexCoordinator::new(
+        database.clone(),
+        writer.clone(),
+        roots,
+        1024 * 1024,
+        agents_viewer::index::InitialIndexPolicy::all(),
+    );
+
+    let initial = coordinator.reconcile().await.unwrap();
+    assert_eq!(initial.indexed_files, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM entries WHERE kind = 'plan'")
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+        1
+    );
+
+    let mut append = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&rollout)
+        .unwrap();
+    append
+        .write_all(
+            b"{\"timestamp\":\"2026-07-30T01:00:02Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"Plan\",\"id\":\"appended-plan-item\",\"text\":\"# Appended plan\\nVerify it\"}}}\n",
+        )
+        .unwrap();
+    append.flush().unwrap();
+
+    let appended = coordinator.reconcile().await.unwrap();
+    assert_eq!(appended.indexed_files, 1);
+    assert_eq!(appended.appended_files, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM entries WHERE kind = 'plan'")
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+        1
+    );
+    let plan = sqlx::query_as::<_, (String, String, i64)>(
+        "SELECT e.primary_text, e.metadata_json, COUNT(r.raw_id) \
+         FROM entries e JOIN entry_raw_refs r ON r.entry_id = e.id \
+         WHERE e.kind = 'plan' GROUP BY e.id",
+    )
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(plan.0, "# Appended plan\nVerify it");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&plan.1).unwrap()["sourceItemId"],
+        "appended-plan-item"
+    );
+    assert_eq!(plan.2, 2);
+
+    writer.shutdown().await.unwrap();
+    writer_task.wait().await.unwrap();
+    database.close().await;
+}

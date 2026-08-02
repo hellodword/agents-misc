@@ -304,6 +304,7 @@ describe("Agents Viewer UI", () => {
       "Received replies",
       "Sent messages",
       "request_user_input",
+      "Plans",
     ]) {
       const required = within(settings).getByRole("checkbox", { name });
       expect(required).toBeChecked();
@@ -334,7 +335,7 @@ describe("Agents Viewer UI", () => {
           .mocked(fetch)
           .mock.calls.some(([input]) =>
             String(input).includes(
-              "displayTypes=received%2Csent%2CrequestUserInput%2Cexec%2Cwarning",
+              "displayTypes=received%2Csent%2CrequestUserInput%2Cexec%2Cplan%2Cwarning",
             ),
           ),
       ).toBe(true),
@@ -345,7 +346,14 @@ describe("Agents Viewer UI", () => {
           "agents-viewer-conversation-display-types",
         ) ?? "null",
       ),
-    ).toEqual(["received", "sent", "requestUserInput", "exec", "warning"]);
+    ).toEqual([
+      "received",
+      "sent",
+      "requestUserInput",
+      "exec",
+      "plan",
+      "warning",
+    ]);
     expect(localStorage.getItem("agents-viewer-search-ctrl-shift-f")).toBe(
       "true",
     );
@@ -402,9 +410,50 @@ describe("Agents Viewer UI", () => {
     expect(
       screen.getByRole("checkbox", { name: "Patch activity" }),
     ).not.toBeChecked();
+    const plan = screen.getByRole("checkbox", { name: "Plans" });
+    expect(plan).toBeChecked();
+    expect(plan).toBeDisabled();
     expect(
       screen.getByRole("checkbox", { name: "Warnings" }),
     ).not.toBeChecked();
+  });
+  it("adds required plans to existing display preferences and every entries request", async () => {
+    localStorage.setItem(
+      "agents-viewer-conversation-display-types",
+      JSON.stringify(["received", "sent", "requestUserInput", "exec"]),
+    );
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/sessions/s1"]}>
+        <App />
+      </MemoryRouter>,
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Hello session" }),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        vi
+          .mocked(fetch)
+          .mock.calls.some(([input]) =>
+            String(input).includes(
+              "displayTypes=received%2Csent%2CrequestUserInput%2Cexec%2Cplan",
+            ),
+          ),
+      ).toBe(true),
+    );
+    await user.click(screen.getByRole("button", { name: /^Settings/ }));
+    const plan = screen.getByRole("checkbox", { name: "Plans" });
+    expect(plan).toBeChecked();
+    expect(plan).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Apply" }));
+    expect(
+      JSON.parse(
+        localStorage.getItem(
+          "agents-viewer-conversation-display-types",
+        ) ?? "null",
+      ),
+    ).toEqual(["received", "sent", "requestUserInput", "exec", "plan"]);
   });
   it("temporarily includes a linked entry type without persisting it", async () => {
     const user = userEvent.setup();
@@ -422,7 +471,7 @@ describe("Agents Viewer UI", () => {
           .mocked(fetch)
           .mock.calls.some(([input]) =>
             String(input).includes(
-              "displayTypes=received%2Csent%2CrequestUserInput%2Creasoning%2Cexec%2Cwarning",
+              "displayTypes=received%2Csent%2CrequestUserInput%2Creasoning%2Cexec%2Cplan%2Cwarning",
             ),
           ),
       ).toBe(true),
@@ -449,6 +498,7 @@ describe("Agents Viewer UI", () => {
       "requestUserInput",
       "reasoning",
       "exec",
+      "plan",
     ]);
     expect(screen.getByText("Linked warning detail")).toBeInTheDocument();
   });
@@ -662,6 +712,34 @@ describe("Agents Viewer UI", () => {
       "git status",
     );
     expect(isDefaultVisible(command)).toBe(true);
+  });
+  it("renders plans as copyable inspectable assistant bubbles", async () => {
+    const user = userEvent.setup();
+    const writeText = vi.spyOn(navigator.clipboard, "writeText");
+    const inspect = vi.fn();
+    const plan = {
+      ...entry,
+      id: "plan-entry",
+      kind: "plan" as const,
+      presentation: "technical" as const,
+      role: undefined,
+      title: "Plan",
+      primaryPreview: "# Delivery plan\n\n- Ship it",
+      primaryBytes: 26,
+    };
+    const { container } = render(
+      <VirtualTranscript entries={[plan]} onInspect={inspect} />,
+    );
+
+    expect(container.querySelector(".message-assistant")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Delivery plan" }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Copy message" }));
+    expect(writeText).toHaveBeenCalledWith("# Delivery plan\n\n- Ship it");
+    await user.click(screen.getByRole("button", { name: "Open inspector" }));
+    expect(inspect).toHaveBeenCalledWith("plan-entry");
+    expect(isDefaultVisible(plan)).toBe(true);
   });
   it("renders localized attachment counts without rendering or copying payloads", async () => {
     const user = userEvent.setup();

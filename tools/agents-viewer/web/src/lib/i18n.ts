@@ -118,7 +118,7 @@ export const resources = {
       conversationDisplayHelp:
         "Choose the normalized entry types shown in conversations.",
       requiredDisplayTypesHelp:
-        "Received replies, sent messages, and request_user_input are always shown.",
+        "Received replies, sent messages, request_user_input, and plans are always shown.",
       displayTypeForced:
         "{{type}} is temporarily shown to reveal the linked entry.",
       displayReceived: "Received replies",
@@ -287,7 +287,7 @@ export const resources = {
       none: "无",
       conversationDisplayHelp: "选择要在对话中显示的归一化条目类型。",
       requiredDisplayTypesHelp:
-        "真正接收的回复、主动发送的消息和 request_user_input 始终显示。",
+        "真正接收的回复、主动发送的消息、request_user_input 和计划始终显示。",
       displayTypeForced: "为显示链接指向的条目，已临时显示“{{type}}”。",
       displayReceived: "真正接收的回复",
       displaySent: "主动发送的消息",

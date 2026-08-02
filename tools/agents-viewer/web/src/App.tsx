@@ -150,7 +150,7 @@ const CONVERSATION_DISPLAY_OPTIONS: readonly {
   { value: "unknown", labelKey: "displayUnknown" },
 ];
 const REQUIRED_CONVERSATION_DISPLAY_TYPES: readonly ConversationDisplayType[] =
-  ["received", "sent", "requestUserInput"];
+  ["received", "sent", "requestUserInput", "plan"];
 export const DEFAULT_CONVERSATION_DISPLAY_TYPES: readonly ConversationDisplayType[] =
   [...REQUIRED_CONVERSATION_DISPLAY_TYPES, "reasoning", "exec"];
 const CONVERSATION_DISPLAY_STORAGE_KEY =
@@ -1653,7 +1653,10 @@ export function VirtualTranscript({
     count: entries.length,
     getScrollElement: () => parent.current,
     getItemKey: (index) => entries[index]?.id ?? index,
-    estimateSize: (index) => (entries[index]?.kind === "message" ? 96 : 36),
+    estimateSize: (index) =>
+      entries[index]?.kind === "message" || entries[index]?.kind === "plan"
+        ? 96
+        : 36,
     overscan: 10,
     anchorTo: "end",
     initialRect: { width: 800, height: 800 },
@@ -2033,8 +2036,9 @@ function TranscriptEntryView({
   const dateLabel = entryDateLabel(entry, previous, locale, t);
   const timestamp = entry.timestamp ? new Date(entry.timestamp) : undefined;
   const bubble =
-    entry.kind === "message" &&
-    (entry.presentation === "user" || entry.presentation === "response");
+    entry.kind === "plan" ||
+    (entry.kind === "message" &&
+      (entry.presentation === "user" || entry.presentation === "response"));
   const requestUserInput = requestUserInputDetails(entry);
   const activity = activityParts(entry, t);
   const activityPreview = firstActivityLine(activity.body);
@@ -3181,6 +3185,7 @@ export function conversationDisplayType(
 export function isDefaultVisible(entry: EntryListItem) {
   return (
     entry.kind === "reasoning" ||
+    entry.kind === "plan" ||
     entry.kind === "warning" ||
     entry.kind === "error" ||
     (entry.kind === "message" &&

@@ -159,6 +159,8 @@ impl Deduper {
                 return false;
             }
             existing.primary_text == candidate.primary_text
+                || (candidate.kind == crate::model::EntryKind::Plan
+                    && existing.primary_text.trim() == candidate.primary_text.trim())
                 || is_streaming_prefix(&existing.primary_text, &candidate.primary_text)
         })
     }
