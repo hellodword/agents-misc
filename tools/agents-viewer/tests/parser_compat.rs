@@ -1,8 +1,8 @@
 use std::io::{BufReader, Cursor, Write};
 
 use agents_viewer::model::{
-    Completeness, EntryKind, EntryPresentation, MessageRole, SessionParentRelation, SourceKind,
-    ToolKind, ToolStatus,
+    Completeness, EntryKind, EntryPresentation, MessageRole, Phase, SessionParentRelation,
+    SourceKind, ToolKind, ToolStatus,
 };
 use agents_viewer::rollout::{
     CollectingSink, EntryOrigin, ParseContext, RootKind, checkpoint_for_file, parse_rollout,
@@ -17,6 +17,8 @@ const V145: &[u8] = include_bytes!("fixtures/rollouts/v0_145.jsonl");
 const V145_SUBAGENT: &[u8] = include_bytes!("fixtures/rollouts/v0_145_subagent.jsonl");
 const V146: &[u8] = include_bytes!("fixtures/rollouts/v0_146.jsonl");
 const PLANS: &[u8] = include_bytes!("fixtures/rollouts/plans.jsonl");
+const PLAN_MODE_FINAL_ANSWER: &[u8] =
+    include_bytes!("fixtures/rollouts/plan_mode_final_answer.jsonl");
 const DEDUP: &[u8] = include_bytes!("fixtures/rollouts/dedup.jsonl");
 const MALFORMED: &[u8] = include_bytes!("fixtures/rollouts/malformed.jsonl");
 const REVIEW: &[u8] = include_bytes!("fixtures/rollouts/subagent_review.jsonl");
@@ -447,6 +449,45 @@ fn extracts_assistant_plan_blocks_and_merges_the_authoritative_plan_item() {
     assert_eq!(inline.kind, EntryKind::Message);
     assert!(inline.primary_text.contains("prefix <proposed_plan>"));
     assert!(inline.primary_text.contains("</proposed_plan> suffix"));
+}
+
+#[test]
+fn keeps_ordinary_plan_mode_final_answers_as_one_received_message() {
+    let parsed = parse(
+        PLAN_MODE_FINAL_ANSWER,
+        "rollout-2026-07-31T00-00-00-81818181-8181-4181-8181-818181818181.jsonl",
+        1024 * 1024,
+    );
+
+    let received = parsed
+        .entries
+        .iter()
+        .filter(|entry| entry.role == Some(MessageRole::Assistant))
+        .collect::<Vec<_>>();
+    assert_eq!(received.len(), 1);
+    let answer = received[0];
+    assert_eq!(answer.kind, EntryKind::Message);
+    assert_eq!(answer.presentation, EntryPresentation::Response);
+    assert_eq!(answer.phase, Some(Phase::Final));
+    assert_eq!(answer.sequence, 2);
+    assert_eq!(
+        answer.primary_text,
+        "Ordinary plan-mode answer keeps zetaunique visible."
+    );
+    assert_eq!(answer.raw_refs.len(), 2);
+    let raw_lines = answer
+        .raw_refs
+        .iter()
+        .map(|raw_ref| {
+            parsed
+                .raw_records
+                .iter()
+                .find(|raw| &raw.id == raw_ref)
+                .expect("answer raw ref")
+                .line_no
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(raw_lines, vec![3, 4]);
 }
 
 #[test]

@@ -722,6 +722,21 @@ async fn coordinator_prefers_active_duplicate_skips_unchanged_and_reconciles_app
         Some(IndexUpdate::Discovering { .. })
     ));
     assert!(events.iter().any(|update| matches!(update, IndexUpdate::Progress { progress, .. } if progress.total_files == 1 && progress.processed_files == 1)));
+    let committed = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, update)| match update {
+            IndexUpdate::SessionCommitted {
+                generation,
+                session_id,
+            } => Some((index, *generation, session_id.as_str())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(committed.len(), 1);
+    assert_eq!(committed[0].1, first.generation);
+    assert_eq!(committed[0].2, "11111111-1111-4111-8111-111111111111");
+    assert!(committed[0].0 < events.len() - 1);
     assert!(matches!(
         events.last(),
         Some(IndexUpdate::Completed {

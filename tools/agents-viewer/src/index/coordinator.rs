@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -56,6 +57,10 @@ pub enum IndexUpdate {
     Progress {
         generation: u64,
         progress: IndexProgress,
+    },
+    SessionCommitted {
+        generation: u64,
+        session_id: String,
     },
     Completed {
         report: ReconcileReport,
@@ -153,6 +158,7 @@ impl IndexCoordinator {
             excluded_bytes: discovery.excluded_bytes,
             ..ReconcileReport::default()
         };
+        let mut notified_source_sessions = HashSet::new();
         let mut changed = Vec::new();
         for source in &discovery.sources {
             if shutdown.is_cancelled() {
@@ -220,7 +226,14 @@ impl IndexCoordinator {
                     if outcome.appended {
                         report.appended_sessions.push(outcome.session_id.clone());
                     }
-                    report.updated_sessions.push(outcome.session_id);
+                    report.updated_sessions.push(outcome.session_id.clone());
+                    send_session_committed(
+                        updates,
+                        &mut notified_source_sessions,
+                        generation,
+                        &outcome.session_id,
+                    )
+                    .await;
                 }
                 Err(error) => {
                     if !shutdown.is_cancelled() {
@@ -250,9 +263,18 @@ impl IndexCoordinator {
         } else {
             report.reconcile_again = true;
         }
-        report
-            .updated_sessions
-            .extend(reconcile_plan_handoffs(&self.database).await?);
+        let relationship_updates = reconcile_plan_handoffs(&self.database).await?;
+        for session_id in &relationship_updates {
+            send_update(
+                updates,
+                IndexUpdate::SessionCommitted {
+                    generation,
+                    session_id: session_id.clone(),
+                },
+            )
+            .await;
+        }
+        report.updated_sessions.extend(relationship_updates);
         report.updated_sessions.sort();
         report.updated_sessions.dedup();
         send_update(
@@ -284,13 +306,12 @@ impl IndexCoordinator {
     ) -> Result<()> {
         let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut foreground_next = foreground_first;
         let mut bootstrap_pending = foreground_first;
         loop {
             tokio::select! {
                 () = shutdown.cancelled() => return Ok(()),
                 _ = interval.tick() => {
-                    let foreground = std::mem::take(&mut foreground_next);
+                    let foreground = bootstrap_pending;
                     if let Err(error) = self.reconcile_trigger(&shutdown, updates.as_ref(), foreground, &mut bootstrap_pending).await {
                         if shutdown.is_cancelled() { return Ok(()); }
                         return Err(error);
@@ -299,7 +320,7 @@ impl IndexCoordinator {
                 event = watch_events.recv() => {
                     match event {
                         Some(WatchEvent::Paths(_) | WatchEvent::Reconcile) => {
-                            let foreground = std::mem::take(&mut foreground_next);
+                            let foreground = bootstrap_pending;
                             if let Err(error) = self.reconcile_trigger(&shutdown, updates.as_ref(), foreground, &mut bootstrap_pending).await {
                                 if shutdown.is_cancelled() { return Ok(()); }
                                 return Err(error);
@@ -309,7 +330,7 @@ impl IndexCoordinator {
                             // Periodic reconcile remains active as watcher fallback.
                         }
                         None => {
-                            let foreground = std::mem::take(&mut foreground_next);
+                            let foreground = bootstrap_pending;
                             if let Err(error) = self.reconcile_trigger(&shutdown, updates.as_ref(), foreground, &mut bootstrap_pending).await {
                                 if shutdown.is_cancelled() { return Ok(()); }
                                 return Err(error);
@@ -349,6 +370,24 @@ fn report_is_healthy(report: &ReconcileReport) -> bool {
 async fn send_update(sender: Option<&mpsc::Sender<IndexUpdate>>, update: IndexUpdate) {
     if let Some(sender) = sender {
         let _ = sender.send(update).await;
+    }
+}
+
+async fn send_session_committed(
+    sender: Option<&mpsc::Sender<IndexUpdate>>,
+    notified_source_sessions: &mut HashSet<String>,
+    generation: u64,
+    session_id: &str,
+) {
+    if notified_source_sessions.insert(session_id.to_owned()) {
+        send_update(
+            sender,
+            IndexUpdate::SessionCommitted {
+                generation,
+                session_id: session_id.to_owned(),
+            },
+        )
+        .await;
     }
 }
 

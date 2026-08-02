@@ -51,6 +51,8 @@ SQLite contains normalized sessions, entries, raw-record metadata, diagnostics, 
 
 The database is initialized from the single baseline in `schema.sql`. This project is still in early development: schema changes replace that baseline directly and do not add upgrade migrations or schema-version history. A cache with a different schema signature is rebuilt from rollout JSONL by the existing recovery path.
 
+Parser-triggered reindexing and interrupted-source recovery keep the last atomically committed session snapshots readable. While any source is pending or indexing, status starts at `Starting` and reports foreground discovery plus file/byte progress instead of claiming `Ready`. Each source commit immediately emits the existing `sessionUpdated` and `entryUpdated` events, so an open conversation can refresh before the remaining sources finish. Status becomes `Ready` only after every discovered source is ready; this recovery path needs neither a cache migration nor deletion of the previous snapshots.
+
 ### API and Web UI
 
 Axum serves a loopback-only JSON API, an SSE stream for index and conversation updates, and the embedded Web bundle. Public DTOs are defined in Rust and exported deterministically to `web/src/generated/api.ts`, so the React client and service share one checked contract.
@@ -131,7 +133,7 @@ Run the packaged application through the root Just menu:
 just agents-viewer-run
 ```
 
-On first start it creates `~/.agents-viewer/config.toml` and a generated `schema.json`, indexes the configured rollout window, and prints its URL once. The viewer never opens a browser. A large bootstrap or explicit rebuild reports progress; routine watcher and reconciliation scans remain silent unless they fail.
+On first start it creates `~/.agents-viewer/config.toml` and a generated `schema.json`, indexes the configured rollout window, and prints its URL once. The viewer never opens a browser. A large bootstrap, explicit rebuild, parser reindex, or interrupted-source recovery reports progress; routine watcher and reconciliation scans remain silent unless they fail.
 
 ```text
 agents-viewer [OPTIONS]

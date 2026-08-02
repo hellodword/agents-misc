@@ -260,6 +260,116 @@ async fn status_sessions_entries_content_raw_and_search_follow_contract() {
 }
 
 #[tokio::test]
+async fn plan_mode_final_answer_is_visible_in_the_tail_and_default_search() {
+    use agents_viewer::index::Database;
+    use agents_viewer::index::coordinator::IndexCoordinator;
+    use agents_viewer::index::writer::spawn_writer;
+    use agents_viewer::server::AppState;
+    use tempfile::TempDir;
+
+    let temp = TempDir::new().unwrap();
+    let source_home = temp.path().join("codex-home");
+    let sessions = source_home.join("sessions/2026/07/31");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::write(
+        sessions.join("rollout-2026-07-31T00-00-00-81818181-8181-4181-8181-818181818181.jsonl"),
+        include_bytes!("fixtures/rollouts/plan_mode_final_answer.jsonl"),
+    )
+    .unwrap();
+    let roots = agents_viewer::paths::resolve_source_roots(&source_home).unwrap();
+    let cache =
+        agents_viewer::paths::resolve_cache_paths(&roots.home, &temp.path().join("cache")).unwrap();
+    agents_viewer::permissions::prepare_cache_directory(&cache.namespace).unwrap();
+    let database = Database::open_or_recover(&cache.database, "plan-mode-api")
+        .await
+        .unwrap();
+    let (writer, writer_task) = spawn_writer(database.clone());
+    IndexCoordinator::new(
+        database.clone(),
+        writer.clone(),
+        roots.clone(),
+        1024 * 1024,
+        agents_viewer::index::InitialIndexPolicy::all(),
+    )
+    .reconcile()
+    .await
+    .unwrap();
+    writer.shutdown().await.unwrap();
+    writer_task.wait().await.unwrap();
+    let state = AppState::new(
+        database,
+        roots,
+        cache,
+        agents_viewer::index::InitialIndexPolicy::all(),
+    );
+    let router = agents_viewer::server::router(state, "127.0.0.1:4747".parse().unwrap(), "");
+    let session_id = "81818181-8181-4181-8181-818181818181";
+
+    let received = support::json(
+        router
+            .clone()
+            .oneshot(support::request(&format!(
+                "/api/v1/sessions/{session_id}/entries?limit=10&displayTypes=received"
+            )))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(received["data"].as_array().unwrap().len(), 1);
+
+    let tail = support::json(
+        router
+            .clone()
+            .oneshot(support::request(&format!(
+                "/api/v1/sessions/{session_id}/entries?limit=1&direction=backward"
+            )))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let answer = &tail["data"][0];
+    assert_eq!(answer["sequence"], 2);
+    assert_eq!(answer["kind"], "message");
+    assert_eq!(answer["presentation"], "response");
+    assert_eq!(answer["phase"], "final");
+    assert_eq!(
+        answer["primaryPreview"],
+        "Ordinary plan-mode answer keeps zetaunique visible."
+    );
+    assert_eq!(answer["rawRefCount"], 2);
+    let entry_id = answer["id"].as_str().unwrap();
+
+    let detail = support::json(
+        router
+            .clone()
+            .oneshot(support::request(&format!(
+                "/api/v1/sessions/{session_id}/entries/{entry_id}"
+            )))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(detail["rawRefs"].as_array().unwrap().len(), 2);
+    assert_eq!(detail["rawRefs"][0]["line"], 3);
+    assert_eq!(detail["rawRefs"][1]["line"], 4);
+
+    let search = support::json(
+        router
+            .oneshot(support::request("/api/v1/search?q=zetaunique&limit=10"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        search["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hit| hit["entryId"] == entry_id && hit["kind"] == "message")
+    );
+}
+
+#[tokio::test]
 async fn request_user_input_is_visible_without_other_technical_activity() {
     let app = support::TestApp::new().await;
     let session = "11111111-1111-4111-8111-111111111111";
@@ -626,7 +736,16 @@ async fn removing_a_plan_parent_clears_the_derived_handoff_relation() {
         agents_viewer::index::InitialIndexPolicy::all(),
     );
     coordinator.reconcile().await.unwrap();
-    let report = coordinator.reconcile().await.unwrap();
+    let (updates, mut received) = tokio::sync::mpsc::channel(16);
+    let report = coordinator
+        .reconcile_with_updates(&tokio_util::sync::CancellationToken::new(), Some(&updates))
+        .await
+        .unwrap();
+    drop(updates);
+    let mut events = Vec::new();
+    while let Some(update) = received.recv().await {
+        events.push(update);
+    }
     writer.shutdown().await.unwrap();
     task.wait().await.unwrap();
     let row = sqlx::query(
@@ -643,4 +762,24 @@ async fn removing_a_plan_parent_clears_the_derived_handoff_relation() {
             .updated_sessions
             .contains(&"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".to_owned())
     );
+    let relationship_updates = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, update)| match update {
+            agents_viewer::index::coordinator::IndexUpdate::SessionCommitted {
+                session_id, ..
+            } => Some((index, session_id.as_str())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(relationship_updates.len(), 1);
+    assert_eq!(
+        relationship_updates[0].1,
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    );
+    assert!(relationship_updates[0].0 < events.len() - 1);
+    assert!(matches!(
+        events.last(),
+        Some(agents_viewer::index::coordinator::IndexUpdate::Completed { .. })
+    ));
 }

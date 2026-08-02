@@ -296,6 +296,9 @@ async fn update_status(
                             last_sse = Instant::now();
                         }
                     }
+                    IndexUpdate::SessionCommitted { generation, session_id } => {
+                        publish_session_committed(&state, generation, &session_id).await;
+                    }
                     IndexUpdate::Completed { report, foreground } => {
                         let phase = if report.failed_files == 0
                             && report.discovery_issues == 0
@@ -321,23 +324,50 @@ async fn update_status(
                         if foreground || phase != previous_phase {
                             publish_progress(&state, report.generation, phase, progress).await;
                         }
-                        for session_id in &report.updated_sessions {
-                            state.sse.publish(SseEventType::SessionUpdated, SseEventPayload { generation: report.generation, phase: None, session_id: Some(session_id.clone()), entry_id: None, progress: None, diagnostic: None }).await;
-                        }
-                        for session_id in &report.updated_sessions {
-                            let entry_id = sqlx::query_scalar::<_, String>("SELECT id FROM entries WHERE session_id = ? ORDER BY sequence DESC LIMIT 1")
-                                .bind(session_id)
-                                .fetch_optional(state.database.pool())
-                                .await
-                                .ok()
-                                .flatten();
-                            state.sse.publish(SseEventType::EntryUpdated, SseEventPayload { generation: report.generation, phase: None, session_id: Some(session_id.clone()), entry_id, progress: None, diagnostic: None }).await;
-                        }
                     }
                 }
             }
         }
     }
+}
+
+async fn publish_session_committed(state: &AppState, generation: u64, session_id: &str) {
+    state
+        .sse
+        .publish(
+            SseEventType::SessionUpdated,
+            SseEventPayload {
+                generation,
+                phase: None,
+                session_id: Some(session_id.to_owned()),
+                entry_id: None,
+                progress: None,
+                diagnostic: None,
+            },
+        )
+        .await;
+    let entry_id = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM entries WHERE session_id = ? ORDER BY sequence DESC LIMIT 1",
+    )
+    .bind(session_id)
+    .fetch_optional(state.database.pool())
+    .await
+    .ok()
+    .flatten();
+    state
+        .sse
+        .publish(
+            SseEventType::EntryUpdated,
+            SseEventPayload {
+                generation,
+                phase: None,
+                session_id: Some(session_id.to_owned()),
+                entry_id,
+                progress: None,
+                diagnostic: None,
+            },
+        )
+        .await;
 }
 
 async fn publish_progress(
@@ -373,6 +403,7 @@ async fn update_terminal_only(
             update = updates.recv() => match update {
                 Some(IndexUpdate::Discovering { .. }) => terminal.render(ServicePhase::Discovering, &IndexProgress { total_files: 0, processed_files: 0, total_bytes: 0, processed_bytes: 0, failed_files: 0, excluded_files: 0, excluded_bytes: 0 }, false),
                 Some(IndexUpdate::Progress { progress, .. }) => terminal.render(ServicePhase::Indexing, &progress, false),
+                Some(IndexUpdate::SessionCommitted { .. }) => {}
                 Some(IndexUpdate::Completed { report, .. }) => {
                     let phase = if report.failed_files == 0 && report.discovery_issues == 0 && !report.reconcile_again { ServicePhase::Ready } else { ServicePhase::Degraded };
                     let progress = report_progress(&report);

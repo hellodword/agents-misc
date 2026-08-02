@@ -216,7 +216,12 @@ impl Database {
         )
         .fetch_optional(&self.pool)
         .await?;
-        Ok(complete.as_deref() != Some("1"))
+        let incomplete_sources = sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS(SELECT 1 FROM source_files WHERE scan_state != 'ready')",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(complete.as_deref() != Some("1") || incomplete_sources != 0)
     }
 
     pub async fn mark_bootstrap_complete(&self) -> Result<()> {
@@ -486,9 +491,11 @@ mod tests {
             .execute(database.pool())
             .await
             .unwrap();
+        database.mark_bootstrap_complete().await.unwrap();
         database.close().await;
 
         let reopened = Database::open_or_recover(&path, "source").await.unwrap();
+        assert!(reopened.bootstrap_required().await.unwrap());
         let state = sqlx::query_as::<_, (String, i64, i64, Option<String>)>(
             "SELECT scan_state, checkpoint_offset, checkpoint_line, checkpoint_hash \
              FROM source_files WHERE id = 1",
@@ -507,6 +514,40 @@ mod tests {
             PARSER_VERSION.to_string()
         );
         reopened.close().await;
+    }
+
+    #[tokio::test]
+    async fn completed_bootstrap_still_requires_every_source_to_be_ready() {
+        let temp = TempDir::new().unwrap();
+        let cache = temp.path().join("cache");
+        crate::permissions::prepare_cache_directory(&cache).unwrap();
+        let database = Database::open_or_recover(&cache.join("index.sqlite3"), "source")
+            .await
+            .unwrap();
+        database.mark_bootstrap_complete().await.unwrap();
+        sqlx::query(
+            "INSERT INTO source_files( \
+                id, root_kind, relative_path, file_key, size_bytes, mtime_ns, scan_state \
+             ) VALUES \
+                (1, 'active', 'pending.jsonl', 'pending-key', 1, 1, 'pending'), \
+                (2, 'active', 'indexing.jsonl', 'indexing-key', 1, 1, 'indexing')",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        assert!(database.bootstrap_required().await.unwrap());
+        sqlx::query("UPDATE source_files SET scan_state = 'ready' WHERE id = 1")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        assert!(database.bootstrap_required().await.unwrap());
+        sqlx::query("UPDATE source_files SET scan_state = 'ready' WHERE id = 2")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        assert!(!database.bootstrap_required().await.unwrap());
+        database.close().await;
     }
 
     #[test]

@@ -1,0 +1,4 @@
+{"timestamp":"2026-07-31T00:00:00.000Z","type":"session_meta","payload":{"id":"81818181-8181-4181-8181-818181818181","cwd":"/synthetic/plan-mode","cli_version":"0.146.0","source":"cli"}}
+{"timestamp":"2026-07-31T00:00:00.100Z","type":"response_item","payload":{"type":"message","id":"plan-mode-user","role":"user","content":[{"type":"input_text","text":"Give an ordinary answer while planning"}]}}
+{"timestamp":"2026-07-31T00:00:00.200Z","type":"event_msg","payload":{"type":"agent_message","message":"Ordinary plan-mode answer keeps zetaunique visible.","phase":"final_answer"}}
+{"timestamp":"2026-07-31T00:00:00.300Z","type":"response_item","payload":{"type":"message","id":"plan-mode-assistant","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Ordinary plan-mode answer keeps zetaunique visible."}]}}
