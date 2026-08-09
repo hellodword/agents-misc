@@ -661,6 +661,7 @@ fn normalize_item_completed(
                 add_source_item_id(entry, item);
             }
             add_execution_attribution_metadata(entry, item);
+            add_tool_capability_metadata(entry, item);
             add_event_timing_metadata(entry, payload);
             if let Some(turn_id) = string_option(payload, "turn_id") {
                 entry
@@ -894,6 +895,7 @@ fn normalize_item_completed(
     };
     add_source_item_id(&mut entry, item);
     add_execution_attribution_metadata(&mut entry, item);
+    add_tool_capability_metadata(&mut entry, item);
     add_event_timing_metadata(&mut entry, payload);
     if let Some(turn_id) = string_option(payload, "turn_id") {
         entry
@@ -1044,6 +1046,7 @@ fn normalize_response_item(
                         add_attachment_metadata(entry, payload);
                         add_source_item_id(entry, payload);
                     }
+                    add_response_item_metadata(entry, payload);
                 }
                 return NormalizeResult::Entries(entries);
             }
@@ -1061,11 +1064,13 @@ fn normalize_response_item(
             }
             add_attachment_metadata(&mut entry, payload);
             add_source_item_id(&mut entry, payload);
+            add_response_item_metadata(&mut entry, payload);
             NormalizeResult::Entry(entry)
         }
         "agent_message" => {
             let mut entry = inter_agent_communication_entry(payload, timestamp_micros, raw_id);
             entry.origin = EntryOrigin::ResponseItem;
+            add_response_item_metadata(&mut entry, payload);
             NormalizeResult::Entry(entry)
         }
         "reasoning" => {
@@ -1084,6 +1089,7 @@ fn normalize_response_item(
             let mut entry = reasoning_entry(text, timestamp_micros, raw_id, searchable);
             entry.origin = EntryOrigin::ResponseItem;
             add_source_item_id(&mut entry, payload);
+            add_response_item_metadata(&mut entry, payload);
             NormalizeResult::Entry(entry)
         }
         "function_call" | "custom_tool_call" | "tool_search_call" => {
@@ -1104,6 +1110,7 @@ fn normalize_response_item(
                 add_request_user_input_questions_from_text(&mut entry, &primary);
             }
             add_source_item_id(&mut entry, payload);
+            add_response_item_metadata(&mut entry, payload);
             NormalizeResult::Entry(entry)
         }
         "function_call_output" | "custom_tool_call_output" | "tool_search_output" => {
@@ -1130,6 +1137,7 @@ fn normalize_response_item(
             add_request_user_input_response_from_text(&mut entry, &secondary);
             add_attachment_metadata(&mut entry, payload);
             add_source_item_id(&mut entry, payload);
+            add_response_item_metadata(&mut entry, payload);
             NormalizeResult::Entry(entry)
         }
         "local_shell_call" => {
@@ -1145,6 +1153,7 @@ fn normalize_response_item(
                 EntryOrigin::ResponseItem,
             );
             add_source_item_id(&mut entry, payload);
+            add_response_item_metadata(&mut entry, payload);
             NormalizeResult::Entry(entry)
         }
         "web_search_call" => {
@@ -1160,6 +1169,7 @@ fn normalize_response_item(
                 EntryOrigin::ResponseItem,
             );
             add_source_item_id(&mut entry, payload);
+            add_response_item_metadata(&mut entry, payload);
             NormalizeResult::Entry(entry)
         }
         "image_generation_call" => {
@@ -1176,6 +1186,7 @@ fn normalize_response_item(
             );
             add_attachment_counts(&mut entry, 1, 0);
             add_source_item_id(&mut entry, payload);
+            add_response_item_metadata(&mut entry, payload);
             NormalizeResult::Entry(entry)
         }
         "compaction" | "compaction_summary" | "context_compaction" | "compaction_trigger" => {
@@ -1190,6 +1201,7 @@ fn normalize_response_item(
                 true,
             );
             add_source_item_id(&mut entry, payload);
+            add_response_item_metadata(&mut entry, payload);
             NormalizeResult::Entry(entry)
         }
         _ => NormalizeResult::Unknown(
@@ -1530,6 +1542,7 @@ fn tool_event_entry(
     );
     add_attachment_metadata(&mut entry, payload);
     add_execution_attribution_metadata(&mut entry, payload);
+    add_tool_capability_metadata(&mut entry, payload);
     add_event_timing_metadata(&mut entry, payload);
     if event == "image_generation_end" {
         add_attachment_counts(&mut entry, 1, 0);
@@ -2037,6 +2050,90 @@ fn add_execution_attribution_metadata(entry: &mut NormalizedEntry, payload: &Val
         if let Some(value) = string_option(payload, source).filter(|value| !value.is_empty()) {
             entry.metadata.insert(target.into(), Value::String(value));
         }
+    }
+}
+
+fn add_tool_capability_metadata(entry: &mut NormalizedEntry, payload: &Value) {
+    for (snake_case, camel_case) in [
+        ("read_only_hint", "readOnlyHint"),
+        ("transparent_background", "transparentBackground"),
+    ] {
+        if let Some(value) = payload
+            .get(snake_case)
+            .or_else(|| payload.get(camel_case))
+            .and_then(Value::as_bool)
+        {
+            entry.metadata.insert(camel_case.into(), Value::Bool(value));
+        }
+    }
+}
+
+fn add_response_item_metadata(entry: &mut NormalizedEntry, payload: &Value) {
+    add_tool_capability_metadata(entry, payload);
+
+    if let Some(encrypted_args) = payload
+        .get("encrypted_function_args")
+        .or_else(|| payload.get("encryptedFunctionArgs"))
+        .and_then(Value::as_array)
+    {
+        entry.metadata.insert(
+            "encryptedFunctionArgsCount".into(),
+            Value::from(encrypted_args.len()),
+        );
+    }
+
+    let Some(metadata) = payload
+        .get("internal_chat_message_metadata_passthrough")
+        .or_else(|| payload.get("internalChatMessageMetadataPassthrough"))
+        .and_then(Value::as_object)
+    else {
+        return;
+    };
+    if let Some(turn_id) = metadata
+        .get("turn_id")
+        .or_else(|| metadata.get("turnId"))
+        .and_then(Value::as_str)
+        .filter(|turn_id| !turn_id.is_empty())
+    {
+        entry
+            .metadata
+            .insert("turnId".into(), Value::String(turn_id.into()));
+    }
+
+    let Some(executed_calls) = metadata
+        .get("executed_tool_calls")
+        .or_else(|| metadata.get("executedToolCalls"))
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    entry.metadata.insert(
+        "executedToolCallCount".into(),
+        Value::from(executed_calls.len()),
+    );
+    let names = executed_calls
+        .iter()
+        .filter_map(|call| call.get("name").and_then(Value::as_str))
+        .filter(|name| !name.is_empty())
+        .map(|name| Value::String(name.into()))
+        .collect::<Vec<_>>();
+    if !names.is_empty() {
+        entry
+            .metadata
+            .insert("executedToolCallNames".into(), Value::Array(names));
+    }
+    let omitted_count = executed_calls
+        .iter()
+        .filter_map(|call| call.get("arguments"))
+        .filter_map(|arguments| arguments.get("_codex_executed_tool_call_truncated"))
+        .filter_map(|truncation| truncation.get("omitted_calls"))
+        .filter_map(Value::as_u64)
+        .fold(0_u64, u64::saturating_add);
+    if omitted_count > 0 {
+        entry.metadata.insert(
+            "executedToolCallOmittedCount".into(),
+            Value::from(omitted_count),
+        );
     }
 }
 

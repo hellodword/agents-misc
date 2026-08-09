@@ -16,6 +16,7 @@ const V144: &[u8] = include_bytes!("fixtures/rollouts/v0_144.jsonl");
 const V145: &[u8] = include_bytes!("fixtures/rollouts/v0_145.jsonl");
 const V145_SUBAGENT: &[u8] = include_bytes!("fixtures/rollouts/v0_145_subagent.jsonl");
 const V146: &[u8] = include_bytes!("fixtures/rollouts/v0_146.jsonl");
+const V147: &[u8] = include_bytes!("fixtures/rollouts/v0_147.jsonl");
 const PLANS: &[u8] = include_bytes!("fixtures/rollouts/plans.jsonl");
 const PLAN_MODE_FINAL_ANSWER: &[u8] =
     include_bytes!("fixtures/rollouts/plan_mode_final_answer.jsonl");
@@ -367,6 +368,93 @@ fn parses_v146_command_attribution_and_timing_across_legacy_and_durable_events()
     assert_eq!(command.metadata["startedAtMs"], 1_785_319_201_000_i64);
     assert_eq!(command.metadata["completedAtMs"], 1_785_319_202_000_i64);
     assert!(command.secondary_text.contains("synthetic 0.146 output"));
+}
+
+#[test]
+fn parses_v147_messages_and_preserves_new_metadata_without_exposing_opaque_payloads() {
+    let parsed = parse(
+        V147,
+        "rollout-2026-08-01T10-00-00-14714714-7147-4147-8147-147147147147.jsonl",
+        1024 * 1024,
+    );
+
+    assert_eq!(
+        parsed.summary.session.cli_version.as_deref(),
+        Some("0.147.0")
+    );
+    assert_eq!(parsed.summary.recognized_record_count, 9);
+    assert!(parsed.diagnostics.is_empty());
+    assert_ne!(parsed.summary.session.completeness, Completeness::Partial);
+
+    let messages = parsed
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == EntryKind::Message)
+        .collect::<Vec<_>>();
+    assert_eq!(messages.len(), 2);
+    assert!(messages.iter().any(|entry| {
+        entry.role == Some(MessageRole::User)
+            && entry.primary_text == "Inspect the synthetic 0.147 rollout"
+    }));
+    let assistant = messages
+        .iter()
+        .copied()
+        .find(|entry| entry.role == Some(MessageRole::Assistant))
+        .expect("0.147 assistant message");
+    assert_eq!(
+        assistant.primary_text,
+        "The synthetic 0.147 reply is complete"
+    );
+    assert_eq!(assistant.raw_refs.len(), 2);
+    assert_eq!(assistant.metadata["turnId"], "turn-147");
+    assert_eq!(assistant.metadata["executedToolCallCount"], 2);
+    assert_eq!(
+        assistant.metadata["executedToolCallNames"],
+        serde_json::json!(["exec_command", "mcp__fixture__read"])
+    );
+    assert_eq!(assistant.metadata["executedToolCallOmittedCount"], 2);
+
+    let function = parsed
+        .entries
+        .iter()
+        .find(|entry| entry.call_id.as_deref() == Some("call-fn-147"))
+        .expect("0.147 function call");
+    assert_eq!(function.metadata["encryptedFunctionArgsCount"], 1);
+    assert_eq!(function.metadata["executedToolCallCount"], 1);
+    assert_eq!(
+        function.metadata["executedToolCallNames"],
+        serde_json::json!(["spawn_agent"])
+    );
+
+    let mcp = parsed
+        .entries
+        .iter()
+        .find(|entry| entry.call_id.as_deref() == Some("mcp-147"))
+        .expect("0.147 MCP call");
+    assert_eq!(mcp.raw_refs.len(), 2);
+    assert_eq!(mcp.metadata["readOnlyHint"], true);
+
+    let image = parsed
+        .entries
+        .iter()
+        .find(|entry| entry.call_id.as_deref() == Some("image-147"))
+        .expect("0.147 image generation");
+    assert_eq!(image.metadata["transparentBackground"], false);
+
+    let rendered = parsed
+        .entries
+        .iter()
+        .flat_map(|entry| [&entry.primary_text, &entry.secondary_text])
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    for forbidden in [
+        "synthetic-private-arguments-must-not-render",
+        "encrypted-function-args-must-not-render",
+        "image-payload-must-not-render",
+    ] {
+        assert!(!rendered.contains(forbidden), "rendered {forbidden}");
+    }
 }
 
 #[test]

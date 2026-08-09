@@ -39,11 +39,13 @@ Rollout input is treated as an append-oriented, partially open log rather than a
 - extracts line-delimited `<proposed_plan>` blocks only from assistant messages, leaving non-plan assistant text as an ordinary message;
 - resumes from a verified stable prefix when a live rollout is appended.
 
-Codex 0.146 persists internal model input in more than one role. System/developer control material covers permissions, collaboration and plan modes, multi-agent behavior, model/personality changes, skills, plugins, apps, tools, environment and Git state, realtime sessions, budgets, extensions, and hooks. User-role contextual material includes AGENTS instructions, environment snapshots, loaded skills, external and internal model context, shell/interruption/subagent notifications, recommended plugins, hook prompts, and legacy warnings. None of these non-assistant roles are eligible for plan extraction, even when their protocol instructions contain a complete `<proposed_plan>` example. The distinct `turn_context` and `world_state` envelopes remain Context entries, while inter-agent traffic remains Technical rather than being reclassified as an assistant plan.
+Codex 0.147 persists internal model input in more than one role. System/developer control material covers permissions, collaboration and plan modes, multi-agent behavior, model/personality changes, skills, plugins, apps, tools, environment and Git state, realtime sessions, budgets, extensions, and hooks. User-role contextual material includes AGENTS instructions, environment snapshots, loaded skills, external and internal model context, shell/interruption/subagent notifications, recommended plugins, hook prompts, and legacy warnings. None of these non-assistant roles are eligible for plan extraction, even when their protocol instructions contain a complete `<proposed_plan>` example. The distinct `turn_context` and `world_state` envelopes remain Context entries, while inter-agent traffic remains Technical rather than being reclassified as an assistant plan.
 
 Plan tags follow Codex's line parser: each tag must be alone on its line apart from whitespace, CRLF is accepted, an unterminated block closes at the end of the message, and the last recognized block supplies the plan body. Inline lookalikes remain ordinary assistant text. The normalized plan body is deduplicated with adjacent plan presentation and durable `Plan` items; the durable item wins while every contributing raw reference remains inspectable. A plan-only assistant record therefore produces one `plan` entry instead of a duplicate received message.
 
 Session relationships use one normalized `parentThreadId`. Explicit parent and subagent metadata take precedence over `forked_from_id`. A fresh-context plan implementation can also be linked to its planning session when the Codex handoff prefix, normalized plan SHA-256, non-empty working directory, and event ordering match exactly. There is no title, time-window, or similarity fallback; an unresolved parent remains a browsable root.
+
+Codex 0.147 conversation sections and their manual ordering are state-backed metadata rather than rollout message records. The viewer continues to index every local rollout message but does not project section labels or ordering because it deliberately never opens the Codex state database.
 
 ### SQLite as a derived cache
 
@@ -76,7 +78,7 @@ The compatibility promise is for Codex CLI rollout records. Source metadata prod
 | ---------------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | `session_meta`                                 | Stable session ID, source, cwd, parent/fork, version, provider, Git, and paginated-history data |
 | `turn_context`, `world_state`                  | Collapsed technical context, excluded from default search                                       |
-| `event_msg.item_completed`                     | All Codex 0.146 turn-item families, including extension-owned display items                     |
+| `event_msg.item_completed`                     | All Codex 0.147 turn-item families, including extension-owned display items                     |
 | other known `event_msg` payloads               | Messages, reasoning, tool lifecycle, plans, settings, and diagnostics                           |
 | known `response_item` payloads                 | Messages, assistant plan blocks, reasoning summaries, inter-agent messages, tools, and attachments |
 | inter-agent communication and delivery metadata | One collapsed technical message with merged delivery metadata                                 |
@@ -89,23 +91,25 @@ For paginated subagent rollouts, records before `subagent_history_start_ordinal`
 
 Codex 0.146 command attribution (`plugin_id` and `script_path`) and item lifecycle timing are retained as normalized metadata whether they arrive through legacy execution events, durable completed items, or both.
 
+Codex 0.147 MCP read-only hints and image-generation transparency hints are retained as normalized metadata. Encrypted function arguments remain opaque and contribute only a count; attempted-tool metadata retains tool names, counts, and omission counts without copying nested arguments into rendered or searchable content.
+
 Message image and audio attachments are represented only by localized count badges. The transcript does not render attachment URLs, data URIs, ciphertext, or media players; copying a message copies its text only.
 
-Fixtures cover Codex 0.120, the 0.144 legacy baseline, the 0.145 turn-item and subagent-history boundary, the 0.146 command-attribution and timing additions, line-level plan extraction and deduplication, malformed input, source classification, parent/fork metadata, incremental indexing, and plan handoff grouping.
+Fixtures cover Codex 0.120, the 0.144 legacy baseline, the 0.145 turn-item and subagent-history boundary, the 0.146 command-attribution and timing additions, the 0.147 additive response and tool metadata, line-level plan extraction and deduplication, malformed input, source classification, parent/fork metadata, incremental indexing, and plan handoff grouping.
 
 ## Following upstream Codex
 
-The declared compatibility baseline is OpenAI Codex tag [`rust-v0.146.0`](https://github.com/openai/codex/tree/rust-v0.146.0). The important boundary is the persisted rollout, not the shape of an internal crate API.
+The declared compatibility baseline is OpenAI Codex tag [`rust-v0.147.0`](https://github.com/openai/codex/tree/rust-v0.147.0). The important boundary is the persisted rollout, not the shape of an internal crate API.
 
 Upstream references for the baseline are:
 
-- [`codex-rs/protocol/src/protocol.rs`](https://github.com/openai/codex/blob/rust-v0.146.0/codex-rs/protocol/src/protocol.rs) for rollout envelopes, session metadata, events, and inter-agent communication;
-- [`codex-rs/protocol/src/items.rs`](https://github.com/openai/codex/blob/rust-v0.146.0/codex-rs/protocol/src/items.rs) for durable `TurnItem` families;
-- [`codex-rs/protocol/src/models.rs`](https://github.com/openai/codex/blob/rust-v0.146.0/codex-rs/protocol/src/models.rs) for response items and structured attachment content;
-- [`codex-rs/utils/stream-parser/src/proposed_plan.rs`](https://github.com/openai/codex/blob/rust-v0.146.0/codex-rs/utils/stream-parser/src/proposed_plan.rs) for line-level plan extraction semantics;
-- [`codex-rs/rollout/src/recorder.rs`](https://github.com/openai/codex/blob/rust-v0.146.0/codex-rs/rollout/src/recorder.rs) for `RolloutRecorder`, `RolloutLine`, ordinals, and resume behavior;
-- [`codex-rs/state/src/runtime.rs`](https://github.com/openai/codex/blob/rust-v0.146.0/codex-rs/state/src/runtime.rs) for the state boundary that the viewer must not open;
-- [`codex-rs/file-watcher/src/lib.rs`](https://github.com/openai/codex/blob/rust-v0.146.0/codex-rs/file-watcher/src/lib.rs) for comparison with the viewer's narrower rollout-root watcher.
+- [`codex-rs/protocol/src/protocol.rs`](https://github.com/openai/codex/blob/rust-v0.147.0/codex-rs/protocol/src/protocol.rs) for rollout envelopes, session metadata, events, and inter-agent communication;
+- [`codex-rs/protocol/src/items.rs`](https://github.com/openai/codex/blob/rust-v0.147.0/codex-rs/protocol/src/items.rs) for durable `TurnItem` families;
+- [`codex-rs/protocol/src/models.rs`](https://github.com/openai/codex/blob/rust-v0.147.0/codex-rs/protocol/src/models.rs) for response items and structured attachment content;
+- [`codex-rs/utils/stream-parser/src/proposed_plan.rs`](https://github.com/openai/codex/blob/rust-v0.147.0/codex-rs/utils/stream-parser/src/proposed_plan.rs) for line-level plan extraction semantics;
+- [`codex-rs/rollout/src/recorder.rs`](https://github.com/openai/codex/blob/rust-v0.147.0/codex-rs/rollout/src/recorder.rs) for `RolloutRecorder`, `RolloutLine`, ordinals, and resume behavior;
+- [`codex-rs/state/src/runtime.rs`](https://github.com/openai/codex/blob/rust-v0.147.0/codex-rs/state/src/runtime.rs) for the state boundary that the viewer must not open;
+- [`codex-rs/file-watcher/src/lib.rs`](https://github.com/openai/codex/blob/rust-v0.147.0/codex-rs/file-watcher/src/lib.rs) for comparison with the viewer's narrower rollout-root watcher.
 
 Advancing the baseline is an evidence-driven maintenance task:
 
