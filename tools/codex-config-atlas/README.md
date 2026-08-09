@@ -96,7 +96,7 @@ changes with different values or field metadata remain visible.
 Register an explicit upstream version:
 
 ```bash
-just codex-config-atlas-sync-schema 0.146.0
+just codex-config-atlas-sync-schema 0.147.0
 ```
 
 Review the new schema and metadata together, then compare it with the previous
