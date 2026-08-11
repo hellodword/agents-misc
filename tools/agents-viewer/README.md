@@ -57,7 +57,9 @@ Parser-triggered reindexing and interrupted-source recovery keep the last atomic
 
 ### Synchronization policy
 
-Startup performs one metadata-only catalog sweep over both rollout roots. It opens files read-only to obtain identity, size, and modification time, but does not read JSONL content. The same safety sweep runs every six hours and after a coalesced watcher overflow with backoff; ordinary watcher events inspect only the affected paths. An unchanged sweep performs no JSONL reads and no SQLite writes.
+Startup performs one metadata-only catalog sweep over both rollout roots. It opens files read-only to obtain identity, size, and modification time, but does not read JSONL content. Ordinary watcher events inspect only the affected paths, forward close-write notifications, and flush a continuously changing batch within one second. A watcher overflow or degraded event remains pending until a coalesced recovery sweep can run with backoff instead of being discarded while foreground work is active.
+
+The same full safety sweep runs every six hours. Between full sweeps, the runtime checks hot catalog entries every 30 seconds by exact path and compares only file identity, size, and modification time. Hot entries are bounded by the current catalog and include rollouts classified as recent at startup plus sessions subsequently touched by the watcher or a direct synchronization request. An unchanged targeted or full sweep performs no JSONL reads and no SQLite writes.
 
 Work is ordered first by priority, then by rollout filesystem modification time, then by session creation time, with stable ID/path tie-breakers:
 
@@ -65,7 +67,7 @@ Work is ordered first by priority, then by rollout filesystem modification time,
 2. rollouts modified inside the rolling `initial_index_days` window;
 3. all older history, unless the window is `0`.
 
-At most two source reads run concurrently. A direct request can register immediately and parks lower-priority readers at a maximum 64 KiB read boundary. Older-history work starts only after 30 seconds without high-priority work, uses one scanner, and is capped at 8 MiB/s. SQLite remains a single writer with separate direct, recent, and background queues; priority can therefore change between bounded transactions without concurrent writers. Append validation reads at most the first 64 KiB and the old 64 KiB tail, then parses only the stable incomplete suffix plus newly appended bytes. Routine reconciliation does not vacuum the database.
+At most two source reads run concurrently. A direct request rechecks source metadata even for a cached `current` session, keeps the existing snapshot readable during that check, and parks lower-priority readers at a maximum 64 KiB read boundary when parsing is required. Older-history work starts only after 30 seconds without high-priority work, uses one scanner, and is capped at 8 MiB/s. SQLite remains a single writer with separate direct, recent, and background queues; priority can therefore change between bounded transactions without concurrent writers. Append validation reads at most the first 64 KiB and the old 64 KiB tail, then parses only the stable incomplete suffix plus newly appended bytes. Routine reconciliation does not vacuum the database.
 
 ### API and Web UI
 

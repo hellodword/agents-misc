@@ -2,11 +2,12 @@ use std::io::Write as _;
 use std::time::{Duration, Instant};
 
 use agents_viewer::index::Database;
-use agents_viewer::index::coordinator::IndexCoordinator;
+use agents_viewer::index::coordinator::{IndexCoordinator, IndexUpdate};
 use agents_viewer::index::writer::spawn_writer;
 use agents_viewer::watch::{WatchEvent, start_watcher};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn watcher_debounces_source_changes_without_losing_reconcile_signal() {
@@ -62,15 +63,27 @@ async fn appended_complete_line_reaches_sqlite_within_two_seconds() {
         1024 * 1024,
         agents_viewer::index::InitialIndexPolicy::all(),
     );
-    let (sender, mut receiver) = mpsc::channel(8);
+    let (sender, receiver) = mpsc::channel(8);
     let watcher = start_watcher(&roots, sender).unwrap();
-    coordinator.reconcile().await.unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(750), receiver.recv())
-            .await
-            .is_err(),
-        "index reads must not schedule another reconcile"
-    );
+    let (update_sender, mut updates) = mpsc::channel(16);
+    let shutdown = CancellationToken::new();
+    let coordinator_task = tokio::spawn({
+        let shutdown = shutdown.clone();
+        async move {
+            coordinator
+                .run_with_updates(receiver, shutdown, Some(update_sender), false)
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if matches!(updates.recv().await, Some(IndexUpdate::Completed { .. })) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("initial runtime synchronization completes");
     let before = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM entries")
         .fetch_one(database.pool())
         .await
@@ -86,15 +99,20 @@ async fn appended_complete_line_reaches_sqlite_within_two_seconds() {
     )
     .unwrap();
     file.flush().unwrap();
-    let event = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
-        .await
-        .expect("watch event within two seconds")
-        .expect("watch channel open");
-    assert!(matches!(
-        event,
-        WatchEvent::Paths(_) | WatchEvent::Reconcile
-    ));
-    coordinator.reconcile().await.unwrap();
+    drop(file);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if matches!(
+                updates.recv().await,
+                Some(IndexUpdate::SessionCommitted { session_id, .. })
+                    if session_id == "11111111-1111-4111-8111-111111111111"
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("runtime watcher update reaches SQLite within two seconds");
     let after = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM entries")
         .fetch_one(database.pool())
         .await
@@ -102,7 +120,9 @@ async fn appended_complete_line_reaches_sqlite_within_two_seconds() {
     assert_eq!(after, before + 1);
     assert!(started.elapsed() < Duration::from_secs(2));
 
+    shutdown.cancel();
     watcher.shutdown().await;
+    coordinator_task.await.unwrap().unwrap();
     writer.shutdown().await.unwrap();
     writer_task.wait().await.unwrap();
     database.close().await;

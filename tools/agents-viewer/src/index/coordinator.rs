@@ -29,6 +29,7 @@ pub const MAX_PARSER_TASKS: usize = 2;
 pub const DIRECT_SYNC_QUEUE_CAPACITY: usize = 128;
 pub const FULL_SWEEP_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 pub const BACKGROUND_IDLE_DELAY: Duration = Duration::from_secs(30);
+pub const HOT_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
 const SCHEDULER_TICK: Duration = Duration::from_millis(100);
 const FULL_SWEEP_BACKOFF: [Duration; 4] = [
@@ -231,6 +232,7 @@ struct RuntimeScheduler {
     queued: HashMap<String, WorkItem>,
     inflight: HashMap<String, InflightWork>,
     deferred: HashMap<String, WorkItem>,
+    hot_sessions: HashSet<String>,
     completion_sender: mpsc::Sender<WorkCompletion>,
     last_high_activity: Instant,
     background_hold: Option<ScanLease>,
@@ -518,11 +520,17 @@ impl IndexCoordinator {
             FULL_SWEEP_INTERVAL,
         );
         safety_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut hot_refresh = tokio::time::interval_at(
+            tokio::time::Instant::now() + HOT_REFRESH_INTERVAL,
+            HOT_REFRESH_INTERVAL,
+        );
+        hot_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut watch_open = true;
         let mut commands_open = true;
         let mut draining = false;
         let mut next_recovery_sweep = Instant::now();
         let mut recovery_backoff = 0_usize;
+        let mut recovery_requested = false;
 
         loop {
             tokio::select! {
@@ -538,7 +546,7 @@ impl IndexCoordinator {
                 command = command_receiver.recv(), if commands_open && !draining => {
                     match command {
                         Some(CoordinatorCommand::EnsureSession(session_id)) => {
-                            runtime.ensure_session(&session_id).await;
+                            runtime.ensure_session(&session_id).await?;
                         }
                         None => commands_open = false,
                     }
@@ -548,29 +556,23 @@ impl IndexCoordinator {
                         Some(WatchEvent::Paths(paths)) => {
                             runtime.handle_paths(paths, self.next_generation()).await?;
                         }
-                        Some(WatchEvent::Reconcile | WatchEvent::Degraded(_)) => {
-                            if runtime.cycle.is_none() && Instant::now() >= next_recovery_sweep {
-                                let generation = self.next_generation();
-                                let now_micros = chrono::Utc::now().timestamp_micros();
-                                let discovery = self.discover(generation, now_micros, shutdown.clone()).await?;
-                                runtime.apply_full_discovery(discovery, generation, now_micros, false).await?;
-                                let delay = FULL_SWEEP_BACKOFF[recovery_backoff.min(FULL_SWEEP_BACKOFF.len() - 1)];
-                                recovery_backoff = recovery_backoff.saturating_add(1);
-                                next_recovery_sweep = Instant::now() + delay;
-                            }
+                        Some(WatchEvent::Reconcile) => {
+                            recovery_requested = true;
+                        }
+                        Some(WatchEvent::Degraded(message)) => {
+                            tracing::warn!(%message, "source watcher requested recovery");
+                            recovery_requested = true;
                         }
                         None => watch_open = false,
                     }
                 }
                 _ = safety_sweep.tick(), if !draining => {
-                    if runtime.cycle.is_none() {
-                        let generation = self.next_generation();
-                        let now_micros = chrono::Utc::now().timestamp_micros();
-                        let discovery = self.discover(generation, now_micros, shutdown.clone()).await?;
-                        runtime.apply_full_discovery(discovery, generation, now_micros, false).await?;
-                        recovery_backoff = 0;
-                        next_recovery_sweep = Instant::now();
-                    }
+                    recovery_requested = true;
+                    recovery_backoff = 0;
+                    next_recovery_sweep = Instant::now();
+                }
+                _ = hot_refresh.tick(), if !draining && runtime.cycle.is_none() => {
+                    runtime.audit_hot_sessions(self.next_generation()).await?;
                 }
                 _ = scheduler_tick.tick() => {}
             }
@@ -578,6 +580,24 @@ impl IndexCoordinator {
                 runtime.start_available();
                 runtime.maybe_finalize_cycle(&mut bootstrap_pending).await?;
                 runtime.flush_relationships_if_idle().await?;
+                if recovery_requested
+                    && runtime.cycle.is_none()
+                    && Instant::now() >= next_recovery_sweep
+                {
+                    let generation = self.next_generation();
+                    let now_micros = chrono::Utc::now().timestamp_micros();
+                    let discovery = self
+                        .discover(generation, now_micros, shutdown.clone())
+                        .await?;
+                    recovery_requested = !discovery.issues.is_empty();
+                    runtime
+                        .apply_full_discovery(discovery, generation, now_micros, false)
+                        .await?;
+                    let delay =
+                        FULL_SWEEP_BACKOFF[recovery_backoff.min(FULL_SWEEP_BACKOFF.len() - 1)];
+                    recovery_backoff = recovery_backoff.saturating_add(1);
+                    next_recovery_sweep = Instant::now() + delay;
+                }
             }
             if draining && runtime.inflight.is_empty() {
                 return Ok(());
@@ -634,11 +654,17 @@ impl CoordinatorHandle {
         }
         let freshness = shared.freshness.get(session_id).copied();
         let state = match freshness {
-            Some(SessionFreshness::Current) => SessionSyncState::Current,
             Some(SessionFreshness::SourceMissing) => SessionSyncState::SourceMissing,
+            _ if shared.catalog.contains_key(session_id) => SessionSyncState::Queued,
+            None => {
+                if shared.catalog_ready {
+                    SessionSyncState::NotFound
+                } else {
+                    SessionSyncState::Checking
+                }
+            }
+            Some(SessionFreshness::Current) => SessionSyncState::Current,
             Some(SessionFreshness::Checking | SessionFreshness::Stale) => SessionSyncState::Queued,
-            None if shared.catalog_ready => SessionSyncState::NotFound,
-            None => SessionSyncState::Checking,
         };
         if matches!(state, SessionSyncState::Queued | SessionSyncState::Checking) {
             shared.sync_states.insert(session_id.to_owned(), state);
@@ -690,6 +716,7 @@ impl RuntimeScheduler {
             queued: HashMap::new(),
             inflight: HashMap::new(),
             deferred: HashMap::new(),
+            hot_sessions: HashSet::new(),
             completion_sender,
             last_high_activity: Instant::now(),
             background_hold: None,
@@ -769,6 +796,7 @@ impl RuntimeScheduler {
             }
             match automatic_priority(self.policy, &source, now_micros) {
                 Some(WorkPriority::Recent) => {
+                    self.hot_sessions.insert(source.session_id.clone());
                     progress.total_files = progress.total_files.saturating_add(1);
                     progress.total_bytes = progress
                         .total_bytes
@@ -819,6 +847,8 @@ impl RuntimeScheduler {
         }
         self.writer.mark_sources_missing(missing.clone()).await?;
         self.writer.mark_sources_present(present).await?;
+        self.hot_sessions
+            .retain(|session_id| discovered_ids.contains(session_id));
         {
             let mut shared = self.shared.write().expect("index catalog lock poisoned");
             shared.catalog_ready = true;
@@ -1095,7 +1125,7 @@ impl RuntimeScheduler {
         Ok(())
     }
 
-    async fn ensure_session(&mut self, session_id: &str) {
+    async fn ensure_session(&mut self, session_id: &str) -> Result<()> {
         let source = self
             .shared
             .read()
@@ -1104,21 +1134,18 @@ impl RuntimeScheduler {
             .get(session_id)
             .cloned();
         if let Some(source) = source {
-            let freshness = self
-                .shared
-                .read()
-                .expect("index catalog lock poisoned")
-                .freshness
-                .get(session_id)
-                .copied();
-            if freshness == Some(SessionFreshness::Current) {
-                self.clear_sync_state(session_id);
-                self.publish_session_state(session_id, SessionSyncState::Current)
-                    .await;
-            } else {
-                self.enqueue(WorkItem::new(source, WorkPriority::Interactive, None));
-            }
-            return;
+            self.hot_sessions.insert(session_id.to_owned());
+            let generation = self
+                .cycle
+                .as_ref()
+                .map_or(source.source.generation, |cycle| cycle.report.generation);
+            self.handle_paths_with_priority(
+                vec![source.path.clone()],
+                generation,
+                WorkPriority::Interactive,
+            )
+            .await?;
+            return Ok(());
         }
         let state = if self
             .shared
@@ -1134,9 +1161,20 @@ impl RuntimeScheduler {
         };
         self.clear_sync_state(session_id);
         self.publish_session_state(session_id, state).await;
+        Ok(())
     }
 
     async fn handle_paths(&mut self, paths: Vec<PathBuf>, generation: u64) -> Result<()> {
+        self.handle_paths_with_priority(paths, generation, WorkPriority::Recent)
+            .await
+    }
+
+    async fn handle_paths_with_priority(
+        &mut self,
+        paths: Vec<PathBuf>,
+        generation: u64,
+        priority: WorkPriority,
+    ) -> Result<()> {
         let mut unique = paths
             .into_iter()
             .collect::<HashSet<_>>()
@@ -1185,8 +1223,8 @@ impl RuntimeScheduler {
                     Ok(Some(source)) => rediscovered.push(source),
                     Ok(None) => {}
                     Err(_) => {
-                        // A racing append or rename will produce another event. The six-hour
-                        // safety sweep remains the bounded fallback.
+                        // A racing append or rename should produce another event. Hot paths are
+                        // also retried by the targeted audit before the full safety sweep.
                     }
                 }
             } else {
@@ -1197,6 +1235,7 @@ impl RuntimeScheduler {
             .iter()
             .map(|source| source.session_id.clone())
             .collect::<HashSet<_>>();
+        let mut resolved_current = Vec::new();
         for source in rediscovered {
             let source = Arc::new(source);
             let existing = self
@@ -1225,6 +1264,7 @@ impl RuntimeScheduler {
                 .expect("index catalog lock poisoned")
                 .snapshots
                 .contains(&source.session_id);
+            self.hot_sessions.insert(source.session_id.clone());
             {
                 let mut shared = self.shared.write().expect("index catalog lock poisoned");
                 shared
@@ -1249,11 +1289,22 @@ impl RuntimeScheduler {
                         .mark_source_present(stored.root_kind, stored.relative_path)
                         .await?;
                 }
+                if self
+                    .shared
+                    .write()
+                    .expect("index catalog lock poisoned")
+                    .sync_states
+                    .remove(&source.session_id)
+                    .is_some()
+                {
+                    resolved_current.push(source.session_id.clone());
+                }
             } else {
-                self.enqueue(WorkItem::new(source, WorkPriority::Recent, None));
+                self.enqueue(WorkItem::new(source, priority, None));
             }
         }
         let mut mark_missing = Vec::new();
+        let mut resolved_missing = Vec::new();
         for path in deleted {
             if path.extension().and_then(|value| value.to_str()) == Some("jsonl")
                 && let Some(source) = source_coordinates_for_path(&self.roots, &path)
@@ -1281,7 +1332,11 @@ impl RuntimeScheduler {
                             .freshness
                             .insert(session_id.clone(), SessionFreshness::SourceMissing);
                     }
+                    if shared.sync_states.remove(&session_id).is_some() {
+                        resolved_missing.push(session_id.clone());
+                    }
                 }
+                self.hot_sessions.remove(&session_id);
                 mark_missing.push((source.source.root_kind, source.source.relative_path.clone()));
             }
         }
@@ -1292,8 +1347,34 @@ impl RuntimeScheduler {
         });
         mark_missing.dedup();
         self.writer.mark_sources_missing(mark_missing).await?;
+        for session_id in resolved_current {
+            self.publish_session_state(&session_id, SessionSyncState::Current)
+                .await;
+        }
+        for session_id in resolved_missing {
+            self.publish_session_state(&session_id, SessionSyncState::SourceMissing)
+                .await;
+        }
         self.start_available();
         Ok(())
+    }
+
+    async fn audit_hot_sessions(&mut self, generation: u64) -> Result<()> {
+        let mut paths = {
+            let shared = self.shared.read().expect("index catalog lock poisoned");
+            self.hot_sessions
+                .iter()
+                .filter_map(|session_id| shared.catalog.get(session_id))
+                .map(|source| source.path.clone())
+                .collect::<Vec<_>>()
+        };
+        paths.sort();
+        paths.dedup();
+        if paths.is_empty() {
+            return Ok(());
+        }
+        self.handle_paths_with_priority(paths, generation, WorkPriority::Recent)
+            .await
     }
 
     async fn rediscover_and_enqueue(&mut self, path: &Path, priority: WorkPriority) -> Result<()> {
@@ -1308,6 +1389,7 @@ impl RuntimeScheduler {
                 .await
                 .context("targeted source rediscovery task panicked")??
         {
+            self.hot_sessions.insert(source.session_id.clone());
             self.enqueue(WorkItem::new(Arc::new(source), priority, None));
         }
         Ok(())
@@ -1558,8 +1640,11 @@ async fn send_session_committed(
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write as _;
+
     use super::*;
-    use crate::index::writer::SourceFileRecord;
+    use crate::index::writer::{SourceFileRecord, spawn_writer};
+    use tempfile::TempDir;
 
     fn source(id: &str, mtime_ns: i64, created_at_micros: i64) -> DiscoveredSource {
         DiscoveredSource {
@@ -1654,5 +1739,115 @@ mod tests {
             Ok(CoordinatorCommand::EnsureSession(session_id)) if session_id == "session"
         ));
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hot_audit_requeues_a_completed_session_without_a_watcher_event() {
+        let temp = TempDir::new().unwrap();
+        let source_home = temp.path().join("codex-home");
+        let sessions = source_home.join("sessions/2025/01/02");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let session_id = "11111111-1111-4111-8111-111111111111";
+        let rollout = sessions.join(format!("rollout-2025-01-02T03-04-05-{session_id}.jsonl"));
+        std::fs::write(
+            &rollout,
+            include_bytes!("../../tests/fixtures/rollouts/v0_120.jsonl"),
+        )
+        .unwrap();
+        let roots = crate::paths::resolve_source_roots(&source_home).unwrap();
+        let cache = temp.path().join("cache");
+        crate::permissions::prepare_cache_directory(&cache).unwrap();
+        let database = Database::open_or_recover(&cache.join("index.sqlite3"), "hot-audit")
+            .await
+            .unwrap();
+        let (writer, writer_task) = spawn_writer(database.clone());
+        let coordinator = IndexCoordinator::new(
+            database.clone(),
+            writer.clone(),
+            roots,
+            1024 * 1024,
+            InitialIndexPolicy::all(),
+        );
+        let (completion_sender, mut completion_receiver) = mpsc::channel(8);
+        let shutdown = CancellationToken::new();
+        let mut runtime = RuntimeScheduler::new(&coordinator, None, shutdown, completion_sender);
+        let now_micros = chrono::Utc::now().timestamp_micros();
+        let discovery = coordinator
+            .discover(1, now_micros, CancellationToken::new())
+            .await
+            .unwrap();
+        runtime
+            .apply_full_discovery(discovery, 1, now_micros, false)
+            .await
+            .unwrap();
+        runtime.start_available();
+        let completion = tokio::time::timeout(Duration::from_secs(2), completion_receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        runtime.handle_completion(completion).await.unwrap();
+        let mut bootstrap_pending = false;
+        runtime
+            .maybe_finalize_cycle(&mut bootstrap_pending)
+            .await
+            .unwrap();
+        assert!(runtime.hot_sessions.contains(session_id));
+
+        let before = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM entries")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        let read_bytes = runtime.gate.bytes_read();
+        runtime.audit_hot_sessions(2).await.unwrap();
+        assert_eq!(runtime.gate.bytes_read(), read_bytes);
+        assert!(runtime.queue.is_empty());
+        assert!(runtime.inflight.is_empty());
+        assert!(completion_receiver.try_recv().is_err());
+
+        let mut append = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        append
+            .write_all(
+                b"{\"timestamp\":\"2025-01-02T03:04:09.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"Hot audit synthetic line\",\"phase\":\"final\"}}\n",
+            )
+            .unwrap();
+        append.flush().unwrap();
+        drop(append);
+
+        let background = WorkItem::new(
+            Arc::new(source("background-inflight", 1, 1)),
+            WorkPriority::Background,
+            None,
+        );
+        runtime.inflight.insert(
+            background.source.session_id.clone(),
+            InflightWork {
+                work: background,
+                lease: runtime.gate.register(WorkPriority::Background),
+            },
+        );
+        runtime.audit_hot_sessions(3).await.unwrap();
+        assert!(runtime.inflight.contains_key("background-inflight"));
+        assert!(runtime.inflight.contains_key(session_id));
+        let completion = tokio::time::timeout(Duration::from_secs(2), completion_receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        runtime.handle_completion(completion).await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM entries")
+                .fetch_one(database.pool())
+                .await
+                .unwrap(),
+            before + 1
+        );
+        runtime.inflight.remove("background-inflight");
+
+        drop(runtime);
+        writer.shutdown().await.unwrap();
+        writer_task.wait().await.unwrap();
+        database.close().await;
     }
 }

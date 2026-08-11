@@ -793,6 +793,8 @@ async fn missing_source_retains_cached_session_and_handoff_snapshot() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn direct_session_sync_indexes_a_deferred_uuid_without_blocking_the_request() {
+    use std::io::Write as _;
+
     use agents_viewer::index::Database;
     use agents_viewer::index::coordinator::{IndexCoordinator, IndexUpdate};
     use agents_viewer::index::writer::spawn_writer;
@@ -805,10 +807,9 @@ async fn direct_session_sync_indexes_a_deferred_uuid_without_blocking_the_reques
     let sessions = source_home.join("sessions/2024/01/01");
     std::fs::create_dir_all(&sessions).unwrap();
     let session_id = "019f5a6f-512b-7ae2-bbe9-884d39f6f500";
+    let source = sessions.join(format!("rollout-2024-01-01T00-00-00-{session_id}.jsonl"));
     std::fs::write(
-        sessions.join(format!(
-            "rollout-2024-01-01T00-00-00-{session_id}.jsonl"
-        )),
+        &source,
         format!(
             "{{\"timestamp\":\"2024-01-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"/deferred\"}}}}\n"
         ),
@@ -891,10 +892,56 @@ async fn direct_session_sync_indexes_a_deferred_uuid_without_blocking_the_reques
         .await
         .unwrap();
     assert_eq!(detail.status(), StatusCode::OK);
-    assert_eq!(
-        support::json(detail).await["summary"]["freshness"],
-        "current"
-    );
+    let detail = support::json(detail).await;
+    assert_eq!(detail["summary"]["freshness"], "current");
+    assert_eq!(detail["summary"]["entryCount"], 0);
+
+    let mut append = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&source)
+        .unwrap();
+    append
+        .write_all(
+            b"{\"timestamp\":\"2024-01-01T00:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"Direct refresh line\",\"phase\":\"final\"}}\n",
+        )
+        .unwrap();
+    append.flush().unwrap();
+    drop(append);
+
+    let response = app
+        .clone()
+        .oneshot(
+            http::Request::builder()
+                .method("PUT")
+                .uri(format!("/api/v1/sessions/{session_id}/sync"))
+                .header("host", "127.0.0.1:4747")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let status = support::json(response).await;
+    assert_eq!(status["state"], "queued");
+    assert_eq!(status["hasSnapshot"], true);
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if matches!(
+                updates.recv().await,
+                Some(IndexUpdate::SessionCommitted { session_id: committed, .. }) if committed == session_id
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let detail = app
+        .clone()
+        .oneshot(support::request(&format!("/api/v1/sessions/{session_id}")))
+        .await
+        .unwrap();
+    assert_eq!(support::json(detail).await["summary"]["entryCount"], 1);
 
     let unknown = app
         .clone()
