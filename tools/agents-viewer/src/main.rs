@@ -10,7 +10,9 @@ use agents_viewer::index::coordinator::{IndexCoordinator, IndexUpdate, Reconcile
 use agents_viewer::index::recovery::replace_database_atomically;
 use agents_viewer::index::writer::spawn_writer;
 use agents_viewer::index::{Database, InitialIndexPolicy};
-use agents_viewer::model::{IndexProgress, ServicePhase, SseEventPayload, SseEventType};
+use agents_viewer::model::{
+    IndexProgress, ServicePhase, SessionSyncState, SseEventPayload, SseEventType,
+};
 use agents_viewer::permissions::{acquire_cache_lock, prepare_cache_directory};
 use agents_viewer::server::{self, AppState};
 use agents_viewer::watch::start_watcher;
@@ -99,7 +101,8 @@ async fn run(config: Config) -> Result<()> {
         policy,
         shutdown.clone(),
         bootstrap_required,
-    );
+    )
+    .with_coordinator(coordinator.handle());
     let (update_sender, update_receiver) = mpsc::channel(64);
     let coordinator_shutdown = shutdown.clone();
     let coordinator_task = tokio::spawn(async move {
@@ -299,6 +302,9 @@ async fn update_status(
                     IndexUpdate::SessionCommitted { generation, session_id } => {
                         publish_session_committed(&state, generation, &session_id).await;
                     }
+                    IndexUpdate::SessionState { generation, session_id, state: sync_state } => {
+                        publish_session_state(&state, generation, &session_id, sync_state).await;
+                    }
                     IndexUpdate::Completed { report, foreground } => {
                         let phase = if report.failed_files == 0
                             && report.discovery_issues == 0
@@ -343,6 +349,7 @@ async fn publish_session_committed(state: &AppState, generation: u64, session_id
                 entry_id: None,
                 progress: None,
                 diagnostic: None,
+                sync_state: Some(SessionSyncState::Current),
             },
         )
         .await;
@@ -365,6 +372,30 @@ async fn publish_session_committed(state: &AppState, generation: u64, session_id
                 entry_id,
                 progress: None,
                 diagnostic: None,
+                sync_state: None,
+            },
+        )
+        .await;
+}
+
+async fn publish_session_state(
+    state: &AppState,
+    generation: u64,
+    session_id: &str,
+    sync_state: SessionSyncState,
+) {
+    state
+        .sse
+        .publish(
+            SseEventType::SessionUpdated,
+            SseEventPayload {
+                generation,
+                phase: None,
+                session_id: Some(session_id.to_owned()),
+                entry_id: None,
+                progress: None,
+                diagnostic: None,
+                sync_state: Some(sync_state),
             },
         )
         .await;
@@ -387,6 +418,7 @@ async fn publish_progress(
                 entry_id: None,
                 progress: Some(progress),
                 diagnostic: None,
+                sync_state: None,
             },
         )
         .await;
@@ -404,6 +436,7 @@ async fn update_terminal_only(
                 Some(IndexUpdate::Discovering { .. }) => terminal.render(ServicePhase::Discovering, &IndexProgress { total_files: 0, processed_files: 0, total_bytes: 0, processed_bytes: 0, failed_files: 0, excluded_files: 0, excluded_bytes: 0 }, false),
                 Some(IndexUpdate::Progress { progress, .. }) => terminal.render(ServicePhase::Indexing, &progress, false),
                 Some(IndexUpdate::SessionCommitted { .. }) => {}
+                Some(IndexUpdate::SessionState { .. }) => {}
                 Some(IndexUpdate::Completed { report, .. }) => {
                     let phase = if report.failed_files == 0 && report.discovery_issues == 0 && !report.reconcile_again { ServicePhase::Ready } else { ServicePhase::Degraded };
                     let progress = report_progress(&report);
@@ -416,11 +449,17 @@ async fn update_terminal_only(
 }
 
 fn report_progress(report: &ReconcileReport) -> IndexProgress {
+    let foreground_files = report
+        .discovered_files
+        .saturating_sub(report.excluded_files);
+    let foreground_bytes = report
+        .discovered_bytes
+        .saturating_sub(report.excluded_bytes);
     IndexProgress {
-        total_files: report.discovered_files,
-        processed_files: report.discovered_files,
-        total_bytes: report.discovered_bytes,
-        processed_bytes: report.discovered_bytes,
+        total_files: foreground_files,
+        processed_files: foreground_files,
+        total_bytes: foreground_bytes,
+        processed_bytes: foreground_bytes,
         failed_files: report.failed_files,
         excluded_files: report.excluded_files,
         excluded_bytes: report.excluded_bytes,
@@ -501,7 +540,7 @@ async fn heartbeat(state: AppState, shutdown: CancellationToken) {
             () = shutdown.cancelled() => return,
             _ = interval.tick() => {
                 let generation = state.status.read().await.generation;
-                state.sse.publish(SseEventType::Heartbeat, SseEventPayload { generation, phase: None, session_id: None, entry_id: None, progress: None, diagnostic: None }).await;
+                state.sse.publish(SseEventType::Heartbeat, SseEventPayload { generation, phase: None, session_id: None, entry_id: None, progress: None, diagnostic: None, sync_state: None }).await;
             }
         }
     }

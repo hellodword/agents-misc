@@ -5,8 +5,9 @@ use axum::Json;
 use axum::Router;
 use axum::extract::{Path, Query, RawQuery, State};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, put};
 use chrono::{SecondsFormat, TimeZone as _, Utc};
+use http::StatusCode;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sqlx::{QueryBuilder, Row as _, Sqlite};
@@ -15,7 +16,8 @@ use crate::index::search::{ArchiveFilter, SearchFilters, SearchRequest, search a
 use crate::model::{
     ApiPage, ContentChunk, ContentField, Diagnostic, EntryKind, EntryListItem, GitMetadata,
     RawEncoding, RawRecord, RawRecordSummary, RawRefSummary, SearchHit, SessionDetail,
-    SessionGroup, SessionSummary, SessionTreeNode, SourceKind, TranscriptEntry,
+    SessionFreshness, SessionGroup, SessionSummary, SessionSyncState, SessionSyncStatus,
+    SessionTreeNode, SourceKind, TranscriptEntry,
 };
 use crate::permissions::open_source_read_only;
 
@@ -31,6 +33,7 @@ pub fn router() -> Router<AppState> {
         .route("/sessions", get(sessions))
         .route("/session-groups", get(session_groups))
         .route("/sessions/{session_id}", get(session_detail))
+        .route("/sessions/{session_id}/sync", put(sync_session))
         .route("/sessions/{session_id}/entries", get(entries))
         .route(
             "/sessions/{session_id}/entries/{entry_id}",
@@ -52,6 +55,13 @@ pub async fn unknown_api() -> ApiFailure {
 
 async fn status(State(state): State<AppState>) -> Json<crate::model::Status> {
     let mut status = state.status.read().await.clone();
+    status.initial_index_cutoff = match status.initial_index_days {
+        days if days > 0 => chrono::Utc::now()
+            .checked_sub_signed(chrono::Duration::days(days))
+            .map(|time| time.to_rfc3339_opts(SecondsFormat::Micros, true)),
+        -1 => None,
+        _ => Some(chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true)),
+    };
     status.database_bytes = database_family_bytes(&state.cache.database);
     Json(status)
 }
@@ -119,10 +129,11 @@ async fn sessions(
     if previous {
         rows.reverse();
     }
-    let data = rows
+    let mut data = rows
         .iter()
         .map(session_from_row)
         .collect::<Result<Vec<_>, _>>()?;
+    apply_freshness(&state, &mut data);
     let next_cursor = if previous || has_more {
         data.last().map(|item| {
             cursor::encode(
@@ -178,12 +189,13 @@ async fn session_groups(
     let previous = decoded
         .as_ref()
         .is_some_and(|(_, _, direction)| direction == "previous");
-    let sessions = sqlx::query("SELECT * FROM sessions")
+    let mut sessions = sqlx::query("SELECT * FROM sessions")
         .fetch_all(state.database.pool())
         .await?
         .iter()
         .map(session_from_row)
         .collect::<Result<Vec<_>, _>>()?;
+    apply_freshness(&state, &mut sessions);
     let mut groups = build_session_groups(sessions);
     groups.retain(|group| group_matches(group, &query, archived));
     groups.sort_by(|left, right| {
@@ -423,10 +435,49 @@ async fn session_detail(
             .iter()
             .map(diagnostic_from_row)
             .collect::<Result<Vec<_>, _>>()?;
+    let mut summary = session_from_row(&row)?;
+    apply_session_freshness(&state, &mut summary);
     Ok(Json(SessionDetail {
-        summary: session_from_row(&row)?,
+        summary,
         diagnostics,
     }))
+}
+
+async fn sync_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Response, ApiFailure> {
+    validate_id(&session_id)?;
+    let has_snapshot =
+        sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?)")
+            .bind(&session_id)
+            .fetch_one(state.database.pool())
+            .await?
+            != 0;
+    if !has_snapshot && uuid::Uuid::parse_str(&session_id).is_err() {
+        return Err(ApiFailure::invalid(
+            "an uncached session identifier must be a UUID",
+        ));
+    }
+    let coordinator = state
+        .coordinator
+        .as_ref()
+        .ok_or_else(|| ApiFailure::service_unavailable("session synchronization is unavailable"))?;
+    let status = coordinator
+        .ensure_session(&session_id)
+        .map_err(|_| ApiFailure::service_unavailable("session synchronization queue is full"))?;
+    if status.state == SessionSyncState::NotFound {
+        return Err(ApiFailure::not_found("session source does not exist"));
+    }
+    let response_status = if matches!(
+        status.state,
+        SessionSyncState::Checking | SessionSyncState::Queued | SessionSyncState::Indexing
+    ) {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    };
+    Ok((response_status, Json::<SessionSyncStatus>(status)).into_response())
 }
 
 #[derive(Default, Deserialize)]
@@ -1032,8 +1083,10 @@ async fn search(
             .bind(&hit.session_id)
             .fetch_one(state.database.pool())
             .await?;
+        let mut session = session_from_row(&row)?;
+        apply_session_freshness(&state, &mut session);
         hits.push(SearchHit {
-            session: session_from_row(&row)?,
+            session,
             entry_id: hit.entry_id,
             kind: hit.kind,
             snippet: hit.snippet,
@@ -1111,7 +1164,20 @@ fn session_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<SessionSummary, Api
             .map_err(|_| ApiFailure::internal())?,
         index_state: decode(row, "index_state")?,
         completeness: decode(row, "completeness")?,
+        freshness: SessionFreshness::Current,
     })
+}
+
+fn apply_freshness(state: &AppState, sessions: &mut [SessionSummary]) {
+    for session in sessions {
+        apply_session_freshness(state, session);
+    }
+}
+
+fn apply_session_freshness(state: &AppState, session: &mut SessionSummary) {
+    if let Some(coordinator) = &state.coordinator {
+        session.freshness = coordinator.freshness(&session.id);
+    }
 }
 
 fn entry_item_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<EntryListItem, ApiFailure> {

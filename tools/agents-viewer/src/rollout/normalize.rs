@@ -1970,20 +1970,21 @@ fn payload_session_id(payload: &Value) -> Option<String> {
 }
 
 fn session_id_from_file(context: &ParseContext) -> String {
-    let stem = context
-        .file_name
-        .strip_suffix(".jsonl")
-        .unwrap_or(&context.file_name);
+    session_id_from_filename(&context.file_name, &context.relative_path)
+}
+
+pub(crate) fn session_id_from_filename(file_name: &str, relative_path: &str) -> String {
+    let stem = file_name.strip_suffix(".jsonl").unwrap_or(file_name);
     if stem.len() >= 36 {
         let candidate = &stem[stem.len() - 36..];
         if let Ok(id) = Uuid::parse_str(candidate) {
             return id.to_string();
         }
     }
-    format!("s_{}", sha256(context.relative_path.as_bytes()))
+    format!("s_{}", sha256(relative_path.as_bytes()))
 }
 
-fn timestamp_from_filename(file_name: &str) -> Option<i64> {
+pub(crate) fn timestamp_from_filename(file_name: &str) -> Option<i64> {
     let stem = file_name.strip_suffix(".jsonl")?.strip_prefix("rollout-")?;
     let timestamp = stem.get(..stem.len().checked_sub(37)?)?;
     ["%Y-%m-%dT%H-%M-%S%.f", "%Y-%m-%dT%H-%M-%S"]

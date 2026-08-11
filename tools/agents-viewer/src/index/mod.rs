@@ -1,3 +1,4 @@
+pub mod control;
 pub mod coordinator;
 pub mod db;
 pub mod recovery;

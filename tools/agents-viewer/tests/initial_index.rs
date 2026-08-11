@@ -3,7 +3,7 @@ use agents_viewer::index::scanner::discover_sources;
 use tempfile::TempDir;
 
 #[test]
-fn discovery_reports_files_excluded_by_session_creation_time() {
+fn discovery_catalogs_deferred_files_without_reading_content_fingerprints() {
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("source");
     let sessions = source.join("sessions/2025/01/02");
@@ -33,7 +33,9 @@ fn discovery_reports_files_excluded_by_session_creation_time() {
             cutoff_micros: Some(cutoff),
         },
     );
-    assert!(excluded.sources.is_empty());
+    assert_eq!(excluded.sources.len(), 1);
+    assert_eq!(excluded.sources[0].source.head_hash, None);
+    assert_eq!(excluded.sources[0].source.tail_hash, None);
     assert_eq!(excluded.excluded_files, 1);
     assert_eq!(excluded.excluded_bytes, size);
 

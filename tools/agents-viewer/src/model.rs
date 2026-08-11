@@ -128,6 +128,20 @@ contract_enum!(SseEventType {
     Resync,
     Heartbeat,
 });
+contract_enum!(SessionFreshness {
+    Checking,
+    Current,
+    Stale,
+    SourceMissing,
+});
+contract_enum!(SessionSyncState {
+    Checking,
+    Queued,
+    Indexing,
+    Current,
+    SourceMissing,
+    NotFound,
+});
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -220,6 +234,16 @@ pub struct SessionSummary {
     pub diagnostic_count: u64,
     pub index_state: IndexState,
     pub completeness: Completeness,
+    pub freshness: SessionFreshness,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct SessionSyncStatus {
+    pub session_id: String,
+    pub state: SessionSyncState,
+    pub has_snapshot: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
@@ -445,6 +469,9 @@ pub struct SseEventPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub diagnostic: Option<Diagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub sync_state: Option<SessionSyncState>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
@@ -477,10 +504,13 @@ pub fn typescript_contract() -> String {
         RawEncoding::decl(),
         RawParseStatus::decl(),
         SseEventType::decl(),
+        SessionFreshness::decl(),
+        SessionSyncState::decl(),
         IndexProgress::decl(),
         Status::decl(),
         GitMetadata::decl(),
         SessionSummary::decl(),
+        SessionSyncStatus::decl(),
         SessionTreeNode::decl(),
         SessionGroup::decl(),
         Diagnostic::decl(),

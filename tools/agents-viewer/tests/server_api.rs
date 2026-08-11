@@ -545,6 +545,7 @@ async fn sse_ring_replays_recent_events_and_marks_expired_ids_for_resync() {
                 entry_id: None,
                 progress: None,
                 diagnostic: None,
+                sync_state: None,
             },
         )
         .await;
@@ -717,7 +718,7 @@ async fn session_group_pagination_and_cycle_guard_keep_every_session_browsable()
 }
 
 #[tokio::test]
-async fn removing_a_plan_parent_clears_the_derived_handoff_relation() {
+async fn missing_source_retains_cached_session_and_handoff_snapshot() {
     use agents_viewer::index::coordinator::IndexCoordinator;
     use agents_viewer::index::writer::spawn_writer;
 
@@ -755,13 +756,24 @@ async fn removing_a_plan_parent_clears_the_derived_handoff_relation() {
     .await
     .unwrap();
     use sqlx::Row as _;
-    assert_eq!(row.get::<Option<String>, _>("parent_thread_id"), None);
-    assert_eq!(row.get::<Option<String>, _>("parent_relation"), None);
-    assert!(
-        report
-            .updated_sessions
-            .contains(&"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".to_owned())
+    assert_eq!(
+        row.get::<Option<String>, _>("parent_thread_id").as_deref(),
+        Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
     );
+    assert_eq!(
+        row.get::<Option<String>, _>("parent_relation").as_deref(),
+        Some("planHandoff")
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT scan_state FROM source_files WHERE session_id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'",
+        )
+        .fetch_one(app.state.database.pool())
+        .await
+        .unwrap(),
+        "source_missing"
+    );
+    assert!(report.updated_sessions.is_empty());
     let relationship_updates = events
         .iter()
         .enumerate()
@@ -772,14 +784,146 @@ async fn removing_a_plan_parent_clears_the_derived_handoff_relation() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(relationship_updates.len(), 1);
-    assert_eq!(
-        relationship_updates[0].1,
-        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
-    );
-    assert!(relationship_updates[0].0 < events.len() - 1);
+    assert!(relationship_updates.is_empty());
     assert!(matches!(
         events.last(),
         Some(agents_viewer::index::coordinator::IndexUpdate::Completed { .. })
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn direct_session_sync_indexes_a_deferred_uuid_without_blocking_the_request() {
+    use agents_viewer::index::Database;
+    use agents_viewer::index::coordinator::{IndexCoordinator, IndexUpdate};
+    use agents_viewer::index::writer::spawn_writer;
+    use agents_viewer::server::{AppState, router};
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    let temp = tempfile::TempDir::new().unwrap();
+    let source_home = temp.path().join("codex-home");
+    let sessions = source_home.join("sessions/2024/01/01");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let session_id = "019f5a6f-512b-7ae2-bbe9-884d39f6f500";
+    std::fs::write(
+        sessions.join(format!(
+            "rollout-2024-01-01T00-00-00-{session_id}.jsonl"
+        )),
+        format!(
+            "{{\"timestamp\":\"2024-01-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"/deferred\"}}}}\n"
+        ),
+    )
+    .unwrap();
+    let roots = agents_viewer::paths::resolve_source_roots(&source_home).unwrap();
+    let cache =
+        agents_viewer::paths::resolve_cache_paths(&roots.home, &temp.path().join("cache")).unwrap();
+    agents_viewer::permissions::prepare_cache_directory(&cache.namespace).unwrap();
+    let database = Database::open_or_recover(&cache.database, "direct-sync-source")
+        .await
+        .unwrap();
+    let (writer, writer_task) = spawn_writer(database.clone());
+    let policy =
+        agents_viewer::index::InitialIndexPolicy::new(0, chrono::Utc::now().timestamp_micros())
+            .unwrap();
+    let coordinator = IndexCoordinator::new(
+        database.clone(),
+        writer.clone(),
+        roots.clone(),
+        1024 * 1024,
+        policy,
+    );
+    let state = AppState::new(database.clone(), roots, cache, policy)
+        .with_coordinator(coordinator.handle());
+    let app = router(state, "127.0.0.1:4747".parse().unwrap(), "");
+    let (_watch_sender, watch_receiver) = mpsc::channel(4);
+    let (update_sender, mut updates) = mpsc::channel(16);
+    let shutdown = CancellationToken::new();
+    let coordinator_task = tokio::spawn({
+        let shutdown = shutdown.clone();
+        async move {
+            coordinator
+                .run_with_updates(watch_receiver, shutdown, Some(update_sender), false)
+                .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if matches!(updates.recv().await, Some(IndexUpdate::Completed { .. })) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            http::Request::builder()
+                .method("PUT")
+                .uri(format!("/api/v1/sessions/{session_id}/sync"))
+                .header("host", "127.0.0.1:4747")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let status = support::json(response).await;
+    assert_eq!(status["state"], "queued");
+    assert_eq!(status["hasSnapshot"], false);
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if matches!(
+                updates.recv().await,
+                Some(IndexUpdate::SessionCommitted { session_id: committed, .. }) if committed == session_id
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let detail = app
+        .clone()
+        .oneshot(support::request(&format!("/api/v1/sessions/{session_id}")))
+        .await
+        .unwrap();
+    assert_eq!(detail.status(), StatusCode::OK);
+    assert_eq!(
+        support::json(detail).await["summary"]["freshness"],
+        "current"
+    );
+
+    let unknown = app
+        .clone()
+        .oneshot(
+            http::Request::builder()
+                .method("PUT")
+                .uri("/api/v1/sessions/019f5a6f-512b-7ae2-bbe9-884d39f6f501/sync")
+                .header("host", "127.0.0.1:4747")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    let unsafe_unknown = app
+        .oneshot(
+            http::Request::builder()
+                .method("PUT")
+                .uri("/api/v1/sessions/not-a-cached-uuid/sync")
+                .header("host", "127.0.0.1:4747")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unsafe_unknown.status(), StatusCode::BAD_REQUEST);
+
+    shutdown.cancel();
+    coordinator_task.await.unwrap().unwrap();
+    writer.shutdown().await.unwrap();
+    writer_task.wait().await.unwrap();
 }

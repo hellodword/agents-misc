@@ -59,6 +59,22 @@ impl InitialIndexPolicy {
         self.cutoff_micros
             .is_none_or(|cutoff| created_at_micros >= cutoff)
     }
+
+    #[must_use]
+    pub fn is_recent(self, updated_at_micros: i64, now_micros: i64) -> bool {
+        match self.days {
+            -1 => true,
+            0 => false,
+            days => now_micros
+                .checked_sub(days.saturating_mul(MICROS_PER_DAY))
+                .is_none_or(|cutoff| updated_at_micros >= cutoff),
+        }
+    }
+
+    #[must_use]
+    pub const fn background_enabled(self) -> bool {
+        self.days != 0
+    }
 }
 
 #[derive(Clone)]
@@ -217,7 +233,8 @@ impl Database {
         .fetch_optional(&self.pool)
         .await?;
         let incomplete_sources = sqlx::query_scalar::<_, i64>(
-            "SELECT EXISTS(SELECT 1 FROM source_files WHERE scan_state != 'ready')",
+            "SELECT EXISTS(SELECT 1 FROM source_files \
+             WHERE scan_state IN ('pending', 'indexing'))",
         )
         .fetch_one(&self.pool)
         .await?;
@@ -256,66 +273,18 @@ impl Database {
             .fetch_one(&mut *transaction)
             .await?;
 
-        let policy = match (stored_days, stored_cutoff) {
-            (Some(days), cutoff) => {
-                let days = days
-                    .parse::<i64>()
-                    .context("invalid stored initial_index_days")?;
-                if days != requested_days {
-                    bail!(
-                        "initial_index_days changed from {days} to {requested_days}; run agents-viewer --rebuild-index to apply the new fixed window"
-                    );
-                }
-                let cutoff_micros = match (days, cutoff) {
-                    (-1, None) => None,
-                    (-1, Some(value)) if value.is_empty() => None,
-                    (-1, Some(_)) => bail!("invalid stored cutoff for all-history index"),
-                    (_, Some(value)) => Some(
-                        value
-                            .parse::<i64>()
-                            .context("invalid stored initial_index_cutoff_micros")?,
-                    ),
-                    (_, None) => bail!("stored initial index cutoff is missing"),
-                };
-                InitialIndexPolicy {
-                    days,
-                    cutoff_micros,
-                }
-            }
-            (None, None) if indexed_files == 0 => {
-                let policy = InitialIndexPolicy::new(requested_days, now_micros)?;
-                set_meta(
-                    &mut transaction,
-                    "initial_index_days",
-                    &policy.days.to_string(),
-                )
+        let policy = InitialIndexPolicy::new(requested_days, now_micros)?;
+        let policy_days = policy.days.to_string();
+        if stored_days.as_deref() != Some(policy_days.as_str()) {
+            upsert_meta(&mut transaction, "initial_index_days", &policy_days).await?;
+        }
+        // Older builds persisted a one-time cutoff. Rolling windows derive it from the current
+        // clock, so remove the obsolete marker once without rebuilding the disposable cache.
+        if stored_cutoff.is_some() {
+            sqlx::query("DELETE FROM app_meta WHERE key = 'initial_index_cutoff_micros'")
+                .execute(&mut *transaction)
                 .await?;
-                if let Some(cutoff) = policy.cutoff_micros {
-                    set_meta(
-                        &mut transaction,
-                        "initial_index_cutoff_micros",
-                        &cutoff.to_string(),
-                    )
-                    .await?;
-                }
-                policy
-            }
-            (None, None) => {
-                if requested_days != -1 {
-                    bail!(
-                        "existing index predates fixed initial_index_days metadata; run agents-viewer --rebuild-index to apply the configured window"
-                    );
-                }
-                let policy = InitialIndexPolicy::all();
-                set_meta(&mut transaction, "initial_index_days", "-1").await?;
-                policy
-            }
-            _ => {
-                bail!(
-                    "stored initial index policy is incomplete; run agents-viewer --rebuild-index"
-                )
-            }
-        };
+        }
 
         if let Some(stored) = stored_max_bytes {
             let stored = stored
@@ -368,6 +337,22 @@ async fn set_meta(
     Ok(())
 }
 
+async fn upsert_meta(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO app_meta(key, value) VALUES (?, ?) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(key)
+    .bind(value)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 async fn connect(path: &Path) -> Result<SqlitePool> {
     let url = format!("sqlite://{}", path.to_string_lossy());
     let options = SqliteConnectOptions::from_str(&url)?
@@ -379,7 +364,7 @@ async fn connect(path: &Path) -> Result<SqlitePool> {
         .pragma("auto_vacuum", "INCREMENTAL")
         .log_statements(LevelFilter::Off);
     SqlitePoolOptions::new()
-        .max_connections(5)
+        .max_connections(4)
         .after_connect(|connection, _metadata| {
             Box::pin(async move {
                 connection.execute("PRAGMA foreign_keys=ON").await?;
@@ -440,7 +425,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn initial_policy_is_fixed_and_config_mismatch_requires_rebuild() {
+    async fn index_window_rolls_and_can_change_without_rebuild() {
         let temp = TempDir::new_in(".").unwrap();
         let cache = temp.path().join("cache");
         crate::permissions::prepare_cache_directory(&cache).unwrap();
@@ -456,14 +441,15 @@ mod tests {
             .resolve_index_policy(7, 32 * 1024 * 1024, 99 * MICROS_PER_DAY)
             .await
             .unwrap();
-        assert_eq!(later, first);
-        let error = database
+        assert_eq!(later.days, first.days);
+        assert_eq!(later.cutoff_micros, Some(92 * MICROS_PER_DAY));
+        let zero = database
             .resolve_index_policy(0, 32 * 1024 * 1024, 99 * MICROS_PER_DAY)
             .await
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("--rebuild-index"));
+            .unwrap();
+        assert_eq!(zero.days, 0);
         let error = database
-            .resolve_index_policy(7, 16 * 1024 * 1024, 99 * MICROS_PER_DAY)
+            .resolve_index_policy(0, 16 * 1024 * 1024, 99 * MICROS_PER_DAY)
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("--rebuild-index"));

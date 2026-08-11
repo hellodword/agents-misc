@@ -53,7 +53,19 @@ SQLite contains normalized sessions, entries, raw-record metadata, diagnostics, 
 
 The database is initialized from the single baseline in `schema.sql`. This project is still in early development: schema changes replace that baseline directly and do not add upgrade migrations or schema-version history. A cache with a different schema signature is rebuilt from rollout JSONL by the existing recovery path.
 
-Parser-triggered reindexing and interrupted-source recovery keep the last atomically committed session snapshots readable. While any source is pending or indexing, status starts at `Starting` and reports foreground discovery plus file/byte progress instead of claiming `Ready`. Each source commit immediately emits the existing `sessionUpdated` and `entryUpdated` events, so an open conversation can refresh before the remaining sources finish. Status becomes `Ready` only after every discovered source is ready; this recovery path needs neither a cache migration nor deletion of the previous snapshots.
+Parser-triggered reindexing and interrupted-source recovery keep the last atomically committed session snapshots readable. Foreground status covers metadata discovery and the rolling high-priority window; older history continues at low priority after the service is ready. Each source commit immediately emits the existing `sessionUpdated` and `entryUpdated` events, so an open conversation can refresh before the remaining sources finish. A rollout that disappears is retained as a readable cached snapshot with `sourceMissing` freshness instead of being cascade-deleted.
+
+### Synchronization policy
+
+Startup performs one metadata-only catalog sweep over both rollout roots. It opens files read-only to obtain identity, size, and modification time, but does not read JSONL content. The same safety sweep runs every six hours and after a coalesced watcher overflow with backoff; ordinary watcher events inspect only the affected paths. An unchanged sweep performs no JSONL reads and no SQLite writes.
+
+Work is ordered first by priority, then by rollout filesystem modification time, then by session creation time, with stable ID/path tie-breakers:
+
+1. a direct `PUT /api/v1/sessions/{sessionId}/sync`, issued automatically before the Web route loads a conversation;
+2. rollouts modified inside the rolling `initial_index_days` window;
+3. all older history, unless the window is `0`.
+
+At most two source reads run concurrently. A direct request can register immediately and parks lower-priority readers at a maximum 64 KiB read boundary. Older-history work starts only after 30 seconds without high-priority work, uses one scanner, and is capped at 8 MiB/s. SQLite remains a single writer with separate direct, recent, and background queues; priority can therefore change between bounded transactions without concurrent writers. Append validation reads at most the first 64 KiB and the old 64 KiB tail, then parses only the stable incomplete suffix plus newly appended bytes. Routine reconciliation does not vacuum the database.
 
 ### API and Web UI
 
@@ -161,7 +173,7 @@ max_event_bytes = "32MiB"
 log_level = "warn"
 ```
 
-`initial_index_days` establishes a fixed cutoff when the index is created: `7` indexes the preceding seven days, `-1` indexes all history, and `0` indexes only sessions created at or after startup. The cutoff does not move forward each day. Changing the index window or event-size bound for an existing cache requires `just agents-viewer-run --rebuild-index`.
+`initial_index_days` is a rolling high-priority window based on rollout modification time. `7` synchronizes the preceding seven days first and then fills all older history at low priority; `-1` treats all history as high priority; `0` disables old-history backfill while still synchronizing new watcher events and directly opened sessions. The cutoff moves with the clock, and changing this window does not rebuild the cache. Changing `max_event_bytes` for a populated cache still requires `just agents-viewer-run --rebuild-index` so existing and future records use one bound.
 
 A non-empty `password` enables HTTP Basic authentication for the page, assets, API, raw content, and event stream. The username is always `agents-viewer`. Browsers control how long credentials remain cached; direct clients can use `curl --user agents-viewer URL` and enter the password at the prompt.
 
@@ -243,7 +255,7 @@ Common failures:
 - `already locked`: use the running instance's printed URL or stop that process.
 - unsafe config/cache permissions: restrict them to the current account.
 - source/data overlap: choose a data directory outside the canonical Codex home.
-- index setting mismatch: intentionally rebuild with `just agents-viewer-run --rebuild-index`.
+- event-size setting mismatch: intentionally rebuild with `just agents-viewer-run --rebuild-index`; changing only `initial_index_days` does not require a rebuild.
 - no FTS5: use the Nix package or another build with bundled SQLite and FTS5.
 - no E2E browser: configure CDP or expose a supported Chromium-family executable; do not install a browser from the test command.
 - stale UI during E2E: use `just agents-viewer-e2e`, not the Web package's `e2e` script directly; the Just recipe rebuilds the compile-time embedded bundle first.

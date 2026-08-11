@@ -27,7 +27,7 @@ source_dir = "~/.codex"
 # Viewer-owned configuration, index, and lock root.
 data_dir = "~/.agents-viewer"
 
-# Fixed bootstrap window: 7 = seven days, -1 = all history, 0 = new sessions only.
+# Rolling high-priority window: 7 = seven days, -1 = all history, 0 = new/direct only.
 initial_index_days = 7
 
 # HTTP must bind to an IPv4 or IPv6 loopback address. Port 0 selects a free port.
@@ -76,7 +76,7 @@ pub struct FileConfig {
     pub source_dir: String,
     /// Viewer-owned configuration, index, and lock root.
     pub data_dir: String,
-    /// Fixed bootstrap window: 7 = seven days, -1 = all history, 0 = new sessions only.
+    /// Rolling high-priority window: 7 = seven days, -1 = all history, 0 = new/direct only.
     pub initial_index_days: i64,
     /// IPv4 or IPv6 loopback listen address. Port 0 selects a free port.
     pub listen: String,

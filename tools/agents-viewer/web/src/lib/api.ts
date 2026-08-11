@@ -8,6 +8,7 @@ import type {
   SessionDetail,
   SessionGroup,
   SessionSummary,
+  SessionSyncStatus,
   SseEventPayload,
   SseEventType,
   Status,
@@ -33,6 +34,24 @@ export class ApiClientError extends Error {
 
 async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(path, {
+    signal,
+    headers: { accept: "application/json" },
+  });
+  const body = (await response.json()) as T | ApiErrorEnvelope;
+  if (!response.ok) {
+    const failure = body as ApiErrorEnvelope;
+    throw new ApiClientError(
+      response.status,
+      failure.error.code,
+      failure.error.message,
+    );
+  }
+  return body as T;
+}
+
+async function put<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(path, {
+    method: "PUT",
     signal,
     headers: { accept: "application/json" },
   });
@@ -84,6 +103,11 @@ export const api = {
     get<Page<SessionGroup>>(`/api/v1/session-groups${query(options)}`, signal),
   session: (id: string, signal?: AbortSignal) =>
     get<SessionDetail>(`/api/v1/sessions/${encodeURIComponent(id)}`, signal),
+  syncSession: (id: string, signal?: AbortSignal) =>
+    put<SessionSyncStatus>(
+      `/api/v1/sessions/${encodeURIComponent(id)}/sync`,
+      signal,
+    ),
   entries: (
     id: string,
     options: {

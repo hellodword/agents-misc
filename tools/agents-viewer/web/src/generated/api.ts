@@ -34,13 +34,19 @@ export type RawParseStatus = "valid" | "inherited" | "invalidJson" | "invalidUtf
 
 export type SseEventType = "indexProgress" | "sessionUpdated" | "entryUpdated" | "diagnostic" | "resync" | "heartbeat";
 
+export type SessionFreshness = "checking" | "current" | "stale" | "sourceMissing";
+
+export type SessionSyncState = "checking" | "queued" | "indexing" | "current" | "sourceMissing" | "notFound";
+
 export type IndexProgress = { totalFiles: number, processedFiles: number, totalBytes: number, processedBytes: number, failedFiles: number, excludedFiles: number, excludedBytes: number, };
 
 export type Status = { appVersion: string, sourceHome: string, cacheDir: string, initialIndexDays: number, initialIndexCutoff?: string, generation: number, phase: ServicePhase, progress: IndexProgress, ftsReady: boolean, databaseBytes: number, lastReconcileAt?: string, };
 
 export type GitMetadata = { branch?: string, commit?: string, };
 
-export type SessionSummary = { id: string, source: SourceKind, parentThreadId?: string, parentRelation?: SessionParentRelation, cwd?: string, title: string, preview: string, createdAt: string, updatedAt: string, archived: boolean, cliVersion?: string, provider?: string, git?: GitMetadata, entryCount: number, diagnosticCount: number, indexState: IndexState, completeness: Completeness, };
+export type SessionSummary = { id: string, source: SourceKind, parentThreadId?: string, parentRelation?: SessionParentRelation, cwd?: string, title: string, preview: string, createdAt: string, updatedAt: string, archived: boolean, cliVersion?: string, provider?: string, git?: GitMetadata, entryCount: number, diagnosticCount: number, indexState: IndexState, completeness: Completeness, freshness: SessionFreshness, };
+
+export type SessionSyncStatus = { sessionId: string, state: SessionSyncState, hasSnapshot: boolean, };
 
 export type SessionTreeNode = { session: SessionSummary, children: Array<SessionTreeNode>, };
 
@@ -72,6 +78,6 @@ export type ApiError = { code: string, message: string, details?: Record<string,
 
 export type ApiErrorEnvelope = { error: ApiError, };
 
-export type SseEventPayload = { generation: number, phase?: ServicePhase, sessionId?: string, entryId?: string, progress?: IndexProgress, diagnostic?: Diagnostic, };
+export type SseEventPayload = { generation: number, phase?: ServicePhase, sessionId?: string, entryId?: string, progress?: IndexProgress, diagnostic?: Diagnostic, syncState?: SessionSyncState, };
 
 export type SseEvent = { id: number, event: SseEventType, data: SseEventPayload, };

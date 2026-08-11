@@ -16,6 +16,7 @@ use http::StatusCode;
 use tokio::sync::{RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 
+use crate::index::coordinator::CoordinatorHandle;
 use crate::index::{Database, InitialIndexPolicy};
 use crate::model::{ApiError, ApiErrorEnvelope, IndexProgress, ServicePhase, Status};
 use crate::paths::{CachePaths, SourceRoots};
@@ -27,6 +28,7 @@ pub struct AppState {
     pub cache: CachePaths,
     pub status: Arc<RwLock<Status>>,
     pub sse: sse::SseHub,
+    pub coordinator: Option<CoordinatorHandle>,
     requests: Arc<Semaphore>,
 }
 
@@ -91,8 +93,15 @@ impl AppState {
             roots,
             cache,
             sse: sse::SseHub::new_with_shutdown(shutdown),
+            coordinator: None,
             requests: Arc::new(Semaphore::new(64)),
         }
+    }
+
+    #[must_use]
+    pub fn with_coordinator(mut self, coordinator: CoordinatorHandle) -> Self {
+        self.coordinator = Some(coordinator);
+        self
     }
 }
 

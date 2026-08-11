@@ -7,8 +7,10 @@ use tokio::sync::{mpsc, oneshot};
 use crate::rollout::{ParseSummary, ParserDiagnostic, ParserOutput, RootKind};
 
 use super::Database;
+use super::control::{ScanLease, WorkPriority};
 
 pub const WRITER_QUEUE_CAPACITY: usize = 32;
+pub const BACKGROUND_WRITER_QUEUE_CAPACITY: usize = 8;
 pub const MAX_BATCH_ENTRIES: usize = 500;
 pub const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
 
@@ -33,7 +35,9 @@ pub struct SourceFileRecord {
 
 #[derive(Clone)]
 pub struct WriterHandle {
-    sender: mpsc::Sender<WriteCommand>,
+    interactive: mpsc::Sender<WriteCommand>,
+    recent: mpsc::Sender<WriteCommand>,
+    background: mpsc::Sender<WriteCommand>,
 }
 
 pub struct WriterTask {
@@ -58,29 +62,42 @@ enum WriteCommand {
         scan_token: String,
         summary: ParseSummary,
         mode: ScanMode,
+        final_tail_hash: Option<String>,
         reply: oneshot::Sender<Result<()>>,
     },
     Abort {
         scan_token: String,
         reply: oneshot::Sender<Result<()>>,
     },
-    MarkSeen {
-        root_kind: RootKind,
-        relative_path: String,
-        generation: u64,
+    MarkSourceStates {
+        sources: Vec<(RootKind, String)>,
+        state: &'static str,
         reply: oneshot::Sender<Result<()>>,
-    },
-    RemoveUnseen {
-        generation: u64,
-        reply: oneshot::Sender<Result<u64>>,
     },
     Shutdown,
 }
 
 pub fn spawn_writer(database: Database) -> (WriterHandle, WriterTask) {
-    let (sender, mut receiver) = mpsc::channel(WRITER_QUEUE_CAPACITY);
+    let (interactive, mut interactive_receiver) = mpsc::channel(WRITER_QUEUE_CAPACITY);
+    let (recent, mut recent_receiver) = mpsc::channel(WRITER_QUEUE_CAPACITY);
+    let (background, mut background_receiver) = mpsc::channel(BACKGROUND_WRITER_QUEUE_CAPACITY);
     let join = tokio::spawn(async move {
-        while let Some(command) = receiver.recv().await {
+        loop {
+            let command = tokio::select! {
+                biased;
+                command = interactive_receiver.recv() => command,
+                command = recent_receiver.recv() => command,
+                command = background_receiver.recv() => command,
+            };
+            let Some(command) = command else {
+                if interactive_receiver.is_closed()
+                    && recent_receiver.is_closed()
+                    && background_receiver.is_closed()
+                {
+                    break;
+                }
+                continue;
+            };
             match command {
                 WriteCommand::Begin {
                     source,
@@ -104,44 +121,74 @@ pub fn spawn_writer(database: Database) -> (WriterHandle, WriterTask) {
                     scan_token,
                     summary,
                     mode,
+                    final_tail_hash,
                     reply,
                 } => {
                     let _ = reply.send(
-                        finish_scan(&database, source_file_id, &scan_token, &summary, mode).await,
+                        finish_scan(
+                            &database,
+                            source_file_id,
+                            &scan_token,
+                            &summary,
+                            mode,
+                            final_tail_hash.as_deref(),
+                        )
+                        .await,
                     );
                 }
                 WriteCommand::Abort { scan_token, reply } => {
                     let _ = reply.send(abort_scan(&database, &scan_token).await);
                 }
-                WriteCommand::MarkSeen {
-                    root_kind,
-                    relative_path,
-                    generation,
+                WriteCommand::MarkSourceStates {
+                    sources,
+                    state,
                     reply,
                 } => {
-                    let _ = reply
-                        .send(mark_seen(&database, root_kind, &relative_path, generation).await);
-                }
-                WriteCommand::RemoveUnseen { generation, reply } => {
-                    let _ = reply.send(remove_unseen(&database, generation).await);
+                    let _ = reply.send(mark_source_states(&database, &sources, state).await);
                 }
                 WriteCommand::Shutdown => break,
             }
         }
         Ok(())
     });
-    (WriterHandle { sender }, WriterTask { join })
+    (
+        WriterHandle {
+            interactive,
+            recent,
+            background,
+        },
+        WriterTask { join },
+    )
 }
 
 impl WriterHandle {
+    fn sender(&self, priority: WorkPriority) -> &mpsc::Sender<WriteCommand> {
+        match priority {
+            WorkPriority::Interactive => &self.interactive,
+            WorkPriority::Recent => &self.recent,
+            WorkPriority::Background => &self.background,
+        }
+    }
+
     pub async fn begin(
         &self,
         source: SourceFileRecord,
         scan_token: String,
         mode: ScanMode,
     ) -> Result<i64> {
+        self.begin_with_priority(source, scan_token, mode, WorkPriority::Recent)
+            .await
+    }
+
+    pub async fn begin_with_priority(
+        &self,
+        source: SourceFileRecord,
+        scan_token: String,
+        mode: ScanMode,
+        priority: WorkPriority,
+    ) -> Result<i64> {
         let (reply, response) = oneshot::channel();
-        self.sender
+        self.sender(priority)
             .send(WriteCommand::Begin {
                 source,
                 scan_token,
@@ -161,8 +208,23 @@ impl WriterHandle {
         scan_token: String,
         outputs: Vec<ParserOutput>,
     ) -> Result<()> {
+        self.write_batch_blocking_with_priority(
+            source_file_id,
+            scan_token,
+            outputs,
+            WorkPriority::Recent,
+        )
+    }
+
+    pub fn write_batch_blocking_with_priority(
+        &self,
+        source_file_id: i64,
+        scan_token: String,
+        outputs: Vec<ParserOutput>,
+        priority: WorkPriority,
+    ) -> Result<()> {
         let (reply, response) = oneshot::channel();
-        self.sender
+        self.sender(priority)
             .blocking_send(WriteCommand::Batch {
                 source_file_id,
                 scan_token,
@@ -182,13 +244,52 @@ impl WriterHandle {
         summary: ParseSummary,
         mode: ScanMode,
     ) -> Result<()> {
+        self.finish_with_priority(
+            source_file_id,
+            scan_token,
+            summary,
+            mode,
+            WorkPriority::Recent,
+        )
+        .await
+    }
+
+    pub async fn finish_with_priority(
+        &self,
+        source_file_id: i64,
+        scan_token: String,
+        summary: ParseSummary,
+        mode: ScanMode,
+        priority: WorkPriority,
+    ) -> Result<()> {
+        self.finish_with_priority_and_tail(
+            source_file_id,
+            scan_token,
+            summary,
+            mode,
+            priority,
+            None,
+        )
+        .await
+    }
+
+    pub async fn finish_with_priority_and_tail(
+        &self,
+        source_file_id: i64,
+        scan_token: String,
+        summary: ParseSummary,
+        mode: ScanMode,
+        priority: WorkPriority,
+        final_tail_hash: Option<String>,
+    ) -> Result<()> {
         let (reply, response) = oneshot::channel();
-        self.sender
+        self.sender(priority)
             .send(WriteCommand::Finish {
                 source_file_id,
                 scan_token,
                 summary,
                 mode,
+                final_tail_hash,
                 reply,
             })
             .await
@@ -199,8 +300,17 @@ impl WriterHandle {
     }
 
     pub async fn abort(&self, scan_token: String) -> Result<()> {
+        self.abort_with_priority(scan_token, WorkPriority::Recent)
+            .await
+    }
+
+    pub async fn abort_with_priority(
+        &self,
+        scan_token: String,
+        priority: WorkPriority,
+    ) -> Result<()> {
         let (reply, response) = oneshot::channel();
-        self.sender
+        self.sender(priority)
             .send(WriteCommand::Abort { scan_token, reply })
             .await
             .map_err(|_| anyhow!("database writer stopped"))?;
@@ -209,18 +319,52 @@ impl WriterHandle {
             .map_err(|_| anyhow!("database writer stopped"))?
     }
 
-    pub async fn mark_seen(
+    pub async fn shutdown(&self) -> Result<()> {
+        self.interactive
+            .send(WriteCommand::Shutdown)
+            .await
+            .map_err(|_| anyhow!("database writer stopped"))
+    }
+
+    pub async fn mark_source_missing(
         &self,
         root_kind: RootKind,
         relative_path: String,
-        generation: u64,
     ) -> Result<()> {
+        self.mark_source_states(vec![(root_kind, relative_path)], "source_missing")
+            .await
+    }
+
+    pub async fn mark_source_present(
+        &self,
+        root_kind: RootKind,
+        relative_path: String,
+    ) -> Result<()> {
+        self.mark_source_states(vec![(root_kind, relative_path)], "ready")
+            .await
+    }
+
+    pub async fn mark_sources_missing(&self, sources: Vec<(RootKind, String)>) -> Result<()> {
+        self.mark_source_states(sources, "source_missing").await
+    }
+
+    pub async fn mark_sources_present(&self, sources: Vec<(RootKind, String)>) -> Result<()> {
+        self.mark_source_states(sources, "ready").await
+    }
+
+    async fn mark_source_states(
+        &self,
+        sources: Vec<(RootKind, String)>,
+        state: &'static str,
+    ) -> Result<()> {
+        if sources.is_empty() {
+            return Ok(());
+        }
         let (reply, response) = oneshot::channel();
-        self.sender
-            .send(WriteCommand::MarkSeen {
-                root_kind,
-                relative_path,
-                generation,
+        self.recent
+            .send(WriteCommand::MarkSourceStates {
+                sources,
+                state,
                 reply,
             })
             .await
@@ -228,24 +372,6 @@ impl WriterHandle {
         response
             .await
             .map_err(|_| anyhow!("database writer stopped"))?
-    }
-
-    pub async fn remove_unseen(&self, generation: u64) -> Result<u64> {
-        let (reply, response) = oneshot::channel();
-        self.sender
-            .send(WriteCommand::RemoveUnseen { generation, reply })
-            .await
-            .map_err(|_| anyhow!("database writer stopped"))?;
-        response
-            .await
-            .map_err(|_| anyhow!("database writer stopped"))?
-    }
-
-    pub async fn shutdown(&self) -> Result<()> {
-        self.sender
-            .send(WriteCommand::Shutdown)
-            .await
-            .map_err(|_| anyhow!("database writer stopped"))
     }
 }
 
@@ -263,11 +389,23 @@ pub struct BatchingSink {
     entry_count: usize,
     byte_count: usize,
     error: Option<anyhow::Error>,
+    priority: WorkPriority,
+    lease: Option<ScanLease>,
 }
 
 impl BatchingSink {
     #[must_use]
     pub fn new(writer: WriterHandle, source_file_id: i64, scan_token: String) -> Self {
+        Self::new_with_priority(writer, source_file_id, scan_token, WorkPriority::Recent)
+    }
+
+    #[must_use]
+    pub fn new_with_priority(
+        writer: WriterHandle,
+        source_file_id: i64,
+        scan_token: String,
+        priority: WorkPriority,
+    ) -> Self {
         Self {
             writer,
             source_file_id,
@@ -276,6 +414,28 @@ impl BatchingSink {
             entry_count: 0,
             byte_count: 0,
             error: None,
+            priority,
+            lease: None,
+        }
+    }
+
+    #[must_use]
+    pub fn new_with_lease(
+        writer: WriterHandle,
+        source_file_id: i64,
+        scan_token: String,
+        lease: ScanLease,
+    ) -> Self {
+        Self {
+            writer,
+            source_file_id,
+            scan_token,
+            outputs: Vec::new(),
+            entry_count: 0,
+            byte_count: 0,
+            error: None,
+            priority: lease.priority(),
+            lease: Some(lease),
         }
     }
 
@@ -291,10 +451,16 @@ impl BatchingSink {
         let outputs = std::mem::take(&mut self.outputs);
         self.entry_count = 0;
         self.byte_count = 0;
-        if let Err(error) =
-            self.writer
-                .write_batch_blocking(self.source_file_id, self.scan_token.clone(), outputs)
-        {
+        let priority = self
+            .lease
+            .as_ref()
+            .map_or(self.priority, ScanLease::priority);
+        if let Err(error) = self.writer.write_batch_blocking_with_priority(
+            self.source_file_id,
+            self.scan_token.clone(),
+            outputs,
+            priority,
+        ) {
             self.error = Some(error);
         }
     }
@@ -526,6 +692,7 @@ async fn finish_scan(
     scan_token: &str,
     summary: &ParseSummary,
     mode: ScanMode,
+    final_tail_hash: Option<&str>,
 ) -> Result<()> {
     let session = &summary.session;
     let mut transaction = database.pool().begin().await?;
@@ -674,7 +841,8 @@ async fn finish_scan(
     .await?;
     sqlx::query(
         "UPDATE source_files SET session_id = ?, checkpoint_offset = ?, checkpoint_line = ?, \
-            checkpoint_hash = ?, scan_state = 'ready', scan_token = NULL, last_error = NULL \
+            checkpoint_hash = ?, tail_hash = COALESCE(?, tail_hash), \
+            scan_state = 'ready', scan_token = NULL, last_error = NULL \
          WHERE id = ?",
     )
     .bind(&session.id)
@@ -685,6 +853,7 @@ async fn finish_scan(
             .saturating_sub(u64::from(summary.incomplete_tail)),
     )?)
     .bind(&summary.stable_prefix_hash)
+    .bind(final_tail_hash)
     .bind(source_file_id)
     .execute(&mut *transaction)
     .await?;
@@ -700,38 +869,30 @@ async fn abort_scan(database: &Database, scan_token: &str) -> Result<()> {
     Ok(())
 }
 
-async fn mark_seen(
+async fn mark_source_states(
     database: &Database,
-    root_kind: RootKind,
-    relative_path: &str,
-    generation: u64,
+    sources: &[(RootKind, String)],
+    state: &str,
 ) -> Result<()> {
-    let root_kind = match root_kind {
-        RootKind::Active => "active",
-        RootKind::Archived => "archived",
-    };
-    sqlx::query(
-        "UPDATE source_files SET seen_generation = ? WHERE root_kind = ? AND relative_path = ?",
-    )
-    .bind(i64::try_from(generation)?)
-    .bind(root_kind)
-    .bind(relative_path)
-    .execute(database.pool())
-    .await?;
-    Ok(())
-}
-
-async fn remove_unseen(database: &Database, generation: u64) -> Result<u64> {
-    let result = sqlx::query("DELETE FROM source_files WHERE seen_generation != ?")
-        .bind(i64::try_from(generation)?)
-        .execute(database.pool())
+    let mut transaction = database.pool().begin().await?;
+    for (root_kind, relative_path) in sources {
+        let root_kind = match root_kind {
+            RootKind::Active => "active",
+            RootKind::Archived => "archived",
+        };
+        sqlx::query(
+            "UPDATE source_files SET scan_state = ?, scan_token = NULL \
+             WHERE root_kind = ? AND relative_path = ? AND scan_state != ?",
+        )
+        .bind(state)
+        .bind(root_kind)
+        .bind(relative_path)
+        .bind(state)
+        .execute(&mut *transaction)
         .await?;
-    if result.rows_affected() > 0 {
-        sqlx::query("PRAGMA incremental_vacuum")
-            .execute(database.pool())
-            .await?;
     }
-    Ok(result.rows_affected())
+    transaction.commit().await?;
+    Ok(())
 }
 
 async fn cleanup_token(transaction: &mut Transaction<'_, Sqlite>, scan_token: &str) -> Result<()> {

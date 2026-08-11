@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
-use std::io::{BufReader, Read as _, Seek as _, SeekFrom};
+use std::io::{self, BufReader, Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -9,15 +9,15 @@ use sha2::{Digest, Sha256};
 use sqlx::Row as _;
 use tokio_util::sync::CancellationToken;
 
-use crate::model::{Completeness, DiagnosticSeverity, IndexState, SourceKind};
+use crate::model::DiagnosticSeverity;
 use crate::paths::SourceRoots;
 use crate::permissions::{open_source_read_only, opened_file_identity};
 use crate::rollout::{
-    BoundedJsonlReader, CollectingSink, EntryOrigin, LineReadStatus, NormalizedEntry, ParseContext,
-    ParseSeed, ParseSink as _, ParserDiagnostic, ParserOutput, RootKind, SessionRecord,
-    parse_rollout, verify_checkpoint,
+    EntryOrigin, NormalizedEntry, ParseContext, ParseSeed, ParseSink as _, ParserDiagnostic,
+    ParserOutput, RootKind, SessionRecord,
 };
 
+use super::control::{IoGate, ScanLease, WorkPriority};
 use super::writer::{BatchingSink, ScanMode, SourceFileRecord, WriterHandle};
 use super::{Database, InitialIndexPolicy};
 
@@ -27,6 +27,8 @@ const FINGERPRINT_BYTES: usize = 64 * 1024;
 pub struct DiscoveredSource {
     pub root: PathBuf,
     pub path: PathBuf,
+    pub session_id: String,
+    pub created_at_micros: i64,
     pub source: SourceFileRecord,
     pub duplicate_paths: Vec<String>,
 }
@@ -46,17 +48,18 @@ pub struct Discovery {
     pub excluded_bytes: u64,
 }
 
-enum FileDiscovery {
-    Included(Box<DiscoveredSource>),
-    Excluded(u64),
-}
-
 #[derive(Clone, Debug)]
 pub struct ScanOutcome {
     pub source_file_id: i64,
     pub session_id: String,
     pub changed_during_scan: bool,
     pub appended: bool,
+}
+
+struct ScanPlan {
+    mode: ScanMode,
+    seed: Option<ParseSeed>,
+    tail_seed: Vec<u8>,
 }
 
 pub fn discover_sources(
@@ -88,9 +91,29 @@ pub fn discover_sources_cancellable(
     )
 }
 
+pub fn discover_source_path(
+    roots: &SourceRoots,
+    path: &Path,
+    generation: u64,
+) -> Result<Option<DiscoveredSource>> {
+    if path.extension().and_then(|value| value.to_str()) != Some("jsonl") || !path.is_file() {
+        return Ok(None);
+    }
+    for (root_kind, root) in [
+        (RootKind::Active, roots.active.as_ref()),
+        (RootKind::Archived, roots.archived.as_ref()),
+    ] {
+        let Some(root) = root else { continue };
+        if path.strip_prefix(root).is_ok() {
+            return discover_file(root, path, root_kind, generation).map(Some);
+        }
+    }
+    Ok(None)
+}
+
 fn discover_sources_inner(
     roots: &SourceRoots,
-    max_event_bytes: usize,
+    _max_event_bytes: usize,
     generation: u64,
     now_micros: i64,
     policy: InitialIndexPolicy,
@@ -124,20 +147,8 @@ fn discover_sources_inner(
             {
                 continue;
             }
-            match discover_file(
-                root,
-                entry.path(),
-                root_kind,
-                max_event_bytes,
-                generation,
-                now_micros,
-                policy,
-            ) {
-                Ok(FileDiscovery::Included(source)) => discovered.push(*source),
-                Ok(FileDiscovery::Excluded(bytes)) => {
-                    excluded_files = excluded_files.saturating_add(1);
-                    excluded_bytes = excluded_bytes.saturating_add(bytes);
-                }
+            match discover_file(root, entry.path(), root_kind, generation) {
+                Ok(source) => discovered.push(source),
                 Err(error) => issues.push(DiscoveryIssue {
                     code: "source_changed".into(),
                     message: format!("source file skipped during discovery: {error:#}"),
@@ -148,12 +159,7 @@ fn discover_sources_inner(
 
     let mut winners = HashMap::<String, DiscoveredSource>::new();
     for source in discovered {
-        let session_id = source
-            .source
-            .placeholder
-            .as_ref()
-            .map(|session| session.id.clone())
-            .unwrap_or_else(|| source.source.relative_path.clone());
+        let session_id = source.session_id.clone();
         if let Some(current) = winners.get_mut(&session_id) {
             if source_precedes(&source, current) {
                 let loser = current.source.relative_path.clone();
@@ -178,8 +184,19 @@ fn discover_sources_inner(
             .source
             .mtime_ns
             .cmp(&left.source.mtime_ns)
+            .then_with(|| right.created_at_micros.cmp(&left.created_at_micros))
+            .then_with(|| left.session_id.cmp(&right.session_id))
             .then_with(|| left.source.relative_path.cmp(&right.source.relative_path))
     });
+    if !policy.background_enabled() {
+        for source in &sources {
+            let updated_at_micros = source.source.mtime_ns / 1_000;
+            if !policy.is_recent(updated_at_micros, now_micros) {
+                excluded_files = excluded_files.saturating_add(1);
+                excluded_bytes = excluded_bytes.saturating_add(source.source.size_bytes);
+            }
+        }
+    }
     let total_bytes = sources.iter().map(|source| source.source.size_bytes).sum();
     Ok(Discovery {
         sources,
@@ -198,18 +215,56 @@ pub async fn scan_source(
     now_micros: i64,
     shutdown: CancellationToken,
 ) -> Result<ScanOutcome> {
+    let gate = IoGate::new();
+    let lease = gate.register(WorkPriority::Recent);
+    scan_source_with_lease(
+        database,
+        writer,
+        discovered,
+        max_event_bytes,
+        now_micros,
+        shutdown,
+        lease,
+    )
+    .await
+}
+
+pub async fn scan_source_with_lease(
+    database: Database,
+    writer: WriterHandle,
+    discovered: DiscoveredSource,
+    max_event_bytes: usize,
+    now_micros: i64,
+    shutdown: CancellationToken,
+    lease: ScanLease,
+) -> Result<ScanOutcome> {
     if shutdown.is_cancelled() {
         bail!("index scan cancelled");
     }
+    let hydrate_source = discovered;
+    let hydrate_lease = lease.clone();
+    let hydrate_shutdown = shutdown.clone();
+    let discovered = tokio::task::spawn_blocking(move || {
+        hydrate_source_fingerprints(hydrate_source, &hydrate_lease, &hydrate_shutdown)
+    })
+    .await
+    .context("source fingerprint task panicked")??;
     let scan_token = uuid::Uuid::new_v4().to_string();
-    let (mode, seed) = append_plan(&database, &discovered).await?;
+    let plan = append_plan(&database, &discovered, &lease, &shutdown).await?;
+    let mode = plan.mode;
     let source_file_id = writer
-        .begin(discovered.source.clone(), scan_token.clone(), mode)
+        .begin_with_priority(
+            discovered.source.clone(),
+            scan_token.clone(),
+            mode,
+            lease.priority(),
+        )
         .await?;
     let blocking_writer = writer.clone();
     let blocking_token = scan_token.clone();
     let blocking_source = discovered.clone();
     let blocking_shutdown = shutdown.clone();
+    let blocking_lease = lease.clone();
     let result = tokio::task::spawn_blocking(move || {
         parse_source_blocking(
             blocking_writer,
@@ -219,20 +274,29 @@ pub async fn scan_source(
             max_event_bytes,
             now_micros,
             mode,
-            seed,
+            plan.seed,
+            plan.tail_seed,
             blocking_shutdown,
+            blocking_lease,
         )
     })
     .await
     .context("source parser task panicked")?;
     match result {
-        Ok((mut summary, changed_during_scan)) if !shutdown.is_cancelled() => {
+        Ok((mut summary, changed_during_scan, final_tail_hash)) if !shutdown.is_cancelled() => {
             summary.session.diagnostic_count = summary
                 .session
                 .diagnostic_count
                 .saturating_add(discovered.duplicate_paths.len() as u64);
             writer
-                .finish(source_file_id, scan_token, summary.clone(), mode)
+                .finish_with_priority_and_tail(
+                    source_file_id,
+                    scan_token,
+                    summary.clone(),
+                    mode,
+                    lease.priority(),
+                    Some(final_tail_hash),
+                )
                 .await?;
             Ok(ScanOutcome {
                 source_file_id,
@@ -248,7 +312,9 @@ pub async fn scan_source(
         }
         Err(error) => {
             if !shutdown.is_cancelled() {
-                writer.abort(scan_token).await?;
+                writer
+                    .abort_with_priority(scan_token, lease.priority())
+                    .await?;
             }
             Err(error)
         }
@@ -259,12 +325,9 @@ fn discover_file(
     root: &Path,
     path: &Path,
     root_kind: RootKind,
-    max_event_bytes: usize,
     generation: u64,
-    now_micros: i64,
-    policy: InitialIndexPolicy,
-) -> Result<FileDiscovery> {
-    let mut opened = open_source_read_only(root, path)?;
+) -> Result<DiscoveredSource> {
+    let opened = open_source_read_only(root, path)?;
     let relative_path = normalized_relative(root, &opened.canonical_path)?;
     let file_name = opened
         .canonical_path
@@ -272,28 +335,11 @@ fn discover_file(
         .and_then(|value| value.to_str())
         .ok_or_else(|| anyhow!("source filename is not valid Unicode"))?
         .to_owned();
+    let session_id =
+        crate::rollout::normalize::session_id_from_filename(&file_name, &relative_path);
     let modified_at_micros = system_time_micros(opened.identity.modified.unwrap_or(UNIX_EPOCH));
-    let context = ParseContext {
-        root_kind,
-        relative_path: relative_path.clone(),
-        file_name,
-        modified_at_micros,
-        now_micros,
-        max_event_bytes,
-    };
-    let placeholder = metadata_placeholder(&mut opened.file, &context)?;
-    if !policy.includes(placeholder.created_at_micros) {
-        let after = opened_file_identity(
-            &opened.file,
-            &opened.file.metadata().context("re-stat excluded source")?,
-            &opened.canonical_path,
-        );
-        if after != opened.identity {
-            bail!("source changed during metadata discovery");
-        }
-        return Ok(FileDiscovery::Excluded(after.size));
-    }
-    let (head_hash, tail_hash) = head_tail_hash(&mut opened.file, opened.identity.size)?;
+    let created_at_micros = crate::rollout::normalize::timestamp_from_filename(&file_name)
+        .unwrap_or(modified_at_micros);
     let after = opened_file_identity(
         &opened.file,
         &opened
@@ -305,46 +351,24 @@ fn discover_file(
     if after != opened.identity {
         bail!("source changed during metadata discovery");
     }
-    Ok(FileDiscovery::Included(Box::new(DiscoveredSource {
+    Ok(DiscoveredSource {
         root: root.to_path_buf(),
         path: opened.canonical_path,
+        session_id,
+        created_at_micros,
         source: SourceFileRecord {
             root_kind,
             relative_path,
             file_key: after.file_key,
             size_bytes: after.size,
             mtime_ns: system_time_nanos(after.modified.unwrap_or(UNIX_EPOCH)),
-            head_hash: Some(head_hash),
-            tail_hash: Some(tail_hash),
+            head_hash: None,
+            tail_hash: None,
             generation,
-            placeholder: Some(placeholder),
+            placeholder: None,
         },
         duplicate_paths: Vec::new(),
-    })))
-}
-
-fn metadata_placeholder(file: &mut File, context: &ParseContext) -> Result<SessionRecord> {
-    file.seek(SeekFrom::Start(0))?;
-    let mut reader = BoundedJsonlReader::new(BufReader::new(&mut *file), context.max_event_bytes);
-    let bytes = match reader.read_next()? {
-        Some(line) if line.status == LineReadStatus::Complete => line.bytes.unwrap_or_default(),
-        _ => Vec::new(),
-    };
-    file.seek(SeekFrom::Start(0))?;
-    let mut first_record = bytes;
-    if !first_record.is_empty() {
-        first_record.push(b'\n');
-    }
-    let mut sink = CollectingSink::default();
-    let summary = parse_rollout(BufReader::new(first_record.as_slice()), context, &mut sink)?;
-    let mut placeholder = summary.session;
-    placeholder.index_state = IndexState::Pending;
-    placeholder.entry_count = 0;
-    placeholder.preview.clear();
-    if placeholder.completeness == Completeness::Unsupported {
-        placeholder.source = SourceKind::Unknown;
-    }
-    Ok(placeholder)
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -357,8 +381,10 @@ fn parse_source_blocking(
     now_micros: i64,
     mode: ScanMode,
     seed: Option<ParseSeed>,
+    tail_seed: Vec<u8>,
     shutdown: CancellationToken,
-) -> Result<(crate::rollout::ParseSummary, bool)> {
+    lease: ScanLease,
+) -> Result<(crate::rollout::ParseSummary, bool, String)> {
     let mut opened = open_source_read_only(&discovered.root, &discovered.path)?;
     let modified_at_micros = system_time_micros(opened.identity.modified.unwrap_or(UNIX_EPOCH));
     let context = ParseContext {
@@ -374,7 +400,7 @@ fn parse_source_blocking(
         now_micros,
         max_event_bytes,
     };
-    let mut sink = BatchingSink::new(writer, source_file_id, scan_token);
+    let mut sink = BatchingSink::new_with_lease(writer, source_file_id, scan_token, lease.clone());
     for duplicate in &discovered.duplicate_paths {
         sink.emit(ParserOutput::Diagnostic(ParserDiagnostic {
             severity: DiagnosticSeverity::Warning,
@@ -387,7 +413,24 @@ fn parse_source_blocking(
     if let ScanMode::Append { checkpoint_offset } = mode {
         opened.file.seek(SeekFrom::Start(checkpoint_offset))?;
     }
-    let mut reader = BufReader::new(&opened.file);
+    let snapshot_size = discovered.source.size_bytes;
+    if opened.identity.file_key != discovered.source.file_key
+        || opened.identity.size < snapshot_size
+    {
+        bail!("source changed before parsing began");
+    }
+    let start_offset = match mode {
+        ScanMode::Full => 0,
+        ScanMode::Append { checkpoint_offset } => checkpoint_offset,
+    };
+    let snapshot_bytes = snapshot_size.saturating_sub(start_offset);
+    let controlled = ControlledReader::with_tail_seed(
+        (&opened.file).take(snapshot_bytes),
+        lease,
+        shutdown.clone(),
+        tail_seed,
+    );
+    let mut reader = BufReader::new(controlled);
     let mut summary = match seed {
         Some(seed) => crate::rollout::normalize::parse_rollout_from_seed_cancellable(
             &mut reader,
@@ -404,40 +447,32 @@ fn parse_source_blocking(
         )?,
     };
     sink.finish()?;
+    let final_tail_hash = reader.into_inner().tail_hash();
     let after = opened_file_identity(
         &opened.file,
         &opened.file.metadata().context("re-stat parsed source")?,
         &opened.canonical_path,
     );
     let changed = after != opened.identity;
-    let stable_checkpoint = crate::rollout::checkpoint_for_file(
-        &discovered.root,
-        &discovered.path,
-        summary.stable_prefix_bytes,
-    )?;
-    summary.stable_prefix_hash = stable_checkpoint.prefix_hash;
-    if changed {
-        let checkpoint = crate::rollout::FileCheckpoint {
-            offset: summary.stable_prefix_bytes,
-            prefix_hash: summary.stable_prefix_hash.clone(),
-        };
-        if !verify_checkpoint(&discovered.root, &discovered.path, &checkpoint)? {
-            bail!("source changed before stable prefix could be revalidated");
-        }
-    }
-    Ok((summary, changed))
+    // Append safety is established with bounded head and old-tail windows before parsing. The
+    // parser's rolling hash covers only bytes read in this invocation; it is retained for cache
+    // compatibility but is no longer re-created by rereading an unbounded prefix.
+    summary.stable_prefix_hash.clear();
+    Ok((summary, changed, final_tail_hash))
 }
 
 async fn append_plan(
     database: &Database,
     discovered: &DiscoveredSource,
-) -> Result<(ScanMode, Option<ParseSeed>)> {
+    lease: &ScanLease,
+    shutdown: &CancellationToken,
+) -> Result<ScanPlan> {
     let root_kind = match discovered.source.root_kind {
         RootKind::Active => "active",
         RootKind::Archived => "archived",
     };
     let Some(source) = sqlx::query(
-        "SELECT id, file_key, size_bytes, head_hash, checkpoint_offset, checkpoint_line, \
+        "SELECT id, file_key, size_bytes, head_hash, tail_hash, checkpoint_offset, checkpoint_line, \
             checkpoint_hash, session_id, scan_state \
          FROM source_files WHERE root_kind = ? AND relative_path = ?",
     )
@@ -446,7 +481,7 @@ async fn append_plan(
     .fetch_optional(database.pool())
     .await?
     else {
-        return Ok((ScanMode::Full, None));
+        return Ok(full_scan_plan());
     };
     let old_size = source.get::<i64, _>("size_bytes");
     let checkpoint_offset = source.get::<i64, _>("checkpoint_offset");
@@ -459,19 +494,22 @@ async fn append_plan(
         && head_matches
         && checkpoint_offset >= 0;
     if !append_candidate {
-        return Ok((ScanMode::Full, None));
+        return Ok(full_scan_plan());
     }
-    let checkpoint = crate::rollout::FileCheckpoint {
-        offset: u64::try_from(checkpoint_offset)?,
-        prefix_hash: source
-            .get::<Option<String>, _>("checkpoint_hash")
-            .unwrap_or_default(),
+    let checkpoint_offset = u64::try_from(checkpoint_offset)?;
+    let Some(stored_tail) = source.get::<Option<String>, _>("tail_hash") else {
+        return Ok(full_scan_plan());
     };
-    if checkpoint.prefix_hash.is_empty()
-        || !verify_checkpoint(&discovered.root, &discovered.path, &checkpoint)?
-    {
-        return Ok((ScanMode::Full, None));
-    }
+    let Some(old_tail) = verify_old_tail(
+        discovered,
+        u64::try_from(old_size)?,
+        &stored_tail,
+        lease,
+        shutdown,
+    )?
+    else {
+        return Ok(full_scan_plan());
+    };
     let source_file_id = source.get::<i64, _>("id");
     let session_id = source
         .get::<Option<String>, _>("session_id")
@@ -506,11 +544,15 @@ async fn append_plan(
     .fetch_one(database.pool())
     .await?;
     let checkpoint_line = u64::try_from(source.get::<i64, _>("checkpoint_line"))?;
-    Ok((
-        ScanMode::Append {
-            checkpoint_offset: checkpoint.offset,
-        },
-        Some(ParseSeed {
+    let old_size = u64::try_from(old_size)?;
+    let old_tail_start = old_size.saturating_sub(old_tail.len() as u64);
+    let prefix_end = checkpoint_offset
+        .saturating_sub(old_tail_start)
+        .min(old_tail.len() as u64) as usize;
+    let prefix_start = prefix_end.saturating_sub(FINGERPRINT_BYTES);
+    Ok(ScanPlan {
+        mode: ScanMode::Append { checkpoint_offset },
+        seed: Some(ParseSeed {
             partial: matches!(
                 session.completeness,
                 crate::model::Completeness::Partial | crate::model::Completeness::Unsupported
@@ -521,10 +563,19 @@ async fn append_plan(
             recent,
             raw_record_count: checkpoint_line,
             recognized_record_count: u64::try_from(recognized_record_count)?,
-            checkpoint_offset: checkpoint.offset,
+            checkpoint_offset,
             checkpoint_line,
         }),
-    ))
+        tail_seed: old_tail[prefix_start..prefix_end].to_vec(),
+    })
+}
+
+fn full_scan_plan() -> ScanPlan {
+    ScanPlan {
+        mode: ScanMode::Full,
+        seed: None,
+        tail_seed: Vec::new(),
+    }
 }
 
 async fn load_session(database: &Database, id: &str) -> Result<SessionRecord> {
@@ -632,7 +683,7 @@ fn decode_optional_enum<T: serde::de::DeserializeOwned>(
     value.as_deref().map(decode_enum).transpose()
 }
 
-fn source_precedes(left: &DiscoveredSource, right: &DiscoveredSource) -> bool {
+pub(crate) fn source_precedes(left: &DiscoveredSource, right: &DiscoveredSource) -> bool {
     let left_active = left.source.root_kind == RootKind::Active;
     let right_active = right.source.root_kind == RootKind::Active;
     left_active
@@ -651,16 +702,152 @@ fn normalized_relative(root: &Path, path: &Path) -> Result<String> {
         .join("/"))
 }
 
-fn head_tail_hash(file: &mut File, size: u64) -> Result<(String, String)> {
-    let mut head = vec![0_u8; FINGERPRINT_BYTES.min(usize::try_from(size).unwrap_or(usize::MAX))];
-    file.seek(SeekFrom::Start(0))?;
-    file.read_exact(&mut head)?;
-    let tail_len = FINGERPRINT_BYTES.min(usize::try_from(size).unwrap_or(usize::MAX));
-    let mut tail = vec![0_u8; tail_len];
-    file.seek(SeekFrom::Start(size.saturating_sub(tail_len as u64)))?;
-    file.read_exact(&mut tail)?;
-    file.seek(SeekFrom::Start(0))?;
-    Ok((sha256_hex(&head), sha256_hex(&tail)))
+fn hydrate_source_fingerprints(
+    mut discovered: DiscoveredSource,
+    lease: &ScanLease,
+    shutdown: &CancellationToken,
+) -> Result<DiscoveredSource> {
+    let mut opened = open_source_read_only(&discovered.root, &discovered.path)?;
+    let head_len =
+        FINGERPRINT_BYTES.min(usize::try_from(opened.identity.size).unwrap_or(usize::MAX));
+    let head = read_controlled_range(&mut opened.file, 0, head_len, lease, shutdown)?;
+    let after = opened_file_identity(
+        &opened.file,
+        &opened
+            .file
+            .metadata()
+            .context("re-stat fingerprinted source")?,
+        &opened.canonical_path,
+    );
+    if after != opened.identity {
+        bail!("source changed while its bounded fingerprint was read");
+    }
+    discovered.path = opened.canonical_path;
+    discovered.source.file_key = after.file_key;
+    discovered.source.size_bytes = after.size;
+    discovered.source.mtime_ns = system_time_nanos(after.modified.unwrap_or(UNIX_EPOCH));
+    discovered.source.head_hash = Some(sha256_hex(&head));
+    // The final tail is captured while the parser reads the snapshot, avoiding a third window
+    // read on append.
+    discovered.source.tail_hash = None;
+    Ok(discovered)
+}
+
+fn verify_old_tail(
+    discovered: &DiscoveredSource,
+    old_size: u64,
+    expected_hash: &str,
+    lease: &ScanLease,
+    shutdown: &CancellationToken,
+) -> Result<Option<Vec<u8>>> {
+    let mut opened = open_source_read_only(&discovered.root, &discovered.path)?;
+    if opened.identity.file_key != discovered.source.file_key || opened.identity.size < old_size {
+        return Ok(None);
+    }
+    let tail_len = FINGERPRINT_BYTES.min(usize::try_from(old_size).unwrap_or(usize::MAX));
+    let tail = read_controlled_range(
+        &mut opened.file,
+        old_size.saturating_sub(tail_len as u64),
+        tail_len,
+        lease,
+        shutdown,
+    )?;
+    let after = opened_file_identity(
+        &opened.file,
+        &opened.file.metadata().context("re-stat append candidate")?,
+        &opened.canonical_path,
+    );
+    if after != opened.identity || sha256_hex(&tail) != expected_hash {
+        return Ok(None);
+    }
+    Ok(Some(tail))
+}
+
+fn read_controlled_range(
+    file: &mut File,
+    offset: u64,
+    length: usize,
+    lease: &ScanLease,
+    shutdown: &CancellationToken,
+) -> Result<Vec<u8>> {
+    file.seek(SeekFrom::Start(offset))?;
+    let mut reader = ControlledReader::new(
+        (&mut *file).take(length as u64),
+        lease.clone(),
+        shutdown.clone(),
+    );
+    let mut bytes = Vec::with_capacity(length);
+    reader.read_to_end(&mut bytes)?;
+    if bytes.len() != length {
+        bail!("source changed while a bounded fingerprint window was read");
+    }
+    Ok(bytes)
+}
+
+struct ControlledReader<R> {
+    inner: R,
+    lease: ScanLease,
+    shutdown: CancellationToken,
+    tail: Vec<u8>,
+}
+
+impl<R> ControlledReader<R> {
+    fn new(inner: R, lease: ScanLease, shutdown: CancellationToken) -> Self {
+        Self::with_tail_seed(inner, lease, shutdown, Vec::new())
+    }
+
+    fn with_tail_seed(
+        inner: R,
+        lease: ScanLease,
+        shutdown: CancellationToken,
+        mut tail: Vec<u8>,
+    ) -> Self {
+        if tail.len() > FINGERPRINT_BYTES {
+            tail.drain(..tail.len() - FINGERPRINT_BYTES);
+        }
+        Self {
+            inner,
+            lease,
+            shutdown,
+            tail,
+        }
+    }
+
+    fn tail_hash(&self) -> String {
+        sha256_hex(&self.tail)
+    }
+
+    fn capture_tail(&mut self, bytes: &[u8]) {
+        if bytes.len() >= FINGERPRINT_BYTES {
+            self.tail.clear();
+            self.tail
+                .extend_from_slice(&bytes[bytes.len() - FINGERPRINT_BYTES..]);
+            return;
+        }
+        let overflow = self
+            .tail
+            .len()
+            .saturating_add(bytes.len())
+            .saturating_sub(FINGERPRINT_BYTES);
+        if overflow > 0 {
+            self.tail.drain(..overflow);
+        }
+        self.tail.extend_from_slice(bytes);
+    }
+}
+
+impl<R: io::Read> io::Read for ControlledReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        let permit = self.lease.before_io(buffer.len(), &self.shutdown)?;
+        let read = self.inner.read(&mut buffer[..permit.max_bytes()])?;
+        drop(permit);
+        self.lease.record_read(read);
+        self.capture_tail(&buffer[..read]);
+        Ok(read)
+    }
 }
 
 fn system_time_micros(time: SystemTime) -> i64 {

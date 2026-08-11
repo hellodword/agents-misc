@@ -93,6 +93,7 @@ impl SseHub {
                     entry_id: None,
                     progress: None,
                     diagnostic: None,
+                    sync_state: None,
                 },
             });
         }
@@ -119,6 +120,7 @@ impl SseHub {
                                     entry_id: None,
                                     progress: None,
                                     diagnostic: None,
+                                    sync_state: None,
                                 },
                             },
                             Err(broadcast::error::RecvError::Closed) => return None,

@@ -1,8 +1,9 @@
 use std::io::{BufReader, BufWriter, Cursor, Write as _};
 
 use agents_viewer::index::Database;
+use agents_viewer::index::control::{IoGate, WorkPriority};
 use agents_viewer::index::coordinator::{IndexCoordinator, IndexUpdate};
-use agents_viewer::index::scanner::{discover_sources, scan_source};
+use agents_viewer::index::scanner::{discover_sources, scan_source, scan_source_with_lease};
 use agents_viewer::index::search::{ArchiveFilter, SearchFilters};
 use agents_viewer::index::search::{SearchRequest, search};
 use agents_viewer::index::writer::{ScanMode, SourceFileRecord, spawn_writer};
@@ -924,6 +925,110 @@ async fn append_merges_an_explicit_plan_with_the_preceding_assistant_block() {
         "appended-plan-item"
     );
     assert_eq!(plan.2, 2);
+
+    writer.shutdown().await.unwrap();
+    writer_task.wait().await.unwrap();
+    database.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn append_reads_only_the_suffix_plus_two_bounded_fingerprint_windows() {
+    let temp = TempDir::new().unwrap();
+    let source_home = temp.path().join("codex-home");
+    let sessions = source_home.join("sessions/2025/01/02");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let rollout =
+        sessions.join("rollout-2025-01-02T03-04-05-11111111-1111-4111-8111-111111111111.jsonl");
+    std::fs::write(&rollout, include_bytes!("fixtures/rollouts/v0_120.jsonl")).unwrap();
+    let roots = agents_viewer::paths::resolve_source_roots(&source_home).unwrap();
+    let cache = temp.path().join("cache");
+    agents_viewer::permissions::prepare_cache_directory(&cache).unwrap();
+    let database = Database::open_or_recover(&cache.join("index.sqlite3"), "bounded-append")
+        .await
+        .unwrap();
+    let (writer, writer_task) = spawn_writer(database.clone());
+    let first = discover_sources(
+        &roots,
+        1024 * 1024,
+        1,
+        chrono::Utc::now().timestamp_micros(),
+        agents_viewer::index::InitialIndexPolicy::all(),
+    )
+    .sources
+    .into_iter()
+    .next()
+    .unwrap();
+    scan_source(
+        database.clone(),
+        writer.clone(),
+        first,
+        1024 * 1024,
+        chrono::Utc::now().timestamp_micros(),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    let appended = b"{\"timestamp\":\"2025-01-02T03:04:09Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"bounded append\",\"phase\":\"final\"}}\n";
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&rollout)
+        .unwrap()
+        .write_all(appended)
+        .unwrap();
+    let changed = discover_sources(
+        &roots,
+        1024 * 1024,
+        2,
+        chrono::Utc::now().timestamp_micros(),
+        agents_viewer::index::InitialIndexPolicy::all(),
+    )
+    .sources
+    .into_iter()
+    .next()
+    .unwrap();
+    let gate = IoGate::new();
+    let outcome = scan_source_with_lease(
+        database.clone(),
+        writer.clone(),
+        changed,
+        1024 * 1024,
+        chrono::Utc::now().timestamp_micros(),
+        CancellationToken::new(),
+        gate.register(WorkPriority::Recent),
+    )
+    .await
+    .unwrap();
+    assert!(outcome.appended);
+    assert!(
+        gate.bytes_read() <= appended.len() as u64 + 2 * 64 * 1024,
+        "append read {} bytes for a {} byte suffix",
+        gate.bytes_read(),
+        appended.len()
+    );
+
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .fetch_all(database.pool())
+        .await
+        .unwrap();
+    let wal = cache.join("index.sqlite3-wal");
+    let wal_bytes = std::fs::metadata(&wal).map_or(0, |metadata| metadata.len());
+    let unchanged = IndexCoordinator::new(
+        database.clone(),
+        writer.clone(),
+        roots,
+        1024 * 1024,
+        agents_viewer::index::InitialIndexPolicy::all(),
+    )
+    .reconcile()
+    .await
+    .unwrap();
+    assert_eq!(unchanged.indexed_files, 0);
+    assert_eq!(
+        std::fs::metadata(&wal).map_or(0, |metadata| metadata.len()),
+        wal_bytes,
+        "an unchanged metadata sweep must not grow the SQLite WAL"
+    );
 
     writer.shutdown().await.unwrap();
     writer_task.wait().await.unwrap();

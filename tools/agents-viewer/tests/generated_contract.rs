@@ -1,7 +1,7 @@
 use agents_viewer::model::{
     Completeness, ContentField, DiagnosticSeverity, EntryKind, IndexState, MessageRole, Phase,
-    RawEncoding, RawParseStatus, ServicePhase, SessionParentRelation, SessionSummary, SourceKind,
-    SseEventType, ToolKind, ToolStatus, typescript_contract,
+    RawEncoding, RawParseStatus, ServicePhase, SessionFreshness, SessionParentRelation,
+    SessionSummary, SourceKind, SseEventType, ToolKind, ToolStatus, typescript_contract,
 };
 use pretty_assertions::assert_eq;
 
@@ -25,6 +25,7 @@ fn session_summary_round_trips_and_omits_absent_optional_fields() {
         diagnostic_count: 0,
         index_state: IndexState::Ready,
         completeness: Completeness::Complete,
+        freshness: SessionFreshness::Current,
     };
 
     let json = serde_json::to_value(&summary).expect("summary serializes");

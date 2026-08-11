@@ -36,6 +36,7 @@ const session: SessionSummary = {
   diagnosticCount: 0,
   indexState: "ready",
   completeness: "complete",
+  freshness: "current",
 };
 const sessionGroups: SessionGroup[] = [
   {
@@ -109,7 +110,9 @@ beforeEach(() => {
     vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
       let body: unknown;
-      if (url.includes("/sessions/s1/entries/e1/content")) {
+      if (url.endsWith("/sessions/s1/sync"))
+        body = { sessionId: "s1", state: "current", hasSnapshot: true };
+      else if (url.includes("/sessions/s1/entries/e1/content")) {
         const secondary = url.includes("field=secondary");
         body = {
           field: secondary ? "secondary" : "primary",
@@ -1334,5 +1337,60 @@ describe("Agents Viewer UI", () => {
         headers: { "content-type": "application/json" },
       }),
     );
+  });
+
+  it("waits for direct synchronization before loading an uncached deep link", async () => {
+    const fallback = vi.mocked(fetch);
+    let synchronized = false;
+    const controlled = vi.fn(
+      (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/sessions/s1/sync"))
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                sessionId: "s1",
+                state: synchronized ? "current" : "queued",
+                hasSnapshot: synchronized,
+              }),
+              { status: synchronized ? 200 : 202 },
+            ),
+          );
+        return fallback(input, init);
+      },
+    );
+    vi.stubGlobal("fetch", controlled);
+    render(
+      <MemoryRouter initialEntries={["/sessions/s1?entry=e1"]}>
+        <App />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText("Session synchronization queued…"))
+      .toBeInTheDocument();
+    expect(
+      controlled.mock.calls.filter(([input]) =>
+        String(input).endsWith("/sessions/s1"),
+      ),
+    ).toHaveLength(0);
+    expect(
+      controlled.mock.calls.filter(([input]) =>
+        String(input).includes("/sessions/s1/entries/e1"),
+      ),
+    ).toHaveLength(0);
+
+    synchronized = true;
+    eventSources().instances[0].emit("sessionUpdated", {
+      generation: 2,
+      sessionId: "s1",
+      syncState: "current",
+    });
+    expect(
+      await screen.findByRole("heading", { name: "Hello session" }),
+    ).toBeInTheDocument();
+    expect(
+      controlled.mock.calls.filter(([input]) =>
+        String(input).includes("/sessions/s1/entries/e1"),
+      ),
+    ).toHaveLength(1);
   });
 });

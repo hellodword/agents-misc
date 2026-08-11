@@ -86,6 +86,7 @@ import type {
   SearchHit,
   SessionGroup,
   SessionSummary,
+  SessionSyncStatus,
   SessionTreeNode,
   SourceKind,
   Status,
@@ -383,6 +384,13 @@ export function App() {
           }
           if (event.type === "sessionUpdated") {
             scheduleSessionRefresh();
+            if (event.data.sessionId) {
+              const sequence = ++liveSequence.current;
+              setConversationSignals((current) => ({
+                ...current,
+                [event.data.sessionId!]: sequence,
+              }));
+            }
             return;
           }
           if (event.type === "entryUpdated" && event.data.sessionId) {
@@ -1308,6 +1316,8 @@ function Conversation({
   const [params] = useSearchParams();
   const around = params.get("entry") ?? undefined;
   const [session, setSession] = useState<SessionSummary>();
+  const [syncStatus, setSyncStatus] = useState<SessionSyncStatus>();
+  const [syncReady, setSyncReady] = useState(false);
   const [entries, setEntries] = useState<EntryListItem[]>([]);
   const [previousCursor, setPreviousCursor] = useState<string>();
   const [nextCursor, setNextCursor] = useState<string>();
@@ -1340,6 +1350,30 @@ function Conversation({
   const serializedConversationDisplayTypes =
     effectiveConversationDisplayTypes.join(",");
 
+  const applySyncStatus = useCallback((status: SessionSyncStatus) => {
+    setSyncStatus(status);
+    setSyncReady(
+      status.hasSnapshot ||
+        status.state === "current" ||
+        status.state === "sourceMissing",
+    );
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setSession(undefined);
+    setSyncStatus(undefined);
+    setSyncReady(false);
+    setError("");
+    api
+      .syncSession(sessionId, controller.signal)
+      .then(applySyncStatus)
+      .catch((failure) => {
+        if (!(failure instanceof DOMException)) setError(message(failure));
+      });
+    return () => controller.abort();
+  }, [applySyncStatus, sessionId]);
+
   useEffect(() => {
     const controller = new AbortController();
     pageEpoch.current += 1;
@@ -1353,6 +1387,10 @@ function Conversation({
     pendingTailSequenceRef.current = undefined;
     setPendingTailSequence(undefined);
     viewport.current = { atBottom: !around };
+    if (!syncReady) {
+      setVisibilityReady(false);
+      return () => controller.abort();
+    }
     if (!around) {
       setVisibilityReady(true);
       return () => controller.abort();
@@ -1381,6 +1419,7 @@ function Conversation({
     onForceConversationDisplayType,
     serializedSelectedConversationDisplayTypes,
     sessionId,
+    syncReady,
   ]);
 
   const replacePage = useCallback(
@@ -1450,6 +1489,16 @@ function Conversation({
   useEffect(() => {
     if (eventSequence === 0 || eventSequence <= handledSignal.current) return;
     handledSignal.current = eventSequence;
+    if (!syncReady) {
+      const controller = new AbortController();
+      void api
+        .syncSession(sessionId, controller.signal)
+        .then(applySyncStatus)
+        .catch((failure) => {
+          if (!(failure instanceof DOMException)) setError(message(failure));
+        });
+      return () => controller.abort();
+    }
     if (refreshTimer.current !== undefined)
       window.clearTimeout(refreshTimer.current);
     refreshTimer.current = window.setTimeout(() => {
@@ -1470,7 +1519,14 @@ function Conversation({
         refreshTimer.current = undefined;
       }
     };
-  }, [eventSequence, replacePage, resyncSequence]);
+  }, [
+    applySyncStatus,
+    eventSequence,
+    replacePage,
+    resyncSequence,
+    sessionId,
+    syncReady,
+  ]);
 
   const loadOlder = useCallback(() => {
     const cursor = previousCursor;
@@ -1576,11 +1632,22 @@ function Conversation({
             {sourceLabel(session.source, t)} ·{" "}
             {t("entryCount", { count: session.entryCount })} ·{" "}
             {session.completeness}
+            {session.freshness !== "current" && (
+              <Badge variant="outline" className="session-freshness">
+                {t(`freshness_${session.freshness}`)}
+              </Badge>
+            )}
           </div>
         </div>
       )}
       {error ? (
         <Empty text={error} />
+      ) : !syncReady ? (
+        <Empty
+          text={t(
+            syncStatus ? `sync_${syncStatus.state}` : "syncingSession",
+          )}
+        />
       ) : entries.length === 0 ? (
         <Empty text={t("noEntries")} />
       ) : (
