@@ -419,6 +419,12 @@ fn normalize_envelope(
             timestamp_micros,
             raw_id,
         )),
+        "security_risk_score" => NormalizeResult::Entry(context_entry(
+            "Security risk score",
+            &envelope.payload,
+            timestamp_micros,
+            raw_id,
+        )),
         "inter_agent_communication" => {
             let entry =
                 inter_agent_communication_entry(&envelope.payload, timestamp_micros, raw_id);
@@ -454,7 +460,10 @@ fn normalize_envelope(
         }
         "event_msg" => normalize_event(&envelope.payload, timestamp_micros, raw_id),
         "response_item" => {
-            normalize_response_item(&envelope.payload, timestamp_micros, raw_id, session)
+            let mut result =
+                normalize_response_item(&envelope.payload, timestamp_micros, raw_id, session);
+            add_response_item_envelope_metadata(&mut result, &envelope.harness_metadata);
+            result
         }
         "compacted" => NormalizeResult::Entry(simple_entry(
             EntryKind::Marker,
@@ -810,6 +819,7 @@ fn normalize_item_completed(
                 EntryOrigin::ItemCompleted,
             );
             add_attachment_counts(&mut entry, 1, 0);
+            add_image_generation_failure_metadata(&mut entry, item);
             entry
         }
         "EnteredReviewMode" | "entered_review_mode" => simple_entry(
@@ -951,6 +961,8 @@ fn normalize_extension_item(
                 EntryOrigin::ItemCompleted,
             );
             add_attachment_counts(&mut entry, 1, 0);
+            add_tool_capability_metadata(&mut entry, item);
+            add_image_generation_failure_metadata(&mut entry, item);
             entry
         }
         _ => {
@@ -1546,6 +1558,7 @@ fn tool_event_entry(
     add_event_timing_metadata(&mut entry, payload);
     if event == "image_generation_end" {
         add_attachment_counts(&mut entry, 1, 0);
+        add_image_generation_failure_metadata(&mut entry, payload);
     }
     entry
 }
@@ -2100,6 +2113,15 @@ fn add_response_item_metadata(entry: &mut NormalizedEntry, payload: &Value) {
             .metadata
             .insert("turnId".into(), Value::String(turn_id.into()));
     }
+    if let Some(create_time) = metadata
+        .get("create_time")
+        .or_else(|| metadata.get("createTime"))
+        .filter(|value| value.is_number())
+    {
+        entry
+            .metadata
+            .insert("createTime".into(), create_time.clone());
+    }
 
     let Some(executed_calls) = metadata
         .get("executed_tool_calls")
@@ -2134,6 +2156,35 @@ fn add_response_item_metadata(entry: &mut NormalizedEntry, payload: &Value) {
         entry.metadata.insert(
             "executedToolCallOmittedCount".into(),
             Value::from(omitted_count),
+        );
+    }
+}
+
+fn add_response_item_envelope_metadata(result: &mut NormalizeResult, metadata: &Value) {
+    let Some(client_authored) = metadata
+        .get("client_authored")
+        .or_else(|| metadata.get("clientAuthored"))
+        .and_then(Value::as_bool)
+    else {
+        return;
+    };
+    let add = |entry: &mut NormalizedEntry| {
+        entry
+            .metadata
+            .insert("clientAuthored".into(), Value::Bool(client_authored));
+    };
+    match result {
+        NormalizeResult::Entry(entry) | NormalizeResult::Unknown(entry, _) => add(entry),
+        NormalizeResult::Entries(entries) => entries.iter_mut().for_each(add),
+        NormalizeResult::None => {}
+    }
+}
+
+fn add_image_generation_failure_metadata(entry: &mut NormalizedEntry, payload: &Value) {
+    if let Some(failure) = payload.get("failure").filter(|value| !value.is_null()) {
+        entry.metadata.insert(
+            "imageGenerationFailure".into(),
+            sanitize_for_display(failure),
         );
     }
 }
@@ -2528,6 +2579,7 @@ fn is_known_envelope(kind: &str) -> bool {
         "session_meta"
             | "turn_context"
             | "world_state"
+            | "security_risk_score"
             | "inter_agent_communication"
             | "inter_agent_communication_metadata"
             | "event_msg"

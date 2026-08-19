@@ -6,6 +6,7 @@ pub struct Envelope {
     pub ordinal: Option<u64>,
     pub kind: String,
     pub payload: Value,
+    pub harness_metadata: Value,
 }
 
 impl Envelope {
@@ -17,6 +18,7 @@ impl Envelope {
                 ordinal: None,
                 kind: String::new(),
                 payload: Value::Null,
+                harness_metadata: Value::Null,
             });
         };
         Ok(Self {
@@ -31,6 +33,7 @@ impl Envelope {
                 .unwrap_or_default()
                 .to_owned(),
             payload: object.get("payload").cloned().unwrap_or(Value::Null),
+            harness_metadata: object.get("metadata").cloned().unwrap_or(Value::Null),
         })
     }
 }

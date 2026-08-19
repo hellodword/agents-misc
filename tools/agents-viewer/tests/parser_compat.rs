@@ -17,6 +17,7 @@ const V145: &[u8] = include_bytes!("fixtures/rollouts/v0_145.jsonl");
 const V145_SUBAGENT: &[u8] = include_bytes!("fixtures/rollouts/v0_145_subagent.jsonl");
 const V146: &[u8] = include_bytes!("fixtures/rollouts/v0_146.jsonl");
 const V147: &[u8] = include_bytes!("fixtures/rollouts/v0_147.jsonl");
+const V148: &[u8] = include_bytes!("fixtures/rollouts/v0_148.jsonl");
 const PLANS: &[u8] = include_bytes!("fixtures/rollouts/plans.jsonl");
 const PLAN_MODE_FINAL_ANSWER: &[u8] =
     include_bytes!("fixtures/rollouts/plan_mode_final_answer.jsonl");
@@ -455,6 +456,109 @@ fn parses_v147_messages_and_preserves_new_metadata_without_exposing_opaque_paylo
     ] {
         assert!(!rendered.contains(forbidden), "rendered {forbidden}");
     }
+}
+
+#[test]
+fn parses_v148_history_metadata_security_scores_and_image_failures() {
+    let parsed = parse(
+        V148,
+        "rollout-2026-08-15T10-00-00-14814814-8148-4148-8148-148148148148.jsonl",
+        1024 * 1024,
+    );
+
+    assert_eq!(
+        parsed.summary.session.cli_version.as_deref(),
+        Some("0.148.0")
+    );
+    assert_eq!(parsed.summary.recognized_record_count, 5);
+    assert!(parsed.diagnostics.is_empty());
+    assert_ne!(parsed.summary.session.completeness, Completeness::Partial);
+
+    let developer = parsed
+        .entries
+        .iter()
+        .find(|entry| {
+            entry
+                .metadata
+                .get("sourceItemId")
+                .and_then(serde_json::Value::as_str)
+                == Some("developer-148")
+        })
+        .expect("0.148 client-authored developer message");
+    assert_eq!(developer.role, Some(MessageRole::Developer));
+    assert_eq!(developer.metadata["clientAuthored"], true);
+    assert_eq!(developer.metadata["createTime"], 1_786_788_001.25);
+
+    let risk = parsed
+        .entries
+        .iter()
+        .find(|entry| entry.title == "Security risk score")
+        .expect("0.148 security risk score");
+    assert_eq!(risk.kind, EntryKind::Context);
+    assert!(risk.default_collapsed);
+    assert!(!risk.searchable);
+    assert!(risk.primary_text.contains("action_risk"));
+    assert!(risk.primary_text.contains("data_exfiltration"));
+
+    let image = parsed
+        .entries
+        .iter()
+        .find(|entry| entry.call_id.as_deref() == Some("image-ext-148"))
+        .expect("0.148 extension image generation");
+    assert_eq!(image.tool_status, Some(ToolStatus::Failed));
+    assert_eq!(image.metadata["transparentBackground"], true);
+    assert_eq!(
+        image.metadata["imageGenerationFailure"],
+        serde_json::json!({
+            "type": "usageLimitExceeded",
+            "limitId": "image_gen",
+            "resetsAt": 1_786_791_600_i64,
+        })
+    );
+    assert!(!image.primary_text.contains("image-result-must-not-render"));
+    assert!(
+        !image
+            .secondary_text
+            .contains("image-result-must-not-render")
+    );
+}
+
+#[test]
+fn preserves_v148_legacy_image_generation_failure_metadata() {
+    let bytes = br##"{"timestamp":"2026-08-15T11:00:00Z","type":"session_meta","payload":{"id":"24824824-8248-4248-8248-248248248248","cli_version":"0.148.0","history_mode":"legacy"}}
+{"timestamp":"2026-08-15T11:00:01Z","type":"event_msg","payload":{"type":"image_generation_end","call_id":"image-legacy-148","status":"failed","revised_prompt":"Synthetic legacy failure","result":"legacy-image-result-must-not-render","failure":{"type":"usageLimitExceeded","limitId":"image_gen","resetsAt":1786795200}}}
+"##;
+    let parsed = parse(
+        bytes,
+        "rollout-2026-08-15T11-00-00-24824824-8248-4248-8248-248248248248.jsonl",
+        1024 * 1024,
+    );
+
+    assert!(parsed.diagnostics.is_empty());
+    let image = parsed
+        .entries
+        .iter()
+        .find(|entry| entry.call_id.as_deref() == Some("image-legacy-148"))
+        .expect("0.148 legacy image generation");
+    assert_eq!(image.tool_status, Some(ToolStatus::Failed));
+    assert_eq!(
+        image.metadata["imageGenerationFailure"],
+        serde_json::json!({
+            "type": "usageLimitExceeded",
+            "limitId": "image_gen",
+            "resetsAt": 1_786_795_200_i64,
+        })
+    );
+    assert!(
+        !image
+            .primary_text
+            .contains("legacy-image-result-must-not-render")
+    );
+    assert!(
+        !image
+            .secondary_text
+            .contains("legacy-image-result-must-not-render")
+    );
 }
 
 #[test]
