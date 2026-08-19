@@ -132,13 +132,20 @@ def _handle_sync_schema(args: argparse.Namespace) -> int:
         schema_path.parent.mkdir(parents=True, exist_ok=True)
         schema_path.write_bytes(schema_bytes)
 
+    fetched_at = utc_now_rfc3339()
+    if metadata_path.exists():
+        existing_metadata = json_load(metadata_path)
+        existing_fetched_at = existing_metadata.get("fetchedAt")
+        if isinstance(existing_fetched_at, str) and existing_fetched_at:
+            fetched_at = existing_fetched_at
+
     metadata = {
         "version": version,
         "tag": tag_for_version(version),
         "schemaUrl": url,
         "schemaFile": SCHEMA_FILE_IN_UPSTREAM,
         "schemaSha256": schema_sha,
-        "fetchedAt": utc_now_rfc3339(),
+        "fetchedAt": fetched_at,
     }
     json_dump(metadata_path, metadata)
 

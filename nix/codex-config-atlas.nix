@@ -131,7 +131,11 @@ let
       {
         nativeBuildInputs = [
           pkgs.nodejs_24
-          pkgs.python3
+          (pkgs.python3.withPackages (pythonPackages: [
+            pythonPackages.packaging
+            pythonPackages.rich
+            pythonPackages.tomlkit
+          ]))
         ];
       }
       ''
