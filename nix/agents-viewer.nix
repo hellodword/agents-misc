@@ -22,7 +22,7 @@ let
       src = ../tools/agents-viewer/web;
       filter = sourceFilter;
     };
-    npmDepsHash = "sha256-lAbqPqCh6A8AljVfvYz2MC+Lj5SvjB70CoNokhOs2Wc=";
+    npmDepsHash = "sha256-gY0vgAhxSTb78pBBklbzUIIs9hx1Jwr7tXXvHM7dqbQ=";
     npmFlags = [ "--ignore-scripts" ];
     buildPhase = ''
       runHook preBuild
