@@ -2,11 +2,31 @@
 
 Agent Rules Kit is a small, project-scoped instruction payload for coding agents. It uses the open [AGENTS.md format](https://agents.md/) for shared instructions and the open [Agent Skills specification](https://agentskills.io/specification) for on-demand workflows.
 
+## Repository map
+
+This repository also maintains several independent Codex tools. Each component
+has one authoritative input boundary and one primary verification entrypoint:
+
+| Component | Purpose | Authoritative inputs | Primary maintenance entry |
+| --- | --- | --- | --- |
+| [Agent Rules Kit](AGENTS.md) | Shared agent rules and reusable workflow skills | `AGENTS.md`, `.agents/**` | `just check-agent-rules` |
+| [Codex patches](codex/README.md) | Reproducible patches over one pinned upstream Codex revision | `codex/upstream.toml`, `codex/series.toml`, current patch files | `just codex-test` |
+| [Codex hook helpers](tools/codex-hooks/README.md) | Bounded local forwarding and notification helpers for patched hook events | helper source and the patch-owned hook schemas | `nix build --no-link .#checks.x86_64-linux.codex-hooks` |
+| [Codex Config Atlas](tools/codex-config-atlas/README.md) | Versioned upstream schema registry, CLI, and static comparison site | tracked schema registry and Web source | `nix build --no-link .#checks.x86_64-linux.codex-config-atlas-tests` |
+| [Agents Viewer](tools/agents-viewer/README.md) | Read-only local rollout index, API, and Web reader | rollout fixtures, Rust DTOs, Rust/Web source | `just agents-viewer-verify` |
+| [Agent behavior evals](tests/evals/README.md) | Deterministic corpus validation and optional isolated live Codex diagnostics | eval JSONL, hidden oracles, schemas, and runtime contract | `nix build --no-link .#checks.x86_64-linux.agent-evals` |
+
+Generated ownership is explicit. Codex generated contracts live inside the
+sixth patch in `codex/series.toml`; Atlas data and site trees are Nix outputs;
+Viewer's `web/src/generated/api.ts` is the only checked-in Rust-to-TypeScript
+binding; eval run artifacts remain below ignored `tmp/agent/evals/`. No other
+generated tree is a durable source input.
+
 ## Distribution boundary
 
 Only [AGENTS.md](AGENTS.md) and `.agents/**` are distributed. Consuming repositories provide both at their root and normally mount or copy them read-only. The external distribution system chooses and records a Git commit, version, or tag; this repository does not maintain a payload version or consumer lock.
 
-Repository maintenance files such as `.project-agent/**`, the checker, tests, Just recipes, and Nix checks are not part of the payload. The unrelated `codex/**`, `tools/**`, and `.github/**` trees are outside rules-kit maintenance.
+Repository maintenance files such as `.project-agent/**`, the checker, tests, Just recipes, and Nix checks are not part of the payload. The separately maintained `codex/**`, `tools/**`, and `.github/**` trees are outside the distributed rules-kit payload; their own guides define their contracts.
 
 ## Loading model
 
@@ -77,3 +97,9 @@ authentication, model/reasoning selection, prompt-source checks, independent
 behavior judging, and skill-disabled certification baselines, see
 [the eval runner guide](tests/evals/README.md). Live model output remains
 diagnostic and is intentionally excluded from the deterministic Nix checks.
+
+Run the repository-wide deterministic gate with:
+
+```sh
+nix flake check --accept-flake-config
+```

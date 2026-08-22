@@ -34,9 +34,16 @@ The generated data and assembled site are Nix build outputs. They are not
 committed to the repository. The site computes selected-version diffs in the
 browser from per-version normalized field payloads.
 
-The unpatched registry here is separate from
-`codex/patches/<tag>/config.schema.json`. The latter records the schema produced
-by the locally patched upstream tree and belongs to patch validation.
+Python source under `src/codex_config_atlas/` is authoritative for registry
+validation, normalization, semantic diffing, stable TOML, synchronization, and
+data generation. `web/` is authoritative for the static application shell and
+the browser implementation of the shared golden diff contract. The tracked
+cross-language golden cases are the compatibility boundary; temporary data and
+site trees are disposable build products.
+
+The unpatched registry here is separate from the patched schema hunk owned by
+`0006-generated-contracts.patch`. That hunk is reproduced from the local
+patched upstream tree and belongs to patch validation.
 
 ## Layout
 
@@ -125,10 +132,32 @@ inspection, each selected comparison also writes a copyable `新增` / `移除` 
 documented CLI commands above followed by:
 
 ```bash
-nix flake check
+nix build --no-link --accept-flake-config .#checks.x86_64-linux.codex-config-atlas-tests
+nix build --no-link --accept-flake-config .#checks.x86_64-linux.codex-config-atlas-registry
+nix build --no-link --accept-flake-config .#checks.x86_64-linux.codex-config-atlas-data
+nix build --no-link --accept-flake-config .#checks.x86_64-linux.codex-config-atlas-site
 ```
 
 The Python package, dependencies, current Codex version, schema inputs, and Web
 assets are all resolved through the repository flake. Runtime build output,
 temporary generated data, and packaged sites stay outside the tracked source
 tree.
+
+## Failure recovery
+
+- Sync timeout, size, tag, commit, hash, path, JSON, or provenance failure:
+  correct the explicit version/expectation or upstream record and retry. The
+  installed registry tree remains byte-identical.
+- Interrupted or failed installation: preserve the sibling backup path printed
+  by the command. The tool restores the previous tree automatically; if that
+  restoration fails, verify the candidate and backup before moving the exact
+  backup into place.
+- Cross-language golden mismatch: fix the shared normalization semantics, not
+  one language's expected output. Run the tests check before regenerating data.
+- TOML output changes with input order: treat it as a determinism bug. Keep the
+  old registry and reduce the schema pair to a golden case.
+- Data/site generation failure: discard only the reported temporary candidate
+  output. The tracked registry and previous output remain unchanged.
+
+Recovery is complete only after registry validation and two consecutive
+data/site builds produce identical file inventories and hashes.

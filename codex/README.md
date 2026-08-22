@@ -1,464 +1,178 @@
-# Codex Pure Patch Workspace
+# Codex pure-patch workspace
 
-This directory maintains local patches for `https://github.com/openai/codex`
-without committing a patched upstream source tree.
+This directory maintains a reproducible patch set over one pinned revision of
+[`openai/codex`](https://github.com/openai/codex). The patched upstream source
+tree is never committed.
 
-## Layout
+## Authority and layout
+
+Two TOML files are the only maintenance manifests:
+
+- [`upstream.toml`](upstream.toml) pins the repository URL, tag, peeled commit,
+  ignored worktree, generator commands, and cumulative Cargo validation.
+- [`series.toml`](series.toml) defines patch order, intent, behavior, exclusive
+  source/generated ownership, and focused tests.
+
+The current patch files live below `patches/<upstream-ref>/`. Patch order must
+come from `series.toml`; there is no YAML manifest, text `series` file, ref CLI
+argument, or historical patch-directory fallback.
 
 ```text
 codex/
-  upstream.yaml
-  patches/
-    <tag>/
-      series
-      <patch-file>.patch
-      config.schema.json
+  upstream.toml
+  series.toml
+  patches/<upstream-ref>/
+    0001-*.patch
+    ...
   scripts/
-    fetch-upstream.py
-    apply-patches.py
-    refresh-patches.py
-    build.py
-    test.py
-.work/codex/<tag>/src/
+  tests/
+.work/codex/<upstream-ref>/src/  # ignored checkout
 ```
 
-`codex/patches/<tag>/series` is the patch order. Patch paths are relative to
-that directory. `config.schema.json` is generated from the patched upstream
-tree by running `just write-config-schema` in the upstream checkout.
-Build caches are kept under `.work/codex/<tag>/target/`.
+All human-facing commands are root Just recipes. They enter the pinned
+`codex` development shell before invoking Python, Cargo, or upstream
+generators. Do not run repository maintenance with host Python or Cargo.
 
-## Common Commands
+## Maintained series
 
-Fetch or update a shallow upstream checkout:
+The following order mirrors `series.toml`. The manifest remains authoritative
+for exact file ownership and commands.
 
-```sh
-just codex-fetch <tag>
-```
+| Order | Patch | Intent and affected behavior | Focused validation |
+| --- | --- | --- | --- |
+| 1 | `0001-provider-network-config.patch` | Make the OpenAI sampling/compact endpoint and compact timeout explicit, validated, and precedence-aware. | Provider config plus compact timeout behavior. |
+| 2 | `0002-failure-hook-contract.patch` | Define stable camelCase `RequestError` and `AbnormalStop` payload/output contracts with typed error categories. | Hook contract and schema tests. |
+| 3 | `0003-failure-hook-integration.patch` | Emit one bounded event for each visible retry, fallback, or stop; serialize request hooks and aggregate abnormal-stop decisions. | Hook engine and core integration tests. |
+| 4 | `0004-terminal-wait.patch` | Match named terminal rules in order and expose checked decision deadlines and completion states. | Config, unified-exec, and terminal-wait behavior. |
+| 5 | `0005-code-mode-wait-control.patch` | Give terminal-wait decisions explicit one-use Code Mode leases across protocol, host, and runtime boundaries. | Code Mode protocol/runtime/host suites. |
+| 6 | `0006-generated-contracts.patch` | Own every generated schema, protobuf binding, TypeScript contract, and resolved Cargo graph changed by patches 1–5. | Re-generation plus config/app-server contract suites. |
 
-Check that the committed patch series applies:
+There is deliberately no Plan auto-resolution patch. Plan-mode input remains
+blocking upstream behavior, and no compatibility alias recreates the removed
+patch or its former consumer contract.
 
-```sh
-just codex-apply-check <tag>
-```
-
-Apply the patch series:
-
-```sh
-just codex-apply <tag>
-```
-
-Refresh the patch series and generated schema from the current `.work` checkout:
-
-```sh
-just codex-refresh <tag>
-```
-
-Run the narrow patch validation:
-
-```sh
-just codex-test <tag>
-```
-
-The unpatched upstream schema registry, diff site, and configuration generator
-are maintained separately in
-[`tools/codex-config-atlas`](../tools/codex-config-atlas/README.md).
-
-## Maintained Codex Behavior
-
-### OpenAI Provider Network Overrides
-
-`model_providers.openai` may override only these network-related fields:
-
-- `request_max_retries`
-- `stream_max_retries`
-- `stream_idle_timeout_ms`
-- `websocket_connect_timeout_ms`
-- `compact_request_timeout_ms`
-
-If `model_providers.openai` sets any other non-default provider field, config
-loading fails. This keeps the built-in OpenAI provider from becoming an
-arbitrary custom provider.
-
-Example:
-
-```toml
-[model_providers.openai]
-request_max_retries = 6
-stream_max_retries = 8
-stream_idle_timeout_ms = 420000
-websocket_connect_timeout_ms = 20000
-compact_request_timeout_ms = 900000
-```
-
-`compact_request_timeout_ms` controls the total timeout for unary
-`/responses/compact` requests. When it is not configured, the existing fallback
-is still used:
+## Data flow and generated ownership
 
 ```text
-stream_idle_timeout * COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER
+upstream.toml pinned commit
+  -> ignored exact upstream checkout
+  -> series.toml cumulative patch application
+  -> manifest-declared generators
+  -> manifest-declared Cargo and focused tests
+  -> atomic replacement of current patch files
 ```
 
-This field is wired through `ModelProviderInfo`, the config schema, remote
-thread config proto conversion, and existing test struct literals.
+The first five patches own handwritten behavior. The sixth patch exclusively
+owns generated files and prefixes declared in `series.toml`, including the
+patched Cargo lock, configuration schema, hooks schemas, app-server schemas,
+and protobuf bindings. Never edit those generated hunks by hand. Change their
+authoritative source in the ignored checkout, run the declared generators, and
+refresh the series.
 
-`compact_request_timeout_ms` is not OpenAI-only. It is a general
-`ModelProviderInfo` field, so it may be set on any user-defined provider under
-`model_providers.*`.
+Atlas's unpatched historical schema registry is a separate product documented
+in the [Codex Config Atlas guide](../tools/codex-config-atlas/README.md). Do not
+copy the locally patched schema into that registry.
 
-Built-in provider IDs in this baseline are:
+## Daily commands
 
-- `openai`
-- `amazon-bedrock`
-- `ollama`
-- `lmstudio`
-
-Built-in provider override rules are narrower than user-defined provider rules:
-
-- `model_providers.openai` may override the five network fields listed above.
-- `model_providers.amazon-bedrock` may override `base_url`, `auth`,
-  `http_headers`, `aws.profile`, and `aws.region`; setting
-  `compact_request_timeout_ms` there is rejected.
-- `model_providers.ollama` and `model_providers.lmstudio` are existing
-  built-ins. Define a distinct custom provider ID when customized OSS provider
-  settings are needed.
-
-### Terminal Wait Command Rules
-
-Codex accepts root-level `terminal_wait.commands` entries for command-specific
-supervised unified exec waits. There is one behavior rather than selectable
-wait modes. Profile-scoped `terminal_wait` is not supported in this patch
-series.
-
-| Field               | Required | Default         | Notes                                                                 |
-| ------------------- | -------- | --------------- | --------------------------------------------------------------------- |
-| `pattern`           | yes      | none            | `regex-lite` pattern matched against the original `exec_command.cmd`. |
-| `poll_interval_ms`  | yes      | none            | Positive runtime-controlled interval between decision points.         |
-| `name`              | no       | none            | Human-readable label for the rule.                                    |
-| `enabled`           | no       | `true`          | Disabled rules are skipped.                                           |
-| `cwd_pattern`       | no       | none            | `regex-lite` pattern matched against the effective cwd string.        |
-| `max_output_tokens` | no       | request/default | Positive model-visible output token cap for this command.             |
-
-Rules are evaluated in TOML order and the first enabled match wins. `pattern`
-matches the raw command string from the tool request. `cwd_pattern` matches the
-native absolute cwd string when one is available, otherwise the `PathUri`
-string. TTY requests never match; managed waits use non-TTY processes only.
-
-For a matching command, `poll_interval_ms` replaces the tool-request
-`yield_time_ms` for the initial wait. The runtime returns immediately if the
-process exits. If it is still running at the end of the interval, the result
-has `terminal_wait_state = "decision_required"` and offers exactly three
-actions through `terminal_wait_control`:
-
-- `continue` waits for a fresh, complete `poll_interval_ms`.
-- `interrupt` sends a gentle interrupt and waits up to a fixed 10-second grace
-  period.
-- `terminate` performs confirmed process-tree termination.
-
-The managed process is implicit, so `terminal_wait_control` takes no session or
-process ID. For compatibility, empty `write_stdin` on that process acts as
-`continue`, and a Ctrl-C write acts as `interrupt`. Other stdin writes are
-rejected because managed processes are non-TTY.
-
-Only one managed process may exist in a Codex Session, across environments and
-Code Mode cells. Its gate is reserved before approval and spawning and remains
-held until the managed result is consumed. If the process exits naturally after
-returning `decision_required`, the next control action consumes its final output
-and returns `completed`; it does not lose the implicit target or report
-`NoTerminalWaitDecision`. A control action is otherwise permitted only from
-`decision_required`. While the gate is held, Codex rejects new built-in terminal
-starts through `exec_command` or legacy `shell_command`, and rejects interaction
-with other built-in terminal sessions. A normal terminal command already
-admitted before the reservation may continue in the background, but cannot be
-interacted with until the managed gate clears. Non-terminal tools remain
-available.
-
-Turn or Code Mode cell cancellation does not terminate a stored managed
-process. It returns the gate to `decision_required`, allowing the next turn to
-continue, interrupt, or terminate it. `/stop` remains the hard-stop path: it
-terminates all built-in terminal processes and clears the managed gate.
-
-These restrictions are session-local and cover Codex's built-in terminal
-tools. They do not govern another Codex Session, a child agent's separate
-Session, MCP tools, or external processes.
-
-The same wait and decision semantics apply inside Code Mode. A matching call
-holds a Code Mode terminal-wait lease, so outer timer-generated `exec`/`wait`
-yields cannot return control early. No separate `codex-code-mode-host`
-configuration is required. When at least one rule is enabled,
-`terminal_wait_control` is exposed in normal, Code Mode, and guardian tool
-plans, even if the current command does not match.
-
-Managed results report `terminal_wait_state` as `decision_required`,
-`completed`, or `terminated`, along with `poll_interval_ms`. The
-`available_actions` array is present only for `decision_required`.
-
-`max_output_tokens` affects only the model-visible tool result. UI streaming and
-terminal transcript events are not truncated by this setting.
-
-Patterns are compiled with `regex-lite` during config load. Use Rust-regex-style
-syntax supported by `regex-lite`; avoid look-around, backreferences, and
-Unicode property classes.
-
-Example:
-
-```toml
-[terminal_wait]
-
-[[terminal_wait.commands]]
-name = "workspace cargo tests"
-pattern = "^cargo test( |$)"
-cwd_pattern = "/workspaces/my-project"
-poll_interval_ms = 600000
-max_output_tokens = 20000
-
-[[terminal_wait.commands]]
-name = "vite dev server"
-pattern = "npm run dev"
-poll_interval_ms = 60000
-```
-
-`mode`, `wait_timeout_ms`, and `allow_tty` are removed and rejected as unknown
-fields. When `terminal_wait` is unset, all rules are disabled, or no rule
-matches, ordinary terminal wait and background polling behavior is unchanged.
-
-### Model Request Failure Hooks
-
-Codex exposes model request failures through two hook events. `RequestError`
-is an observational hook for every failed model request attempt, including
-attempts that will be retried. `AbnormalStop` is the final-stop hook for model
-request failures that would end the current execution.
-
-Together they support notification, diagnostics, and recovery policy around
-provider outages, streaming disconnects, retry exhaustion, context-window
-failures, usage limits, sandbox failures, and policy blocks. `AbnormalStop`
-also carries the active `/goal` state and the effective permission mode, so a
-hook can distinguish yolo sessions and decide whether a failed turn should
-deliver turn error lifecycle events to extensions.
-
-#### RequestError Hook
-
-`RequestError` fires once for each Codex-visible retry, fallback, or stop
-decision. Transport retries internal to one HTTP request are aggregated. The
-`nextAction` field records the resulting `retry`, `fallback`, or `stop`
-decision.
-
-Trigger scope:
-
-- normal sampling: `/responses`
-- local compact: `/responses`
-- remote compaction v2: `/responses`
-- remote compact v1: `/responses/compact`
-
-This hook only emits `HookStarted` / `HookCompleted` notifications. After
-`HookStarted` is emitted, the hook command completes in the background. Hook
-output does not block retry and does not change the later stop flow.
-
-Example payload:
-
-```json
-{
-  "sessionId": "00000000-0000-0000-0000-000000000000",
-  "turnId": "turn-1",
-  "transcriptPath": "/home/user/.codex/sessions/session.jsonl",
-  "cwd": "/workspaces/project",
-  "hookEventName": "RequestError",
-  "model": "gpt-5",
-  "provider": "openai",
-  "operation": "sampling",
-  "endpointPath": "/responses",
-  "attempt": 1,
-  "nextAction": "retry",
-  "error": {
-    "category": "transport",
-    "message": "stream disconnected"
-  }
-}
-```
-
-#### AbnormalStop Hook
-
-`AbnormalStop` fires once only when a final model request failure causes Codex
-to stop the current execution. Codex runs the hook before it emits turn error
-lifecycle events, so hook output can control whether that lifecycle is
-delivered to extensions.
-
-Included cases:
-
-- final sampling failure in a normal turn
-- final model request failure during pre-turn auto compact
-- final model request failure during mid-turn auto compact
-- final model request failure during a manual compact task
-
-Excluded cases:
-
-- user interrupt
-- task replacement
-- hook-initiated stop
-- review event channel close
-- startup prewarm cancellation
-- ordinary tool handling errors
-
-Example payload:
-
-```json
-{
-  "sessionId": "00000000-0000-0000-0000-000000000000",
-  "turnId": "turn-1",
-  "transcriptPath": "/home/user/.codex/sessions/session.jsonl",
-  "cwd": "/workspaces/project",
-  "hookEventName": "AbnormalStop",
-  "model": "gpt-5",
-  "provider": "openai",
-  "goalMode": true,
-  "approvalPolicy": "never",
-  "sandboxMode": "danger-full-access",
-  "reason": "requestError",
-  "operation": "remoteCompact",
-  "endpointPath": "/responses/compact",
-  "attempt": 4,
-  "nextAction": "stop",
-  "error": {
-    "category": "timeout",
-    "message": "request timed out"
-  }
-}
-```
-
-`goalMode` is true when the failed turn is executing the active `/goal`.
-`approvalPolicy` and `sandboxMode` describe the effective permissions for the
-turn; a hook can treat `approvalPolicy == "never"` and
-`sandboxMode == "danger-full-access"` as yolo mode.
-
-`error.category` is one of `transport`, `timeout`, `rateLimit`, `usageLimit`,
-`contextWindow`, `policy`, `sandbox`, `invalidRequest`, `server`, `internal`,
-or `other`. The payload intentionally excludes arbitrary internal error
-objects.
-
-Hook output may include:
-
-```json
-{
-  "suppressTurnErrorLifecycle": true
-}
-```
-
-When this field is absent, Codex suppresses turn error lifecycle delivery by
-default for `/goal` turns unless `error.category` is `policy`. Other turns
-default to normal turn error lifecycle delivery. Setting the field explicitly
-overrides the default for that hook run.
-
-This keeps active goals from being ended by transient provider, transport,
-retry, context-window, usage-limit, or sandbox failures unless a hook chooses
-normal lifecycle delivery. Policy blocks still use normal lifecycle delivery by
-default.
-
-### Plan Mode User Input
-
-Plan mode user-input requests are blocking: Codex does not send
-`autoResolutionMs` and the TUI does not create a countdown. Non-blocking
-requests retain their existing optional auto-resolution timer behavior.
-
-## Local Hook Helper Scripts
-
-`tools/codex-hooks` contains two optional helper scripts for forwarding Codex
-hook events to local desktop or webhook notifications.
-
-Copy them into `~/.codex`:
+Validate the manifests without fetching upstream:
 
 ```sh
-cp tools/codex-hooks/codex_hook_forwarder.py ~/.codex/
-cp tools/codex-hooks/codex_hook_notify_server.py ~/.codex/
+just codex-manifest-check
 ```
 
-Start the receiver server:
+Fetch the exact pinned revision, check cumulative application, apply it to the
+ignored checkout, and run the complete Codex patch gate:
 
 ```sh
-python3 ~/.codex/codex_hook_notify_server.py --host 0.0.0.0 --port 8765 --verbose
+just codex-fetch
+just codex-apply-check
+just codex-apply
+just codex-test
 ```
 
-The server reads CLI flags and `~/.codex/hook-notify-server.toml`; it does not
-read environment variables. Empty or omitted `events` means handle every
-received event:
+`codex-test` checks cumulative application, runs every declared generator
+twice, rejects generated drift, runs the cumulative Cargo validation, and runs
+the focused tests in series order. To run only the cumulative Cargo command:
 
-```toml
-events = []
-
-[notify_send]
-enabled = true
-timeout_ms = 0
-
-[webhook]
-enabled = false
-url = "https://foo.com/notify"
+```sh
+just codex-build
 ```
 
-Use `codex_hook_forwarder.py` as the Codex hook command. It reads hook JSON
-from stdin and posts to the notification server. The forwarder does not accept
-CLI arguments; configure it only with environment variables such as
-`CODEX_HOOK_SERVER_URL`, `CODEX_HOOK_FORWARDER_EVENTS`,
-`CODEX_HOOK_FORWARDER_TIMEOUT`, `CODEX_HOOK_FORWARDER_VERBOSE`,
-`CODEX_HOOK_FORWARDER_STRICT`, `CODEX_HOOK_FORWARDER_INCLUDE_RAW`,
-`CODEX_HOOK_FORWARDER_PREVIEW_LIMIT`, and
-`CODEX_HOOK_FORWARDER_MAX_STDIN_BYTES`.
+Build the patched package or its deterministic Nix checks without creating a
+result link:
 
-Minimal `~/.codex/hooks.json` example:
-
-```json
-{
-  "hooks": {
-    "RequestError": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "env CODEX_HOOK_SERVER_URL=http://172.17.0.1:8765/hook python3 ~/.codex/codex_hook_forwarder.py",
-            "timeout": 5,
-            "statusMessage": "Forwarding request error"
-          }
-        ]
-      }
-    ],
-    "AbnormalStop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "env CODEX_HOOK_SERVER_URL=http://172.17.0.1:8765/hook python3 ~/.codex/codex_hook_forwarder.py",
-            "timeout": 5,
-            "statusMessage": "Forwarding abnormal stop"
-          }
-        ]
-      }
-    ]
-  }
-}
+```sh
+nix build --no-link --accept-flake-config .#codex
+nix build --no-link --accept-flake-config .#checks.x86_64-linux.codex-patch-contract
+nix build --no-link --accept-flake-config .#checks.x86_64-linux.codex-behavior
+nix build --no-link --accept-flake-config .#checks.x86_64-linux.codex-generation
+nix build --no-link --accept-flake-config .#checks.x86_64-linux.codex-hooks
 ```
 
-Review and trust command hooks with `/hooks`. If you test with `SessionStart`,
-remember it fires only when a matching session starts or resumes, not in the
-middle of an already-running session.
+The optional local hook transport is maintained separately in the
+[hook helper guide](../tools/codex-hooks/README.md).
 
-## Upgrading To A New Codex Ref
+## Changing a patch
 
-Use an explicit target. Do not infer the target from upstream tags.
+1. Run `just codex-manifest-check`, `just codex-fetch`, and
+   `just codex-apply` from a clean repository worktree.
+2. Edit only the ignored worktree declared by `upstream.toml`. Keep every
+   changed path inside exactly one patch ownership boundary.
+3. Run the narrow upstream tests while inside `nix develop .#codex`, then run
+   `just codex-refresh-dry-run`.
+4. Review the candidate patch bytes and generator/test report. A dry-run must
+   not change the current patch directory or the upstream Git index.
+5. Run `just codex-refresh` to atomically install the candidate, then repeat
+   the dry-run. The second candidate must be byte-identical.
+6. Run `just codex-test` and the relevant Nix check/package builds before
+   committing current patch files and manifest changes.
 
-Example instruction:
+`refresh-patches.py` uses a temporary Git index and a sibling candidate
+directory. It applies patches cumulatively, checks ownership after each
+boundary, runs generation and validation, and replaces the installed patch
+directory only after every gate succeeds.
 
-```text
-Use pure-patch-workflow for Codex.
+## Advancing upstream
 
-Upstream: https://github.com/openai/codex
-Source patch ref: <source-tag>
-Target upstream ref: <target-tag>
+An upstream upgrade is an explicit manifest change, not a positional CLI
+argument:
 
-Follow codex/upstream.yaml and codex/README.md.
-Use .work/codex/<tag>/src, not codex/origin.
-Preserve the behavior described in codex/README.md.
-Create codex/patches/<target-tag>/ with series, patch files, and config.schema.json.
-Run apply check, just write-config-schema, schema diff, and the narrowest useful
-cargo check. Report source, target, patch dir, series, schema, validation, and
-limitations.
-```
+1. Choose a signed or otherwise reviewed upstream tag and resolve its peeled
+   commit through Git.
+2. Update `ref`, `revision`, and the ref-derived `worktree` together in
+   `upstream.toml`.
+3. Rename/create only the current patch directory for that ref; do not retain
+   historical consumer directories.
+4. Fetch the exact revision and port each `series.toml` responsibility in
+   order. Update the manifest only when ownership, intent, or validation
+   genuinely changes.
+5. Refresh generators, compare the patched schema, and complete `codex-test`,
+   the four Codex Nix checks, and the patched package build.
 
-If the source patch ref is omitted, use the newest existing `rust-v*` patch
-directory as the source. The target ref must still be provided explicitly.
+Do not infer a target from a floating branch or a newest-tag query. Do not
+accept a revision mismatch merely because the tag name exists.
+
+## Failure recovery
+
+The tools fail before installing partial state and print the exact candidate,
+backup, or worktree path needed for recovery.
+
+- Manifest, path ownership, revision, or cumulative apply failure: correct the
+  authoritative TOML/source. The patch directory, source tree, temporary
+  index, and real upstream index remain unchanged.
+- Generator, Cargo, or focused-test failure: fix the ignored checkout and run
+  the dry-run again. The current patch directory is still the last validated
+  version.
+- Atomic install failure: keep the reported sibling backup. If automatic
+  restoration also fails, move that exact backup back to the printed patch
+  path only after verifying both paths; never delete both copies.
+- Generated drift after apply: do not edit the generated patch. Re-run the
+  manifest-declared generator in `nix develop .#codex`, then refresh.
+- Nix V8 download/cache failure: retry through the pinned Codex shell or
+  package inputs. Do not install a host Rust/Node toolchain or rewrite the lock
+  manually.
+
+Use `just codex-refresh-dry-run` as the recovery proof: success with identical
+candidate hashes demonstrates that the installed patch set is complete,
+reproducible, and safe to commit.

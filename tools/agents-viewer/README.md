@@ -73,6 +73,13 @@ At most two source reads run concurrently. A direct request rechecks source meta
 
 Axum serves a loopback-only JSON API, an SSE stream for index and conversation updates, and the embedded Web bundle. Public DTOs are defined in Rust and exported deterministically to `web/src/generated/api.ts`, so the React client and service share one checked contract.
 
+Rust DTO definitions are the authoritative contract input.
+`web/src/generated/api.ts` is the only checked-in generated Viewer file and
+must be changed only through `just agents-viewer-generate`. `web/dist`, Cargo
+`target`, SQLite databases, browser artifacts, and the embedded release bundle
+are ignored or Nix-produced runtime/build outputs; they are never source
+inputs or commit candidates.
+
 The React/Vite UI presents conversations in a Telegram-like layout. User messages are right-aligned; assistant messages and normalized plans are left-aligned bubbles. Both reuse sanitized GFM Markdown, full-content copying, timestamps, and Inspector actions. Reasoning and commands appear as compact inspectable activity. Each `request_user_input` question appears as its own default-visible incoming poll message with option labels and descriptions; completed polls mark selected answers and place non-empty per-question notes below the selected option. Command results remain in the inspector.
 
 `GET /api/v1/sessions/{sessionId}/entries` accepts a comma-separated `displayTypes` set for cursor-safe exact filtering. Supported values are `received`, `sent`, `requestUserInput`, `reasoning`, `exec`, `plan`, `patch`, `mcp`, `webSearch`, `function`, `dynamic`, `terminal`, `viewImage`, `otherTool`, `warning`, `error`, `context`, `marker`, `technicalMessage`, `internalMessage`, and `unknown`. `plan` is the canonical view of plan-only assistant records; `received` does not return a second tagged copy, while assistant text outside a plan block remains `received`. `displayTypes` and `includeTechnical` are mutually exclusive; omitting `displayTypes` preserves the earlier boolean behavior for compatible callers. The Web client always includes `plan` in its exact filter, including when it canonicalizes older saved preferences.
@@ -266,3 +273,13 @@ Common failures:
 - no E2E browser: configure CDP or expose a supported Chromium-family executable; do not install a browser from the test command.
 - stale UI during E2E: use `just agents-viewer-e2e`, not the Web package's `e2e` script directly; the Just recipe rebuilds the compile-time embedded bundle first.
 - UI/API version mismatch: rebuild the embedded binary with `just agents-viewer-build`.
+- generated binding drift: change the Rust DTO, run `just agents-viewer-generate`,
+  review the public contract diff, then run `just agents-viewer-generate-check`;
+  never hand-edit `web/src/generated/api.ts`.
+
+All SQLite recovery commands apply only to Viewer-owned derived caches. Stop
+the process and verify the exact source namespace before removing one; never
+delete or modify rollout JSONL. A successful `just agents-viewer-verify`
+followed by `just agents-viewer-acceptance-large` is the complete local
+recovery proof for source, generated, package, bounded-memory, and Linux
+read-only syscall boundaries.

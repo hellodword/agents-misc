@@ -9,6 +9,26 @@ and never gate `nix flake check`.
 Only Codex is implemented and certified. OpenCode has no adapter, placeholder,
 or implied support in this suite.
 
+## Data flow and ownership
+
+```text
+tracked case JSONL + hidden oracle JSONL + JSON Schemas + Codex runtime contract
+  -> immutable payload snapshot and prompt/tool-surface preflight
+  -> isolated route, behavior, baseline, and judge stages
+  -> atomic per-trial results and run summary below ignored tmp/agent/evals/
+```
+
+`tests/evals/` is authoritative for the corpus, oracles, schemas, and
+versioned Codex runtime contract. `tools/agent_evals/` owns auth, isolation,
+process runtime, prompts, case loading, stages, scoring, orchestration, and CLI behavior. The
+`agent-evals` Nix app is the durable executable; the deleted single-file runner
+has no compatibility entrypoint.
+
+Run artifacts, copied payload snapshots, stderr/event captures, temporary
+homes, and credential vaults are never generated source. Artifacts stay in the
+confirmed ignored tree, temporary homes are deleted, and the vault stays in
+the user's private state directory.
+
 ## Case and oracle contract
 
 The subject-visible records are `routing.jsonl`, `skills.jsonl`, and
@@ -173,7 +193,36 @@ Validate structural changes with:
 
 ```sh
 just check-agent-rules
+nix build --no-link --accept-flake-config .#checks.x86_64-linux.agent-evals
+nix run --accept-flake-config .#agent-evals -- --help
 ```
+
+The Nix check runs formatting, lint, 36 synthetic unit/failure-injection tests,
+and preflight help without credentials or a real model call. Use
+`just agent-evals-preflight` before any manual live diagnostic. Never add a
+live LLM invocation to CI or `nix flake check`.
+
+## Failure recovery
+
+- Missing/insecure/invalid vault: correct ownership and permissions on the
+  explicit source, then rerun `agent-evals-auth-init`. Replacement requires
+  `--replace`; the runner never silently overwrites the vault.
+- Unsupported Codex version or tool-surface mismatch: stop before credentials
+  are loaded, review the runtime contract against that exact Codex version,
+  and update the contract plus synthetic tests together.
+- Stage nonzero exit, timeout, malformed event JSON, or scoring parse error:
+  inspect the redacted per-trial event/stderr and atomic result. Re-run one
+  case; do not weaken thresholds or schemas to make a failed result pass.
+- Partial run: the runner writes a parseable failed result and summary
+  atomically. Preserve those ignored diagnostics, correct the cause, and start
+  a fresh run rather than treating the partial summary as certification.
+- Secret or temporary path in output: stop and treat it as a redaction defect.
+  Do not share the artifact; run the deterministic unit suite after fixing the
+  boundary.
+
+Recovery is complete when the deterministic Nix check and unauthenticated
+preflight pass. A real-model result remains diagnostic evidence, not a
+repository completion gate.
 
 ## Practice references
 

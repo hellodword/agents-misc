@@ -22,6 +22,15 @@ class CheckAgentRulesTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         shutil.copyfile(REPO_ROOT / "AGENTS.md", self.root / "AGENTS.md")
         shutil.copyfile(REPO_ROOT / "README.md", self.root / "README.md")
+        for relative in (
+            "codex/README.md",
+            "tools/codex-hooks/README.md",
+            "tools/codex-config-atlas/README.md",
+            "tools/agents-viewer/README.md",
+        ):
+            destination = self.root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(REPO_ROOT / relative, destination)
         shutil.copytree(
             REPO_ROOT / ".agents",
             self.root / ".agents",

@@ -29,7 +29,17 @@ check-agent-rules:
 _check-agent-rules:
   @test "${AGENTS_MISC_SHELL:-}" = "dev" || { echo "error: run 'just check-agent-rules' to enter nix develop .#dev" >&2; exit 2; }
   python3 scripts/check-agent-rules.py --root .
+  python3 scripts/check-maintenance-docs.py --root .
   python3 -m unittest discover -s tests -p 'test_*.py'
+
+# Validate maintenance links and safely smoke every documented shell command.
+check-docs:
+  nix develop .#dev --command just _check-docs
+
+[private]
+_check-docs:
+  @test "${AGENTS_MISC_SHELL:-}" = "dev" || { echo "error: run 'just check-docs' to enter nix develop .#dev" >&2; exit 2; }
+  python3 scripts/check-maintenance-docs.py --root . --execute-commands
 
 # Validate GitHub Actions syntax, official major tags, and verification gates.
 check-workflows:
