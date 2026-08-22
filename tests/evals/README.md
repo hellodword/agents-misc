@@ -2,7 +2,7 @@
 
 This directory contains routing, safety, and skill-trigger scenarios for the
 Agent Rules Kit. The deterministic repository check validates their structure
-and coverage. `scripts/run-agent-evals.py` can additionally exercise the
+and coverage. The `agent-evals` Nix app can additionally exercise the
 checked-in payload with a real Codex CLI; live results are manual diagnostics
 and never gate `nix flake check`.
 

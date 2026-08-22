@@ -74,6 +74,7 @@
       apps = import ./nix/apps.nix {
         inherit
           lib
+          nixpkgs
           codexConfigAtlasFor
           codexFor
           agentsViewerFor

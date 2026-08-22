@@ -72,7 +72,8 @@ lib.genAttrs supportedSystems (
       packages = [
         codexPackage
         pkgs.coreutils
-        pkgs.python3
+        pkgs.ruff
+        agentRulesPython
       ];
 
       AGENTS_MISC_SHELL = "agent-evals";

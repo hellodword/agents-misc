@@ -82,13 +82,24 @@ lib.genAttrs supportedSystems (
       checkMarker "agents-viewer-bindings-check" agentsViewer.checks.rust
         "bindings-ok";
     agents-viewer-web = agentsViewer.checks.web;
-    agent-evals = pkgs.runCommand "agent-evals-check" { nativeBuildInputs = [ agentRulesPython ]; } ''
-      cd ${../.}
-      export PYTHONDONTWRITEBYTECODE=1
-      python3 -m unittest tests.test_run_agent_evals
-      python3 scripts/run-agent-evals.py preflight --help
-      touch "$out"
-    '';
+    agent-evals =
+      pkgs.runCommand "agent-evals-check"
+        {
+          nativeBuildInputs = [
+            agentRulesPython
+            pkgs.ruff
+          ];
+        }
+        ''
+          cd ${../.}
+          export PYTHONDONTWRITEBYTECODE=1
+          export RUFF_CACHE_DIR="$TMPDIR/ruff-cache"
+          ruff format --check tools/agent_evals tests/test_run_agent_evals.py
+          ruff check tools/agent_evals tests/test_run_agent_evals.py
+          python3 -m unittest tests.test_run_agent_evals
+          python3 -m tools.agent_evals preflight --help
+          touch "$out"
+        '';
     github-workflows =
       pkgs.runCommand "github-workflows-check"
         {

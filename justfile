@@ -49,7 +49,7 @@ agent-evals-auth-init *args:
 [private]
 _agent-evals-auth-init *args:
   @test "${AGENTS_MISC_SHELL:-}" = "agent-evals" || { echo "error: run 'just agent-evals-auth-init' to enter nix develop .#agent-evals" >&2; exit 2; }
-  python3 scripts/run-agent-evals.py auth-init "$@"
+  python3 -m tools.agent_evals auth-init "$@"
 
 # Verify Agent eval prompt sources and the versioned no-execution-tool surface.
 agent-evals-preflight *args:
@@ -58,7 +58,7 @@ agent-evals-preflight *args:
 [private]
 _agent-evals-preflight *args:
   @test "${AGENTS_MISC_SHELL:-}" = "agent-evals" || { echo "error: run 'just agent-evals-preflight' to enter nix develop .#agent-evals" >&2; exit 2; }
-  python3 scripts/run-agent-evals.py preflight "$@"
+  python3 -m tools.agent_evals preflight "$@"
 
 # Run isolated Codex route, behavior, judge, and certification evals.
 agent-evals *args:
@@ -67,7 +67,7 @@ agent-evals *args:
 [private]
 _agent-evals *args:
   @test "${AGENTS_MISC_SHELL:-}" = "agent-evals" || { echo "error: run 'just agent-evals' to enter nix develop .#agent-evals" >&2; exit 2; }
-  python3 scripts/run-agent-evals.py run "$@"
+  python3 -m tools.agent_evals run "$@"
 
 # Build the default patched Codex package.
 build:

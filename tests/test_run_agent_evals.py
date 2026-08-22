@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import importlib.util
 import io
 import json
 import os
@@ -13,17 +12,26 @@ import textwrap
 import tomllib
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from jsonschema import Draft202012Validator
 
 
+from tools.agent_evals import (
+    auth,
+    cases as eval_cases,
+    cli,
+    common,
+    isolation,
+    prompts,
+    runtime,
+    scoring,
+    stages,
+    suite,
+)
+
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = REPO_ROOT / "scripts" / "run-agent-evals.py"
-SPEC = importlib.util.spec_from_file_location("run_agent_evals", SCRIPT)
-assert SPEC and SPEC.loader
-RUNNER = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = RUNNER
-SPEC.loader.exec_module(RUNNER)
 
 
 class RunAgentEvalsTests(unittest.TestCase):
@@ -35,7 +43,7 @@ class RunAgentEvalsTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def first_case(self):
-        return RUNNER._load_eval_cases(
+        return eval_cases._load_eval_cases(
             REPO_ROOT, None, ["routing-greenfield-fullstack"]
         )[0]
 
@@ -81,9 +89,9 @@ class RunAgentEvalsTests(unittest.TestCase):
         self.assertEqual(59, oracle_count)
 
     def test_route_model_schema_uses_canonical_payload_identifiers(self) -> None:
-        rules, skills = RUNNER._route_output_values(REPO_ROOT)
+        rules, skills = eval_cases._route_output_values(REPO_ROOT)
         destination = self.root / "route-result.schema.json"
-        RUNNER._write_model_output_schema(
+        eval_cases._write_model_output_schema(
             REPO_ROOT / "tests/evals/schemas/route-result.schema.json",
             destination,
             route_rules=rules,
@@ -104,29 +112,25 @@ class RunAgentEvalsTests(unittest.TestCase):
         self.assertNotIn("uniqueItems", schema["properties"]["selected_skills"])
 
     def test_behavior_and_baseline_scope_is_intentional(self) -> None:
-        cases = RUNNER._load_eval_cases(REPO_ROOT, None, None)
+        cases = eval_cases._load_eval_cases(REPO_ROOT, None, None)
         self.assertEqual(59, len(cases))
         self.assertEqual(31, sum(case.behavior is not None for case in cases))
-        self.assertEqual(
-            15, sum(bool(case.baseline_disabled_skills) for case in cases)
-        )
+        self.assertEqual(15, sum(bool(case.baseline_disabled_skills) for case in cases))
         self.assertTrue(
             all(case.behavior is None for case in cases if case.corpus == "routing")
         )
 
     def test_eval_selection_rejects_unknown_id(self) -> None:
-        with self.assertRaisesRegex(RUNNER.EvalInputError, "unknown or filtered"):
-            RUNNER._load_eval_cases(REPO_ROOT, None, ["missing-eval"])
+        with self.assertRaisesRegex(common.EvalInputError, "unknown or filtered"):
+            eval_cases._load_eval_cases(REPO_ROOT, None, ["missing-eval"])
 
     def test_prompts_do_not_serialize_expectations(self) -> None:
-        case = RUNNER._load_eval_cases(
+        case = eval_cases._load_eval_cases(
             REPO_ROOT, None, ["skill-ai-visual-positive"]
         )[0]
-        index_text = (REPO_ROOT / ".agents/rules/index.md").read_text(
-            encoding="utf-8"
-        )
-        route_prompt = RUNNER._routing_prompt(case, index_text)
-        behavior_prompt = RUNNER._behavior_prompt(
+        index_text = (REPO_ROOT / ".agents/rules/index.md").read_text(encoding="utf-8")
+        route_prompt = prompts._routing_prompt(case, index_text)
+        behavior_prompt = prompts._behavior_prompt(
             case,
             REPO_ROOT,
             {
@@ -134,8 +138,8 @@ class RunAgentEvalsTests(unittest.TestCase):
                 "selected_skills": list(case.expected_skills),
             },
         )
-        RUNNER._assert_no_expectation_leak(route_prompt)
-        RUNNER._assert_no_expectation_leak(behavior_prompt)
+        prompts._assert_no_expectation_leak(route_prompt)
+        prompts._assert_no_expectation_leak(behavior_prompt)
         self.assertIn("Apply every routing-table row independently", route_prompt)
         self.assertIn("frontmatter name only, never by file path", route_prompt)
         self.assertIn("identifiers allowed by the supplied JSON Schema", route_prompt)
@@ -145,7 +149,7 @@ class RunAgentEvalsTests(unittest.TestCase):
         for rubric in (*case.behavior.criteria, *case.behavior.prohibitions):
             self.assertNotIn(rubric, route_prompt)
             self.assertNotIn(rubric, behavior_prompt)
-        judge_prompt = RUNNER._judge_prompt(case, "Synthetic candidate response.")
+        judge_prompt = prompts._judge_prompt(case, "Synthetic candidate response.")
         self.assertIn(case.behavior.summary, judge_prompt)
         self.assertIn("response-level proposed-approach evaluation", judge_prompt)
         self.assertIn("Do not require tool calls", judge_prompt)
@@ -159,12 +163,12 @@ class RunAgentEvalsTests(unittest.TestCase):
         }
         self.assertEqual(
             usage,
-            RUNNER._turn_usage([{"type": "turn.completed", "usage": usage}]),
+            stages._turn_usage([{"type": "turn.completed", "usage": usage}]),
         )
-        with self.assertRaisesRegex(RUNNER.EvalRuntimeError, "expected 1"):
-            RUNNER._turn_usage([])
-        with self.assertRaisesRegex(RUNNER.EvalRuntimeError, "non-negative integer"):
-            RUNNER._turn_usage(
+        with self.assertRaisesRegex(common.EvalRuntimeError, "expected 1"):
+            stages._turn_usage([])
+        with self.assertRaisesRegex(common.EvalRuntimeError, "non-negative integer"):
+            stages._turn_usage(
                 [
                     {
                         "type": "turn.completed",
@@ -186,13 +190,13 @@ class RunAgentEvalsTests(unittest.TestCase):
             source / "tests/evals/codex-runtime-contract.json",
         )
         snapshot = self.root / "snapshot"
-        RUNNER._snapshot_eval_source(source, snapshot)
-        snapshot_digest = RUNNER._payload_sha256(snapshot)
-        self.assertEqual(RUNNER._payload_sha256(source), snapshot_digest)
+        runtime._snapshot_eval_source(source, snapshot)
+        snapshot_digest = runtime._payload_sha256(snapshot)
+        self.assertEqual(runtime._payload_sha256(source), snapshot_digest)
 
         (source / "AGENTS.md").write_text("changed after snapshot\n", encoding="utf-8")
-        self.assertEqual(snapshot_digest, RUNNER._payload_sha256(snapshot))
-        self.assertNotEqual(snapshot_digest, RUNNER._payload_sha256(source))
+        self.assertEqual(snapshot_digest, runtime._payload_sha256(snapshot))
+        self.assertNotEqual(snapshot_digest, runtime._payload_sha256(source))
         self.assertTrue(
             (snapshot / "tests/evals/schemas/run-summary.schema.json").is_file()
         )
@@ -205,14 +209,12 @@ class RunAgentEvalsTests(unittest.TestCase):
         shutil.copyfile(REPO_ROOT / "AGENTS.md", linked_source / "AGENTS.md")
         shutil.copytree(REPO_ROOT / ".agents", linked_source / ".agents")
         (linked_source / "tests").symlink_to(source / "tests", target_is_directory=True)
-        with self.assertRaisesRegex(RUNNER.EvalInputError, "non-symlink directory"):
-            RUNNER._snapshot_eval_source(linked_source, self.root / "bad-snapshot")
+        with self.assertRaisesRegex(common.EvalInputError, "non-symlink directory"):
+            runtime._snapshot_eval_source(linked_source, self.root / "bad-snapshot")
 
     def test_behavior_prompt_includes_direct_skill_resource(self) -> None:
-        case = RUNNER._load_eval_cases(
-            REPO_ROOT, None, ["routing-heavy-nix-ci"]
-        )[0]
-        prompt = RUNNER._behavior_prompt(
+        case = eval_cases._load_eval_cases(REPO_ROOT, None, ["routing-heavy-nix-ci"])[0]
+        prompt = prompts._behavior_prompt(
             case,
             REPO_ROOT,
             {
@@ -244,7 +246,7 @@ class RunAgentEvalsTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        policy = RUNNER._load_policy(config, "inherit", "inherit")
+        policy = runtime._load_policy(config, "inherit", "inherit")
         self.assertEqual("never", policy.approval_policy)
         self.assertEqual("workspace-write", policy.sandbox_mode)
         self.assertEqual(
@@ -256,7 +258,7 @@ class RunAgentEvalsTests(unittest.TestCase):
             },
             policy.sandbox_workspace_write,
         )
-        rendered = RUNNER._render_config(
+        rendered = runtime._render_config(
             model="gpt-test",
             reasoning_effort="high",
             policy=policy,
@@ -286,17 +288,17 @@ class RunAgentEvalsTests(unittest.TestCase):
             'approval_policy = "on-request"\nsandbox_mode = "danger-full-access"\n',
             encoding="utf-8",
         )
-        policy = RUNNER._load_policy(config, "never", "read-only")
+        policy = runtime._load_policy(config, "never", "read-only")
         self.assertEqual("never", policy.approval_policy)
         self.assertEqual("read-only", policy.sandbox_mode)
         self.assertEqual("command-line", policy.approval_source)
 
     def test_rendered_config_disables_the_selected_payload_skill(self) -> None:
         disabled = self.root / "fixture/.agents/skills/example/SKILL.md"
-        rendered = RUNNER._render_config(
+        rendered = runtime._render_config(
             model="gpt-test",
             reasoning_effort="high",
-            policy=RUNNER.Policy(
+            policy=common.Policy(
                 approval_policy="never",
                 sandbox_mode="read-only",
                 sandbox_workspace_write={},
@@ -319,16 +321,16 @@ class RunAgentEvalsTests(unittest.TestCase):
         (source / "AGENTS.md").write_text("# Rules\n", encoding="utf-8")
         rule = source / ".agents/rule.md"
         rule.write_text("first\n", encoding="utf-8")
-        original = RUNNER._payload_sha256(source)
-        self.assertEqual(original, RUNNER._payload_sha256(source))
+        original = runtime._payload_sha256(source)
+        self.assertEqual(original, runtime._payload_sha256(source))
         rule.write_text("second\n", encoding="utf-8")
-        self.assertNotEqual(original, RUNNER._payload_sha256(source))
+        self.assertNotEqual(original, runtime._payload_sha256(source))
 
     def test_auth_init_creates_private_independent_vault(self) -> None:
         source = self.root / "source-auth.json"
         self.write_chatgpt_auth(source, "synthetic-token")
         state = self.root / "state" / "agent-evals"
-        result = RUNNER._auth_init(source, state, False)
+        result = auth._auth_init(source, state, False)
         vault = state / "auth.json"
         self.assertEqual("initialized", result["status"])
         self.assertEqual(json.loads(source.read_text()), json.loads(vault.read_text()))
@@ -339,21 +341,21 @@ class RunAgentEvalsTests(unittest.TestCase):
         source = self.root / "source-auth.json"
         self.write_chatgpt_auth(source, "synthetic-token")
         state = self.root / "state"
-        RUNNER._auth_init(source, state, False)
-        with self.assertRaisesRegex(RUNNER.EvalInputError, "already exists"):
-            RUNNER._auth_init(source, state, False)
+        auth._auth_init(source, state, False)
+        with self.assertRaisesRegex(common.EvalInputError, "already exists"):
+            auth._auth_init(source, state, False)
 
     def test_auth_init_rejects_insecure_or_symlink_source(self) -> None:
         source = self.root / "source-auth.json"
         self.write_chatgpt_auth(source, "synthetic-token")
         source.chmod(0o644)
-        with self.assertRaisesRegex(RUNNER.EvalInputError, "permissions"):
-            RUNNER._auth_init(source, self.root / "state-a", False)
+        with self.assertRaisesRegex(common.EvalInputError, "permissions"):
+            auth._auth_init(source, self.root / "state-a", False)
         source.chmod(0o600)
         link = self.root / "auth-link.json"
         link.symlink_to(source)
-        with self.assertRaisesRegex(RUNNER.EvalInputError, "non-symlink"):
-            RUNNER._auth_init(link, self.root / "state-b", False)
+        with self.assertRaisesRegex(common.EvalInputError, "non-symlink"):
+            auth._auth_init(link, self.root / "state-b", False)
 
     def test_auth_init_rejects_non_chatgpt_credentials(self) -> None:
         source = self.root / "source-auth.json"
@@ -362,15 +364,15 @@ class RunAgentEvalsTests(unittest.TestCase):
             encoding="utf-8",
         )
         source.chmod(0o600)
-        with self.assertRaisesRegex(RUNNER.EvalInputError, "ChatGPT authentication"):
-            RUNNER._auth_init(source, self.root / "state", False)
+        with self.assertRaisesRegex(common.EvalInputError, "ChatGPT authentication"):
+            auth._auth_init(source, self.root / "state", False)
 
     def test_runtime_auth_refresh_is_persisted_privately(self) -> None:
         temporary = tempfile.TemporaryDirectory(dir=self.root)
         runtime_root = Path(temporary.name)
         codex_home = runtime_root / "codex-home"
         codex_home.mkdir()
-        runtime = RUNNER.Runtime(
+        runtime = common.Runtime(
             temporary=temporary,
             root=runtime_root,
             home=runtime_root / "home",
@@ -383,7 +385,7 @@ class RunAgentEvalsTests(unittest.TestCase):
         self.write_chatgpt_auth(runtime_auth, "refreshed-synthetic-token")
         vault = self.root / "vault.json"
         self.write_chatgpt_auth(vault, "old-synthetic-token")
-        secrets = RUNNER._sync_runtime_auth(runtime, vault)
+        secrets = auth._sync_runtime_auth(runtime, vault)
         self.assertIn("refreshed-synthetic-token", secrets)
         self.assertIn("refreshed-synthetic-token", vault.read_text())
         self.assertEqual(0o600, stat.S_IMODE(vault.stat().st_mode))
@@ -391,7 +393,7 @@ class RunAgentEvalsTests(unittest.TestCase):
 
     def test_copy_payload_excludes_repository_maintenance_files(self) -> None:
         destination = self.root / "fixture"
-        RUNNER._copy_payload(REPO_ROOT, destination)
+        runtime._copy_payload(REPO_ROOT, destination)
         self.assertEqual(
             {"AGENTS.md", ".agents"}, {path.name for path in destination.iterdir()}
         )
@@ -403,20 +405,22 @@ class RunAgentEvalsTests(unittest.TestCase):
         (source / ".agents").mkdir(parents=True)
         (source / "AGENTS.md").write_text("# Agent\n")
         (source / ".agents" / "linked.md").symlink_to(source / "AGENTS.md")
-        with self.assertRaisesRegex(RUNNER.EvalInputError, "symlinks"):
-            RUNNER._copy_payload(source, self.root / "fixture")
+        with self.assertRaisesRegex(common.EvalInputError, "symlinks"):
+            runtime._copy_payload(source, self.root / "fixture")
 
     def test_artifacts_require_confirmed_ignored_containment(self) -> None:
         source = self.root / "artifact-root"
         source.mkdir()
         (source / ".gitignore").write_text("tmp/\n", encoding="utf-8")
-        selected = RUNNER._artifact_base(source, Path("tmp/agent/custom"))
-        self.assertTrue(RUNNER._is_relative_to(selected, source / "tmp/agent"))
+        selected = suite._artifact_base(source, Path("tmp/agent/custom"))
+        self.assertTrue(common._is_relative_to(selected, source / "tmp/agent"))
         (source / ".gitignore").write_text("dist/\n", encoding="utf-8")
-        with self.assertRaisesRegex(RUNNER.EvalInputError, "must ignore tmp"):
-            RUNNER._artifact_base(source, None)
+        with self.assertRaisesRegex(common.EvalInputError, "must ignore tmp"):
+            suite._artifact_base(source, None)
 
-    def test_restricted_catalog_removes_apply_patch_only_for_selected_model(self) -> None:
+    def test_restricted_catalog_removes_apply_patch_only_for_selected_model(
+        self,
+    ) -> None:
         catalog = {
             "models": [
                 {
@@ -432,7 +436,7 @@ class RunAgentEvalsTests(unittest.TestCase):
                 },
             ]
         }
-        restricted = RUNNER._restrict_model_catalog(catalog, "gpt-test", "high")
+        restricted = runtime._restrict_model_catalog(catalog, "gpt-test", "high")
         self.assertEqual(1, len(restricted["models"]))
         self.assertIsNone(restricted["models"][0]["apply_patch_tool_type"])
         self.assertEqual("built-in", restricted["models"][0]["base_instructions"])
@@ -447,8 +451,8 @@ class RunAgentEvalsTests(unittest.TestCase):
                 }
             ]
         }
-        with self.assertRaisesRegex(RUNNER.EvalInputError, "does not advertise"):
-            RUNNER._restrict_model_catalog(catalog, "gpt-test", "xhigh")
+        with self.assertRaisesRegex(common.EvalInputError, "does not advertise"):
+            runtime._restrict_model_catalog(catalog, "gpt-test", "xhigh")
 
     def test_tool_event_detection_allows_messages_and_rejects_actions(self) -> None:
         safe = [
@@ -461,16 +465,16 @@ class RunAgentEvalsTests(unittest.TestCase):
                 "item": {"type": "error", "message": "synthetic config error"},
             }
         ]
-        unsafe = [
-            {"type": "item.started", "item": {"type": "plan_update"}}
-        ]
-        self.assertFalse(RUNNER._tool_call_in_events(safe))
-        self.assertFalse(RUNNER._tool_call_in_events(error))
-        self.assertTrue(RUNNER._tool_call_in_events(unsafe))
-        self.assertTrue(RUNNER._failed_event_in_events(error))
+        unsafe = [{"type": "item.started", "item": {"type": "plan_update"}}]
+        self.assertFalse(stages._tool_call_in_events(safe))
+        self.assertFalse(stages._tool_call_in_events(error))
+        self.assertTrue(stages._tool_call_in_events(unsafe))
+        self.assertTrue(stages._failed_event_in_events(error))
         self.assertEqual(
-            ["synthetic config error"], RUNNER._event_failure_messages(error)
+            ["synthetic config error"], stages._event_failure_messages(error)
         )
+        with self.assertRaisesRegex(common.EvalRuntimeError, "invalid JSON"):
+            stages._parse_events('{"type":')
 
     def test_tool_surface_allowlist_accepts_missing_and_subset(self) -> None:
         allowed = {
@@ -478,10 +482,10 @@ class RunAgentEvalsTests(unittest.TestCase):
             ("function", "update_plan"),
             ("function", "view_image"),
         }
-        self.assertEqual(set(), RUNNER._validate_tool_surface_request({}, allowed))
+        self.assertEqual(set(), isolation._validate_tool_surface_request({}, allowed))
         self.assertEqual(
             {("function", "update_plan")},
-            RUNNER._validate_tool_surface_request(
+            isolation._validate_tool_surface_request(
                 {"tools": [{"type": "function", "name": "update_plan"}]},
                 allowed,
             ),
@@ -489,12 +493,12 @@ class RunAgentEvalsTests(unittest.TestCase):
 
     def test_tool_surface_allowlist_rejects_unsafe_or_malformed_tools(self) -> None:
         allowed = {("function", "update_plan")}
-        with self.assertRaisesRegex(RUNNER.EvalRuntimeError, "exceeds"):
-            RUNNER._validate_tool_surface_request(
+        with self.assertRaisesRegex(common.EvalRuntimeError, "exceeds"):
+            isolation._validate_tool_surface_request(
                 {"tools": [{"type": "function", "name": "shell"}]}, allowed
             )
-        with self.assertRaisesRegex(RUNNER.EvalRuntimeError, "duplicate"):
-            RUNNER._validate_tool_surface_request(
+        with self.assertRaisesRegex(common.EvalRuntimeError, "duplicate"):
+            isolation._validate_tool_surface_request(
                 {
                     "tools": [
                         {"type": "function", "name": "update_plan"},
@@ -503,10 +507,10 @@ class RunAgentEvalsTests(unittest.TestCase):
                 },
                 allowed,
             )
-        with self.assertRaisesRegex(RUNNER.EvalRuntimeError, "must be an array"):
-            RUNNER._validate_tool_surface_request({"tools": None}, allowed)
-        with self.assertRaisesRegex(RUNNER.EvalRuntimeError, "not valid JSON"):
-            RUNNER._validate_tool_surface_request({"invalid_json": True}, allowed)
+        with self.assertRaisesRegex(common.EvalRuntimeError, "must be an array"):
+            isolation._validate_tool_surface_request({"tools": None}, allowed)
+        with self.assertRaisesRegex(common.EvalRuntimeError, "not valid JSON"):
+            isolation._validate_tool_surface_request({"invalid_json": True}, allowed)
 
     def test_route_scoring_requires_expected_and_rejects_forbidden(self) -> None:
         case = self.first_case()
@@ -514,14 +518,14 @@ class RunAgentEvalsTests(unittest.TestCase):
             "selected_rules": list(case.expected_rules),
             "selected_skills": list(case.expected_skills),
         }
-        self.assertTrue(RUNNER._score_route(case, route)["passed"])
+        self.assertTrue(scoring._score_route(case, route)["passed"])
         route["selected_rules"].append(".agents/rules/formatting.md")
-        score = RUNNER._score_route(case, route)
+        score = scoring._score_route(case, route)
         self.assertTrue(score["passed"])
         self.assertEqual([".agents/rules/formatting.md"], score["unexpected_rules"])
 
         route["selected_rules"].remove(case.expected_rules[-1])
-        score = RUNNER._score_route(case, route)
+        score = scoring._score_route(case, route)
         self.assertFalse(score["passed"])
         self.assertEqual([case.expected_rules[-1]], score["missing_rules"])
 
@@ -532,14 +536,12 @@ class RunAgentEvalsTests(unittest.TestCase):
                 case.forbidden_skills[0],
             ],
         }
-        score = RUNNER._score_route(case, route)
+        score = scoring._score_route(case, route)
         self.assertFalse(score["passed"])
-        self.assertEqual(
-            [case.forbidden_skills[0]], score["forbidden_skills_selected"]
-        )
+        self.assertEqual([case.forbidden_skills[0]], score["forbidden_skills_selected"])
 
     def test_judge_scoring_is_exact(self) -> None:
-        behavior_case = RUNNER._load_eval_cases(
+        behavior_case = eval_cases._load_eval_cases(
             REPO_ROOT, None, ["safety-test-weakening"]
         )[0]
         assert behavior_case.behavior is not None
@@ -555,14 +557,14 @@ class RunAgentEvalsTests(unittest.TestCase):
             ],
             "summary": "The candidate meets the rubric.",
         }
-        self.assertTrue(RUNNER._score_judge(behavior_case, judge)["passed"])
+        self.assertTrue(scoring._score_judge(behavior_case, judge)["passed"])
         judge["criteria"][0]["verdict"] = "unknown"
-        self.assertFalse(RUNNER._score_judge(behavior_case, judge)["passed"])
+        self.assertFalse(scoring._score_judge(behavior_case, judge)["passed"])
 
     def test_safety_oracles_require_only_deterministically_routed_security_rules(
         self,
     ) -> None:
-        cases = RUNNER._load_eval_cases(
+        cases = eval_cases._load_eval_cases(
             REPO_ROOT,
             None,
             ["safety-real-data-reset", "safety-hosted-nix-exception"],
@@ -574,7 +576,7 @@ class RunAgentEvalsTests(unittest.TestCase):
 
     def test_certification_thresholds_are_layered(self) -> None:
         routing = self.first_case()
-        safety = RUNNER._load_eval_cases(
+        safety = eval_cases._load_eval_cases(
             REPO_ROOT, None, ["safety-test-weakening"]
         )[0]
 
@@ -586,9 +588,9 @@ class RunAgentEvalsTests(unittest.TestCase):
                 "status": "passed" if passed else "failed",
                 "route": {"status": "passed" if passed else "failed"},
                 "behavior": {
-                    "status": (
-                        "passed" if passed else "failed"
-                    ) if case.behavior is not None else "not-applicable"
+                    "status": ("passed" if passed else "failed")
+                    if case.behavior is not None
+                    else "not-applicable"
                 },
                 "baseline": {"status": "not-requested"},
             }
@@ -601,7 +603,7 @@ class RunAgentEvalsTests(unittest.TestCase):
             result(safety, 2, True),
             result(safety, 3, False),
         ]
-        summaries, _dimensions, _warnings = RUNNER._aggregate_case_results(
+        summaries, _dimensions, _warnings = scoring._aggregate_case_results(
             [routing, safety], results, 3, True
         )
         by_id = {item["id"]: item for item in summaries}
@@ -609,7 +611,7 @@ class RunAgentEvalsTests(unittest.TestCase):
         self.assertFalse(by_id[safety.id]["passed"])
 
     def test_certification_compares_completed_skill_baselines(self) -> None:
-        case = RUNNER._load_eval_cases(
+        case = eval_cases._load_eval_cases(
             REPO_ROOT, None, ["skill-ai-visual-positive"]
         )[0]
 
@@ -621,12 +623,8 @@ class RunAgentEvalsTests(unittest.TestCase):
                     "attempt": attempt,
                     "status": "passed" if enabled_passed else "failed",
                     "route": {"status": "passed"},
-                    "behavior": {
-                        "status": "passed" if enabled_passed else "failed"
-                    },
-                    "baseline": {
-                        "status": "passed" if disabled_passed else "failed"
-                    },
+                    "behavior": {"status": "passed" if enabled_passed else "failed"},
+                    "baseline": {"status": "passed" if disabled_passed else "failed"},
                 }
                 for attempt, (enabled_passed, disabled_passed) in enumerate(
                     zip(enabled, disabled, strict=True), start=1
@@ -639,7 +637,7 @@ class RunAgentEvalsTests(unittest.TestCase):
             ([True, True, False], [True, True, True], "negative", False, 0),
         ):
             with self.subTest(effect=effect):
-                summaries, _dimensions, warnings = RUNNER._aggregate_case_results(
+                summaries, _dimensions, warnings = scoring._aggregate_case_results(
                     [case], results(enabled, disabled), 3, True
                 )
                 self.assertEqual(effect, summaries[0]["baseline"]["effect"])
@@ -647,7 +645,7 @@ class RunAgentEvalsTests(unittest.TestCase):
                 self.assertEqual(warning_count, len(warnings))
 
     def test_owned_process_timeout_terminates_only_its_process_group(self) -> None:
-        result = RUNNER._run_owned_process(
+        result = runtime._run_owned_process(
             [sys.executable, "-c", "import time; time.sleep(5)"],
             cwd=self.root,
             environment=dict(os.environ),
@@ -656,6 +654,131 @@ class RunAgentEvalsTests(unittest.TestCase):
         self.assertTrue(result.timed_out)
         self.assertNotEqual(0, result.returncode)
 
+    def test_stage_failure_redacts_output_before_reporting_nonzero_exit(self) -> None:
+        temporary = tempfile.TemporaryDirectory(dir=self.root)
+        runtime_root = Path(temporary.name)
+        runtime_fixture = runtime_root / "fixture"
+        runtime_codex_home = runtime_root / "codex-home"
+        runtime_fixture.mkdir()
+        runtime_codex_home.mkdir()
+        isolated = common.Runtime(
+            temporary=temporary,
+            root=runtime_root,
+            home=runtime_root / "home",
+            codex_home=runtime_codex_home,
+            fixture=runtime_fixture,
+            config_path=runtime_codex_home / "config.toml",
+            model_catalog_path=runtime_root / "models.json",
+        )
+        secret = "synthetic-secret-value"
+        events = self.root / "failed.events.jsonl"
+        stderr = self.root / "failed.stderr.txt"
+        process = common.ProcessResult(
+            returncode=7,
+            stdout=f"partial output {secret} at {runtime_root}",
+            stderr=f"Authorization: Bearer {secret}",
+            duration_seconds=0.1,
+        )
+        with mock.patch.object(stages, "_run_owned_process", return_value=process):
+            with self.assertRaisesRegex(common.EvalRuntimeError, "exited with 7"):
+                stages._run_codex_stage(
+                    codex_bin=self.root / "fake-codex",
+                    runtime=isolated,
+                    model="gpt-test",
+                    prompt="safe prompt",
+                    schema_path=self.root / "schema.json",
+                    output_path=self.root / "final.json",
+                    events_path=events,
+                    stderr_path=stderr,
+                    timeout=1,
+                    secrets_to_redact={secret},
+                )
+        self.assertNotIn(secret, events.read_text(encoding="utf-8"))
+        self.assertNotIn(str(runtime_root), events.read_text(encoding="utf-8"))
+        self.assertIn("<isolated-runtime>", events.read_text(encoding="utf-8"))
+        self.assertIn("Bearer <redacted>", stderr.read_text(encoding="utf-8"))
+        isolated.cleanup()
+
+    def test_missing_vault_fails_before_artifact_creation(self) -> None:
+        source_root = self.root / "missing-vault-repo"
+        source_root.mkdir()
+        (source_root / ".gitignore").write_text("tmp/\n", encoding="utf-8")
+        state_dir = self.root / "missing-vault-state"
+        preflight = {
+            "agent": {"name": "codex", "version": "codex-cli test"},
+            "subject": {},
+            "payload_sha256": "0" * 64,
+            "checks": {},
+        }
+        with mock.patch.object(suite, "_perform_preflight", return_value=preflight):
+            with self.assertRaisesRegex(
+                common.EvalInputError, "credential vault is missing"
+            ):
+                suite._run_suite_from_snapshot(
+                    repository_root=source_root,
+                    source_root=source_root,
+                    codex_bin=self.root / "fake-codex",
+                    model="gpt-test",
+                    reasoning_effort="high",
+                    judge_model="gpt-test",
+                    judge_reasoning_effort="high",
+                    policy=common.Policy("never", "read-only", {}, "test", "test"),
+                    timeout=1,
+                    state_dir=state_dir,
+                    artifacts_dir=None,
+                    cases=[self.first_case()],
+                    repeat=1,
+                    certify=False,
+                )
+        self.assertFalse((source_root / "tmp").exists())
+
+    def test_partial_stage_failure_persists_atomic_result_and_summary(self) -> None:
+        source_root = self.root / "partial-stage-repo"
+        source_root.mkdir()
+        (source_root / ".gitignore").write_text("tmp/\n", encoding="utf-8")
+        state_dir = self.root / "partial-stage-state"
+        source_auth = self.root / "partial-stage-auth.json"
+        self.write_chatgpt_auth(source_auth, "synthetic-partial-stage-token")
+        auth._auth_init(source_auth, state_dir, False)
+        preflight = {
+            "agent": {"name": "codex", "version": "codex-cli test"},
+            "subject": {},
+            "payload_sha256": "0" * 64,
+            "checks": {},
+        }
+        with (
+            mock.patch.object(suite, "_perform_preflight", return_value=preflight),
+            mock.patch.object(
+                suite,
+                "_run_fresh_codex_stage",
+                side_effect=common.EvalRuntimeError("injected partial stage failure"),
+            ),
+        ):
+            summary, status = suite._run_suite_from_snapshot(
+                repository_root=source_root,
+                source_root=source_root,
+                codex_bin=self.root / "fake-codex",
+                model="gpt-test",
+                reasoning_effort="high",
+                judge_model="gpt-test",
+                judge_reasoning_effort="high",
+                policy=common.Policy("never", "read-only", {}, "test", "test"),
+                timeout=1,
+                state_dir=state_dir,
+                artifacts_dir=None,
+                cases=[self.first_case()],
+                repeat=1,
+                certify=False,
+            )
+        self.assertEqual(1, status)
+        self.assertEqual("failed", summary["status"])
+        self.assertIn("injected partial stage failure", summary["results"][0]["error"])
+        run_dir = Path(summary["artifacts_dir"])
+        self.assertEqual(summary, json.loads((run_dir / "summary.json").read_text()))
+        result_paths = list(run_dir.glob("*--1/result.json"))
+        self.assertEqual(1, len(result_paths))
+        self.assertEqual("failed", json.loads(result_paths[0].read_text())["status"])
+
     def test_full_suite_orchestration_with_fake_codex(self) -> None:
         source_root = self.root / "repo"
         source_root.mkdir()
@@ -663,7 +786,7 @@ class RunAgentEvalsTests(unittest.TestCase):
         shutil.copyfile(REPO_ROOT / ".gitignore", source_root / ".gitignore")
         shutil.copytree(REPO_ROOT / ".agents", source_root / ".agents")
         shutil.copytree(REPO_ROOT / "tests/evals", source_root / "tests/evals")
-        case = RUNNER._load_eval_cases(
+        case = eval_cases._load_eval_cases(
             source_root, None, ["safety-test-weakening"]
         )[0]
         route_result_path = self.root / "fake-route-result.json"
@@ -795,15 +918,15 @@ class RunAgentEvalsTests(unittest.TestCase):
         source_auth = self.root / "source-auth.json"
         self.write_chatgpt_auth(source_auth, "initial-synthetic-token")
         state_dir = self.root / "state"
-        RUNNER._auth_init(source_auth, state_dir, False)
-        policy = RUNNER.Policy(
+        auth._auth_init(source_auth, state_dir, False)
+        policy = common.Policy(
             approval_policy="never",
             sandbox_mode="read-only",
             sandbox_workspace_write={},
             approval_source="test",
             sandbox_source="test",
         )
-        summary, status = RUNNER._run_suite(
+        summary, status = suite._run_suite(
             source_root=source_root,
             codex_bin=fake_codex,
             model="gpt-eval-test",
@@ -855,7 +978,9 @@ class RunAgentEvalsTests(unittest.TestCase):
         self.assertEqual(
             0, summary["preflight"]["judge_prompt_sources"]["fixture_entry_count"]
         )
-        self.assertIn("refreshed-synthetic-token", (state_dir / "auth.json").read_text())
+        self.assertIn(
+            "refreshed-synthetic-token", (state_dir / "auth.json").read_text()
+        )
         artifacts = Path(summary["artifacts_dir"])
         self.assertEqual([], list(artifacts.rglob("auth.json")))
         summary_schema = json.loads(
@@ -872,7 +997,7 @@ class RunAgentEvalsTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        failed_summary, failed_status = RUNNER._run_suite(
+        failed_summary, failed_status = suite._run_suite(
             source_root=source_root,
             codex_bin=fake_codex,
             model="gpt-eval-test",
@@ -912,7 +1037,7 @@ class RunAgentEvalsTests(unittest.TestCase):
         self.write_chatgpt_auth(source, "synthetic-token")
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
-            status = RUNNER.main(
+            status = cli.main(
                 [
                     "auth-init",
                     "--source",
@@ -923,10 +1048,11 @@ class RunAgentEvalsTests(unittest.TestCase):
             )
         self.assertEqual(0, status)
         self.assertEqual("initialized", json.loads(stdout.getvalue())["status"])
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
-            io.StringIO()
+        with (
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
         ):
-            status = RUNNER.main(
+            status = cli.main(
                 [
                     "auth-init",
                     "--source",
@@ -936,10 +1062,10 @@ class RunAgentEvalsTests(unittest.TestCase):
                 ]
             )
         self.assertEqual(2, status)
-        self.assertEqual(1, RUNNER._trial_count(None, False))
-        self.assertEqual(3, RUNNER._trial_count(None, True))
-        with self.assertRaisesRegex(RUNNER.EvalInputError, "requires --repeat 3"):
-            RUNNER._trial_count(2, True)
+        self.assertEqual(1, common._trial_count(None, False))
+        self.assertEqual(3, common._trial_count(None, True))
+        with self.assertRaisesRegex(common.EvalInputError, "requires --repeat 3"):
+            common._trial_count(2, True)
 
 
 if __name__ == "__main__":
