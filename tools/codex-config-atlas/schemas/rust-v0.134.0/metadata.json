@@ -1,4 +1,5 @@
 {
+  "commitSha": "a75c443fdb64db48c3cf4bdb247c7ee52c0144c9",
   "fetchedAt": "2026-06-23T11:35:14Z",
   "schemaFile": "codex-rs/core/config.schema.json",
   "schemaSha256": "sha256:72ae3e6931847261ed6ecdaa0133d33e70d7e9036733c7b3516094cf8f46d1d5",

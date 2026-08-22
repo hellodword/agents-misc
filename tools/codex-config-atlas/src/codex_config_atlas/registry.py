@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +14,17 @@ SCHEMA_FILE = "config.schema.json"
 METADATA_FILE = "metadata.json"
 MANIFEST_FILE = "manifest.json"
 SCHEMA_FILE_IN_UPSTREAM = "codex-rs/core/config.schema.json"
+MANIFEST_KEYS = {"minVersion", "versions"}
+MANIFEST_ENTRY_KEYS = {"version", "tag", "schemaPath", "metadataPath"}
+METADATA_KEYS = {
+    "version",
+    "tag",
+    "commitSha",
+    "schemaUrl",
+    "schemaFile",
+    "schemaSha256",
+    "fetchedAt",
+}
 
 
 @dataclass(frozen=True)
@@ -33,7 +45,9 @@ def parse_version(version: str) -> Version:
 
 def ensure_supported_version(version: str, min_version: str) -> None:
     if parse_version(version) < parse_version(min_version):
-        raise ValueError(f"version {version} is below minimum supported version {min_version}")
+        raise ValueError(
+            f"version {version} is below minimum supported version {min_version}"
+        )
 
 
 def tag_for_version(version: str) -> str:
@@ -68,12 +82,19 @@ def sha256_bytes(data: bytes) -> str:
 
 
 def utc_now_rfc3339() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 def json_dump(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    )
 
 
 def json_load(path: Path) -> Any:
@@ -84,27 +105,35 @@ def default_manifest(min_version: str) -> dict[str, Any]:
     return {"minVersion": min_version, "versions": []}
 
 
-def normalize_manifest(manifest: dict[str, Any], min_version: str | None = None) -> dict[str, Any]:
+def normalize_manifest(
+    manifest: dict[str, Any], min_version: str | None = None
+) -> dict[str, Any]:
+    if set(manifest) != MANIFEST_KEYS:
+        raise ValueError(
+            f"manifest keys must be exactly {sorted(MANIFEST_KEYS)}; got {sorted(manifest)}"
+        )
     versions = manifest.get("versions", [])
+    if not isinstance(versions, list):
+        raise ValueError("manifest versions must be an array")
     normalized = []
     for item in versions:
+        if not isinstance(item, dict) or set(item) != MANIFEST_ENTRY_KEYS:
+            actual = sorted(item) if isinstance(item, dict) else type(item).__name__
+            raise ValueError(
+                f"manifest version keys must be exactly {sorted(MANIFEST_ENTRY_KEYS)}; got {actual}"
+            )
         version = item["version"]
         normalized.append(
             {
                 "version": version,
-                "tag": item.get("tag", tag_for_version(version)),
-                "schemaPath": item.get(
-                    "schemaPath", f"{version_dir_name(version)}/{SCHEMA_FILE}"
-                ),
-                "metadataPath": item.get(
-                    "metadataPath", f"{version_dir_name(version)}/{METADATA_FILE}"
-                ),
+                "tag": item["tag"],
+                "schemaPath": item["schemaPath"],
+                "metadataPath": item["metadataPath"],
             }
         )
 
-    normalized.sort(key=lambda item: parse_version(item["version"]))
     result = {
-        "minVersion": manifest.get("minVersion", min_version),
+        "minVersion": manifest["minVersion"],
         "versions": normalized,
     }
     if result["minVersion"] is None:
@@ -147,7 +176,9 @@ def entry_for_version(manifest: dict[str, Any], version: str) -> RegistryEntry |
 
 
 def upsert_manifest_entry(manifest: dict[str, Any], version: str) -> dict[str, Any]:
-    entries = [item for item in manifest.get("versions", []) if item["version"] != version]
+    entries = [
+        item for item in manifest.get("versions", []) if item["version"] != version
+    ]
     entries.append(
         {
             "version": version,
@@ -161,6 +192,36 @@ def upsert_manifest_entry(manifest: dict[str, Any], version: str) -> dict[str, A
         "versions": sorted(entries, key=lambda item: parse_version(item["version"])),
     }
     return manifest
+
+
+def _registry_path(schemas_dir: Path, relative_path: str, expected: str) -> Path:
+    if relative_path != expected:
+        raise ValueError(f"registry path mismatch: {relative_path!r} != {expected!r}")
+    relative = Path(relative_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"registry path escapes schemas directory: {relative_path!r}")
+
+    root = schemas_dir.resolve()
+    candidate = root / relative
+    try:
+        candidate.resolve(strict=False).relative_to(root)
+    except ValueError as exc:
+        raise ValueError(
+            f"registry path escapes schemas directory: {relative_path!r}"
+        ) from exc
+
+    current = candidate
+    while current != root:
+        if current.is_symlink():
+            raise ValueError(f"registry path contains a symlink: {relative_path!r}")
+        current = current.parent
+    return candidate
+
+
+def _validate_commit_sha(value: Any, version: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{40}", value) is None:
+        raise ValueError(f"metadata commitSha is invalid for {version}")
+    return value
 
 
 def validate_manifest(
@@ -191,22 +252,48 @@ def validate_manifest(
 
         expected_tag = tag_for_version(version)
         if item["tag"] != expected_tag:
-            raise ValueError(f"manifest tag mismatch for {version}: {item['tag']} != {expected_tag}")
+            raise ValueError(
+                f"manifest tag mismatch for {version}: {item['tag']} != {expected_tag}"
+            )
 
-        schema_file = schemas_dir / item["schemaPath"]
-        metadata_file = schemas_dir / item["metadataPath"]
+        schema_file = _registry_path(
+            schemas_dir,
+            item["schemaPath"],
+            f"{version_dir_name(version)}/{SCHEMA_FILE}",
+        )
+        metadata_file = _registry_path(
+            schemas_dir,
+            item["metadataPath"],
+            f"{version_dir_name(version)}/{METADATA_FILE}",
+        )
         if not schema_file.is_file():
             raise ValueError(f"missing schema file for {version}: {schema_file}")
         if not metadata_file.is_file():
             raise ValueError(f"missing metadata file for {version}: {metadata_file}")
 
         metadata = json_load(metadata_file)
+        if not isinstance(metadata, dict) or set(metadata) != METADATA_KEYS:
+            actual = (
+                sorted(metadata)
+                if isinstance(metadata, dict)
+                else type(metadata).__name__
+            )
+            raise ValueError(
+                f"metadata keys are invalid for {version}: expected {sorted(METADATA_KEYS)}, got {actual}"
+            )
         schema_bytes = schema_file.read_bytes()
+        try:
+            schema = json.loads(schema_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"schema JSON is invalid for {version}") from exc
+        if not isinstance(schema, dict):
+            raise ValueError(f"schema root must be an object for {version}")
         expected_url = schema_url_for_version(version)
         if metadata.get("version") != version:
             raise ValueError(f"metadata version mismatch for {version}")
         if metadata.get("tag") != expected_tag:
             raise ValueError(f"metadata tag mismatch for {version}")
+        _validate_commit_sha(metadata.get("commitSha"), version)
         if metadata.get("schemaUrl") != expected_url:
             raise ValueError(f"metadata schemaUrl mismatch for {version}")
         if metadata.get("schemaFile") != SCHEMA_FILE_IN_UPSTREAM:

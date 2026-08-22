@@ -24,6 +24,8 @@ dist/
 playwright-report/
 test-results/
 tools/agents-viewer/web/e2e.config.json
+tools/codex-config-atlas/.schemas-sync-*/
+tools/codex-config-atlas/.schemas-backup-*/
 
 node_modules/
 target/
