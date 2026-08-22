@@ -3,51 +3,29 @@ from __future__ import annotations
 import argparse
 
 from common import (
-    add_ref_argument,
-    command_exists,
-    jobs_limit,
+    add_repo_root_argument,
+    ensure_pinned_head,
     json_stdout,
+    load_manifest,
     main_wrapper,
-    run,
-    upstream_build_env,
-    worktree_path,
+    require_git_worktree,
+    run_upstream,
 )
 
 
-DEFAULT_PACKAGES = [
-    "codex-protocol",
-    "codex-config",
-    "codex-hooks",
-    "codex-core",
-    "codex-app-server-protocol",
-    "codex-analytics",
-    "codex-app-server",
-    "codex-tui",
-]
-
-
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run the narrow Codex cargo check")
-    add_ref_argument(parser)
-    parser.add_argument("--package", action="append", dest="packages", help="Cargo package to check")
+    parser = argparse.ArgumentParser(description="Run the manifest-defined Codex validation command")
+    add_repo_root_argument(parser)
     args = parser.parse_args()
-
-    if not command_exists("cargo"):
-        raise RuntimeError("cargo is not available in this environment")
-
-    src = worktree_path(args.ref)
-    packages = args.packages or DEFAULT_PACKAGES
-    command = ["cargo", "check"]
-    for package in packages:
-        command.extend(["-p", package])
-    command.extend(["--jobs", str(jobs_limit())])
-    run(command, cwd=src / "codex-rs", env=upstream_build_env(src))
+    manifest = load_manifest(args.repo_root)
+    require_git_worktree(manifest.worktree)
+    ensure_pinned_head(manifest.worktree, manifest.upstream)
+    run_upstream(manifest, manifest.upstream.validation_command, cwd=manifest.worktree)
     json_stdout(
         {
-            "ref": args.ref,
-            "worktree": str(src),
-            "packages": packages,
-            "jobs": jobs_limit(),
+            "ref": manifest.upstream.ref,
+            "revision": manifest.upstream.revision,
+            "command": list(manifest.upstream.validation_command),
         }
     )
     return 0

@@ -1,0 +1,775 @@
+diff --git a/codex-rs/analytics/src/events.rs b/codex-rs/analytics/src/events.rs
+index 7080aa20b7fc09bbedd4b14873bd580f898c3085..884ed756554f274af2c3c0dbe82a39217ae11c25 100644
+--- a/codex-rs/analytics/src/events.rs
++++ b/codex-rs/analytics/src/events.rs
+@@ -1370,6 +1370,8 @@ fn analytics_hook_event_name(event_name: HookEventName) -> &'static str {
+         HookEventName::PostToolUse => "PostToolUse",
+         HookEventName::PreCompact => "PreCompact",
+         HookEventName::PostCompact => "PostCompact",
++        HookEventName::RequestError => "RequestError",
++        HookEventName::AbnormalStop => "AbnormalStop",
+         HookEventName::SessionStart => "SessionStart",
+         HookEventName::SessionEnd => "SessionEnd",
+         HookEventName::UserPromptSubmit => "UserPromptSubmit",
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/config.rs b/codex-rs/app-server-protocol/src/protocol/v2/config.rs
+index 5b04cdf532ed6a3ef665c01c9345d930bd06a346..fb2341efc35f38ae5027f0b5992537310f8cb556 100644
+--- a/codex-rs/app-server-protocol/src/protocol/v2/config.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/config.rs
+@@ -483,6 +483,12 @@ pub struct ManagedHooksRequirements {
+     #[serde(rename = "PostCompact")]
+     #[ts(rename = "PostCompact")]
+     pub post_compact: Vec<ConfiguredHookMatcherGroup>,
++    #[serde(rename = "RequestError")]
++    #[ts(rename = "RequestError")]
++    pub request_error: Vec<ConfiguredHookMatcherGroup>,
++    #[serde(rename = "AbnormalStop")]
++    #[ts(rename = "AbnormalStop")]
++    pub abnormal_stop: Vec<ConfiguredHookMatcherGroup>,
+     #[serde(rename = "SessionStart")]
+     #[ts(rename = "SessionStart")]
+     pub session_start: Vec<ConfiguredHookMatcherGroup>,
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/hook.rs b/codex-rs/app-server-protocol/src/protocol/v2/hook.rs
+index 41e34a3f8f11f34c12c8f880f029e734442f0400..53288b770c9898e8f86444fb4ff4fd97f4640946 100644
+--- a/codex-rs/app-server-protocol/src/protocol/v2/hook.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/hook.rs
+@@ -17,7 +17,7 @@ use serde::Serialize;
+ 
+ v2_enum_from_core!(
+     pub enum HookEventName from CoreHookEventName {
+-        PreToolUse, PermissionRequest, PostToolUse, PreCompact, PostCompact, SessionStart, SessionEnd, UserPromptSubmit, SubagentStart, SubagentStop, Stop
++        PreToolUse, PermissionRequest, PostToolUse, PreCompact, PostCompact, RequestError, AbnormalStop, SessionStart, SessionEnd, UserPromptSubmit, SubagentStart, SubagentStop, Stop
+     }
+ );
+ 
+diff --git a/codex-rs/config/src/hook_config.rs b/codex-rs/config/src/hook_config.rs
+index 9716db03621a859b96a283a897b3cc48c873dffb..79a421346eace1b5084721027912d3022bd0da19 100644
+--- a/codex-rs/config/src/hook_config.rs
++++ b/codex-rs/config/src/hook_config.rs
+@@ -44,6 +44,10 @@ pub struct HookEventsToml {
+     pub pre_compact: Vec<MatcherGroup>,
+     #[serde(rename = "PostCompact", default)]
+     pub post_compact: Vec<MatcherGroup>,
++    #[serde(rename = "RequestError", default)]
++    pub request_error: Vec<MatcherGroup>,
++    #[serde(rename = "AbnormalStop", default)]
++    pub abnormal_stop: Vec<MatcherGroup>,
+     #[serde(rename = "SessionStart", default)]
+     pub session_start: Vec<MatcherGroup>,
+     #[serde(rename = "SessionEnd", default)]
+@@ -66,6 +70,8 @@ impl HookEventsToml {
+             post_tool_use,
+             pre_compact,
+             post_compact,
++            request_error,
++            abnormal_stop,
+             session_start,
+             session_end,
+             user_prompt_submit,
+@@ -78,6 +84,8 @@ impl HookEventsToml {
+             && post_tool_use.is_empty()
+             && pre_compact.is_empty()
+             && post_compact.is_empty()
++            && request_error.is_empty()
++            && abnormal_stop.is_empty()
+             && session_start.is_empty()
+             && session_end.is_empty()
+             && user_prompt_submit.is_empty()
+@@ -93,6 +101,8 @@ impl HookEventsToml {
+             post_tool_use,
+             pre_compact,
+             post_compact,
++            request_error,
++            abnormal_stop,
+             session_start,
+             session_end,
+             user_prompt_submit,
+@@ -106,6 +116,8 @@ impl HookEventsToml {
+             post_tool_use,
+             pre_compact,
+             post_compact,
++            request_error,
++            abnormal_stop,
+             session_start,
+             session_end,
+             user_prompt_submit,
+@@ -119,13 +131,15 @@ impl HookEventsToml {
+         .sum()
+     }
+ 
+-    pub fn into_matcher_groups(self) -> [(HookEventName, Vec<MatcherGroup>); 11] {
++    pub fn into_matcher_groups(self) -> [(HookEventName, Vec<MatcherGroup>); 13] {
+         [
+             (HookEventName::PreToolUse, self.pre_tool_use),
+             (HookEventName::PermissionRequest, self.permission_request),
+             (HookEventName::PostToolUse, self.post_tool_use),
+             (HookEventName::PreCompact, self.pre_compact),
+             (HookEventName::PostCompact, self.post_compact),
++            (HookEventName::RequestError, self.request_error),
++            (HookEventName::AbnormalStop, self.abnormal_stop),
+             (HookEventName::SessionStart, self.session_start),
+             (HookEventName::SessionEnd, self.session_end),
+             (HookEventName::UserPromptSubmit, self.user_prompt_submit),
+diff --git a/codex-rs/config/src/requirements_layers/hooks.rs b/codex-rs/config/src/requirements_layers/hooks.rs
+index 10b6c1c09cb332131ef5231c61dec415a0ae91f5..176dbf3673fa38395237052a252e0a4c12c8b88e 100644
+--- a/codex-rs/config/src/requirements_layers/hooks.rs
++++ b/codex-rs/config/src/requirements_layers/hooks.rs
+@@ -209,6 +209,8 @@ fn append_hook_events(existing: &mut HookEventsToml, incoming: HookEventsToml) -
+         post_tool_use,
+         pre_compact,
+         post_compact,
++        request_error,
++        abnormal_stop,
+         session_start,
+         session_end,
+         user_prompt_submit,
+@@ -223,6 +225,8 @@ fn append_hook_events(existing: &mut HookEventsToml, incoming: HookEventsToml) -
+     changed |= append_vec(&mut existing.post_tool_use, post_tool_use);
+     changed |= append_vec(&mut existing.pre_compact, pre_compact);
+     changed |= append_vec(&mut existing.post_compact, post_compact);
++    changed |= append_vec(&mut existing.request_error, request_error);
++    changed |= append_vec(&mut existing.abnormal_stop, abnormal_stop);
+     changed |= append_vec(&mut existing.session_start, session_start);
+     changed |= append_vec(&mut existing.session_end, session_end);
+     changed |= append_vec(&mut existing.user_prompt_submit, user_prompt_submit);
+diff --git a/codex-rs/hooks/src/events/common.rs b/codex-rs/hooks/src/events/common.rs
+index c67602086c54c2ab8d399d93c5ebd199496f5162..56a18c3f9dce6a965622d8321a84c7ba86bb9168 100644
+--- a/codex-rs/hooks/src/events/common.rs
++++ b/codex-rs/hooks/src/events/common.rs
+@@ -121,7 +121,10 @@ pub(crate) fn matcher_pattern_for_event(
+         | HookEventName::SubagentStop
+         | HookEventName::PreCompact
+         | HookEventName::PostCompact => matcher,
+-        HookEventName::UserPromptSubmit | HookEventName::Stop => None,
++        HookEventName::UserPromptSubmit
++        | HookEventName::RequestError
++        | HookEventName::AbnormalStop
++        | HookEventName::Stop => None,
+     }
+ }
+ 
+diff --git a/codex-rs/hooks/src/events/mod.rs b/codex-rs/hooks/src/events/mod.rs
+index eb5c727d3179db8a0bec1601aafc52fb56ec1ed9..707780000774016113013a91832626146f011663 100644
+--- a/codex-rs/hooks/src/events/mod.rs
++++ b/codex-rs/hooks/src/events/mod.rs
+@@ -1,5 +1,6 @@
+ pub(crate) mod common;
+ pub mod compact;
++pub mod model_request;
+ pub mod permission_request;
+ pub mod post_tool_use;
+ pub mod pre_tool_use;
+diff --git a/codex-rs/hooks/src/events/model_request.rs b/codex-rs/hooks/src/events/model_request.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..f34d7075c8576786738927e061e81f769c83cde1
+--- /dev/null
++++ b/codex-rs/hooks/src/events/model_request.rs
+@@ -0,0 +1,336 @@
++use std::path::PathBuf;
++
++use codex_protocol::ThreadId;
++use codex_protocol::protocol::HookCompletedEvent;
++use codex_protocol::protocol::HookEventName;
++use codex_protocol::protocol::HookOutputEntry;
++use codex_protocol::protocol::HookOutputEntryKind;
++use codex_protocol::protocol::HookRunStatus;
++use codex_protocol::protocol::HookRunSummary;
++use codex_utils_absolute_path::AbsolutePathBuf;
++use serde_json::Value;
++
++use super::common;
++use crate::engine::ClaudeHooksEngine;
++use crate::engine::ConfiguredHandler;
++use crate::engine::HandlerRunResult;
++use crate::engine::dispatcher;
++use crate::engine::output_parser;
++use crate::schema::AbnormalStopCommandInput;
++use crate::schema::NullableString;
++use crate::schema::RequestErrorCommandInput;
++
++#[derive(Debug, Clone)]
++pub struct RequestErrorRequest {
++    pub session_id: ThreadId,
++    pub turn_id: String,
++    pub transcript_path: Option<PathBuf>,
++    pub cwd: AbsolutePathBuf,
++    pub model: String,
++    pub provider: String,
++    pub request_type: String,
++    pub request_subtype: String,
++    pub endpoint_path: String,
++    pub retry_attempt: u64,
++    pub max_retries: u64,
++    pub will_retry: bool,
++    pub next_retry_attempt: Option<u64>,
++    pub error_retryable: bool,
++    pub error_kind: String,
++    pub error_message: String,
++    pub codex_error_info: Value,
++}
++
++#[derive(Debug, Clone)]
++pub struct AbnormalStopRequest {
++    pub session_id: ThreadId,
++    pub turn_id: String,
++    pub transcript_path: Option<PathBuf>,
++    pub cwd: AbsolutePathBuf,
++    pub model: String,
++    pub provider: String,
++    pub goal_mode: bool,
++    pub approval_policy: String,
++    pub sandbox_mode: String,
++    pub request_type: String,
++    pub request_subtype: String,
++    pub endpoint_path: String,
++    pub retry_attempt: u64,
++    pub max_retries: u64,
++    pub error_kind: String,
++    pub error_message: String,
++    pub codex_error_info: Value,
++}
++
++#[derive(Debug, Default)]
++pub struct NotificationHookOutcome {
++    pub hook_events: Vec<HookCompletedEvent>,
++    pub suppress_turn_error_lifecycle: Option<bool>,
++}
++
++#[derive(Debug, Default)]
++struct NotificationHandlerData {
++    suppress_turn_error_lifecycle: Option<bool>,
++}
++
++pub(crate) fn preview_request_error(
++    handlers: &[ConfiguredHandler],
++    _request: &RequestErrorRequest,
++) -> Vec<HookRunSummary> {
++    preview(handlers, HookEventName::RequestError)
++}
++
++pub(crate) async fn run_request_error(
++    engine: &ClaudeHooksEngine,
++    request: RequestErrorRequest,
++) -> NotificationHookOutcome {
++    let input_json = match serde_json::to_string(&RequestErrorCommandInput {
++        session_id: request.session_id.to_string(),
++        turn_id: request.turn_id.clone(),
++        transcript_path: NullableString::from_path(request.transcript_path),
++        cwd: request.cwd.display().to_string(),
++        hook_event_name: "RequestError".to_string(),
++        model: request.model,
++        provider: request.provider,
++        request_type: request.request_type,
++        request_subtype: request.request_subtype,
++        endpoint_path: request.endpoint_path,
++        retry_attempt: request.retry_attempt,
++        max_retries: request.max_retries,
++        will_retry: request.will_retry,
++        next_retry_attempt: request.next_retry_attempt,
++        error_retryable: request.error_retryable,
++        error_kind: request.error_kind,
++        error_message: request.error_message,
++        codex_error_info: request.codex_error_info,
++    }) {
++        Ok(input_json) => input_json,
++        Err(error) => {
++            let matched = select(&engine.handlers, HookEventName::RequestError);
++            return NotificationHookOutcome {
++                hook_events: common::serialization_failure_hook_events(
++                    matched,
++                    Some(request.turn_id),
++                    format!("failed to serialize request error hook input: {error}"),
++                ),
++                suppress_turn_error_lifecycle: None,
++            };
++        }
++    };
++    run_notification(
++        engine,
++        HookEventName::RequestError,
++        input_json,
++        request.cwd,
++        Some(request.turn_id),
++        parse_request_error_completed,
++    )
++    .await
++}
++
++pub(crate) fn preview_abnormal_stop(
++    handlers: &[ConfiguredHandler],
++    _request: &AbnormalStopRequest,
++) -> Vec<HookRunSummary> {
++    preview(handlers, HookEventName::AbnormalStop)
++}
++
++pub(crate) async fn run_abnormal_stop(
++    engine: &ClaudeHooksEngine,
++    request: AbnormalStopRequest,
++) -> NotificationHookOutcome {
++    let default_suppress_turn_error_lifecycle =
++        request.goal_mode && request.error_kind != "CyberPolicy";
++    let input_json = match serde_json::to_string(&AbnormalStopCommandInput {
++        session_id: request.session_id.to_string(),
++        turn_id: request.turn_id.clone(),
++        transcript_path: NullableString::from_path(request.transcript_path),
++        cwd: request.cwd.display().to_string(),
++        hook_event_name: "AbnormalStop".to_string(),
++        model: request.model,
++        provider: request.provider,
++        goal_mode: request.goal_mode,
++        approval_policy: request.approval_policy,
++        sandbox_mode: request.sandbox_mode,
++        reason: "request_error".to_string(),
++        request_type: request.request_type,
++        request_subtype: request.request_subtype,
++        endpoint_path: request.endpoint_path,
++        retry_attempt: request.retry_attempt,
++        max_retries: request.max_retries,
++        error_kind: request.error_kind,
++        error_message: request.error_message,
++        codex_error_info: request.codex_error_info,
++    }) {
++        Ok(input_json) => input_json,
++        Err(error) => {
++            let matched = select(&engine.handlers, HookEventName::AbnormalStop);
++            return NotificationHookOutcome {
++                hook_events: common::serialization_failure_hook_events(
++                    matched,
++                    Some(request.turn_id),
++                    format!("failed to serialize abnormal stop hook input: {error}"),
++                ),
++                suppress_turn_error_lifecycle: Some(default_suppress_turn_error_lifecycle),
++            };
++        }
++    };
++    let mut outcome = run_notification(
++        engine,
++        HookEventName::AbnormalStop,
++        input_json,
++        request.cwd,
++        Some(request.turn_id),
++        parse_abnormal_stop_completed,
++    )
++    .await;
++    if outcome.suppress_turn_error_lifecycle.is_none() {
++        outcome.suppress_turn_error_lifecycle = Some(default_suppress_turn_error_lifecycle);
++    }
++    outcome
++}
++
++fn preview(handlers: &[ConfiguredHandler], event_name: HookEventName) -> Vec<HookRunSummary> {
++    select(handlers, event_name)
++        .into_iter()
++        .map(|handler| dispatcher::running_summary(&handler))
++        .collect()
++}
++
++fn select(handlers: &[ConfiguredHandler], event_name: HookEventName) -> Vec<ConfiguredHandler> {
++    dispatcher::select_handlers(handlers, event_name, /*matcher_input*/ None)
++}
++
++async fn run_notification(
++    engine: &ClaudeHooksEngine,
++    event_name: HookEventName,
++    input_json: String,
++    cwd: AbsolutePathBuf,
++    turn_id: Option<String>,
++    parse: fn(
++        &ConfiguredHandler,
++        HandlerRunResult,
++        Option<String>,
++    ) -> dispatcher::ParsedHandler<NotificationHandlerData>,
++) -> NotificationHookOutcome {
++    let matched = select(&engine.handlers, event_name);
++    if matched.is_empty() {
++        return NotificationHookOutcome::default();
++    }
++
++    let results =
++        dispatcher::execute_handlers(engine, matched, input_json, cwd.as_path(), turn_id, parse)
++            .await;
++
++    NotificationHookOutcome {
++        suppress_turn_error_lifecycle: results
++            .iter()
++            .find_map(|result| result.data.suppress_turn_error_lifecycle),
++        hook_events: results.into_iter().map(|result| result.completed).collect(),
++    }
++}
++
++fn parse_request_error_completed(
++    handler: &ConfiguredHandler,
++    run_result: HandlerRunResult,
++    turn_id: Option<String>,
++) -> dispatcher::ParsedHandler<NotificationHandlerData> {
++    parse_notification_completed(
++        handler,
++        run_result,
++        turn_id,
++        "RequestError",
++        output_parser::parse_request_error,
++    )
++}
++
++fn parse_abnormal_stop_completed(
++    handler: &ConfiguredHandler,
++    run_result: HandlerRunResult,
++    turn_id: Option<String>,
++) -> dispatcher::ParsedHandler<NotificationHandlerData> {
++    parse_notification_completed(
++        handler,
++        run_result,
++        turn_id,
++        "AbnormalStop",
++        output_parser::parse_abnormal_stop,
++    )
++}
++
++fn parse_notification_completed(
++    handler: &ConfiguredHandler,
++    run_result: HandlerRunResult,
++    turn_id: Option<String>,
++    event_label: &'static str,
++    parse_output: fn(&str) -> Option<output_parser::StatelessHookOutput>,
++) -> dispatcher::ParsedHandler<NotificationHandlerData> {
++    let mut entries = Vec::new();
++    let mut status = HookRunStatus::Completed;
++    let mut data = NotificationHandlerData::default();
++
++    match run_result.error.as_deref() {
++        Some(error) => {
++            status = HookRunStatus::Failed;
++            entries.push(HookOutputEntry {
++                kind: HookOutputEntryKind::Error,
++                text: error.to_string(),
++            });
++        }
++        None => match run_result.exit_code {
++            Some(0) => {
++                let trimmed_stdout = run_result.stdout.trim();
++                if trimmed_stdout.is_empty() {
++                } else if let Some(parsed) = parse_output(&run_result.stdout) {
++                    if let Some(system_message) = parsed.universal.system_message {
++                        entries.push(HookOutputEntry {
++                            kind: HookOutputEntryKind::Warning,
++                            text: system_message,
++                        });
++                    }
++                    let _ = parsed.universal.suppress_output;
++                    let _ = parsed.universal.continue_processing;
++                    let _ = parsed.universal.stop_reason;
++                    data.suppress_turn_error_lifecycle = parsed.suppress_turn_error_lifecycle;
++                    if let Some(invalid_reason) = parsed.invalid_reason {
++                        status = HookRunStatus::Failed;
++                        entries.push(HookOutputEntry {
++                            kind: HookOutputEntryKind::Error,
++                            text: invalid_reason,
++                        });
++                    }
++                } else if output_parser::looks_like_json(&run_result.stdout) {
++                    status = HookRunStatus::Failed;
++                    entries.push(HookOutputEntry {
++                        kind: HookOutputEntryKind::Error,
++                        text: format!("hook returned invalid {event_label} hook JSON output"),
++                    });
++                }
++            }
++            Some(code) => {
++                status = HookRunStatus::Failed;
++                entries.push(HookOutputEntry {
++                    kind: HookOutputEntryKind::Error,
++                    text: common::trimmed_non_empty(&run_result.stderr)
++                        .unwrap_or_else(|| format!("hook exited with code {code}")),
++                });
++            }
++            None => {
++                status = HookRunStatus::Failed;
++                entries.push(HookOutputEntry {
++                    kind: HookOutputEntryKind::Error,
++                    text: "hook process terminated without an exit code".to_string(),
++                });
++            }
++        },
++    }
++
++    dispatcher::ParsedHandler {
++        completed: HookCompletedEvent {
++            turn_id,
++            run: dispatcher::completed_summary(handler, &run_result, status, entries),
++        },
++        data,
++        completion_order: 0,
++    }
++}
+diff --git a/codex-rs/hooks/src/schema.rs b/codex-rs/hooks/src/schema.rs
+index 3847cc91818a9a141c066e1fc6d734adb60f9bde..e87f862003047e73e0eb2ecc8e2b15216cb0cfd7 100644
+--- a/codex-rs/hooks/src/schema.rs
++++ b/codex-rs/hooks/src/schema.rs
+@@ -21,6 +21,10 @@ const PERMISSION_REQUEST_INPUT_FIXTURE: &str = "permission-request.command.input
+ const PERMISSION_REQUEST_OUTPUT_FIXTURE: &str = "permission-request.command.output.schema.json";
+ const POST_COMPACT_INPUT_FIXTURE: &str = "post-compact.command.input.schema.json";
+ const POST_COMPACT_OUTPUT_FIXTURE: &str = "post-compact.command.output.schema.json";
++const REQUEST_ERROR_INPUT_FIXTURE: &str = "request-error.command.input.schema.json";
++const REQUEST_ERROR_OUTPUT_FIXTURE: &str = "request-error.command.output.schema.json";
++const ABNORMAL_STOP_INPUT_FIXTURE: &str = "abnormal-stop.command.input.schema.json";
++const ABNORMAL_STOP_OUTPUT_FIXTURE: &str = "abnormal-stop.command.output.schema.json";
+ const PRE_TOOL_USE_INPUT_FIXTURE: &str = "pre-tool-use.command.input.schema.json";
+ const PRE_TOOL_USE_OUTPUT_FIXTURE: &str = "pre-tool-use.command.output.schema.json";
+ const PRE_COMPACT_INPUT_FIXTURE: &str = "pre-compact.command.input.schema.json";
+@@ -108,6 +112,10 @@ pub(crate) enum HookEventNameWire {
+     PreCompact,
+     #[serde(rename = "PostCompact")]
+     PostCompact,
++    #[serde(rename = "RequestError")]
++    RequestError,
++    #[serde(rename = "AbnormalStop")]
++    AbnormalStop,
+     #[serde(rename = "SessionStart")]
+     SessionStart,
+     #[serde(rename = "UserPromptSubmit")]
+@@ -179,6 +187,25 @@ pub(crate) struct PostCompactCommandOutputWire {
+     pub universal: HookUniversalOutputWire,
+ }
+ 
++#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
++#[serde(rename_all = "camelCase")]
++#[serde(deny_unknown_fields)]
++#[schemars(rename = "request-error.command.output")]
++pub(crate) struct RequestErrorCommandOutputWire {
++    #[serde(flatten)]
++    pub universal: HookUniversalOutputWire,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
++#[serde(rename_all = "camelCase")]
++#[serde(deny_unknown_fields)]
++#[schemars(rename = "abnormal-stop.command.output")]
++pub(crate) struct AbnormalStopCommandOutputWire {
++    #[serde(flatten)]
++    pub universal: HookUniversalOutputWire,
++    pub suppress_turn_error_lifecycle: Option<bool>,
++}
++
+ #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+ #[serde(rename_all = "camelCase")]
+ #[serde(deny_unknown_fields)]
+@@ -377,6 +404,70 @@ pub(crate) struct PostCompactCommandInput {
+     pub trigger: String,
+ }
+ 
++#[derive(Debug, Clone, Serialize, JsonSchema)]
++#[serde(rename_all = "camelCase")]
++#[serde(deny_unknown_fields)]
++#[schemars(rename = "request-error.command.input")]
++pub(crate) struct RequestErrorCommandInput {
++    pub session_id: String,
++    /// Codex extension: expose the active turn id to internal turn-scoped hooks.
++    #[serde(rename = "turn_id")]
++    pub turn_id: String,
++    pub transcript_path: NullableString,
++    pub cwd: String,
++    #[schemars(schema_with = "request_error_hook_event_name_schema")]
++    pub hook_event_name: String,
++    pub model: String,
++    pub provider: String,
++    #[schemars(schema_with = "model_request_type_schema")]
++    pub request_type: String,
++    #[schemars(schema_with = "model_request_subtype_schema")]
++    pub request_subtype: String,
++    #[schemars(schema_with = "model_request_endpoint_schema")]
++    pub endpoint_path: String,
++    pub retry_attempt: u64,
++    pub max_retries: u64,
++    pub will_retry: bool,
++    pub next_retry_attempt: Option<u64>,
++    pub error_retryable: bool,
++    pub error_kind: String,
++    pub error_message: String,
++    pub codex_error_info: Value,
++}
++
++#[derive(Debug, Clone, Serialize, JsonSchema)]
++#[serde(rename_all = "camelCase")]
++#[serde(deny_unknown_fields)]
++#[schemars(rename = "abnormal-stop.command.input")]
++pub(crate) struct AbnormalStopCommandInput {
++    pub session_id: String,
++    /// Codex extension: expose the active turn id to internal turn-scoped hooks.
++    #[serde(rename = "turn_id")]
++    pub turn_id: String,
++    pub transcript_path: NullableString,
++    pub cwd: String,
++    #[schemars(schema_with = "abnormal_stop_hook_event_name_schema")]
++    pub hook_event_name: String,
++    pub model: String,
++    pub provider: String,
++    pub goal_mode: bool,
++    pub approval_policy: String,
++    pub sandbox_mode: String,
++    #[schemars(schema_with = "abnormal_stop_reason_schema")]
++    pub reason: String,
++    #[schemars(schema_with = "model_request_type_schema")]
++    pub request_type: String,
++    #[schemars(schema_with = "model_request_subtype_schema")]
++    pub request_subtype: String,
++    #[schemars(schema_with = "model_request_endpoint_schema")]
++    pub endpoint_path: String,
++    pub retry_attempt: u64,
++    pub max_retries: u64,
++    pub error_kind: String,
++    pub error_message: String,
++    pub codex_error_info: Value,
++}
++
+ #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+ #[serde(rename_all = "camelCase")]
+ #[serde(deny_unknown_fields)]
+@@ -636,6 +727,22 @@ pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
+         &generated_dir.join(POST_COMPACT_OUTPUT_FIXTURE),
+         schema_json::<PostCompactCommandOutputWire>()?,
+     )?;
++    write_schema(
++        &generated_dir.join(REQUEST_ERROR_INPUT_FIXTURE),
++        schema_json::<RequestErrorCommandInput>()?,
++    )?;
++    write_schema(
++        &generated_dir.join(REQUEST_ERROR_OUTPUT_FIXTURE),
++        schema_json::<RequestErrorCommandOutputWire>()?,
++    )?;
++    write_schema(
++        &generated_dir.join(ABNORMAL_STOP_INPUT_FIXTURE),
++        schema_json::<AbnormalStopCommandInput>()?,
++    )?;
++    write_schema(
++        &generated_dir.join(ABNORMAL_STOP_OUTPUT_FIXTURE),
++        schema_json::<AbnormalStopCommandOutputWire>()?,
++    )?;
+     write_schema(
+         &generated_dir.join(PRE_COMPACT_INPUT_FIXTURE),
+         schema_json::<PreCompactCommandInput>()?,
+@@ -775,6 +882,14 @@ fn post_compact_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+     string_const_schema("PostCompact")
+ }
+ 
++fn request_error_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
++    string_const_schema("RequestError")
++}
++
++fn abnormal_stop_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
++    string_const_schema("AbnormalStop")
++}
++
+ fn pre_tool_use_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+     string_const_schema("PreToolUse")
+ }
+@@ -817,6 +932,22 @@ fn compaction_trigger_schema(_gen: &mut SchemaGenerator) -> Schema {
+     string_enum_schema(&["manual", "auto"])
+ }
+ 
++fn model_request_type_schema(_gen: &mut SchemaGenerator) -> Schema {
++    string_enum_schema(&["sampling", "compact"])
++}
++
++fn model_request_subtype_schema(_gen: &mut SchemaGenerator) -> Schema {
++    string_enum_schema(&["normal", "local", "remote", "remote_v2"])
++}
++
++fn model_request_endpoint_schema(_gen: &mut SchemaGenerator) -> Schema {
++    string_enum_schema(&["/responses", "/responses/compact"])
++}
++
++fn abnormal_stop_reason_schema(_gen: &mut SchemaGenerator) -> Schema {
++    string_const_schema("request_error")
++}
++
+ fn string_const_schema(value: &str) -> Schema {
+     let mut schema = SchemaObject {
+         instance_type: Some(InstanceType::String.into()),
+@@ -846,6 +977,9 @@ fn default_continue() -> bool {
+ 
+ #[cfg(test)]
+ mod tests {
++    use super::ABNORMAL_STOP_INPUT_FIXTURE;
++    use super::ABNORMAL_STOP_OUTPUT_FIXTURE;
++    use super::AbnormalStopCommandInput;
+     use super::NullableString;
+     use super::PERMISSION_REQUEST_INPUT_FIXTURE;
+     use super::PERMISSION_REQUEST_OUTPUT_FIXTURE;
+@@ -865,6 +999,9 @@ mod tests {
+     use super::PreCompactCommandInput;
+     use super::PreToolUseCommandInput;
+     use super::PreToolUseCommandOutputWire;
++    use super::REQUEST_ERROR_INPUT_FIXTURE;
++    use super::REQUEST_ERROR_OUTPUT_FIXTURE;
++    use super::RequestErrorCommandInput;
+     use super::SESSION_END_INPUT_FIXTURE;
+     use super::SESSION_START_INPUT_FIXTURE;
+     use super::SESSION_START_OUTPUT_FIXTURE;
+@@ -913,6 +1050,18 @@ mod tests {
+             POST_COMPACT_OUTPUT_FIXTURE => {
+                 include_str!("../schema/generated/post-compact.command.output.schema.json")
+             }
++            REQUEST_ERROR_INPUT_FIXTURE => {
++                include_str!("../schema/generated/request-error.command.input.schema.json")
++            }
++            REQUEST_ERROR_OUTPUT_FIXTURE => {
++                include_str!("../schema/generated/request-error.command.output.schema.json")
++            }
++            ABNORMAL_STOP_INPUT_FIXTURE => {
++                include_str!("../schema/generated/abnormal-stop.command.input.schema.json")
++            }
++            ABNORMAL_STOP_OUTPUT_FIXTURE => {
++                include_str!("../schema/generated/abnormal-stop.command.output.schema.json")
++            }
+             PRE_COMPACT_INPUT_FIXTURE => {
+                 include_str!("../schema/generated/pre-compact.command.input.schema.json")
+             }
+@@ -993,6 +1142,10 @@ mod tests {
+             PERMISSION_REQUEST_OUTPUT_FIXTURE,
+             POST_COMPACT_INPUT_FIXTURE,
+             POST_COMPACT_OUTPUT_FIXTURE,
++            REQUEST_ERROR_INPUT_FIXTURE,
++            REQUEST_ERROR_OUTPUT_FIXTURE,
++            ABNORMAL_STOP_INPUT_FIXTURE,
++            ABNORMAL_STOP_OUTPUT_FIXTURE,
+             PRE_COMPACT_INPUT_FIXTURE,
+             PRE_COMPACT_OUTPUT_FIXTURE,
+             PRE_TOOL_USE_INPUT_FIXTURE,
+@@ -1071,6 +1224,16 @@ mod tests {
+                 .expect("serialize permission request input schema"),
+         )
+         .expect("parse permission request input schema");
++        let request_error: Value = serde_json::from_slice(
++            &schema_json::<RequestErrorCommandInput>()
++                .expect("serialize request error input schema"),
++        )
++        .expect("parse request error input schema");
++        let abnormal_stop: Value = serde_json::from_slice(
++            &schema_json::<AbnormalStopCommandInput>()
++                .expect("serialize abnormal stop input schema"),
++        )
++        .expect("parse abnormal stop input schema");
+         let user_prompt_submit: Value = serde_json::from_slice(
+             &schema_json::<UserPromptSubmitCommandInput>()
+                 .expect("serialize user prompt submit input schema"),
+@@ -1097,6 +1260,8 @@ mod tests {
+             &post_tool_use,
+             &pre_compact,
+             &post_compact,
++            &request_error,
++            &abnormal_stop,
+             &user_prompt_submit,
+             &subagent_start,
+             &subagent_stop,
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 2ae44aea087d623dabe45cfcb84ca7b21b22000a..8674f1c8d275b8b99d6cce9e47339bc9c9bc2ff8 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -1502,6 +1502,8 @@ pub enum HookEventName {
+     PostToolUse,
+     PreCompact,
+     PostCompact,
++    RequestError,
++    AbnormalStop,
+     SessionStart,
+     SessionEnd,
+     UserPromptSubmit,

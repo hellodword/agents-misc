@@ -1,0 +1,191 @@
+[[patch]]
+file = "0001-provider-network-config.patch"
+intent = "Keep OpenAI provider endpoint and compact timeout configuration explicit."
+behavior = "Operators can override sampling and compact network settings with validated precedence and defaults."
+source_files = [
+  "codex-rs/app-server/src/request_processors/thread_processor_tests.rs",
+  "codex-rs/config/src/thread_config.rs",
+  "codex-rs/config/src/thread_config/remote.rs",
+  "codex-rs/core/src/client.rs",
+  "codex-rs/core/tests/responses_headers.rs",
+  "codex-rs/core/tests/suite/client.rs",
+  "codex-rs/core/tests/suite/client_websockets.rs",
+  "codex-rs/core/tests/suite/stream_error_allows_next_turn.rs",
+  "codex-rs/core/tests/suite/stream_no_completed.rs",
+  "codex-rs/login/src/auth_env_telemetry.rs",
+  "codex-rs/model-provider/src/provider.rs",
+]
+source_prefixes = ["codex-rs/model-provider-info/src/"]
+generated_files = []
+generated_prefixes = []
+tests = [["cargo", "test", "-p", "codex-model-provider-info"]]
+
+[[patch]]
+file = "0002-failure-hook-contract.patch"
+intent = "Define stable model-request failure and abnormal-stop hook contracts."
+behavior = "Hook handlers receive documented typed decisions and return validated suppression results."
+source_files = [
+  "codex-rs/analytics/src/events.rs",
+  "codex-rs/app-server-protocol/src/protocol/v2/config.rs",
+  "codex-rs/app-server-protocol/src/protocol/v2/hook.rs",
+  "codex-rs/config/src/hook_config.rs",
+  "codex-rs/config/src/requirements_layers/hooks.rs",
+  "codex-rs/hooks/src/schema.rs",
+  "codex-rs/protocol/src/protocol.rs",
+]
+source_prefixes = ["codex-rs/hooks/src/events/"]
+generated_files = []
+generated_prefixes = []
+tests = [["cargo", "test", "-p", "codex-hooks", "events"]]
+
+[[patch]]
+file = "0003-failure-hook-integration.patch"
+intent = "Emit one bounded hook event for each visible retry, fallback, and stop decision."
+behavior = "Request failures are aggregated, dispatched without blocking model flow, and abnormal stops follow bounded suppression policy."
+source_files = [
+  "codex-rs/app-server/src/request_processors/config_processor.rs",
+  "codex-rs/core/src/compact.rs",
+  "codex-rs/core/src/compact_remote.rs",
+  "codex-rs/core/src/compact_remote_v2.rs",
+  "codex-rs/core/src/compact_remote_v2_attempt.rs",
+  "codex-rs/core/src/hook_runtime.rs",
+  "codex-rs/core/src/responses_retry.rs",
+  "codex-rs/core/src/session/turn.rs",
+  "codex-rs/core/src/tasks/lifecycle.rs",
+  "codex-rs/ext/extension-api/src/lib.rs",
+  "codex-rs/ext/extension-api/src/state.rs",
+  "codex-rs/ext/goal/src/extension.rs",
+  "codex-rs/hooks/src/lib.rs",
+  "codex-rs/hooks/src/registry.rs",
+  "codex-rs/tui/src/bottom_pane/hooks_browser_view.rs",
+  "codex-rs/tui/src/chatwidget/tests/helpers.rs",
+  "codex-rs/tui/src/history_cell/hook_cell.rs",
+]
+source_prefixes = ["codex-rs/hooks/src/engine/"]
+generated_files = []
+generated_prefixes = []
+tests = [
+  ["cargo", "test", "-p", "codex-hooks", "engine"],
+  ["cargo", "test", "-p", "codex-core", "--lib", "hook_runtime"],
+]
+
+[[patch]]
+file = "0004-terminal-wait.patch"
+intent = "Match terminal commands to named wait rules with bounded polling and explicit decisions."
+behavior = "The first valid rule controls polling, completion, timeout, continue, and terminate outcomes without unchecked time arithmetic."
+source_files = [
+  "codex-rs/config/Cargo.toml",
+  "codex-rs/config/src/lib.rs",
+  "codex-rs/config/src/terminal_wait.rs",
+  "codex-rs/core/src/config/mod.rs",
+  "codex-rs/core/src/session/session.rs",
+  "codex-rs/core/src/session/tests.rs",
+  "codex-rs/core/src/tools/context.rs",
+  "codex-rs/core/src/tools/context_tests.rs",
+  "codex-rs/core/src/tools/handlers/mod.rs",
+  "codex-rs/core/src/tools/handlers/shell/shell_command.rs",
+  "codex-rs/core/src/tools/handlers/shell_spec.rs",
+  "codex-rs/core/src/tools/handlers/shell_spec_tests.rs",
+  "codex-rs/core/src/tools/handlers/unified_exec.rs",
+  "codex-rs/core/src/tools/handlers/unified_exec_tests.rs",
+  "codex-rs/core/src/tools/spec_plan.rs",
+  "codex-rs/core/src/tools/spec_plan_tests.rs",
+  "codex-rs/core/src/unified_exec/errors.rs",
+  "codex-rs/core/src/unified_exec/mod.rs",
+  "codex-rs/core/src/unified_exec/mod_tests.rs",
+  "codex-rs/core/src/unified_exec/process_manager.rs",
+  "codex-rs/core/src/unified_exec/process_manager_tests.rs",
+]
+source_prefixes = ["codex-rs/core/src/tools/handlers/unified_exec/"]
+generated_files = []
+generated_prefixes = []
+tests = [["cargo", "test", "-p", "codex-core", "--lib", "terminal_wait"]]
+
+[[patch]]
+file = "0005-code-mode-wait-control.patch"
+intent = "Separate ordinary Code Mode yields from terminal-wait decision yields."
+behavior = "Decision leases can be established, resumed once, expired, and converted across host/runtime protocols without ambiguous state inference."
+source_files = [
+  "codex-rs/code-mode-host/src/grpc/conversions.rs",
+  "codex-rs/code-mode-host/src/grpc/service_tests.rs",
+  "codex-rs/code-mode-protocol/src/host/host_tests.rs",
+  "codex-rs/code-mode-protocol/src/host/payload.rs",
+  "codex-rs/code-mode-protocol/src/lib.rs",
+  "codex-rs/code-mode-protocol/src/runtime.rs",
+  "codex-rs/code-mode-runtime/src/cell_actor/mod.rs",
+  "codex-rs/code-mode-runtime/src/cell_actor/tests.rs",
+  "codex-rs/code-mode-runtime/src/cell_actor/types.rs",
+  "codex-rs/code-mode-runtime/src/service.rs",
+  "codex-rs/code-mode-runtime/src/service_contract_tests.rs",
+  "codex-rs/code-mode-runtime/src/service_tests.rs",
+  "codex-rs/code-mode-runtime/src/session_runtime/tests.rs",
+  "codex-rs/code-mode-runtime/src/session_runtime/types.rs",
+  "codex-rs/code-mode/src/cell_actor/mod.rs",
+  "codex-rs/code-mode/src/cell_actor/tests.rs",
+  "codex-rs/code-mode/src/cell_actor/types.rs",
+  "codex-rs/code-mode/src/grpc_session/conversion.rs",
+  "codex-rs/code-mode/src/grpc_session/conversion_tests.rs",
+  "codex-rs/code-mode/src/grpc_session/generation.rs",
+  "codex-rs/code-mode/src/grpc_session/generation_tests.rs",
+  "codex-rs/code-mode/src/remote_session/connection/driver/cell_ids.rs",
+  "codex-rs/code-mode/src/remote_session/connection/driver_tests.rs",
+  "codex-rs/code-mode/src/service.rs",
+  "codex-rs/code-mode/src/service_contract_tests.rs",
+  "codex-rs/code-mode/src/service_tests.rs",
+  "codex-rs/code-mode/src/session_runtime/tests.rs",
+  "codex-rs/code-mode/src/session_runtime/types.rs",
+  "codex-rs/core/src/tools/code_mode/execute_handler.rs",
+  "codex-rs/core/src/tools/code_mode/mod.rs",
+  "codex-rs/core/src/tools/code_mode/wait_handler.rs",
+  "codex-rs/core/tests/suite/code_mode.rs",
+  "codex-rs/thread-manager-sample/src/main.rs",
+]
+source_prefixes = []
+generated_files = []
+generated_prefixes = []
+tests = [
+  ["cargo", "test", "-p", "codex-code-mode-protocol"],
+  ["cargo", "test", "-p", "codex-code-mode-runtime"],
+  ["cargo", "test", "-p", "codex-code-mode"],
+]
+
+[[patch]]
+file = "0006-generated-contracts.patch"
+intent = "Own all generated schemas, protobuf bindings, TypeScript contracts, and Cargo resolution in one reproducible patch."
+behavior = "Consumers receive generated contracts that are reproduced from the same pinned source and generator commands."
+source_files = [
+  "codex-rs/config/scripts/generate-proto.sh",
+  "codex-rs/config/src/config_toml.rs",
+  "justfile",
+]
+source_prefixes = []
+generated_files = [
+  "codex-rs/Cargo.lock",
+  "codex-rs/code-mode-protocol/src/grpc/codex.code_mode.v1.proto",
+  "codex-rs/config/src/thread_config/proto/codex.thread_config.v1.proto",
+  "codex-rs/config/src/thread_config/proto/codex.thread_config.v1.rs",
+  "codex-rs/core/config.schema.json",
+]
+generated_prefixes = [
+  "codex-rs/app-server-protocol/schema/",
+  "codex-rs/hooks/schema/generated/",
+]
+tests = [
+  ["cargo", "test", "-p", "codex-app-server-protocol"],
+  ["cargo", "test", "-p", "codex-config"],
+]
+
+[[patch]]
+file = "0007-plan-request-auto-resolution.patch"
+intent = "Temporarily preserve the currently maintained Plan request auto-resolution delta during the tool migration."
+behavior = "This boundary exists only for phase-one byte-preserving refresh and is deleted in phase two."
+source_files = [
+  "codex-rs/core/src/tools/handlers/request_user_input.rs",
+  "codex-rs/core/src/tools/handlers/request_user_input_spec.rs",
+  "codex-rs/core/src/tools/handlers/request_user_input_spec_tests.rs",
+  "codex-rs/core/tests/suite/request_user_input.rs",
+]
+source_prefixes = []
+generated_files = []
+generated_prefixes = []
+tests = [["cargo", "test", "-p", "codex-core", "request_user_input"]]

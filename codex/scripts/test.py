@@ -1,67 +1,74 @@
 from __future__ import annotations
 
 import argparse
-import filecmp
+import tempfile
+from pathlib import Path
 
 from common import (
-    CODEX_ROOT,
-    add_ref_argument,
-    apply_series,
-    checkout_ref,
+    add_repo_root_argument,
+    apply_patches,
+    changed_tree_digest,
     ensure_clean,
+    ensure_pinned_head,
+    ensure_real_index_clean,
     json_stdout,
-    load_upstream,
+    load_manifest,
     main_wrapper,
-    patch_dir,
-    read_series,
+    patch_paths,
     require_git_worktree,
     run,
-    schema_file,
-    upstream_build_env,
-    worktree_path,
+    run_upstream,
 )
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate a Codex patch series")
-    add_ref_argument(parser)
-    parser.add_argument("--cargo-check", action="store_true", help="Also run the narrow cargo check")
+    parser = argparse.ArgumentParser(description="Validate application, generation, and targeted Codex behavior")
+    add_repo_root_argument(parser)
     args = parser.parse_args()
-
-    upstream = load_upstream()
-    src = worktree_path(args.ref, upstream)
-    directory = patch_dir(args.ref, upstream)
-    saved_schema = directory / "config.schema.json"
+    manifest = load_manifest(args.repo_root)
+    src = manifest.worktree
     require_git_worktree(src)
     ensure_clean(src)
-    checkout_ref(src, args.ref)
-    patches = read_series(args.ref, upstream)
-    apply_series(src, patches, check_only=True, index=True)
-
-    applied = False
-    try:
-        apply_series(src, patches, check_only=False, index=True)
-        applied = True
-        run(list(upstream.get("schemaCommand", ["just", "write-config-schema"])), cwd=src, env=upstream_build_env(src))
-        generated_schema = schema_file(src, upstream)
-        if not saved_schema.exists():
-            raise RuntimeError(f"missing saved schema: {saved_schema}")
-        if not filecmp.cmp(generated_schema, saved_schema, shallow=False):
-            raise RuntimeError(f"generated schema differs from saved schema: {saved_schema}")
-        if args.cargo_check:
-            run(["python3", str(CODEX_ROOT / "scripts" / "build.py"), "--ref", args.ref])
-    finally:
-        if applied:
-            run(["git", "reset", "--hard", "HEAD"], cwd=src, check=False)
-
+    ensure_real_index_clean(src)
+    ensure_pinned_head(src, manifest.upstream)
+    with tempfile.TemporaryDirectory(prefix="codex-test-") as temporary:
+        validation = Path(temporary) / "src"
+        run(
+            [
+                "git",
+                "-c",
+                "protocol.file.allow=always",
+                "clone",
+                "--quiet",
+                "--no-hardlinks",
+                str(src),
+                str(validation),
+            ]
+        )
+        run(["git", "checkout", "--quiet", "--detach", manifest.upstream.revision], cwd=validation)
+        patches = patch_paths(manifest)
+        apply_patches(validation, patches, check_only=False)
+        before_generate = changed_tree_digest(validation)
+        for command in manifest.upstream.generate_commands:
+            run_upstream(manifest, command, cwd=validation)
+        after_generate = changed_tree_digest(validation)
+        if after_generate != before_generate:
+            raise RuntimeError("tracked generated artifacts drift after applying the patch series")
+        run_upstream(manifest, manifest.upstream.validation_command, cwd=validation)
+        seen: set[tuple[str, ...]] = set()
+        for patch in manifest.patches:
+            for command in patch.tests:
+                if command in seen:
+                    continue
+                seen.add(command)
+                run_upstream(manifest, command, cwd=validation)
     json_stdout(
         {
-            "ref": args.ref,
-            "worktree": str(src),
-            "patchDir": str(directory),
-            "patches": [patch.name for patch in patches],
-            "schema": str(saved_schema),
-            "cargoCheck": args.cargo_check,
+            "ref": manifest.upstream.ref,
+            "revision": manifest.upstream.revision,
+            "patches": [patch.file for patch in manifest.patches],
+            "generationStable": True,
+            "targetedCommands": len(seen),
         }
     )
     return 0

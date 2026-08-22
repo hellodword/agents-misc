@@ -44,29 +44,37 @@ build:
 build-tools:
   nix build --no-link .#codex-config-atlas .#codex-config-atlas-registry .#codex-config-atlas-data .#codex-config-atlas-site
 
-# Fetch an upstream Codex checkout for a ref.
-codex-fetch ref:
-  nix develop .#dev --command python3 codex/scripts/fetch-upstream.py --ref {{ref}}
+# Validate the declarative Codex maintenance manifests.
+codex-manifest-check:
+  nix develop .#dev --command python3 -m unittest codex.tests.test_manifest
 
-# Check whether Codex patches apply to a ref.
-codex-apply-check ref:
-  nix develop .#dev --command python3 codex/scripts/apply-patches.py --ref {{ref}} --check
+# Fetch the one pinned upstream Codex checkout.
+codex-fetch:
+  nix develop .#dev --command python3 codex/scripts/fetch-upstream.py
 
-# Apply Codex patches to a fetched ref.
-codex-apply ref:
-  nix develop .#dev --command python3 codex/scripts/apply-patches.py --ref {{ref}}
+# Check whether the pinned Codex patches apply cumulatively.
+codex-apply-check:
+  nix develop .#dev --command python3 codex/scripts/apply-patches.py --check
 
-# Refresh Codex patches against a ref.
-codex-refresh ref:
-  nix develop .#dev --command python3 codex/scripts/refresh-patches.py --ref {{ref}}
+# Apply the pinned Codex patches.
+codex-apply:
+  nix develop .#dev --command python3 codex/scripts/apply-patches.py
 
-# Run Codex patch tests against a ref.
-codex-test ref:
-  nix develop .#dev --command python3 codex/scripts/test.py --ref {{ref}}
+# Fully validate candidate patches without changing the checked-in patch set.
+codex-refresh-dry-run:
+  nix develop .#dev --command python3 codex/scripts/refresh-patches.py --dry-run
 
-# Build patched Codex against a ref.
-codex-build ref:
-  nix develop .#dev --command python3 codex/scripts/build.py --ref {{ref}}
+# Atomically refresh the pinned Codex patch set.
+codex-refresh:
+  nix develop .#dev --command python3 codex/scripts/refresh-patches.py
+
+# Run cumulative apply, generation-drift, Cargo, and targeted Codex tests.
+codex-test:
+  nix develop .#dev --command python3 codex/scripts/test.py
+
+# Run the manifest-defined Codex Cargo validation command.
+codex-build:
+  nix develop .#dev --command python3 codex/scripts/build.py
 
 # Print current Codex config schema metadata.
 codex-config-atlas-current:

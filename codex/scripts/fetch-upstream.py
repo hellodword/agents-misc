@@ -2,22 +2,20 @@ from __future__ import annotations
 
 import argparse
 
-from common import add_ref_argument, fetch_ref, json_stdout, load_upstream, main_wrapper, worktree_path
+from common import add_repo_root_argument, fetch_upstream, json_stdout, load_manifest, main_wrapper
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Fetch the Codex upstream ref into .work")
-    add_ref_argument(parser)
+    parser = argparse.ArgumentParser(description="Fetch the one pinned Codex upstream revision")
+    add_repo_root_argument(parser)
     args = parser.parse_args()
-
-    upstream = load_upstream()
-    src = worktree_path(args.ref, upstream)
-    checkout_ref = fetch_ref(src, args.ref, upstream)
+    manifest = load_manifest(args.repo_root)
+    resolved = fetch_upstream(manifest)
     json_stdout(
         {
-            "ref": args.ref,
-            "checkoutRef": checkout_ref,
-            "worktree": str(src),
+            "ref": manifest.upstream.ref,
+            "revision": resolved,
+            "worktree": str(manifest.worktree),
         }
     )
     return 0

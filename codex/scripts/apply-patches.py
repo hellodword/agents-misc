@@ -3,39 +3,38 @@ from __future__ import annotations
 import argparse
 
 from common import (
-    add_ref_argument,
-    apply_series,
-    checkout_ref,
+    add_repo_root_argument,
+    apply_patches,
     ensure_clean,
+    ensure_pinned_head,
+    ensure_real_index_clean,
     json_stdout,
-    load_upstream,
+    load_manifest,
     main_wrapper,
-    patch_dir,
-    read_series,
+    patch_paths,
     require_git_worktree,
-    worktree_path,
 )
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Apply or check a Codex patch series")
-    add_ref_argument(parser)
-    parser.add_argument("--check", action="store_true", help="Check applicability without changing files")
+    parser = argparse.ArgumentParser(description="Apply or check the pinned Codex patch series")
+    add_repo_root_argument(parser)
+    parser.add_argument("--check", action="store_true", help="Check cumulative applicability without changing files")
     args = parser.parse_args()
-
-    upstream = load_upstream()
-    src = worktree_path(args.ref, upstream)
+    manifest = load_manifest(args.repo_root)
+    src = manifest.worktree
     require_git_worktree(src)
     ensure_clean(src)
-    checkout_ref(src, args.ref)
-    patches = read_series(args.ref, upstream)
-    apply_series(src, patches, check_only=args.check)
+    ensure_real_index_clean(src)
+    ensure_pinned_head(src, manifest.upstream)
+    patches = patch_paths(manifest)
+    apply_patches(src, patches, check_only=args.check)
     json_stdout(
         {
-            "ref": args.ref,
+            "ref": manifest.upstream.ref,
+            "revision": manifest.upstream.revision,
             "mode": "check" if args.check else "apply",
             "worktree": str(src),
-            "patchDir": str(patch_dir(args.ref, upstream)),
             "patches": [patch.name for patch in patches],
         }
     )

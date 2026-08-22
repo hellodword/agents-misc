@@ -1,0 +1,34 @@
+url = "https://github.com/openai/codex"
+ref = "rust-v0.148.0"
+revision = "3ba0f711642a888aec92a611a3f3b2211157ff89"
+worktree = ".work/codex/rust-v0.148.0/src"
+generate_commands = [
+  ["bash", "codex-rs/config/scripts/generate-proto.sh"],
+  ["just", "write-config-schema"],
+  ["just", "write-app-server-schema"],
+  ["just", "write-hooks-schema"],
+]
+validation_command = [
+  "cargo",
+  "check",
+  "-p",
+  "codex-protocol",
+  "-p",
+  "codex-config",
+  "-p",
+  "codex-hooks",
+  "-p",
+  "codex-core",
+  "-p",
+  "codex-model-provider-info",
+  "-p",
+  "codex-code-mode-protocol",
+  "-p",
+  "codex-code-mode-runtime",
+  "-p",
+  "codex-code-mode",
+  "-p",
+  "codex-app-server-protocol",
+  "-p",
+  "codex-tui",
+]

@@ -36,7 +36,9 @@
 
       inherit (codexProject)
         codexFor
+        patchOrder
         supportedSystems
+        upstream
         ;
 
       codexConfigAtlasFor =
@@ -93,7 +95,6 @@
           lib
           nixpkgs
           supportedSystems
-          codexFor
           ;
       };
 
@@ -114,6 +115,11 @@
             pkgs = final;
           };
         };
+      };
+
+      lib.codexMaintenance = {
+        inherit patchOrder;
+        inherit (upstream) ref revision;
       };
     };
 }
