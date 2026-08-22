@@ -2,6 +2,7 @@
   lib,
   nixpkgs,
   supportedSystems,
+  codexCheckFor,
   codexConfigAtlasFor,
   agentsViewerFor,
 }:
@@ -16,6 +17,44 @@ lib.genAttrs supportedSystems (
     ]);
     codexConfigAtlas = codexConfigAtlasFor system;
     agentsViewer = agentsViewerFor system;
+    codexCheck = codexCheckFor system;
+    codexPatchContract =
+      pkgs.runCommand "codex-patch-contract-check"
+        {
+          nativeBuildInputs = [
+            pkgs.gitMinimal
+            pkgs.python3
+          ];
+        }
+        ''
+          cd ${../.}
+          export PYTHONDONTWRITEBYTECODE=1
+          python3 -m unittest discover -s codex/tests -p 'test_*.py'
+          touch "$out"
+        '';
+    codexHooksHelper =
+      pkgs.runCommand "codex-hooks-helper-check"
+        {
+          nativeBuildInputs = [
+            pkgs.python3
+            pkgs.ruff
+          ];
+        }
+        ''
+          cd ${../.}
+          export PYTHONDONTWRITEBYTECODE=1
+          export RUFF_CACHE_DIR="$TMPDIR/ruff-cache"
+          ruff format --check tools/codex-hooks
+          ruff check tools/codex-hooks
+          python3 -m unittest discover -s tools/codex-hooks/tests -p 'test_*.py'
+          touch "$out"
+        '';
+    checkMarker =
+      name: dependency: marker:
+      pkgs.runCommand name { } ''
+        test -f ${dependency}/${marker}
+        touch "$out"
+      '';
   in
   {
     agent-rules = pkgs.runCommand "agent-rules-check" { nativeBuildInputs = [ agentRulesPython ]; } ''
@@ -28,7 +67,34 @@ lib.genAttrs supportedSystems (
     codex-config-atlas-data = codexConfigAtlas.checkConfigAtlasData;
     codex-config-atlas-site = codexConfigAtlas.checkConfigAtlasSite;
     codex-config-atlas-tests = codexConfigAtlas.checkConfigAtlasTests;
-    agents-viewer = agentsViewer;
-    agents-viewer-web = agentsViewer.frontend;
+    codex-patch-contract = codexPatchContract;
+    codex-behavior = checkMarker "codex-behavior-check" codexCheck "behavior-ok";
+    codex-generation = checkMarker "codex-generation-check" codexCheck "generation-ok";
+    codex-hooks = pkgs.runCommand "codex-hooks-check" { } ''
+      test -f ${codexCheck}/hooks-rust-ok
+      test -e ${codexHooksHelper}
+      touch "$out"
+    '';
+    agents-viewer-rust =
+      checkMarker "agents-viewer-rust-check" agentsViewer.checks.rust
+        "rust-tests-ok";
+    agents-viewer-bindings =
+      checkMarker "agents-viewer-bindings-check" agentsViewer.checks.rust
+        "bindings-ok";
+    agents-viewer-web = agentsViewer.checks.web;
+    agent-evals = pkgs.runCommand "agent-evals-check" { nativeBuildInputs = [ agentRulesPython ]; } ''
+      cd ${../.}
+      export PYTHONDONTWRITEBYTECODE=1
+      python3 -m unittest tests.test_run_agent_evals
+      python3 scripts/run-agent-evals.py preflight --help
+      touch "$out"
+    '';
+    github-workflows =
+      pkgs.runCommand "github-workflows-check" { nativeBuildInputs = [ pkgs.actionlint ]; }
+        ''
+          cd ${../.}
+          actionlint .github/workflows/*.yml
+          touch "$out"
+        '';
   }
 )

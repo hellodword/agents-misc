@@ -34,7 +34,7 @@ lib.genAttrs supportedSystems (
 
     agents-viewer = {
       type = "app";
-      program = "${agentsViewer}/bin/agents-viewer";
+      program = "${agentsViewer.package}/bin/agents-viewer";
       meta.description = "Read-only local Codex conversation viewer";
     };
   }

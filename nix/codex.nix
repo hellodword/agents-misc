@@ -47,6 +47,7 @@ let
       patch;
   validatedPatches = lib.imap0 validatePatch patches;
   patchOrder = map (patch: patch.file) validatedPatches;
+  targetedTests = lib.unique (lib.concatMap (patch: patch.tests) validatedPatches);
   patchDir = ../codex/patches + "/${upstream.ref}";
   patchPaths = map (
     filename:
@@ -117,9 +118,86 @@ let
   supportedSystems = builtins.attrNames llm-agents.packages;
   codexFor =
     system: patchCodex (import nixpkgs { inherit system; }) llm-agents.packages.${system}.codex;
+  codexCheckFor =
+    system:
+    let
+      pkgs = import nixpkgs { inherit system; };
+      codex = codexFor system;
+      renderCommands = commands: lib.concatMapStringsSep "\n" lib.escapeShellArgs commands;
+    in
+    codex.overrideAttrs (old: {
+      pname = "check-codex-maintenance";
+
+      nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [
+        pkgs.gitMinimal
+        pkgs.just
+        pkgs.protobuf
+        pkgs.python3
+        pkgs.rustfmt
+      ];
+
+      doCheck = false;
+      doInstallCheck = false;
+      dontFixup = true;
+      phases = [
+        "unpackPhase"
+        "patchPhase"
+        "configurePhase"
+        "buildPhase"
+        "installPhase"
+      ];
+      cargoBuildFlags = [ ];
+      cargoTestFlags = [ ];
+
+      buildPhase = ''
+        runHook preBuild
+
+        export HOME="$TMPDIR/home"
+        export RUST_MIN_STACK=8388608
+        mkdir -p "$HOME"
+
+        repo_root="$PWD/.."
+        git -C "$repo_root" init --quiet
+        git -C "$repo_root" config user.email codex-check@example.invalid
+        git -C "$repo_root" config user.name codex-check
+        git -C "$repo_root" add -A
+        git -C "$repo_root" commit --quiet -m baseline
+
+        cd "$repo_root"
+        ${renderCommands upstream.generate_commands}
+        if test -n "$(git status --short)"; then
+          git status --short
+          git diff --stat
+          echo "error: tracked Codex generated artifacts drifted" >&2
+          exit 1
+        fi
+        touch "$TMPDIR/generation-ok"
+
+        cd codex-rs
+        ${lib.escapeShellArgs upstream.validation_command}
+        ${renderCommands targetedTests}
+        touch "$TMPDIR/behavior-ok"
+        touch "$TMPDIR/hooks-rust-ok"
+
+        runHook postBuild
+      '';
+
+      installPhase = ''
+        runHook preInstall
+        mkdir -p "$out"
+        cp "$TMPDIR/generation-ok" "$out/generation-ok"
+        cp "$TMPDIR/behavior-ok" "$out/behavior-ok"
+        cp "$TMPDIR/hooks-rust-ok" "$out/hooks-rust-ok"
+        runHook postInstall
+      '';
+
+      preInstall = "";
+      postInstall = "";
+    });
 in
 {
   inherit
+    codexCheckFor
     codexFor
     patchOrder
     supportedSystems

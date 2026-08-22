@@ -15,13 +15,18 @@ let
     ])
     && !(lib.hasSuffix ".tsbuildinfo" name);
 
+  source = lib.cleanSourceWith {
+    src = ../tools/agents-viewer;
+    filter = sourceFilter;
+  };
+  webSource = lib.cleanSourceWith {
+    src = ../tools/agents-viewer/web;
+    filter = sourceFilter;
+  };
   web = pkgs.buildNpmPackage {
     pname = "agents-viewer-web";
     version = "0.1.0";
-    src = lib.cleanSourceWith {
-      src = ../tools/agents-viewer/web;
-      filter = sourceFilter;
-    };
+    src = webSource;
     npmDepsHash = "sha256-gY0vgAhxSTb78pBBklbzUIIs9hx1Jwr7tXXvHM7dqbQ=";
     npmFlags = [ "--ignore-scripts" ];
     buildPhase = ''
@@ -36,38 +41,79 @@ let
       runHook postInstall
     '';
   };
-in
-pkgs.rustPlatform.buildRustPackage {
-  pname = "agents-viewer";
-  version = "0.1.0";
-  src = lib.cleanSourceWith {
-    src = ../tools/agents-viewer;
-    filter = sourceFilter;
+  webCheck = pkgs.buildNpmPackage {
+    pname = "check-agents-viewer-web";
+    version = "0.1.0";
+    src = webSource;
+    npmDepsHash = "sha256-gY0vgAhxSTb78pBBklbzUIIs9hx1Jwr7tXXvHM7dqbQ=";
+    npmFlags = [ "--ignore-scripts" ];
+    buildPhase = ''
+      runHook preBuild
+      npm run typecheck
+      npm run test
+      npm run build
+      runHook postBuild
+    '';
+    installPhase = ''
+      runHook preInstall
+      mkdir -p "$out"
+      touch "$out/typecheck-ok" "$out/unit-ok" "$out/build-ok"
+      runHook postInstall
+    '';
   };
-  cargoLock.lockFile = ../tools/agents-viewer/Cargo.lock;
-  nativeBuildInputs = [ pkgs.pkg-config ];
-  postPatch = ''
-    mkdir -p web/dist
-    cp -R ${web}/share/agents-viewer/web/. web/dist/
-  '';
-  cargoBuildFlags = [
-    "--bin"
-    "agents-viewer"
-    "--features"
-    "embedded-ui"
-  ];
-  cargoTestFlags = [
-    "--features"
-    "embedded-ui"
-    "--lib"
-  ];
-  postInstall = ''
-    find $out/bin -type f ! -name agents-viewer -delete
-  '';
-  passthru.frontend = web;
-  meta = {
-    description = "Read-only local viewer for Codex rollout conversations";
-    mainProgram = "agents-viewer";
-    platforms = lib.platforms.unix ++ lib.platforms.windows;
+  rustCheck = pkgs.rustPlatform.buildRustPackage {
+    pname = "check-agents-viewer-rust";
+    version = "0.1.0";
+    src = source;
+    cargoLock.lockFile = ../tools/agents-viewer/Cargo.lock;
+    nativeBuildInputs = [ pkgs.pkg-config ];
+    cargoBuildFlags = [ "--all-targets" ];
+    cargoTestFlags = [ ];
+    doCheck = true;
+    postCheck = ''
+      cargo run --offline --bin export_types -- --check
+      touch "$TMPDIR/rust-tests-ok" "$TMPDIR/bindings-ok"
+    '';
+    installPhase = ''
+      runHook preInstall
+      mkdir -p "$out"
+      cp "$TMPDIR/rust-tests-ok" "$out/rust-tests-ok"
+      cp "$TMPDIR/bindings-ok" "$out/bindings-ok"
+      runHook postInstall
+    '';
+  };
+  package = pkgs.rustPlatform.buildRustPackage {
+    pname = "agents-viewer";
+    version = "0.1.0";
+    src = source;
+    cargoLock.lockFile = ../tools/agents-viewer/Cargo.lock;
+    nativeBuildInputs = [ pkgs.pkg-config ];
+    postPatch = ''
+      mkdir -p web/dist
+      cp -R ${web}/share/agents-viewer/web/. web/dist/
+    '';
+    cargoBuildFlags = [
+      "--bin"
+      "agents-viewer"
+      "--features"
+      "embedded-ui"
+    ];
+    doCheck = false;
+    postInstall = ''
+      find $out/bin -type f ! -name agents-viewer -delete
+    '';
+    meta = {
+      description = "Read-only local viewer for Codex rollout conversations";
+      mainProgram = "agents-viewer";
+      platforms = lib.platforms.unix ++ lib.platforms.windows;
+    };
+  };
+in
+{
+  inherit package;
+  frontend = web;
+  checks = {
+    rust = rustCheck;
+    web = webCheck;
   };
 }

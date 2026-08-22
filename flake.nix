@@ -35,6 +35,7 @@
       };
 
       inherit (codexProject)
+        codexCheckFor
         codexFor
         patchOrder
         supportedSystems
@@ -84,6 +85,7 @@
         inherit
           lib
           nixpkgs
+          codexCheckFor
           codexConfigAtlasFor
           agentsViewerFor
           supportedSystems
@@ -111,10 +113,11 @@
       overlays.default = final: _prev: {
         agents-misc = {
           codex = codexFor final.stdenv.hostPlatform.system;
-          agents-viewer = import ./nix/agents-viewer.nix {
-            inherit (final) lib;
-            pkgs = final;
-          };
+          agents-viewer =
+            (import ./nix/agents-viewer.nix {
+              inherit (final) lib;
+              pkgs = final;
+            }).package;
         };
       };
 
