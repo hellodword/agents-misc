@@ -8,15 +8,17 @@ import {
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { AppShell as App } from "@/viewer/app-shell";
+import { executedContent } from "@/viewer/entry-format";
+import { SafeMarkdown } from "@/viewer/markdown";
 import {
-  App,
   conversationDisplayType,
-  executedContent,
   isDefaultVisible,
-  SafeMarkdown,
+} from "@/viewer/preferences";
+import {
   shouldApplyScrollTarget,
   VirtualTranscript,
-} from "@/App";
+} from "@/viewer/virtual-transcript";
 import { resources } from "@/lib/i18n";
 import type {
   EntryListItem,
