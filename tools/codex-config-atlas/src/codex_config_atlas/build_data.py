@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 from typing import Any
 
+from .atomic_output import build_directory_atomically
 from .registry import (
     RegistryEntry,
     ensure_supported_version,
@@ -41,19 +41,6 @@ def _write_version_payload(
     )
 
 
-def _clear_generated_outputs(out_dir: Path) -> None:
-    versions_dir = out_dir / "versions"
-    diffs_dir = out_dir / "diffs"
-    current_file = out_dir / "current.json"
-
-    if versions_dir.exists():
-        shutil.rmtree(versions_dir)
-    if diffs_dir.exists():
-        shutil.rmtree(diffs_dir)
-    if current_file.exists():
-        current_file.unlink()
-
-
 def build_data(
     schemas_dir: Path,
     current_version: str,
@@ -71,41 +58,43 @@ def build_data(
         if parse_version(entry.version) >= parse_version(min_version)
     ]
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    _clear_generated_outputs(out_dir)
+    def populate(candidate: Path) -> None:
+        versions_dir = candidate / "versions"
+        versions_dir.mkdir(parents=True)
 
-    versions_dir = out_dir / "versions"
-    versions_dir.mkdir(parents=True, exist_ok=True)
+        versions_payload = []
+        saw_current_version = False
 
-    versions_payload = []
-    saw_current_version = False
+        for entry in entries:
+            schema_file = schemas_dir / entry.schema_path
+            metadata_file = schemas_dir / entry.metadata_path
+            schema = json_load(schema_file)
+            metadata = json_load(metadata_file)
+            fields = normalize_schema(schema)
+            _write_version_payload(candidate, entry, metadata, fields)
 
-    for entry in entries:
-        schema_file = schemas_dir / entry.schema_path
-        metadata_file = schemas_dir / entry.metadata_path
-        schema = json_load(schema_file)
-        metadata = json_load(metadata_file)
-        fields = normalize_schema(schema)
-        _write_version_payload(out_dir, entry, metadata, fields)
+            version_item = {
+                "version": entry.version,
+                "tag": entry.tag,
+                "schemaUrl": metadata["schemaUrl"],
+                "current": entry.version == current_version,
+            }
+            versions_payload.append(version_item)
+            if entry.version == current_version:
+                saw_current_version = True
 
-        version_item = {
-            "version": entry.version,
-            "tag": entry.tag,
-            "schemaUrl": metadata["schemaUrl"],
-            "current": entry.version == current_version,
-        }
-        versions_payload.append(version_item)
-        if entry.version == current_version:
-            saw_current_version = True
+        if not saw_current_version:
+            raise ValueError(
+                f"current version {current_version} was not found in manifest"
+            )
 
-    if not saw_current_version:
-        raise ValueError(f"current version {current_version} was not found in manifest")
+        json_dump(
+            candidate / "versions.json",
+            {
+                "minVersion": min_version,
+                "current": current_version,
+                "versions": versions_payload,
+            },
+        )
 
-    json_dump(
-        out_dir / "versions.json",
-        {
-            "minVersion": min_version,
-            "current": current_version,
-            "versions": versions_payload,
-        },
-    )
+    build_directory_atomically(out_dir, populate)

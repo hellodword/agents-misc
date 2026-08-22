@@ -66,13 +66,13 @@ let
         nativeBuildInputs = [ codexConfigAtlas ];
       }
       ''
-        mkdir -p "$out"
-
         codex-config-atlas build-data \
           --schemas ${codexConfigAtlasRegistry} \
           --current-version ${codexVersion} \
           --min-version ${minVersion} \
-          --out "$out"
+          --out "$TMPDIR/data"
+
+        mv "$TMPDIR/data" "$out"
       '';
 
   codexConfigAtlasSite =
@@ -81,12 +81,12 @@ let
         nativeBuildInputs = [ codexConfigAtlas ];
       }
       ''
-        mkdir -p "$out"
-
         codex-config-atlas build-site \
           --static ${webSource} \
           --data ${codexConfigAtlasData} \
-          --out "$out"
+          --out "$TMPDIR/site"
+
+        mv "$TMPDIR/site" "$out"
       '';
 
   checkConfigAtlasRegistry =

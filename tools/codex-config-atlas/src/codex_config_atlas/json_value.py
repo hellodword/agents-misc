@@ -35,3 +35,15 @@ def canonical_json_key(value: Any) -> str:
         )
         return f"{{{','.join(items)}}}"
     raise ValueError(f"value is not JSON-compatible: {value!r}")
+
+
+def canonical_json_value(value: Any) -> Any:
+    canonical_json_key(value)
+    if isinstance(value, list):
+        return [canonical_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: canonical_json_value(value[key])
+            for key in sorted(value, key=lambda item: item.encode("utf-16-be"))
+        }
+    return value
