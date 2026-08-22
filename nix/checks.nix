@@ -94,9 +94,9 @@ lib.genAttrs supportedSystems (
           cd ${../.}
           export PYTHONDONTWRITEBYTECODE=1
           export RUFF_CACHE_DIR="$TMPDIR/ruff-cache"
-          ruff format --check tools/agent_evals tests/test_run_agent_evals.py
-          ruff check tools/agent_evals tests/test_run_agent_evals.py
-          python3 -m unittest tests.test_run_agent_evals
+          ruff format --check tools/agent_evals tests/test_agent_evals.py
+          ruff check tools/agent_evals tests/test_agent_evals.py
+          python3 -m unittest tests.test_agent_evals
           python3 -m tools.agent_evals preflight --help
           touch "$out"
         '';

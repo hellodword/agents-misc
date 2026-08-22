@@ -34,7 +34,7 @@ from tools.agent_evals import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-class RunAgentEvalsTests(unittest.TestCase):
+class AgentEvalsTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
