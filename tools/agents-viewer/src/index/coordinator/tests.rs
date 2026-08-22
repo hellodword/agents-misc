@@ -1,0 +1,210 @@
+use std::io::Write as _;
+
+use super::*;
+use crate::index::writer::{SourceFileRecord, spawn_writer};
+use tempfile::TempDir;
+
+fn source(id: &str, mtime_ns: i64, created_at_micros: i64) -> DiscoveredSource {
+    DiscoveredSource {
+        root: PathBuf::from("/source"),
+        path: PathBuf::from(format!("/source/{id}.jsonl")),
+        session_id: id.into(),
+        created_at_micros,
+        source: SourceFileRecord {
+            root_kind: RootKind::Active,
+            relative_path: format!("{id}.jsonl"),
+            file_key: id.into(),
+            size_bytes: 1,
+            mtime_ns,
+            head_hash: None,
+            tail_hash: None,
+            generation: 1,
+            placeholder: None,
+        },
+        duplicate_paths: Vec::new(),
+    }
+}
+
+#[test]
+fn work_order_is_priority_then_mtime_then_creation() {
+    let mut queue = BinaryHeap::new();
+    queue.push(WorkItem::new(
+        Arc::new(source("recent-old", 20, 1)),
+        WorkPriority::Recent,
+        None,
+    ));
+    queue.push(WorkItem::new(
+        Arc::new(source("recent-new", 20, 2)),
+        WorkPriority::Recent,
+        None,
+    ));
+    queue.push(WorkItem::new(
+        Arc::new(source("direct", 1, 1)),
+        WorkPriority::Interactive,
+        None,
+    ));
+    queue.push(WorkItem::new(
+        Arc::new(source("background", 100, 100)),
+        WorkPriority::Background,
+        None,
+    ));
+    assert_eq!(queue.pop().unwrap().source.session_id, "direct");
+    assert_eq!(queue.pop().unwrap().source.session_id, "recent-new");
+    assert_eq!(queue.pop().unwrap().source.session_id, "recent-old");
+    assert_eq!(queue.pop().unwrap().source.session_id, "background");
+}
+
+#[test]
+fn rolling_window_defers_old_history_but_zero_disables_backfill() {
+    const DAY_MICROS: i64 = 86_400_000_000;
+    let now = 20 * DAY_MICROS;
+    let mut recent = source("recent", (19 * DAY_MICROS) * 1_000, 1);
+    let old = source("old", (10 * DAY_MICROS) * 1_000, 2);
+    assert_eq!(
+        automatic_priority(InitialIndexPolicy::new(7, now).unwrap(), &recent, now),
+        Some(WorkPriority::Recent)
+    );
+    assert_eq!(
+        automatic_priority(InitialIndexPolicy::new(7, now).unwrap(), &old, now),
+        Some(WorkPriority::Background)
+    );
+    assert_eq!(
+        automatic_priority(InitialIndexPolicy::new(0, now).unwrap(), &old, now),
+        None
+    );
+    recent.source.mtime_ns = i64::MIN;
+    assert_eq!(
+        automatic_priority(InitialIndexPolicy::all(), &recent, now),
+        Some(WorkPriority::Recent)
+    );
+}
+
+#[test]
+fn repeated_direct_sync_is_singleflight_before_the_scheduler_receives_it() {
+    let (commands, mut receiver) = mpsc::channel(1);
+    let handle = CoordinatorHandle {
+        shared: Arc::new(RwLock::new(SharedState::default())),
+        commands,
+    };
+
+    let first = handle.ensure_session("session").unwrap();
+    let repeated = handle.ensure_session("session").unwrap();
+
+    assert_eq!(first.state, SessionSyncState::Checking);
+    assert_eq!(repeated.state, SessionSyncState::Checking);
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(CoordinatorCommand::EnsureSession(session_id)) if session_id == "session"
+    ));
+    assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hot_audit_requeues_a_completed_session_without_a_watcher_event() {
+    let temp = TempDir::new().unwrap();
+    let source_home = temp.path().join("codex-home");
+    let sessions = source_home.join("sessions/2025/01/02");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let session_id = "11111111-1111-4111-8111-111111111111";
+    let rollout = sessions.join(format!("rollout-2025-01-02T03-04-05-{session_id}.jsonl"));
+    std::fs::write(
+        &rollout,
+        include_bytes!("../../../tests/fixtures/rollouts/v0_120.jsonl"),
+    )
+    .unwrap();
+    let roots = crate::paths::resolve_source_roots(&source_home).unwrap();
+    let cache = temp.path().join("cache");
+    crate::permissions::prepare_cache_directory(&cache).unwrap();
+    let database = Database::open_or_recover(&cache.join("index.sqlite3"), "hot-audit")
+        .await
+        .unwrap();
+    let (writer, writer_task) = spawn_writer(database.clone());
+    let coordinator = IndexCoordinator::new(
+        database.clone(),
+        writer.clone(),
+        roots,
+        1024 * 1024,
+        InitialIndexPolicy::all(),
+    );
+    let (completion_sender, mut completion_receiver) = mpsc::channel(8);
+    let shutdown = CancellationToken::new();
+    let mut runtime = RuntimeScheduler::new(&coordinator, None, shutdown, completion_sender);
+    let now_micros = chrono::Utc::now().timestamp_micros();
+    let discovery = coordinator
+        .discover(1, now_micros, CancellationToken::new())
+        .await
+        .unwrap();
+    runtime
+        .apply_full_discovery(discovery, 1, now_micros, false)
+        .await
+        .unwrap();
+    runtime.start_available();
+    let completion = tokio::time::timeout(Duration::from_secs(2), completion_receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    runtime.handle_completion(completion).await.unwrap();
+    let mut bootstrap_pending = false;
+    runtime
+        .maybe_finalize_cycle(&mut bootstrap_pending)
+        .await
+        .unwrap();
+    assert!(runtime.hot_sessions.contains(session_id));
+
+    let before = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM entries")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    let read_bytes = runtime.gate.bytes_read();
+    runtime.audit_hot_sessions(2).await.unwrap();
+    assert_eq!(runtime.gate.bytes_read(), read_bytes);
+    assert!(runtime.queue.is_empty());
+    assert!(runtime.inflight.is_empty());
+    assert!(completion_receiver.try_recv().is_err());
+
+    let mut append = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&rollout)
+        .unwrap();
+    append
+        .write_all(
+            b"{\"timestamp\":\"2025-01-02T03:04:09.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"Hot audit synthetic line\",\"phase\":\"final\"}}\n",
+        )
+        .unwrap();
+    append.flush().unwrap();
+    drop(append);
+
+    let background = WorkItem::new(
+        Arc::new(source("background-inflight", 1, 1)),
+        WorkPriority::Background,
+        None,
+    );
+    runtime.inflight.insert(
+        background.source.session_id.clone(),
+        InflightWork {
+            work: background,
+            lease: runtime.gate.register(WorkPriority::Background),
+        },
+    );
+    runtime.audit_hot_sessions(3).await.unwrap();
+    assert!(runtime.inflight.contains_key("background-inflight"));
+    assert!(runtime.inflight.contains_key(session_id));
+    let completion = tokio::time::timeout(Duration::from_secs(2), completion_receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    runtime.handle_completion(completion).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM entries")
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+        before + 1
+    );
+    runtime.inflight.remove("background-inflight");
+
+    drop(runtime);
+    writer.shutdown().await.unwrap();
+    writer_task.wait().await.unwrap();
+    database.close().await;
+}
