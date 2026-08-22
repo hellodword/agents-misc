@@ -160,10 +160,10 @@ index eb5c727d3179db8a0bec1601aafc52fb56ec1ed9..707780000774016113013a9183262614
  pub mod pre_tool_use;
 diff --git a/codex-rs/hooks/src/events/model_request.rs b/codex-rs/hooks/src/events/model_request.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..f34d7075c8576786738927e061e81f769c83cde1
+index 0000000000000000000000000000000000000000..9c9ca53dfd30b34a120ead7e9d56738561e849d4
 --- /dev/null
 +++ b/codex-rs/hooks/src/events/model_request.rs
-@@ -0,0 +1,336 @@
+@@ -0,0 +1,721 @@
 +use std::path::PathBuf;
 +
 +use codex_protocol::ThreadId;
@@ -174,7 +174,9 @@ index 0000000000000000000000000000000000000000..f34d7075c8576786738927e061e81f76
 +use codex_protocol::protocol::HookRunStatus;
 +use codex_protocol::protocol::HookRunSummary;
 +use codex_utils_absolute_path::AbsolutePathBuf;
-+use serde_json::Value;
++use schemars::JsonSchema;
++use serde::Serialize;
++use std::time::Duration;
 +
 +use super::common;
 +use crate::engine::ClaudeHooksEngine;
@@ -186,6 +188,49 @@ index 0000000000000000000000000000000000000000..f34d7075c8576786738927e061e81f76
 +use crate::schema::NullableString;
 +use crate::schema::RequestErrorCommandInput;
 +
++pub(crate) const REQUEST_ERROR_QUEUE_CAPACITY: usize = 64;
++const REQUEST_ERROR_HANDLER_CONCURRENCY: usize = 4;
++const ABNORMAL_STOP_GROUP_TIMEOUT: Duration = Duration::from_secs(30);
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
++#[serde(rename_all = "camelCase")]
++pub enum ModelRequestOperation {
++    Sampling,
++    LocalCompact,
++    RemoteCompact,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
++#[serde(rename_all = "camelCase")]
++pub enum ModelRequestNextAction {
++    Retry,
++    Fallback,
++    Stop,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
++#[serde(rename_all = "camelCase")]
++pub enum ModelRequestErrorCategory {
++    Transport,
++    Timeout,
++    RateLimit,
++    UsageLimit,
++    ContextWindow,
++    Policy,
++    Sandbox,
++    InvalidRequest,
++    Server,
++    Internal,
++    Other,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
++#[serde(rename_all = "camelCase")]
++pub struct ModelRequestError {
++    pub category: ModelRequestErrorCategory,
++    pub message: String,
++}
++
 +#[derive(Debug, Clone)]
 +pub struct RequestErrorRequest {
 +    pub session_id: ThreadId,
@@ -194,17 +239,11 @@ index 0000000000000000000000000000000000000000..f34d7075c8576786738927e061e81f76
 +    pub cwd: AbsolutePathBuf,
 +    pub model: String,
 +    pub provider: String,
-+    pub request_type: String,
-+    pub request_subtype: String,
++    pub operation: ModelRequestOperation,
 +    pub endpoint_path: String,
-+    pub retry_attempt: u64,
-+    pub max_retries: u64,
-+    pub will_retry: bool,
-+    pub next_retry_attempt: Option<u64>,
-+    pub error_retryable: bool,
-+    pub error_kind: String,
-+    pub error_message: String,
-+    pub codex_error_info: Value,
++    pub attempt: u64,
++    pub next_action: ModelRequestNextAction,
++    pub error: ModelRequestError,
 +}
 +
 +#[derive(Debug, Clone)]
@@ -218,14 +257,11 @@ index 0000000000000000000000000000000000000000..f34d7075c8576786738927e061e81f76
 +    pub goal_mode: bool,
 +    pub approval_policy: String,
 +    pub sandbox_mode: String,
-+    pub request_type: String,
-+    pub request_subtype: String,
++    pub operation: ModelRequestOperation,
 +    pub endpoint_path: String,
-+    pub retry_attempt: u64,
-+    pub max_retries: u64,
-+    pub error_kind: String,
-+    pub error_message: String,
-+    pub codex_error_info: Value,
++    pub attempt: u64,
++    pub next_action: ModelRequestNextAction,
++    pub error: ModelRequestError,
 +}
 +
 +#[derive(Debug, Default)]
@@ -258,17 +294,11 @@ index 0000000000000000000000000000000000000000..f34d7075c8576786738927e061e81f76
 +        hook_event_name: "RequestError".to_string(),
 +        model: request.model,
 +        provider: request.provider,
-+        request_type: request.request_type,
-+        request_subtype: request.request_subtype,
++        operation: request.operation,
 +        endpoint_path: request.endpoint_path,
-+        retry_attempt: request.retry_attempt,
-+        max_retries: request.max_retries,
-+        will_retry: request.will_retry,
-+        next_retry_attempt: request.next_retry_attempt,
-+        error_retryable: request.error_retryable,
-+        error_kind: request.error_kind,
-+        error_message: request.error_message,
-+        codex_error_info: request.codex_error_info,
++        attempt: request.attempt,
++        next_action: request.next_action,
++        error: request.error,
 +    }) {
 +        Ok(input_json) => input_json,
 +        Err(error) => {
@@ -289,6 +319,8 @@ index 0000000000000000000000000000000000000000..f34d7075c8576786738927e061e81f76
 +        input_json,
 +        request.cwd,
 +        Some(request.turn_id),
++        REQUEST_ERROR_HANDLER_CONCURRENCY,
++        None,
 +        parse_request_error_completed,
 +    )
 +    .await
@@ -306,7 +338,7 @@ index 0000000000000000000000000000000000000000..f34d7075c8576786738927e061e81f76
 +    request: AbnormalStopRequest,
 +) -> NotificationHookOutcome {
 +    let default_suppress_turn_error_lifecycle =
-+        request.goal_mode && request.error_kind != "CyberPolicy";
++        request.goal_mode && request.error.category != ModelRequestErrorCategory::Policy;
 +    let input_json = match serde_json::to_string(&AbnormalStopCommandInput {
 +        session_id: request.session_id.to_string(),
 +        turn_id: request.turn_id.clone(),
@@ -318,15 +350,12 @@ index 0000000000000000000000000000000000000000..f34d7075c8576786738927e061e81f76
 +        goal_mode: request.goal_mode,
 +        approval_policy: request.approval_policy,
 +        sandbox_mode: request.sandbox_mode,
-+        reason: "request_error".to_string(),
-+        request_type: request.request_type,
-+        request_subtype: request.request_subtype,
++        reason: "requestError".to_string(),
++        operation: request.operation,
 +        endpoint_path: request.endpoint_path,
-+        retry_attempt: request.retry_attempt,
-+        max_retries: request.max_retries,
-+        error_kind: request.error_kind,
-+        error_message: request.error_message,
-+        codex_error_info: request.codex_error_info,
++        attempt: request.attempt,
++        next_action: request.next_action,
++        error: request.error,
 +    }) {
 +        Ok(input_json) => input_json,
 +        Err(error) => {
@@ -347,6 +376,8 @@ index 0000000000000000000000000000000000000000..f34d7075c8576786738927e061e81f76
 +        input_json,
 +        request.cwd,
 +        Some(request.turn_id),
++        usize::MAX,
++        Some(ABNORMAL_STOP_GROUP_TIMEOUT),
 +        parse_abnormal_stop_completed,
 +    )
 +    .await;
@@ -373,6 +404,8 @@ index 0000000000000000000000000000000000000000..f34d7075c8576786738927e061e81f76
 +    input_json: String,
 +    cwd: AbsolutePathBuf,
 +    turn_id: Option<String>,
++    max_concurrency: usize,
++    group_timeout: Option<Duration>,
 +    parse: fn(
 +        &ConfiguredHandler,
 +        HandlerRunResult,
@@ -384,15 +417,87 @@ index 0000000000000000000000000000000000000000..f34d7075c8576786738927e061e81f76
 +        return NotificationHookOutcome::default();
 +    }
 +
-+    let results =
-+        dispatcher::execute_handlers(engine, matched, input_json, cwd.as_path(), turn_id, parse)
-+            .await;
++    let execute = dispatcher::execute_handlers_bounded(
++        engine,
++        matched.clone(),
++        input_json,
++        cwd.as_path(),
++        turn_id.clone(),
++        max_concurrency,
++        parse,
++    );
++    let results = match group_timeout {
++        Some(duration) => match tokio::time::timeout(duration, execute).await {
++            Ok(results) => results,
++            Err(_) => {
++                return dispatch_failure(
++                    matched,
++                    turn_id,
++                    format!(
++                        "{event_name:?} hook group timed out after {} seconds",
++                        duration.as_secs()
++                    ),
++                );
++            }
++        },
++        None => execute.await,
++    };
 +
 +    NotificationHookOutcome {
-+        suppress_turn_error_lifecycle: results
++        suppress_turn_error_lifecycle: if results
 +            .iter()
-+            .find_map(|result| result.data.suppress_turn_error_lifecycle),
++            .any(|result| result.data.suppress_turn_error_lifecycle == Some(true))
++        {
++            Some(true)
++        } else if results
++            .iter()
++            .any(|result| result.data.suppress_turn_error_lifecycle == Some(false))
++        {
++            Some(false)
++        } else {
++            None
++        },
 +        hook_events: results.into_iter().map(|result| result.completed).collect(),
++    }
++}
++
++pub(crate) fn request_error_dispatch_failure(
++    handlers: &[ConfiguredHandler],
++    turn_id: String,
++    message: impl Into<String>,
++) -> NotificationHookOutcome {
++    dispatch_failure(
++        select(handlers, HookEventName::RequestError),
++        Some(turn_id),
++        message.into(),
++    )
++}
++
++fn dispatch_failure(
++    handlers: Vec<ConfiguredHandler>,
++    turn_id: Option<String>,
++    message: String,
++) -> NotificationHookOutcome {
++    let completed_at = chrono::Utc::now().timestamp();
++    NotificationHookOutcome {
++        hook_events: handlers
++            .into_iter()
++            .map(|handler| {
++                let mut run = dispatcher::running_summary(&handler);
++                run.status = HookRunStatus::Failed;
++                run.completed_at = Some(completed_at);
++                run.duration_ms = Some(0);
++                run.entries.push(HookOutputEntry {
++                    kind: HookOutputEntryKind::Error,
++                    text: message.clone(),
++                });
++                HookCompletedEvent {
++                    turn_id: turn_id.clone(),
++                    run,
++                }
++            })
++            .collect(),
++        suppress_turn_error_lifecycle: None,
 +    }
 +}
 +
@@ -500,11 +605,301 @@ index 0000000000000000000000000000000000000000..f34d7075c8576786738927e061e81f76
 +        completion_order: 0,
 +    }
 +}
++
++#[cfg(test)]
++mod tests {
++    use std::collections::HashMap;
++    use std::sync::Arc;
++    use std::sync::Mutex;
++    use std::sync::atomic::AtomicUsize;
++    use std::sync::atomic::Ordering;
++    use std::time::Duration;
++
++    use codex_protocol::ThreadId;
++    use codex_protocol::protocol::HookEventName;
++    use codex_protocol::protocol::HookRunStatus;
++    use codex_protocol::protocol::HookSource;
++    use codex_utils_absolute_path::AbsolutePathBuf;
++    use futures::FutureExt;
++    use futures::future::BoxFuture;
++    use serde_json::Map;
++
++    use super::ABNORMAL_STOP_GROUP_TIMEOUT;
++    use super::AbnormalStopRequest;
++    use super::ModelRequestError;
++    use super::ModelRequestErrorCategory;
++    use super::ModelRequestNextAction;
++    use super::ModelRequestOperation;
++    use super::RequestErrorRequest;
++    use super::parse_abnormal_stop_completed;
++    use super::run_abnormal_stop;
++    use super::run_notification;
++    use super::run_request_error;
++    use crate::engine::ClaudeHooksEngine;
++    use crate::engine::CommandShell;
++    use crate::engine::ConfiguredHandler;
++    use crate::engine::ConfiguredHandlerKind;
++    use crate::engine::command_runner::CommandHookRuntime;
++    use crate::mcp::HookMcpCall;
++    use crate::mcp::HookMcpExecutor;
++
++    struct TestMcpExecutor {
++        outputs: HashMap<String, String>,
++        delay: Duration,
++        current: AtomicUsize,
++        maximum: AtomicUsize,
++        calls: Mutex<Vec<String>>,
++    }
++
++    impl HookMcpExecutor for TestMcpExecutor {
++        fn execute(&self, call: HookMcpCall) -> BoxFuture<'_, anyhow::Result<String>> {
++            async move {
++                let current = self.current.fetch_add(1, Ordering::SeqCst) + 1;
++                self.maximum.fetch_max(current, Ordering::SeqCst);
++                self.calls
++                    .lock()
++                    .expect("lock calls")
++                    .push(call.tool.clone());
++                tokio::time::sleep(self.delay).await;
++                self.current.fetch_sub(1, Ordering::SeqCst);
++                Ok(self.outputs.get(&call.tool).cloned().unwrap_or_default())
++            }
++            .boxed()
++        }
++    }
++
++    struct PendingMcpExecutor;
++
++    impl HookMcpExecutor for PendingMcpExecutor {
++        fn execute(&self, _call: HookMcpCall) -> BoxFuture<'_, anyhow::Result<String>> {
++            std::future::pending().boxed()
++        }
++    }
++
++    fn cwd() -> AbsolutePathBuf {
++        AbsolutePathBuf::current_dir().expect("current dir")
++    }
++
++    fn engine_with_executor(executor: Arc<dyn HookMcpExecutor>) -> ClaudeHooksEngine {
++        let (result_sender, _result_receiver) = async_channel::unbounded();
++        ClaudeHooksEngine::new(
++            /*enabled*/ true,
++            /*bypass_hook_trust*/ false,
++            /*config_layer_stack*/ None,
++            Vec::new(),
++            Vec::new(),
++            CommandHookRuntime::new(
++                CommandShell {
++                    program: String::new(),
++                    args: Vec::new(),
++                },
++                ThreadId::new(),
++                result_sender,
++            ),
++            Some(executor),
++        )
++    }
++
++    fn handler(
++        event_name: HookEventName,
++        tool: impl Into<String>,
++        order: i64,
++    ) -> ConfiguredHandler {
++        ConfiguredHandler {
++            event_name,
++            matcher: None,
++            timeout_sec: 60,
++            status_message: None,
++            additional_context_limit: Default::default(),
++            source_path: cwd().join(format!("hook-{order}.json")),
++            source: HookSource::User,
++            display_order: order,
++            kind: ConfiguredHandlerKind::McpTool {
++                server: "test".to_string(),
++                tool: tool.into(),
++                input: Map::new(),
++            },
++        }
++    }
++
++    fn request_error(attempt: u64) -> RequestErrorRequest {
++        RequestErrorRequest {
++            session_id: ThreadId::new(),
++            turn_id: format!("turn-{attempt}"),
++            transcript_path: None,
++            cwd: cwd(),
++            model: "gpt-test".to_string(),
++            provider: "openai".to_string(),
++            operation: ModelRequestOperation::Sampling,
++            endpoint_path: "/responses".to_string(),
++            attempt,
++            next_action: ModelRequestNextAction::Retry,
++            error: ModelRequestError {
++                category: ModelRequestErrorCategory::Transport,
++                message: "disconnected".to_string(),
++            },
++        }
++    }
++
++    fn abnormal_stop(goal_mode: bool, category: ModelRequestErrorCategory) -> AbnormalStopRequest {
++        AbnormalStopRequest {
++            session_id: ThreadId::new(),
++            turn_id: "turn-stop".to_string(),
++            transcript_path: None,
++            cwd: cwd(),
++            model: "gpt-test".to_string(),
++            provider: "openai".to_string(),
++            goal_mode,
++            approval_policy: "never".to_string(),
++            sandbox_mode: "danger-full-access".to_string(),
++            operation: ModelRequestOperation::Sampling,
++            endpoint_path: "/responses".to_string(),
++            attempt: 2,
++            next_action: ModelRequestNextAction::Stop,
++            error: ModelRequestError {
++                category,
++                message: "stopped".to_string(),
++            },
++        }
++    }
++
++    #[tokio::test]
++    async fn request_error_runs_at_most_four_handlers_concurrently() {
++        let executor = Arc::new(TestMcpExecutor {
++            outputs: HashMap::new(),
++            delay: Duration::from_millis(25),
++            current: AtomicUsize::new(0),
++            maximum: AtomicUsize::new(0),
++            calls: Mutex::new(Vec::new()),
++        });
++        let mut engine = engine_with_executor(executor.clone());
++        engine.handlers = (0..9)
++            .map(|order| handler(HookEventName::RequestError, format!("hook-{order}"), order))
++            .collect();
++
++        let outcome = run_request_error(&engine, request_error(0)).await;
++
++        assert_eq!(outcome.hook_events.len(), 9);
++        assert_eq!(executor.maximum.load(Ordering::SeqCst), 4);
++    }
++
++    #[tokio::test]
++    async fn abnormal_stop_any_true_wins_and_invalid_output_has_no_opinion() {
++        let executor = Arc::new(TestMcpExecutor {
++            outputs: HashMap::from([
++                ("false".to_string(), r#"{"suppress":false}"#.to_string()),
++                ("invalid".to_string(), r#"{"suppress":"yes"}"#.to_string()),
++                ("true".to_string(), r#"{"suppress":true}"#.to_string()),
++            ]),
++            delay: Duration::ZERO,
++            current: AtomicUsize::new(0),
++            maximum: AtomicUsize::new(0),
++            calls: Mutex::new(Vec::new()),
++        });
++        let mut engine = engine_with_executor(executor);
++        engine.handlers = vec![
++            handler(HookEventName::AbnormalStop, "false", 0),
++            handler(HookEventName::AbnormalStop, "invalid", 1),
++            handler(HookEventName::AbnormalStop, "true", 2),
++        ];
++
++        let outcome = run_abnormal_stop(
++            &engine,
++            abnormal_stop(false, ModelRequestErrorCategory::Server),
++        )
++        .await;
++
++        assert_eq!(outcome.suppress_turn_error_lifecycle, Some(true));
++        assert_eq!(outcome.hook_events.len(), 3);
++        assert!(
++            outcome
++                .hook_events
++                .iter()
++                .any(|event| event.run.status == HookRunStatus::Failed)
++        );
++    }
++
++    #[tokio::test]
++    async fn abnormal_stop_uses_goal_and_policy_default_without_opinions() {
++        let engine = engine_with_executor(Arc::new(TestMcpExecutor {
++            outputs: HashMap::new(),
++            delay: Duration::ZERO,
++            current: AtomicUsize::new(0),
++            maximum: AtomicUsize::new(0),
++            calls: Mutex::new(Vec::new()),
++        }));
++
++        assert_eq!(
++            run_abnormal_stop(
++                &engine,
++                abnormal_stop(true, ModelRequestErrorCategory::Transport)
++            )
++            .await
++            .suppress_turn_error_lifecycle,
++            Some(true)
++        );
++        assert_eq!(
++            run_abnormal_stop(
++                &engine,
++                abnormal_stop(true, ModelRequestErrorCategory::Policy)
++            )
++            .await
++            .suppress_turn_error_lifecycle,
++            Some(false)
++        );
++        assert_eq!(
++            run_abnormal_stop(
++                &engine,
++                abnormal_stop(false, ModelRequestErrorCategory::Transport)
++            )
++            .await
++            .suppress_turn_error_lifecycle,
++            Some(false)
++        );
++    }
++
++    #[tokio::test]
++    async fn abnormal_stop_group_timeout_returns_explicit_failures() {
++        assert_eq!(ABNORMAL_STOP_GROUP_TIMEOUT, Duration::from_secs(30));
++        let mut engine = engine_with_executor(Arc::new(PendingMcpExecutor));
++        engine.handlers = vec![handler(HookEventName::AbnormalStop, "pending", 0)];
++
++        let outcome = run_notification(
++            &engine,
++            HookEventName::AbnormalStop,
++            "{}".to_string(),
++            cwd(),
++            Some("turn-timeout".to_string()),
++            usize::MAX,
++            Some(Duration::from_millis(10)),
++            parse_abnormal_stop_completed,
++        )
++        .await;
++
++        assert_eq!(outcome.hook_events.len(), 1);
++        assert_eq!(outcome.hook_events[0].run.status, HookRunStatus::Failed);
++        assert!(
++            outcome.hook_events[0].run.entries[0]
++                .text
++                .contains("timed out")
++        );
++    }
++}
 diff --git a/codex-rs/hooks/src/schema.rs b/codex-rs/hooks/src/schema.rs
-index 3847cc91818a9a141c066e1fc6d734adb60f9bde..e87f862003047e73e0eb2ecc8e2b15216cb0cfd7 100644
+index 3847cc91818a9a141c066e1fc6d734adb60f9bde..989bce7699c480fb0a2111bdac327ad6ffd796b7 100644
 --- a/codex-rs/hooks/src/schema.rs
 +++ b/codex-rs/hooks/src/schema.rs
-@@ -21,6 +21,10 @@ const PERMISSION_REQUEST_INPUT_FIXTURE: &str = "permission-request.command.input
+@@ -13,6 +13,9 @@ use std::path::Path;
+ use std::path::PathBuf;
+ 
+ use crate::events::common::SubagentHookContext;
++use crate::events::model_request::ModelRequestError;
++use crate::events::model_request::ModelRequestNextAction;
++use crate::events::model_request::ModelRequestOperation;
+ 
+ const GENERATED_DIR: &str = "generated";
+ const POST_TOOL_USE_INPUT_FIXTURE: &str = "post-tool-use.command.input.schema.json";
+@@ -21,6 +24,10 @@ const PERMISSION_REQUEST_INPUT_FIXTURE: &str = "permission-request.command.input
  const PERMISSION_REQUEST_OUTPUT_FIXTURE: &str = "permission-request.command.output.schema.json";
  const POST_COMPACT_INPUT_FIXTURE: &str = "post-compact.command.input.schema.json";
  const POST_COMPACT_OUTPUT_FIXTURE: &str = "post-compact.command.output.schema.json";
@@ -515,7 +910,7 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..e87f862003047e73e0eb2ecc8e2b1521
  const PRE_TOOL_USE_INPUT_FIXTURE: &str = "pre-tool-use.command.input.schema.json";
  const PRE_TOOL_USE_OUTPUT_FIXTURE: &str = "pre-tool-use.command.output.schema.json";
  const PRE_COMPACT_INPUT_FIXTURE: &str = "pre-compact.command.input.schema.json";
-@@ -108,6 +112,10 @@ pub(crate) enum HookEventNameWire {
+@@ -108,6 +115,10 @@ pub(crate) enum HookEventNameWire {
      PreCompact,
      #[serde(rename = "PostCompact")]
      PostCompact,
@@ -526,7 +921,7 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..e87f862003047e73e0eb2ecc8e2b1521
      #[serde(rename = "SessionStart")]
      SessionStart,
      #[serde(rename = "UserPromptSubmit")]
-@@ -179,6 +187,25 @@ pub(crate) struct PostCompactCommandOutputWire {
+@@ -179,6 +190,25 @@ pub(crate) struct PostCompactCommandOutputWire {
      pub universal: HookUniversalOutputWire,
  }
  
@@ -546,13 +941,13 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..e87f862003047e73e0eb2ecc8e2b1521
 +pub(crate) struct AbnormalStopCommandOutputWire {
 +    #[serde(flatten)]
 +    pub universal: HookUniversalOutputWire,
-+    pub suppress_turn_error_lifecycle: Option<bool>,
++    pub suppress: Option<bool>,
 +}
 +
  #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
  #[serde(rename_all = "camelCase")]
  #[serde(deny_unknown_fields)]
-@@ -377,6 +404,70 @@ pub(crate) struct PostCompactCommandInput {
+@@ -377,6 +407,55 @@ pub(crate) struct PostCompactCommandInput {
      pub trigger: String,
  }
  
@@ -563,7 +958,6 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..e87f862003047e73e0eb2ecc8e2b1521
 +pub(crate) struct RequestErrorCommandInput {
 +    pub session_id: String,
 +    /// Codex extension: expose the active turn id to internal turn-scoped hooks.
-+    #[serde(rename = "turn_id")]
 +    pub turn_id: String,
 +    pub transcript_path: NullableString,
 +    pub cwd: String,
@@ -571,20 +965,12 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..e87f862003047e73e0eb2ecc8e2b1521
 +    pub hook_event_name: String,
 +    pub model: String,
 +    pub provider: String,
-+    #[schemars(schema_with = "model_request_type_schema")]
-+    pub request_type: String,
-+    #[schemars(schema_with = "model_request_subtype_schema")]
-+    pub request_subtype: String,
++    pub operation: ModelRequestOperation,
 +    #[schemars(schema_with = "model_request_endpoint_schema")]
 +    pub endpoint_path: String,
-+    pub retry_attempt: u64,
-+    pub max_retries: u64,
-+    pub will_retry: bool,
-+    pub next_retry_attempt: Option<u64>,
-+    pub error_retryable: bool,
-+    pub error_kind: String,
-+    pub error_message: String,
-+    pub codex_error_info: Value,
++    pub attempt: u64,
++    pub next_action: ModelRequestNextAction,
++    pub error: ModelRequestError,
 +}
 +
 +#[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -594,7 +980,6 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..e87f862003047e73e0eb2ecc8e2b1521
 +pub(crate) struct AbnormalStopCommandInput {
 +    pub session_id: String,
 +    /// Codex extension: expose the active turn id to internal turn-scoped hooks.
-+    #[serde(rename = "turn_id")]
 +    pub turn_id: String,
 +    pub transcript_path: NullableString,
 +    pub cwd: String,
@@ -607,23 +992,18 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..e87f862003047e73e0eb2ecc8e2b1521
 +    pub sandbox_mode: String,
 +    #[schemars(schema_with = "abnormal_stop_reason_schema")]
 +    pub reason: String,
-+    #[schemars(schema_with = "model_request_type_schema")]
-+    pub request_type: String,
-+    #[schemars(schema_with = "model_request_subtype_schema")]
-+    pub request_subtype: String,
++    pub operation: ModelRequestOperation,
 +    #[schemars(schema_with = "model_request_endpoint_schema")]
 +    pub endpoint_path: String,
-+    pub retry_attempt: u64,
-+    pub max_retries: u64,
-+    pub error_kind: String,
-+    pub error_message: String,
-+    pub codex_error_info: Value,
++    pub attempt: u64,
++    pub next_action: ModelRequestNextAction,
++    pub error: ModelRequestError,
 +}
 +
  #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
  #[serde(rename_all = "camelCase")]
  #[serde(deny_unknown_fields)]
-@@ -636,6 +727,22 @@ pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
+@@ -636,6 +715,22 @@ pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
          &generated_dir.join(POST_COMPACT_OUTPUT_FIXTURE),
          schema_json::<PostCompactCommandOutputWire>()?,
      )?;
@@ -646,7 +1026,7 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..e87f862003047e73e0eb2ecc8e2b1521
      write_schema(
          &generated_dir.join(PRE_COMPACT_INPUT_FIXTURE),
          schema_json::<PreCompactCommandInput>()?,
-@@ -775,6 +882,14 @@ fn post_compact_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+@@ -775,6 +870,14 @@ fn post_compact_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
      string_const_schema("PostCompact")
  }
  
@@ -661,30 +1041,22 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..e87f862003047e73e0eb2ecc8e2b1521
  fn pre_tool_use_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
      string_const_schema("PreToolUse")
  }
-@@ -817,6 +932,22 @@ fn compaction_trigger_schema(_gen: &mut SchemaGenerator) -> Schema {
+@@ -817,6 +920,14 @@ fn compaction_trigger_schema(_gen: &mut SchemaGenerator) -> Schema {
      string_enum_schema(&["manual", "auto"])
  }
  
-+fn model_request_type_schema(_gen: &mut SchemaGenerator) -> Schema {
-+    string_enum_schema(&["sampling", "compact"])
-+}
-+
-+fn model_request_subtype_schema(_gen: &mut SchemaGenerator) -> Schema {
-+    string_enum_schema(&["normal", "local", "remote", "remote_v2"])
-+}
-+
 +fn model_request_endpoint_schema(_gen: &mut SchemaGenerator) -> Schema {
 +    string_enum_schema(&["/responses", "/responses/compact"])
 +}
 +
 +fn abnormal_stop_reason_schema(_gen: &mut SchemaGenerator) -> Schema {
-+    string_const_schema("request_error")
++    string_const_schema("requestError")
 +}
 +
  fn string_const_schema(value: &str) -> Schema {
      let mut schema = SchemaObject {
          instance_type: Some(InstanceType::String.into()),
-@@ -846,6 +977,9 @@ fn default_continue() -> bool {
+@@ -846,6 +957,9 @@ fn default_continue() -> bool {
  
  #[cfg(test)]
  mod tests {
@@ -694,7 +1066,7 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..e87f862003047e73e0eb2ecc8e2b1521
      use super::NullableString;
      use super::PERMISSION_REQUEST_INPUT_FIXTURE;
      use super::PERMISSION_REQUEST_OUTPUT_FIXTURE;
-@@ -865,6 +999,9 @@ mod tests {
+@@ -865,6 +979,9 @@ mod tests {
      use super::PreCompactCommandInput;
      use super::PreToolUseCommandInput;
      use super::PreToolUseCommandOutputWire;
@@ -704,7 +1076,18 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..e87f862003047e73e0eb2ecc8e2b1521
      use super::SESSION_END_INPUT_FIXTURE;
      use super::SESSION_START_INPUT_FIXTURE;
      use super::SESSION_START_OUTPUT_FIXTURE;
-@@ -913,6 +1050,18 @@ mod tests {
+@@ -887,6 +1004,10 @@ mod tests {
+     use super::schema_json;
+     use super::write_schema_fixtures;
+     use crate::events::common::SubagentHookContext;
++    use crate::events::model_request::ModelRequestError;
++    use crate::events::model_request::ModelRequestErrorCategory;
++    use crate::events::model_request::ModelRequestNextAction;
++    use crate::events::model_request::ModelRequestOperation;
+     use pretty_assertions::assert_eq;
+     use schemars::JsonSchema;
+     use serde_json::Value;
+@@ -913,6 +1034,18 @@ mod tests {
              POST_COMPACT_OUTPUT_FIXTURE => {
                  include_str!("../schema/generated/post-compact.command.output.schema.json")
              }
@@ -723,7 +1106,7 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..e87f862003047e73e0eb2ecc8e2b1521
              PRE_COMPACT_INPUT_FIXTURE => {
                  include_str!("../schema/generated/pre-compact.command.input.schema.json")
              }
-@@ -993,6 +1142,10 @@ mod tests {
+@@ -993,6 +1126,10 @@ mod tests {
              PERMISSION_REQUEST_OUTPUT_FIXTURE,
              POST_COMPACT_INPUT_FIXTURE,
              POST_COMPACT_OUTPUT_FIXTURE,
@@ -734,7 +1117,7 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..e87f862003047e73e0eb2ecc8e2b1521
              PRE_COMPACT_INPUT_FIXTURE,
              PRE_COMPACT_OUTPUT_FIXTURE,
              PRE_TOOL_USE_INPUT_FIXTURE,
-@@ -1071,6 +1224,16 @@ mod tests {
+@@ -1071,6 +1208,16 @@ mod tests {
                  .expect("serialize permission request input schema"),
          )
          .expect("parse permission request input schema");
@@ -751,15 +1134,169 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..e87f862003047e73e0eb2ecc8e2b1521
          let user_prompt_submit: Value = serde_json::from_slice(
              &schema_json::<UserPromptSubmitCommandInput>()
                  .expect("serialize user prompt submit input schema"),
-@@ -1097,6 +1260,8 @@ mod tests {
-             &post_tool_use,
-             &pre_compact,
-             &post_compact,
-+            &request_error,
-+            &abnormal_stop,
-             &user_prompt_submit,
-             &subagent_start,
-             &subagent_stop,
+@@ -1110,6 +1257,162 @@ mod tests {
+                     .contains(&Value::String("turn_id".to_string()))
+             );
+         }
++
++        for schema in [&request_error, &abnormal_stop] {
++            assert_eq!(schema["properties"]["turnId"]["type"], "string");
++            assert_eq!(schema["properties"].get("turn_id"), None);
++            assert!(
++                schema["required"]
++                    .as_array()
++                    .expect("schema required fields")
++                    .contains(&Value::String("turnId".to_string()))
++            );
++        }
++    }
++
++    #[test]
++    fn model_request_failure_schemas_expose_only_stable_camel_case_fields() {
++        let request_error: Value = serde_json::from_slice(
++            &schema_json::<RequestErrorCommandInput>()
++                .expect("serialize request error input schema"),
++        )
++        .expect("parse request error input schema");
++        let abnormal_stop: Value = serde_json::from_slice(
++            &schema_json::<AbnormalStopCommandInput>()
++                .expect("serialize abnormal stop input schema"),
++        )
++        .expect("parse abnormal stop input schema");
++
++        let request_properties = request_error["properties"]
++            .as_object()
++            .expect("request error properties");
++        for required in [
++            "sessionId",
++            "turnId",
++            "transcriptPath",
++            "cwd",
++            "hookEventName",
++            "model",
++            "provider",
++            "operation",
++            "endpointPath",
++            "attempt",
++            "nextAction",
++            "error",
++        ] {
++            assert!(
++                request_properties.contains_key(required),
++                "missing {required}"
++            );
++        }
++        for removed in [
++            "requestType",
++            "requestSubtype",
++            "retryAttempt",
++            "maxRetries",
++            "willRetry",
++            "nextRetryAttempt",
++            "errorRetryable",
++            "errorKind",
++            "errorMessage",
++            "codexErrorInfo",
++            "turn_id",
++        ] {
++            assert!(
++                !request_properties.contains_key(removed),
++                "retained {removed}"
++            );
++        }
++        assert!(request_properties.keys().all(|field| !field.contains('_')));
++
++        let abnormal_properties = abnormal_stop["properties"]
++            .as_object()
++            .expect("abnormal stop properties");
++        assert!(abnormal_properties.keys().all(|field| !field.contains('_')));
++        for removed in [
++            "requestType",
++            "requestSubtype",
++            "retryAttempt",
++            "maxRetries",
++            "errorKind",
++            "errorMessage",
++            "codexErrorInfo",
++            "turn_id",
++        ] {
++            assert!(
++                !abnormal_properties.contains_key(removed),
++                "retained {removed}"
++            );
++        }
++    }
++
++    #[test]
++    fn model_request_failure_payloads_serialize_with_stable_values() {
++        let error = ModelRequestError {
++            category: ModelRequestErrorCategory::RateLimit,
++            message: "slow down".to_string(),
++        };
++        let request_error = RequestErrorCommandInput {
++            session_id: "session-1".to_string(),
++            turn_id: "turn-1".to_string(),
++            transcript_path: NullableString::from_path(None),
++            cwd: "/tmp".to_string(),
++            hook_event_name: "RequestError".to_string(),
++            model: "gpt-test".to_string(),
++            provider: "openai".to_string(),
++            operation: ModelRequestOperation::RemoteCompact,
++            endpoint_path: "/responses/compact".to_string(),
++            attempt: 3,
++            next_action: ModelRequestNextAction::Fallback,
++            error: error.clone(),
++        };
++        assert_eq!(
++            serde_json::to_value(request_error).expect("serialize request error"),
++            json!({
++                "sessionId": "session-1",
++                "turnId": "turn-1",
++                "transcriptPath": null,
++                "cwd": "/tmp",
++                "hookEventName": "RequestError",
++                "model": "gpt-test",
++                "provider": "openai",
++                "operation": "remoteCompact",
++                "endpointPath": "/responses/compact",
++                "attempt": 3,
++                "nextAction": "fallback",
++                "error": { "category": "rateLimit", "message": "slow down" },
++            })
++        );
++
++        let abnormal_stop = AbnormalStopCommandInput {
++            session_id: "session-1".to_string(),
++            turn_id: "turn-1".to_string(),
++            transcript_path: NullableString::from_path(None),
++            cwd: "/tmp".to_string(),
++            hook_event_name: "AbnormalStop".to_string(),
++            model: "gpt-test".to_string(),
++            provider: "openai".to_string(),
++            goal_mode: true,
++            approval_policy: "never".to_string(),
++            sandbox_mode: "danger-full-access".to_string(),
++            reason: "requestError".to_string(),
++            operation: ModelRequestOperation::RemoteCompact,
++            endpoint_path: "/responses/compact".to_string(),
++            attempt: 4,
++            next_action: ModelRequestNextAction::Stop,
++            error,
++        };
++        let abnormal_stop = serde_json::to_value(abnormal_stop).expect("serialize abnormal stop");
++        assert_eq!(abnormal_stop["reason"], "requestError");
++        assert_eq!(abnormal_stop["nextAction"], "stop");
++        assert_eq!(abnormal_stop["error"]["category"], "rateLimit");
++        assert!(
++            abnormal_stop
++                .as_object()
++                .expect("object")
++                .keys()
++                .all(|key| !key.contains('_'))
++        );
+     }
+ 
+     #[test]
 diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
 index 2ae44aea087d623dabe45cfcb84ca7b21b22000a..8674f1c8d275b8b99d6cce9e47339bc9c9bc2ff8 100644
 --- a/codex-rs/protocol/src/protocol.rs

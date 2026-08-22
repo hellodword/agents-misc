@@ -11055,10 +11055,10 @@ index 6d49d5f0c5bbdf467d885a1d547e3aa1ccb52244..4c5eb3987907552a902cef72f43479b2
 -export type ManagedHooksRequirements = { managedDir: string | null, windowsManagedDir: string | null, PreToolUse: Array<ConfiguredHookMatcherGroup>, PermissionRequest: Array<ConfiguredHookMatcherGroup>, PostToolUse: Array<ConfiguredHookMatcherGroup>, PreCompact: Array<ConfiguredHookMatcherGroup>, PostCompact: Array<ConfiguredHookMatcherGroup>, SessionStart: Array<ConfiguredHookMatcherGroup>, SessionEnd: Array<ConfiguredHookMatcherGroup>, UserPromptSubmit: Array<ConfiguredHookMatcherGroup>, SubagentStart: Array<ConfiguredHookMatcherGroup>, SubagentStop: Array<ConfiguredHookMatcherGroup>, Stop: Array<ConfiguredHookMatcherGroup>, };
 +export type ManagedHooksRequirements = { managedDir: string | null, windowsManagedDir: string | null, PreToolUse: Array<ConfiguredHookMatcherGroup>, PermissionRequest: Array<ConfiguredHookMatcherGroup>, PostToolUse: Array<ConfiguredHookMatcherGroup>, PreCompact: Array<ConfiguredHookMatcherGroup>, PostCompact: Array<ConfiguredHookMatcherGroup>, RequestError: Array<ConfiguredHookMatcherGroup>, AbnormalStop: Array<ConfiguredHookMatcherGroup>, SessionStart: Array<ConfiguredHookMatcherGroup>, SessionEnd: Array<ConfiguredHookMatcherGroup>, UserPromptSubmit: Array<ConfiguredHookMatcherGroup>, SubagentStart: Array<ConfiguredHookMatcherGroup>, SubagentStop: Array<ConfiguredHookMatcherGroup>, Stop: Array<ConfiguredHookMatcherGroup>, };
 diff --git a/codex-rs/code-mode-protocol/src/grpc/codex.code_mode.v1.proto b/codex-rs/code-mode-protocol/src/grpc/codex.code_mode.v1.proto
-index ece24730cc6e349d4640bb8467f47b40b7209d80..212175b1bb82724052dceeb8f074bee4a24ad12f 100644
+index ece24730cc6e349d4640bb8467f47b40b7209d80..f66ade6392418b07a71eee24362703a1a3548034 100644
 --- a/codex-rs/code-mode-protocol/src/grpc/codex.code_mode.v1.proto
 +++ b/codex-rs/code-mode-protocol/src/grpc/codex.code_mode.v1.proto
-@@ -200,7 +200,16 @@ message ExecutionOutcome {
+@@ -200,7 +200,17 @@ message ExecutionOutcome {
    }
  }
  
@@ -11072,6 +11072,7 @@ index ece24730cc6e349d4640bb8467f47b40b7209d80..212175b1bb82724052dceeb8f074bee4
 +  YIELD_REASON_UNSPECIFIED = 0;
 +  YIELD_REASON_TIMER = 1;
 +  YIELD_REASON_EXPLICIT = 2;
++  YIELD_REASON_TERMINAL_WAIT_DECISION = 3;
 +}
  
  message ExecutionTerminated {}
@@ -11165,7 +11166,7 @@ index 05b1cf0eca2bab991621e04aff9b0e601a20e100..abb63db95c36627abf2940b2c734436d
  #[derive(Clone, PartialEq, ::prost::Message)]
  pub struct StringMap {
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index d05a20609728107a9a7d59a4277884b97dfceedc..ff6e28c0bed72694690e49a96a8e174b461d9908 100644
+index d05a20609728107a9a7d59a4277884b97dfceedc..f8e9981dc3471691c7e7be0cdfac5f7f308edf72 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
 @@ -1482,6 +1482,13 @@
@@ -11203,13 +11204,13 @@ index d05a20609728107a9a7d59a4277884b97dfceedc..ff6e28c0bed72694690e49a96a8e174b
 +        "compact_request_timeout_ms": {
 +          "description": "Optional total timeout (in milliseconds) for unary `/responses/compact` requests.",
 +          "format": "uint64",
-+          "minimum": 0.0,
++          "minimum": 1.0,
 +          "type": "integer"
 +        },
          "env_http_headers": {
            "additionalProperties": {
              "type": "string"
-@@ -3235,6 +3255,52 @@
+@@ -3235,6 +3255,56 @@
        },
        "type": "object"
      },
@@ -11236,11 +11237,13 @@ index d05a20609728107a9a7d59a4277884b97dfceedc..ff6e28c0bed72694690e49a96a8e174b
 +        },
 +        "poll_interval_ms": {
 +          "format": "uint64",
++          "maximum": 3600000.0,
 +          "minimum": 1.0,
 +          "type": "integer"
 +        }
 +      },
 +      "required": [
++        "name",
 +        "pattern",
 +        "poll_interval_ms"
 +      ],
@@ -11250,19 +11253,21 @@ index d05a20609728107a9a7d59a4277884b97dfceedc..ff6e28c0bed72694690e49a96a8e174b
 +      "additionalProperties": false,
 +      "properties": {
 +        "commands": {
-+          "default": [],
 +          "items": {
 +            "$ref": "#/definitions/TerminalWaitCommandToml"
 +          },
 +          "type": "array"
 +        }
 +      },
++      "required": [
++        "commands"
++      ],
 +      "type": "object"
 +    },
      "ThreadStoreToml": {
        "oneOf": [
          {
-@@ -5980,6 +6046,15 @@
+@@ -5980,6 +6050,15 @@
        "description": "Suppress warnings about unstable (under development) features.",
        "type": "boolean"
      },
@@ -11280,14 +11285,61 @@ index d05a20609728107a9a7d59a4277884b97dfceedc..ff6e28c0bed72694690e49a96a8e174b
        "format": "uint",
 diff --git a/codex-rs/hooks/schema/generated/abnormal-stop.command.input.schema.json b/codex-rs/hooks/schema/generated/abnormal-stop.command.input.schema.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..02235034c2faf57e3d4ff7b967aa6a75934762c3
+index 0000000000000000000000000000000000000000..d7a754dc5f465f2db083a98b28540935b1389640
 --- /dev/null
 +++ b/codex-rs/hooks/schema/generated/abnormal-stop.command.input.schema.json
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,138 @@
 +{
 +  "$schema": "http://json-schema.org/draft-07/schema#",
 +  "additionalProperties": false,
 +  "definitions": {
++    "ModelRequestError": {
++      "properties": {
++        "category": {
++          "$ref": "#/definitions/ModelRequestErrorCategory"
++        },
++        "message": {
++          "type": "string"
++        }
++      },
++      "required": [
++        "category",
++        "message"
++      ],
++      "type": "object"
++    },
++    "ModelRequestErrorCategory": {
++      "enum": [
++        "transport",
++        "timeout",
++        "rateLimit",
++        "usageLimit",
++        "contextWindow",
++        "policy",
++        "sandbox",
++        "invalidRequest",
++        "server",
++        "internal",
++        "other"
++      ],
++      "type": "string"
++    },
++    "ModelRequestNextAction": {
++      "enum": [
++        "retry",
++        "fallback",
++        "stop"
++      ],
++      "type": "string"
++    },
++    "ModelRequestOperation": {
++      "enum": [
++        "sampling",
++        "localCompact",
++        "remoteCompact"
++      ],
++      "type": "string"
++    },
 +    "NullableString": {
 +      "type": [
 +        "string",
@@ -11299,7 +11351,11 @@ index 0000000000000000000000000000000000000000..02235034c2faf57e3d4ff7b967aa6a75
 +    "approvalPolicy": {
 +      "type": "string"
 +    },
-+    "codexErrorInfo": true,
++    "attempt": {
++      "format": "uint64",
++      "minimum": 0.0,
++      "type": "integer"
++    },
 +    "cwd": {
 +      "type": "string"
 +    },
@@ -11310,11 +11366,8 @@ index 0000000000000000000000000000000000000000..02235034c2faf57e3d4ff7b967aa6a75
 +      ],
 +      "type": "string"
 +    },
-+    "errorKind": {
-+      "type": "string"
-+    },
-+    "errorMessage": {
-+      "type": "string"
++    "error": {
++      "$ref": "#/definitions/ModelRequestError"
 +    },
 +    "goalMode": {
 +      "type": "boolean"
@@ -11323,41 +11376,21 @@ index 0000000000000000000000000000000000000000..02235034c2faf57e3d4ff7b967aa6a75
 +      "const": "AbnormalStop",
 +      "type": "string"
 +    },
-+    "maxRetries": {
-+      "format": "uint64",
-+      "minimum": 0.0,
-+      "type": "integer"
-+    },
 +    "model": {
 +      "type": "string"
++    },
++    "nextAction": {
++      "$ref": "#/definitions/ModelRequestNextAction"
++    },
++    "operation": {
++      "$ref": "#/definitions/ModelRequestOperation"
 +    },
 +    "provider": {
 +      "type": "string"
 +    },
 +    "reason": {
-+      "const": "request_error",
++      "const": "requestError",
 +      "type": "string"
-+    },
-+    "requestSubtype": {
-+      "enum": [
-+        "normal",
-+        "local",
-+        "remote",
-+        "remote_v2"
-+      ],
-+      "type": "string"
-+    },
-+    "requestType": {
-+      "enum": [
-+        "sampling",
-+        "compact"
-+      ],
-+      "type": "string"
-+    },
-+    "retryAttempt": {
-+      "format": "uint64",
-+      "minimum": 0.0,
-+      "type": "integer"
 +    },
 +    "sandboxMode": {
 +      "type": "string"
@@ -11368,31 +11401,28 @@ index 0000000000000000000000000000000000000000..02235034c2faf57e3d4ff7b967aa6a75
 +    "transcriptPath": {
 +      "$ref": "#/definitions/NullableString"
 +    },
-+    "turn_id": {
++    "turnId": {
 +      "description": "Codex extension: expose the active turn id to internal turn-scoped hooks.",
 +      "type": "string"
 +    }
 +  },
 +  "required": [
 +    "approvalPolicy",
-+    "codexErrorInfo",
++    "attempt",
 +    "cwd",
 +    "endpointPath",
-+    "errorKind",
-+    "errorMessage",
++    "error",
 +    "goalMode",
 +    "hookEventName",
-+    "maxRetries",
 +    "model",
++    "nextAction",
++    "operation",
 +    "provider",
 +    "reason",
-+    "requestSubtype",
-+    "requestType",
-+    "retryAttempt",
 +    "sandboxMode",
 +    "sessionId",
 +    "transcriptPath",
-+    "turn_id"
++    "turnId"
 +  ],
 +  "title": "abnormal-stop.command.input",
 +  "type": "object"
@@ -11400,7 +11430,7 @@ index 0000000000000000000000000000000000000000..02235034c2faf57e3d4ff7b967aa6a75
 \ No newline at end of file
 diff --git a/codex-rs/hooks/schema/generated/abnormal-stop.command.output.schema.json b/codex-rs/hooks/schema/generated/abnormal-stop.command.output.schema.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..b861d310235e3357ef1ca1df3f3d74679bbc47d7
+index 0000000000000000000000000000000000000000..a19249079d67ccfa1fb9737fc1efd82d1fd116bb
 --- /dev/null
 +++ b/codex-rs/hooks/schema/generated/abnormal-stop.command.output.schema.json
 @@ -0,0 +1,27 @@
@@ -11416,11 +11446,11 @@ index 0000000000000000000000000000000000000000..b861d310235e3357ef1ca1df3f3d7467
 +      "default": null,
 +      "type": "string"
 +    },
-+    "suppressOutput": {
-+      "default": false,
++    "suppress": {
 +      "type": "boolean"
 +    },
-+    "suppressTurnErrorLifecycle": {
++    "suppressOutput": {
++      "default": false,
 +      "type": "boolean"
 +    },
 +    "systemMessage": {
@@ -11434,14 +11464,61 @@ index 0000000000000000000000000000000000000000..b861d310235e3357ef1ca1df3f3d7467
 \ No newline at end of file
 diff --git a/codex-rs/hooks/schema/generated/request-error.command.input.schema.json b/codex-rs/hooks/schema/generated/request-error.command.input.schema.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..a47c1e276a038db4dd5abe6a95cce67a389cf228
+index 0000000000000000000000000000000000000000..afb1295096c8471d58e1cb87731d553be832ffbc
 --- /dev/null
 +++ b/codex-rs/hooks/schema/generated/request-error.command.input.schema.json
-@@ -0,0 +1,109 @@
+@@ -0,0 +1,121 @@
 +{
 +  "$schema": "http://json-schema.org/draft-07/schema#",
 +  "additionalProperties": false,
 +  "definitions": {
++    "ModelRequestError": {
++      "properties": {
++        "category": {
++          "$ref": "#/definitions/ModelRequestErrorCategory"
++        },
++        "message": {
++          "type": "string"
++        }
++      },
++      "required": [
++        "category",
++        "message"
++      ],
++      "type": "object"
++    },
++    "ModelRequestErrorCategory": {
++      "enum": [
++        "transport",
++        "timeout",
++        "rateLimit",
++        "usageLimit",
++        "contextWindow",
++        "policy",
++        "sandbox",
++        "invalidRequest",
++        "server",
++        "internal",
++        "other"
++      ],
++      "type": "string"
++    },
++    "ModelRequestNextAction": {
++      "enum": [
++        "retry",
++        "fallback",
++        "stop"
++      ],
++      "type": "string"
++    },
++    "ModelRequestOperation": {
++      "enum": [
++        "sampling",
++        "localCompact",
++        "remoteCompact"
++      ],
++      "type": "string"
++    },
 +    "NullableString": {
 +      "type": [
 +        "string",
@@ -11450,7 +11527,11 @@ index 0000000000000000000000000000000000000000..a47c1e276a038db4dd5abe6a95cce67a
 +    }
 +  },
 +  "properties": {
-+    "codexErrorInfo": true,
++    "attempt": {
++      "format": "uint64",
++      "minimum": 0.0,
++      "type": "integer"
++    },
 +    "cwd": {
 +      "type": "string"
 +    },
@@ -11461,55 +11542,24 @@ index 0000000000000000000000000000000000000000..a47c1e276a038db4dd5abe6a95cce67a
 +      ],
 +      "type": "string"
 +    },
-+    "errorKind": {
-+      "type": "string"
-+    },
-+    "errorMessage": {
-+      "type": "string"
-+    },
-+    "errorRetryable": {
-+      "type": "boolean"
++    "error": {
++      "$ref": "#/definitions/ModelRequestError"
 +    },
 +    "hookEventName": {
 +      "const": "RequestError",
 +      "type": "string"
 +    },
-+    "maxRetries": {
-+      "format": "uint64",
-+      "minimum": 0.0,
-+      "type": "integer"
-+    },
 +    "model": {
 +      "type": "string"
 +    },
-+    "nextRetryAttempt": {
-+      "format": "uint64",
-+      "minimum": 0.0,
-+      "type": "integer"
++    "nextAction": {
++      "$ref": "#/definitions/ModelRequestNextAction"
++    },
++    "operation": {
++      "$ref": "#/definitions/ModelRequestOperation"
 +    },
 +    "provider": {
 +      "type": "string"
-+    },
-+    "requestSubtype": {
-+      "enum": [
-+        "normal",
-+        "local",
-+        "remote",
-+        "remote_v2"
-+      ],
-+      "type": "string"
-+    },
-+    "requestType": {
-+      "enum": [
-+        "sampling",
-+        "compact"
-+      ],
-+      "type": "string"
-+    },
-+    "retryAttempt": {
-+      "format": "uint64",
-+      "minimum": 0.0,
-+      "type": "integer"
 +    },
 +    "sessionId": {
 +      "type": "string"
@@ -11517,32 +11567,24 @@ index 0000000000000000000000000000000000000000..a47c1e276a038db4dd5abe6a95cce67a
 +    "transcriptPath": {
 +      "$ref": "#/definitions/NullableString"
 +    },
-+    "turn_id": {
++    "turnId": {
 +      "description": "Codex extension: expose the active turn id to internal turn-scoped hooks.",
 +      "type": "string"
-+    },
-+    "willRetry": {
-+      "type": "boolean"
 +    }
 +  },
 +  "required": [
-+    "codexErrorInfo",
++    "attempt",
 +    "cwd",
 +    "endpointPath",
-+    "errorKind",
-+    "errorMessage",
-+    "errorRetryable",
++    "error",
 +    "hookEventName",
-+    "maxRetries",
 +    "model",
++    "nextAction",
++    "operation",
 +    "provider",
-+    "requestSubtype",
-+    "requestType",
-+    "retryAttempt",
 +    "sessionId",
 +    "transcriptPath",
-+    "turn_id",
-+    "willRetry"
++    "turnId"
 +  ],
 +  "title": "request-error.command.input",
 +  "type": "object"

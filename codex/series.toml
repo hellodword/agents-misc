@@ -7,6 +7,7 @@ source_files = [
   "codex-rs/config/src/thread_config.rs",
   "codex-rs/config/src/thread_config/remote.rs",
   "codex-rs/core/src/client.rs",
+  "codex-rs/core/src/client_tests.rs",
   "codex-rs/core/tests/responses_headers.rs",
   "codex-rs/core/tests/suite/client.rs",
   "codex-rs/core/tests/suite/client_websockets.rs",
@@ -50,8 +51,10 @@ source_files = [
   "codex-rs/core/src/compact_remote_v2_attempt.rs",
   "codex-rs/core/src/hook_runtime.rs",
   "codex-rs/core/src/responses_retry.rs",
+  "codex-rs/core/src/responses_retry_tests.rs",
   "codex-rs/core/src/session/turn.rs",
   "codex-rs/core/src/tasks/lifecycle.rs",
+  "codex-rs/core/tests/suite/compact.rs",
   "codex-rs/ext/extension-api/src/lib.rs",
   "codex-rs/ext/extension-api/src/state.rs",
   "codex-rs/ext/goal/src/extension.rs",
@@ -107,7 +110,11 @@ intent = "Separate ordinary Code Mode yields from terminal-wait decision yields.
 behavior = "Decision leases can be established, resumed once, expired, and converted across host/runtime protocols without ambiguous state inference."
 source_files = [
   "codex-rs/code-mode-host/src/grpc/conversions.rs",
+  "codex-rs/code-mode-host/src/grpc/conversions_tests.rs",
   "codex-rs/code-mode-host/src/grpc/service_tests.rs",
+  "codex-rs/code-mode-host/tests/grpc.rs",
+  "codex-rs/code-mode-host/tests/grpc_notifications.rs",
+  "codex-rs/code-mode-host/tests/stdio.rs",
   "codex-rs/code-mode-protocol/src/host/host_tests.rs",
   "codex-rs/code-mode-protocol/src/host/payload.rs",
   "codex-rs/code-mode-protocol/src/lib.rs",
@@ -174,18 +181,3 @@ tests = [
   ["cargo", "test", "-p", "codex-app-server-protocol"],
   ["cargo", "test", "-p", "codex-config"],
 ]
-
-[[patch]]
-file = "0007-plan-request-auto-resolution.patch"
-intent = "Temporarily preserve the currently maintained Plan request auto-resolution delta during the tool migration."
-behavior = "This boundary exists only for phase-one byte-preserving refresh and is deleted in phase two."
-source_files = [
-  "codex-rs/core/src/tools/handlers/request_user_input.rs",
-  "codex-rs/core/src/tools/handlers/request_user_input_spec.rs",
-  "codex-rs/core/src/tools/handlers/request_user_input_spec_tests.rs",
-  "codex-rs/core/tests/suite/request_user_input.rs",
-]
-source_prefixes = []
-generated_files = []
-generated_prefixes = []
-tests = [["cargo", "test", "-p", "codex-core", "request_user_input"]]

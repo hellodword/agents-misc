@@ -13,20 +13,58 @@ only with environment variables.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import argparse
 import json
 import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from typing import Any
-
 
 DEFAULT_SERVER_URL = "http://172.17.0.1:8765/hook"
 DEFAULT_TIMEOUT_SEC = 1.5
 DEFAULT_PREVIEW_LIMIT = 500
 DEFAULT_MAX_STDIN_BYTES = 2 * 1024 * 1024
+DEFAULT_MAX_REQUEST_BYTES = 2 * 1024 * 1024
+MODEL_REQUEST_EVENTS = {"RequestError", "AbnormalStop"}
+MODEL_REQUEST_OPERATIONS = {"sampling", "localCompact", "remoteCompact"}
+MODEL_REQUEST_NEXT_ACTIONS = {"retry", "fallback", "stop"}
+MODEL_REQUEST_ERROR_CATEGORIES = {
+    "transport",
+    "timeout",
+    "rateLimit",
+    "usageLimit",
+    "contextWindow",
+    "policy",
+    "sandbox",
+    "invalidRequest",
+    "server",
+    "internal",
+    "other",
+}
+REQUEST_ERROR_FIELDS = {
+    "attempt",
+    "cwd",
+    "endpointPath",
+    "error",
+    "hookEventName",
+    "model",
+    "nextAction",
+    "operation",
+    "provider",
+    "sessionId",
+    "transcriptPath",
+    "turnId",
+}
+ABNORMAL_STOP_FIELDS = REQUEST_ERROR_FIELDS | {
+    "approvalPolicy",
+    "goalMode",
+    "reason",
+    "sandboxMode",
+}
 
 
 @dataclass(frozen=True)
@@ -36,6 +74,7 @@ class Options:
     events: str
     preview_limit: int
     max_stdin_bytes: int
+    max_request_bytes: int
     include_raw: bool
     strict: bool
     verbose: bool
@@ -55,12 +94,12 @@ def main() -> int:
         raw_text = read_stdin(options.max_stdin_bytes)
         payload = json.loads(raw_text)
         if not isinstance(payload, dict):
-            raise ValueError("hook stdin JSON must be an object")
-    except Exception as exc:
+            raise TypeError("hook stdin JSON must be an object")
+        normalized = normalize_hook_payload(payload, options.preview_limit)
+    except (TypeError, UnicodeError, ValueError) as exc:
         log(verbose or strict, f"codex hook forwarder: invalid stdin: {exc}")
         return 1 if strict else 0
 
-    normalized = normalize_hook_payload(payload, options.preview_limit)
     event_name = str(normalized.get("hookEventName") or "")
     if not event_matches(event_name, options.events):
         log(verbose, f"codex hook forwarder: skipped event {event_name!r}")
@@ -80,8 +119,13 @@ def main() -> int:
         message["rawPayload"] = payload
 
     try:
-        post_json(options.url, message, options.timeout)
-    except Exception as exc:
+        post_json(
+            options.url,
+            message,
+            options.timeout,
+            options.max_request_bytes,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError, urllib.error.URLError) as exc:
         log(verbose or strict, f"codex hook forwarder: delivery failed: {exc}")
         return 1 if strict else 0
 
@@ -90,24 +134,51 @@ def main() -> int:
 
 
 def load_options() -> Options:
-    if len(sys.argv) > 1:
-        raise ValueError(
-            "command-line arguments are not supported; use CODEX_HOOK_* environment variables"
+    parser = argparse.ArgumentParser(
+        description=(
+            "Forward Codex hook stdin to CODEX_HOOK_SERVER_URL. Runtime options "
+            "are configured with CODEX_HOOK_FORWARDER_* environment variables."
         )
+    )
+    parser.parse_args()
 
-    return Options(
+    options = Options(
         url=os.environ.get("CODEX_HOOK_SERVER_URL", DEFAULT_SERVER_URL),
         timeout=float_env("CODEX_HOOK_FORWARDER_TIMEOUT", DEFAULT_TIMEOUT_SEC),
         events=os.environ.get("CODEX_HOOK_FORWARDER_EVENTS", "*"),
         preview_limit=int_env(
-            "CODEX_HOOK_FORWARDER_PREVIEW_LIMIT", DEFAULT_PREVIEW_LIMIT),
+            "CODEX_HOOK_FORWARDER_PREVIEW_LIMIT", DEFAULT_PREVIEW_LIMIT
+        ),
         max_stdin_bytes=int_env(
-            "CODEX_HOOK_FORWARDER_MAX_STDIN_BYTES", DEFAULT_MAX_STDIN_BYTES),
-        include_raw=truthy(os.environ.get(
-            "CODEX_HOOK_FORWARDER_INCLUDE_RAW", "1")),
+            "CODEX_HOOK_FORWARDER_MAX_STDIN_BYTES", DEFAULT_MAX_STDIN_BYTES
+        ),
+        max_request_bytes=int_env(
+            "CODEX_HOOK_FORWARDER_MAX_REQUEST_BYTES", DEFAULT_MAX_REQUEST_BYTES
+        ),
+        include_raw=truthy(os.environ.get("CODEX_HOOK_FORWARDER_INCLUDE_RAW")),
         strict=truthy(os.environ.get("CODEX_HOOK_FORWARDER_STRICT")),
         verbose=truthy(os.environ.get("CODEX_HOOK_FORWARDER_VERBOSE")),
     )
+    validate_options(options)
+    return options
+
+
+def validate_options(options: Options) -> None:
+    parsed = urllib.parse.urlsplit(options.url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("CODEX_HOOK_SERVER_URL must be an absolute HTTP(S) URL")
+    if options.timeout <= 0:
+        raise ValueError("CODEX_HOOK_FORWARDER_TIMEOUT must be greater than zero")
+    if options.preview_limit < 0:
+        raise ValueError("CODEX_HOOK_FORWARDER_PREVIEW_LIMIT must not be negative")
+    if options.max_stdin_bytes <= 0:
+        raise ValueError(
+            "CODEX_HOOK_FORWARDER_MAX_STDIN_BYTES must be greater than zero"
+        )
+    if options.max_request_bytes <= 0:
+        raise ValueError(
+            "CODEX_HOOK_FORWARDER_MAX_REQUEST_BYTES must be greater than zero"
+        )
 
 
 def float_env(name: str, default: float) -> float:
@@ -139,9 +210,17 @@ def read_stdin(max_bytes: int) -> str:
     return data.decode("utf-8")
 
 
-def post_json(url: str, payload: dict[str, Any], timeout: float) -> None:
-    body = json.dumps(payload, ensure_ascii=False,
-                      separators=(",", ":")).encode("utf-8")
+def post_json(
+    url: str,
+    payload: dict[str, Any],
+    timeout: float,
+    max_request_bytes: int,
+) -> None:
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    if len(body) > max_request_bytes:
+        raise ValueError(f"forwarded request exceeded {max_request_bytes} bytes")
     request = urllib.request.Request(
         url,
         data=body,
@@ -156,44 +235,47 @@ def post_json(url: str, payload: dict[str, Any], timeout: float) -> None:
             raise RuntimeError(f"server returned HTTP {response.status}")
 
 
-def normalize_hook_payload(payload: dict[str, Any], preview_limit: int) -> dict[str, Any]:
-    event_name = first(payload, "hookEventName", "hook_event_name")
+def normalize_hook_payload(
+    payload: dict[str, Any], preview_limit: int
+) -> dict[str, Any]:
+    event_name = payload.get("hookEventName")
+    if event_name in MODEL_REQUEST_EVENTS:
+        validate_model_request_payload(payload)
+        return dict(payload)
+
     summary: dict[str, Any] = {
         "hookEventName": event_name,
-        "sessionId": first(payload, "sessionId", "session_id"),
-        "turnId": first(payload, "turnId", "turn_id"),
-        "agentId": first(payload, "agentId", "agent_id"),
-        "agentType": first(payload, "agentType", "agent_type"),
-        "transcriptPath": first(payload, "transcriptPath", "transcript_path"),
-        "agentTranscriptPath": first(payload, "agentTranscriptPath", "agent_transcript_path"),
+        "sessionId": payload.get("sessionId"),
+        "turnId": payload.get("turnId"),
+        "agentId": payload.get("agentId"),
+        "agentType": payload.get("agentType"),
+        "transcriptPath": payload.get("transcriptPath"),
+        "agentTranscriptPath": payload.get("agentTranscriptPath"),
         "cwd": payload.get("cwd"),
         "model": payload.get("model"),
-        "permissionMode": first(payload, "permissionMode", "permission_mode"),
+        "permissionMode": payload.get("permissionMode"),
         "source": payload.get("source"),
         "trigger": payload.get("trigger"),
-        "toolName": first(payload, "toolName", "tool_name"),
-        "toolUseId": first(payload, "toolUseId", "tool_use_id"),
+        "toolName": payload.get("toolName"),
+        "toolUseId": payload.get("toolUseId"),
         "provider": payload.get("provider"),
-        "requestType": first(payload, "requestType", "request_type"),
-        "requestSubtype": first(payload, "requestSubtype", "request_subtype"),
-        "endpointPath": first(payload, "endpointPath", "endpoint_path"),
-        "retryAttempt": first(payload, "retryAttempt", "retry_attempt"),
-        "maxRetries": first(payload, "maxRetries", "max_retries"),
-        "willRetry": first(payload, "willRetry", "will_retry"),
-        "nextRetryAttempt": first(payload, "nextRetryAttempt", "next_retry_attempt"),
-        "errorRetryable": first(payload, "errorRetryable", "error_retryable"),
-        "errorKind": first(payload, "errorKind", "error_kind"),
-        "errorMessage": first(payload, "errorMessage", "error_message"),
+        "operation": payload.get("operation"),
+        "endpointPath": payload.get("endpointPath"),
+        "attempt": payload.get("attempt"),
+        "nextAction": payload.get("nextAction"),
+        "error": payload.get("error"),
+        "goalMode": payload.get("goalMode"),
+        "approvalPolicy": payload.get("approvalPolicy"),
+        "sandboxMode": payload.get("sandboxMode"),
         "reason": payload.get("reason"),
-        "stopHookActive": first(payload, "stopHookActive", "stop_hook_active"),
+        "stopHookActive": payload.get("stopHookActive"),
     }
 
-    tool_input = first(payload, "toolInput", "tool_input")
-    tool_response = first(payload, "toolResponse", "tool_response")
+    tool_input = payload.get("toolInput")
+    tool_response = payload.get("toolResponse")
     prompt = payload.get("prompt")
-    last_assistant_message = first(
-        payload, "lastAssistantMessage", "last_assistant_message")
-    codex_error_info = first(payload, "codexErrorInfo", "codex_error_info")
+    last_assistant_message = payload.get("lastAssistantMessage")
+    codex_error_info = payload.get("codexErrorInfo")
 
     if tool_input is not None:
         summary["toolInputPreview"] = preview_value(tool_input, preview_limit)
@@ -201,25 +283,66 @@ def normalize_hook_payload(payload: dict[str, Any], preview_limit: int) -> dict[
         if command:
             summary["toolCommand"] = command
     if tool_response is not None:
-        summary["toolResponsePreview"] = preview_value(
-            tool_response, preview_limit)
+        summary["toolResponsePreview"] = preview_value(tool_response, preview_limit)
     if prompt is not None:
         summary["promptPreview"] = preview_value(prompt, preview_limit)
     if last_assistant_message is not None:
         summary["lastAssistantMessagePreview"] = preview_value(
-            last_assistant_message, preview_limit)
+            last_assistant_message, preview_limit
+        )
     if codex_error_info is not None:
         summary["codexErrorInfoPreview"] = preview_value(
-            codex_error_info, preview_limit)
+            codex_error_info, preview_limit
+        )
 
     return {key: value for key, value in summary.items() if value is not None}
 
 
-def first(mapping: dict[str, Any], *keys: str) -> Any:
-    for key in keys:
-        if key in mapping:
-            return mapping[key]
-    return None
+def validate_model_request_payload(payload: dict[str, Any]) -> None:
+    event_name = payload.get("hookEventName")
+    expected_fields = (
+        REQUEST_ERROR_FIELDS if event_name == "RequestError" else ABNORMAL_STOP_FIELDS
+    )
+    missing = sorted(expected_fields - set(payload))
+    unknown = sorted(set(payload) - expected_fields)
+    if missing:
+        raise ValueError(f"{event_name} is missing fields: {', '.join(missing)}")
+    if unknown:
+        raise ValueError(f"{event_name} has unknown fields: {', '.join(unknown)}")
+    for field in ["sessionId", "turnId", "cwd", "model", "provider", "endpointPath"]:
+        if not isinstance(payload.get(field), str):
+            raise TypeError(f"{event_name} {field} must be a string")
+    transcript_path = payload.get("transcriptPath")
+    if transcript_path is not None and not isinstance(transcript_path, str):
+        raise ValueError(f"{event_name} transcriptPath must be a string or null")
+    if payload.get("endpointPath") not in {"/responses", "/responses/compact"}:
+        raise ValueError(f"{event_name} endpointPath is invalid")
+    operation = payload.get("operation")
+    if operation not in MODEL_REQUEST_OPERATIONS:
+        raise ValueError(f"{event_name} operation is invalid")
+    next_action = payload.get("nextAction")
+    if next_action not in MODEL_REQUEST_NEXT_ACTIONS:
+        raise ValueError(f"{event_name} nextAction is invalid")
+    attempt = payload.get("attempt")
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 0:
+        raise ValueError(f"{event_name} attempt must be a non-negative integer")
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        raise TypeError(f"{event_name} error must be an object")
+    if set(error) != {"category", "message"}:
+        raise ValueError(f"{event_name} error must contain only category and message")
+    if error.get("category") not in MODEL_REQUEST_ERROR_CATEGORIES:
+        raise ValueError(f"{event_name} error.category is invalid")
+    if not isinstance(error.get("message"), str):
+        raise TypeError(f"{event_name} error.message must be a string")
+    if event_name == "AbnormalStop":
+        if not isinstance(payload.get("goalMode"), bool):
+            raise ValueError("AbnormalStop goalMode must be a boolean")
+        for field in ["approvalPolicy", "sandboxMode"]:
+            if not isinstance(payload.get(field), str):
+                raise TypeError(f"AbnormalStop {field} must be a string")
+        if payload.get("reason") != "requestError":
+            raise ValueError("AbnormalStop reason is invalid")
 
 
 def command_from_tool_input(value: Any) -> str | None:
@@ -251,7 +374,7 @@ def severity_for(summary: dict[str, Any]) -> str:
     if event_name == "AbnormalStop":
         return "error"
     if event_name == "RequestError":
-        return "warning" if summary.get("willRetry") else "error"
+        return "warning" if summary.get("nextAction") != "stop" else "error"
     if event_name in {"PreToolUse", "PermissionRequest", "UserPromptSubmit"}:
         return "info"
     return "info"
@@ -260,12 +383,9 @@ def severity_for(summary: dict[str, Any]) -> str:
 def title_for(summary: dict[str, Any]) -> str:
     event_name = str(summary.get("hookEventName") or "Hook")
     if event_name == "RequestError":
-        if summary.get("willRetry"):
-            attempt = summary.get(
-                "nextRetryAttempt") or summary.get("retryAttempt")
-            maximum = summary.get("maxRetries")
-            suffix = f" retry {attempt}/{maximum}" if attempt is not None and maximum is not None else " retrying"
-            return "Codex request error:" + suffix
+        next_action = summary.get("nextAction")
+        if next_action in {"retry", "fallback"}:
+            return f"Codex request error: {next_action} after attempt {summary.get('attempt')}"
         return "Codex request failed"
     if event_name == "AbnormalStop":
         return "Codex abnormal stop"
@@ -284,21 +404,31 @@ def message_for(summary: dict[str, Any]) -> str:
         parts = [
             summary.get("provider"),
             summary.get("model"),
-            summary.get("requestType"),
-            summary.get("requestSubtype"),
+            summary.get("operation"),
             summary.get("endpointPath"),
         ]
         context = " ".join(str(part) for part in parts if part)
+        error_value = summary.get("error")
+        error_fields = error_value if isinstance(error_value, dict) else {}
         error = ": ".join(
-            str(part) for part in [summary.get("errorKind"), summary.get("errorMessage")] if part
+            str(part)
+            for part in [error_fields.get("category"), error_fields.get("message")]
+            if part
         )
         return " - ".join(part for part in [context, error] if part)
     if event_name in {"PreToolUse", "PostToolUse", "PermissionRequest"}:
-        return str(summary.get("toolCommand") or summary.get("toolInputPreview") or summary.get("cwd") or "")
+        return str(
+            summary.get("toolCommand")
+            or summary.get("toolInputPreview")
+            or summary.get("cwd")
+            or ""
+        )
     if event_name == "UserPromptSubmit":
         return str(summary.get("promptPreview") or "")
     if event_name in {"Stop", "SubagentStop"}:
-        return str(summary.get("lastAssistantMessagePreview") or summary.get("cwd") or "")
+        return str(
+            summary.get("lastAssistantMessagePreview") or summary.get("cwd") or ""
+        )
     return str(summary.get("cwd") or summary.get("model") or "")
 
 

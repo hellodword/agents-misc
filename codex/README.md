@@ -237,9 +237,10 @@ deliver turn error lifecycle events to extensions.
 
 #### RequestError Hook
 
-`RequestError` fires whenever a model request fails, including intermediate
-retry failures and final failures. On final failure, `willRetry` is `false` and
-`nextRetryAttempt` is `null`.
+`RequestError` fires once for each Codex-visible retry, fallback, or stop
+decision. Transport retries internal to one HTTP request are aggregated. The
+`nextAction` field records the resulting `retry`, `fallback`, or `stop`
+decision.
 
 Trigger scope:
 
@@ -263,17 +264,12 @@ Example payload:
   "hookEventName": "RequestError",
   "model": "gpt-5",
   "provider": "openai",
-  "requestType": "sampling",
-  "requestSubtype": "normal",
+  "operation": "sampling",
   "endpointPath": "/responses",
-  "retryAttempt": 1,
-  "maxRetries": 5,
-  "willRetry": true,
-  "nextRetryAttempt": 2,
-  "errorRetryable": true,
-  "errorKind": "Stream",
-  "errorMessage": "stream disconnected",
-  "codexErrorInfo": {
+  "attempt": 1,
+  "nextAction": "retry",
+  "error": {
+    "category": "transport",
     "message": "stream disconnected"
   }
 }
@@ -316,15 +312,13 @@ Example payload:
   "goalMode": true,
   "approvalPolicy": "never",
   "sandboxMode": "danger-full-access",
-  "reason": "request_error",
-  "requestType": "compact",
-  "requestSubtype": "remote",
+  "reason": "requestError",
+  "operation": "remoteCompact",
   "endpointPath": "/responses/compact",
-  "retryAttempt": 4,
-  "maxRetries": 4,
-  "errorKind": "Timeout",
-  "errorMessage": "request timed out",
-  "codexErrorInfo": {
+  "attempt": 4,
+  "nextAction": "stop",
+  "error": {
+    "category": "timeout",
     "message": "request timed out"
   }
 }
@@ -335,10 +329,10 @@ Example payload:
 turn; a hook can treat `approvalPolicy == "never"` and
 `sandboxMode == "danger-full-access"` as yolo mode.
 
-`errorKind` is the concrete Codex error category, such as `ServerOverloaded`,
-`ConnectionFailed`, `ResponseStreamFailed`, `InternalServerError`,
-`RetryLimit`, `ContextWindowExceeded`, `CyberPolicy`, `UsageLimitReached`, or
-`Sandbox`.
+`error.category` is one of `transport`, `timeout`, `rateLimit`, `usageLimit`,
+`contextWindow`, `policy`, `sandbox`, `invalidRequest`, `server`, `internal`,
+or `other`. The payload intentionally excludes arbitrary internal error
+objects.
 
 Hook output may include:
 
@@ -349,7 +343,7 @@ Hook output may include:
 ```
 
 When this field is absent, Codex suppresses turn error lifecycle delivery by
-default for `/goal` turns unless `errorKind` is `CyberPolicy`. Other turns
+default for `/goal` turns unless `error.category` is `policy`. Other turns
 default to normal turn error lifecycle delivery. Setting the field explicitly
 overrides the default for that hook run.
 
@@ -358,11 +352,11 @@ retry, context-window, usage-limit, or sandbox failures unless a hook chooses
 normal lifecycle delivery. Policy blocks still use normal lifecycle delivery by
 default.
 
-### Plan Mode Request User Input Auto Resolution
+### Plan Mode User Input
 
-Plan mode strips `autoResolutionMs` from `request_user_input`, while Default
-mode with the feature enabled can pass an auto-resolution timeout through to
-the client.
+Plan mode user-input requests are blocking: Codex does not send
+`autoResolutionMs` and the TUI does not create a countdown. Non-blocking
+requests retain their existing optional auto-resolution timer behavior.
 
 ## Local Hook Helper Scripts
 

@@ -21,7 +21,7 @@ index e3e17b30fa15c523ee82f0d8dfad3c2c47c15064..589cd510b2ec462b3eb98f7718de92ee
          session_end: map_hook_matcher_groups_to_api(session_end),
          user_prompt_submit: map_hook_matcher_groups_to_api(user_prompt_submit),
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index b58e99d9d9fc3146cdf3a91f314f05ff3e6a44e5..7852e40aca623170f2ef48d38411c851e78416e9 100644
+index b58e99d9d9fc3146cdf3a91f314f05ff3e6a44e5..2d3b8a12ee05d40241f8bd7219b870eb7b1f4145 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
 @@ -5,10 +5,14 @@ use crate::Prompt;
@@ -39,32 +39,28 @@ index b58e99d9d9fc3146cdf3a91f314f05ff3e6a44e5..7852e40aca623170f2ef48d38411c851
  use crate::responses_metadata::CodexResponsesMetadata;
  use crate::responses_metadata::CodexResponsesRequestKind;
  use crate::responses_metadata::CompactionTurnMetadata;
-@@ -308,6 +312,15 @@ async fn run_compact_task_inner_impl(
+@@ -308,6 +312,13 @@ async fn run_compact_task_inner_impl(
              }
              Err(e) if matches!(e.details(), CodexErrorDetails::ContextWindowExceeded) => {
                  if turn_input_len > 1 {
 +                    let failure = ModelRequestFailure::new(
 +                        ModelRequestHookContext::local_compact(),
 +                        retries,
-+                        max_retries,
-+                        /*will_retry*/ true,
-+                        Some(0),
++                        codex_hooks::ModelRequestNextAction::Retry,
 +                        &e,
 +                    );
 +                    run_request_error_hooks(&sess, &turn_context, failure).await;
                      // Trim from the beginning to preserve cache (prefix-based) and keep recent messages intact.
                      error!(
                          "Context window exceeded while compacting; removing oldest history item. Error: {e}"
-@@ -318,12 +331,31 @@ async fn run_compact_task_inner_impl(
+@@ -318,12 +329,27 @@ async fn run_compact_task_inner_impl(
                  }
                  sess.set_total_tokens_full(turn_context.as_ref()).await;
                  sess.track_turn_codex_error(turn_context.as_ref(), &e);
 +                let failure = ModelRequestFailure::new(
 +                    ModelRequestHookContext::local_compact(),
 +                    retries,
-+                    max_retries,
-+                    /*will_retry*/ false,
-+                    /*next_retry_attempt*/ None,
++                    codex_hooks::ModelRequestNextAction::Stop,
 +                    &e,
 +                );
 +                run_request_error_hooks(&sess, &turn_context, failure.clone()).await;
@@ -78,25 +74,21 @@ index b58e99d9d9fc3146cdf3a91f314f05ff3e6a44e5..7852e40aca623170f2ef48d38411c851
 +                    let failure = ModelRequestFailure::new(
 +                        ModelRequestHookContext::local_compact(),
 +                        retries,
-+                        max_retries,
-+                        /*will_retry*/ true,
-+                        Some(retries + 1),
++                        codex_hooks::ModelRequestNextAction::Retry,
 +                        &e,
 +                    );
 +                    run_request_error_hooks(&sess, &turn_context, failure).await;
                      retries += 1;
                      let delay = backoff(retries);
                      sess.notify_stream_error(
-@@ -336,6 +368,16 @@ async fn run_compact_task_inner_impl(
+@@ -336,6 +362,14 @@ async fn run_compact_task_inner_impl(
                      continue;
                  } else {
                      sess.track_turn_codex_error(turn_context.as_ref(), &e);
 +                    let failure = ModelRequestFailure::new(
 +                        ModelRequestHookContext::local_compact(),
 +                        retries,
-+                        max_retries,
-+                        /*will_retry*/ false,
-+                        /*next_retry_attempt*/ None,
++                        codex_hooks::ModelRequestNextAction::Stop,
 +                        &e,
 +                    );
 +                    run_request_error_hooks(&sess, &turn_context, failure.clone()).await;
@@ -105,7 +97,7 @@ index b58e99d9d9fc3146cdf3a91f314f05ff3e6a44e5..7852e40aca623170f2ef48d38411c851
                      sess.send_event(&turn_context, event).await;
                      return Err(e);
 diff --git a/codex-rs/core/src/compact_remote.rs b/codex-rs/core/src/compact_remote.rs
-index 392fb991c1c5122fa40515359d30f58fcda3fbaa..2621b29400ff2818d70e15bd873ca62fe25154a5 100644
+index 392fb991c1c5122fa40515359d30f58fcda3fbaa..805fb955e59875c7b791b4d27fb655b9cf600881 100644
 --- a/codex-rs/core/src/compact_remote.rs
 +++ b/codex-rs/core/src/compact_remote.rs
 @@ -15,10 +15,14 @@ use crate::compact_remote_history::history_item_groups;
@@ -123,57 +115,90 @@ index 392fb991c1c5122fa40515359d30f58fcda3fbaa..2621b29400ff2818d70e15bd873ca62f
  use crate::responses_metadata::CompactionTurnMetadata;
  use crate::session::session::Session;
  use crate::session::step_context::StepContext;
-@@ -225,9 +229,11 @@ async fn run_remote_compact_task_inner_impl(
+@@ -225,11 +229,35 @@ async fn run_remote_compact_task_inner_impl(
          Ok(attempt) => (attempt, turn_context),
          Err(error) => {
              let Some(fallback_step_context) = fallback_step_context else {
-+                run_remote_compact_failure_hooks(sess, turn_context, &error).await;
++                run_remote_compact_failure_hooks(
++                    sess,
++                    turn_context,
++                    codex_hooks::ModelRequestNextAction::Stop,
++                    &error,
++                    /*abnormal_stop*/ true,
++                )
++                .await;
                  return Err(error);
              };
              if !should_retry_with_current_model(&error) {
-+                run_remote_compact_failure_hooks(sess, turn_context, &error).await;
++                run_remote_compact_failure_hooks(
++                    sess,
++                    turn_context,
++                    codex_hooks::ModelRequestNextAction::Stop,
++                    &error,
++                    /*abnormal_stop*/ true,
++                )
++                .await;
                  return Err(error);
              }
++            run_remote_compact_failure_hooks(
++                sess,
++                turn_context,
++                codex_hooks::ModelRequestNextAction::Fallback,
++                &error,
++                /*abnormal_stop*/ false,
++            )
++            .await;
              let fallback_turn_context = &fallback_step_context.turn;
-@@ -257,7 +263,10 @@ async fn run_remote_compact_task_inner_impl(
+             let fallback_compaction_trace =
+                 sess.services.rollout_thread_trace.compaction_trace_context(
+@@ -257,7 +285,17 @@ async fn run_remote_compact_task_inner_impl(
              );
              match fallback_result {
                  Ok(attempt) => (attempt, fallback_turn_context),
 -                Err(_) => return Err(error),
-+                Err(_) => {
-+                    run_remote_compact_failure_hooks(sess, turn_context, &error).await;
-+                    return Err(error);
++                Err(fallback_error) => {
++                    run_remote_compact_failure_hooks(
++                        sess,
++                        fallback_turn_context,
++                        codex_hooks::ModelRequestNextAction::Stop,
++                        &fallback_error,
++                        /*abnormal_stop*/ true,
++                    )
++                    .await;
++                    return Err(fallback_error);
 +                }
              }
          }
      };
-@@ -308,6 +317,24 @@ async fn run_remote_compact_task_inner_impl(
+@@ -308,6 +346,26 @@ async fn run_remote_compact_task_inner_impl(
      Ok(())
  }
  
 +async fn run_remote_compact_failure_hooks(
 +    sess: &Arc<Session>,
 +    turn_context: &Arc<TurnContext>,
++    next_action: codex_hooks::ModelRequestNextAction,
 +    err: &CodexErr,
++    abnormal_stop: bool,
 +) {
 +    let max_retries = turn_context.provider.info().request_max_retries();
 +    let failure = ModelRequestFailure::new(
 +        ModelRequestHookContext::remote_compact(),
 +        max_retries,
-+        max_retries,
-+        /*will_retry*/ false,
-+        /*next_retry_attempt*/ None,
++        next_action,
 +        err,
 +    );
 +    run_request_error_hooks(sess, turn_context, failure.clone()).await;
-+    run_abnormal_stop_hooks(sess, turn_context, failure).await;
++    if abnormal_stop {
++        run_abnormal_stop_hooks(sess, turn_context, failure).await;
++    }
 +}
 +
  pub(crate) async fn process_compacted_history(
      sess: &Session,
      compacted_history: Vec<ResponseItem>,
 diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
-index 89d5c5a1b15d0a96063ea27a03b6fa8b7afc76ba..a37c16138fe01f5e27d381b281bdae491ee225ad 100644
+index 89d5c5a1b15d0a96063ea27a03b6fa8b7afc76ba..5176f291480bedcd9f77bc4ccc8f1705da0af065 100644
 --- a/codex-rs/core/src/compact_remote_v2.rs
 +++ b/codex-rs/core/src/compact_remote_v2.rs
 @@ -17,10 +17,14 @@ use crate::compact_remote::should_keep_compacted_history_item;
@@ -191,7 +216,93 @@ index 89d5c5a1b15d0a96063ea27a03b6fa8b7afc76ba..a37c16138fe01f5e27d381b281bdae49
  use crate::responses_metadata::CodexResponsesMetadata;
  use crate::responses_metadata::CompactionTurnMetadata;
  use crate::responses_retry::ResponsesStreamRequest;
-@@ -348,8 +352,8 @@ struct RemoteCompactionV2Output {
+@@ -243,11 +247,35 @@ async fn run_remote_compact_task_inner_impl(
+         Ok(attempt) => (attempt, turn_context),
+         Err(error) => {
+             let Some(fallback_step_context) = fallback_step_context else {
++                run_remote_compact_v2_failure_hooks(
++                    sess,
++                    turn_context,
++                    codex_hooks::ModelRequestNextAction::Stop,
++                    &error,
++                    /*abnormal_stop*/ true,
++                )
++                .await;
+                 return Err(error);
+             };
+             if !should_retry_with_current_model(&error) {
++                run_remote_compact_v2_failure_hooks(
++                    sess,
++                    turn_context,
++                    codex_hooks::ModelRequestNextAction::Stop,
++                    &error,
++                    /*abnormal_stop*/ true,
++                )
++                .await;
+                 return Err(error);
+             }
++            run_remote_compact_v2_failure_hooks(
++                sess,
++                turn_context,
++                codex_hooks::ModelRequestNextAction::Fallback,
++                &error,
++                /*abnormal_stop*/ false,
++            )
++            .await;
+             let fallback_turn_context = &fallback_step_context.turn;
+             let fallback_compaction_trace =
+                 sess.services.rollout_thread_trace.compaction_trace_context(
+@@ -275,7 +303,17 @@ async fn run_remote_compact_task_inner_impl(
+             );
+             match fallback_result {
+                 Ok(attempt) => (attempt, fallback_turn_context),
+-                Err(_) => return Err(error),
++                Err(fallback_error) => {
++                    run_remote_compact_v2_failure_hooks(
++                        sess,
++                        fallback_turn_context,
++                        codex_hooks::ModelRequestNextAction::Stop,
++                        &fallback_error,
++                        /*abnormal_stop*/ true,
++                    )
++                    .await;
++                    return Err(fallback_error);
++                }
+             }
+         }
+     };
+@@ -341,6 +379,30 @@ async fn run_remote_compact_task_inner_impl(
+     Ok(())
+ }
+ 
++async fn run_remote_compact_v2_failure_hooks(
++    sess: &Arc<Session>,
++    turn_context: &Arc<TurnContext>,
++    next_action: codex_hooks::ModelRequestNextAction,
++    err: &CodexErr,
++    abnormal_stop: bool,
++) {
++    let attempt = turn_context
++        .provider
++        .info()
++        .stream_max_retries()
++        .min(MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES);
++    let failure = ModelRequestFailure::new(
++        ModelRequestHookContext::remote_compaction_v2(),
++        attempt,
++        next_action,
++        err,
++    );
++    run_request_error_hooks(sess, turn_context, failure.clone()).await;
++    if abnormal_stop {
++        run_abnormal_stop_hooks(sess, turn_context, failure).await;
++    }
++}
++
+ struct RemoteCompactionV2Output {
+     compaction_output: ResponseItem,
+     response_id: String,
+@@ -348,8 +410,8 @@ struct RemoteCompactionV2Output {
  }
  
  async fn run_remote_compaction_request_v2(
@@ -202,47 +313,22 @@ index 89d5c5a1b15d0a96063ea27a03b6fa8b7afc76ba..a37c16138fe01f5e27d381b281bdae49
      client_session: &mut ModelClientSession,
      prompt: &Prompt,
      responses_metadata: &CodexResponsesMetadata,
-@@ -380,9 +384,22 @@ async fn run_remote_compaction_request_v2(
- 
-         match result {
+@@ -382,7 +444,7 @@ async fn run_remote_compaction_request_v2(
              Ok(compaction_output) => return Ok(compaction_output),
--            Err(err) if !err.is_retryable() => return Err(err),
-+            Err(err) if !err.is_retryable() => {
-+                let failure = ModelRequestFailure::new(
-+                    ModelRequestHookContext::remote_compaction_v2(),
-+                    retry_state.retry_attempt(),
-+                    max_retries,
-+                    /*will_retry*/ false,
-+                    /*next_retry_attempt*/ None,
-+                    &err,
-+                );
-+                run_request_error_hooks(sess, turn_context, failure.clone()).await;
-+                run_abnormal_stop_hooks(sess, turn_context, failure).await;
-+                return Err(err);
-+            }
+             Err(err) if !err.is_retryable() => return Err(err),
              Err(err) => {
 -                handle_retryable_response_stream_error(
-+                let retry_attempt = retry_state.retry_attempt();
 +                if let Err(err) = handle_retryable_response_stream_error(
                      &mut retry_state,
                      max_retries,
                      err,
-@@ -391,7 +408,19 @@ async fn run_remote_compaction_request_v2(
+@@ -391,7 +453,10 @@ async fn run_remote_compaction_request_v2(
                      turn_context,
                      ResponsesStreamRequest::RemoteCompactionV2,
                  )
 -                .await?;
 +                .await
 +                {
-+                    let failure = ModelRequestFailure::new(
-+                        ModelRequestHookContext::remote_compaction_v2(),
-+                        retry_attempt,
-+                        max_retries,
-+                        /*will_retry*/ false,
-+                        /*next_retry_attempt*/ None,
-+                        &err,
-+                    );
-+                    run_abnormal_stop_hooks(sess, turn_context, failure).await;
 +                    return Err(err);
 +                }
              }
@@ -262,7 +348,7 @@ index d66bf519be3d65b0c72b5f856865fd54eaf65a3c..1229f13a4447d75a1619d20d13b2c55d
          &prompt,
          &responses_metadata,
 diff --git a/codex-rs/core/src/hook_runtime.rs b/codex-rs/core/src/hook_runtime.rs
-index 279edbf9d207b75175d23fd409f9d9054bebbe40..3bd1c105645124b3eccc34016ed990148b23b42b 100644
+index 279edbf9d207b75175d23fd409f9d9054bebbe40..672939d6cdec3fc1174d34b469779471db348e10 100644
 --- a/codex-rs/core/src/hook_runtime.rs
 +++ b/codex-rs/core/src/hook_runtime.rs
 @@ -21,6 +21,8 @@ use codex_hooks::UserPromptSubmitOutcome;
@@ -274,7 +360,7 @@ index 279edbf9d207b75175d23fd409f9d9054bebbe40..3bd1c105645124b3eccc34016ed99014
  use codex_protocol::items::TurnItem;
  use codex_protocol::items::UserMessageItem;
  use codex_protocol::models::ResponseItem;
-@@ -62,6 +64,87 @@ pub(crate) enum PreToolUseHookResult {
+@@ -62,6 +64,72 @@ pub(crate) enum PreToolUseHookResult {
      Blocked(String),
  }
  
@@ -283,40 +369,35 @@ index 279edbf9d207b75175d23fd409f9d9054bebbe40..3bd1c105645124b3eccc34016ed99014
 +
 +#[derive(Debug, Clone, Copy)]
 +pub(crate) struct ModelRequestHookContext {
-+    request_type: &'static str,
-+    request_subtype: &'static str,
++    operation: codex_hooks::ModelRequestOperation,
 +    endpoint_path: &'static str,
 +}
 +
 +impl ModelRequestHookContext {
 +    pub(crate) fn sampling() -> Self {
 +        Self {
-+            request_type: "sampling",
-+            request_subtype: "normal",
++            operation: codex_hooks::ModelRequestOperation::Sampling,
 +            endpoint_path: "/responses",
 +        }
 +    }
 +
 +    pub(crate) fn local_compact() -> Self {
 +        Self {
-+            request_type: "compact",
-+            request_subtype: "local",
++            operation: codex_hooks::ModelRequestOperation::LocalCompact,
 +            endpoint_path: "/responses",
 +        }
 +    }
 +
 +    pub(crate) fn remote_compact() -> Self {
 +        Self {
-+            request_type: "compact",
-+            request_subtype: "remote",
++            operation: codex_hooks::ModelRequestOperation::RemoteCompact,
 +            endpoint_path: "/responses/compact",
 +        }
 +    }
 +
 +    pub(crate) fn remote_compaction_v2() -> Self {
 +        Self {
-+            request_type: "compact",
-+            request_subtype: "remote_v2",
++            operation: codex_hooks::ModelRequestOperation::RemoteCompact,
 +            endpoint_path: "/responses",
 +        }
 +    }
@@ -325,36 +406,26 @@ index 279edbf9d207b75175d23fd409f9d9054bebbe40..3bd1c105645124b3eccc34016ed99014
 +#[derive(Debug, Clone)]
 +pub(crate) struct ModelRequestFailure {
 +    context: ModelRequestHookContext,
-+    retry_attempt: u64,
-+    max_retries: u64,
-+    will_retry: bool,
-+    next_retry_attempt: Option<u64>,
-+    error_retryable: bool,
-+    error_kind: String,
-+    error_message: String,
-+    codex_error_info: Value,
++    attempt: u64,
++    next_action: codex_hooks::ModelRequestNextAction,
++    error: codex_hooks::ModelRequestError,
 +}
 +
 +impl ModelRequestFailure {
 +    pub(crate) fn new(
 +        context: ModelRequestHookContext,
-+        retry_attempt: u64,
-+        max_retries: u64,
-+        will_retry: bool,
-+        next_retry_attempt: Option<u64>,
++        attempt: u64,
++        next_action: codex_hooks::ModelRequestNextAction,
 +        error: &CodexErr,
 +    ) -> Self {
 +        Self {
 +            context,
-+            retry_attempt,
-+            max_retries,
-+            will_retry,
-+            next_retry_attempt,
-+            error_retryable: error.is_retryable(),
-+            error_kind: codex_error_kind(error),
-+            error_message: error.to_string(),
-+            codex_error_info: serde_json::to_value(error.to_codex_protocol_error())
-+                .unwrap_or(Value::Null),
++            attempt,
++            next_action,
++            error: codex_hooks::ModelRequestError {
++                category: model_request_error_category(error),
++                message: error.to_string(),
++            },
 +        }
 +    }
 +}
@@ -362,7 +433,7 @@ index 279edbf9d207b75175d23fd409f9d9054bebbe40..3bd1c105645124b3eccc34016ed99014
  struct ContextInjectingHookOutcome {
      hook_events: Vec<HookCompletedEvent>,
      outcome: HookRuntimeOutcome,
-@@ -465,6 +548,93 @@ pub(crate) async fn run_post_compact_hooks(
+@@ -465,6 +533,92 @@ pub(crate) async fn run_post_compact_hooks(
      }
  }
  
@@ -379,17 +450,11 @@ index 279edbf9d207b75175d23fd409f9d9054bebbe40..3bd1c105645124b3eccc34016ed99014
 +        cwd: turn_context.cwd.clone(),
 +        model: turn_context.model_info.slug.clone(),
 +        provider: turn_context.config.model_provider_id.clone(),
-+        request_type: failure.context.request_type.to_string(),
-+        request_subtype: failure.context.request_subtype.to_string(),
++        operation: failure.context.operation,
 +        endpoint_path: failure.context.endpoint_path.to_string(),
-+        retry_attempt: failure.retry_attempt,
-+        max_retries: failure.max_retries,
-+        will_retry: failure.will_retry,
-+        next_retry_attempt: failure.next_retry_attempt,
-+        error_retryable: failure.error_retryable,
-+        error_kind: failure.error_kind,
-+        error_message: failure.error_message,
-+        codex_error_info: failure.codex_error_info,
++        attempt: failure.attempt,
++        next_action: failure.next_action,
++        error: failure.error,
 +    };
 +    let hooks = sess.hooks();
 +    let preview_runs = hooks.preview_request_error(&request);
@@ -398,12 +463,20 @@ index 279edbf9d207b75175d23fd409f9d9054bebbe40..3bd1c105645124b3eccc34016ed99014
 +    }
 +    emit_hook_started_events(sess, turn_context, preview_runs).await;
 +
-+    let sess = Arc::clone(sess);
-+    let turn_context = Arc::clone(turn_context);
-+    let _hook_task = tokio::spawn(async move {
-+        let outcome = hooks.run_request_error(request).await;
-+        emit_hook_completed_events(&sess, &turn_context, outcome.hook_events).await;
-+    });
++    match hooks.enqueue_request_error(request) {
++        codex_hooks::RequestErrorDispatch::Queued(outcome_receiver) => {
++            let sess = Arc::clone(sess);
++            let turn_context = Arc::clone(turn_context);
++            let _hook_task = tokio::spawn(async move {
++                if let Ok(outcome) = outcome_receiver.await {
++                    emit_hook_completed_events(&sess, &turn_context, outcome.hook_events).await;
++                }
++            });
++        }
++        codex_hooks::RequestErrorDispatch::Rejected(outcome) => {
++            emit_hook_completed_events(sess, turn_context, outcome.hook_events).await;
++        }
++    }
 +}
 +
 +pub(crate) async fn run_abnormal_stop_hooks(
@@ -426,14 +499,11 @@ index 279edbf9d207b75175d23fd409f9d9054bebbe40..3bd1c105645124b3eccc34016ed99014
 +            .is_some(),
 +        approval_policy: turn_context.approval_policy().to_string(),
 +        sandbox_mode: sandbox_policy.to_string(),
-+        request_type: failure.context.request_type.to_string(),
-+        request_subtype: failure.context.request_subtype.to_string(),
++        operation: failure.context.operation,
 +        endpoint_path: failure.context.endpoint_path.to_string(),
-+        retry_attempt: failure.retry_attempt,
-+        max_retries: failure.max_retries,
-+        error_kind: failure.error_kind,
-+        error_message: failure.error_message,
-+        codex_error_info: failure.codex_error_info,
++        attempt: failure.attempt,
++        next_action: failure.next_action,
++        error: failure.error,
 +    };
 +    let hooks = sess.hooks();
 +    let preview_runs = hooks.preview_abnormal_stop(&request);
@@ -456,7 +526,7 @@ index 279edbf9d207b75175d23fd409f9d9054bebbe40..3bd1c105645124b3eccc34016ed99014
  #[instrument(level = "trace", skip_all)]
  pub(crate) async fn run_legacy_after_agent_hook(
      sess: &Arc<Session>,
-@@ -790,6 +960,8 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str);
+@@ -790,6 +944,8 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str);
          HookEventName::PostToolUse => "PostToolUse",
          HookEventName::PreCompact => "PreCompact",
          HookEventName::PostCompact => "PostCompact",
@@ -465,65 +535,160 @@ index 279edbf9d207b75175d23fd409f9d9054bebbe40..3bd1c105645124b3eccc34016ed99014
          HookEventName::SessionStart => "SessionStart",
          HookEventName::SessionEnd => "SessionEnd",
          HookEventName::UserPromptSubmit => "UserPromptSubmit",
-@@ -825,6 +997,53 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str);
+@@ -825,6 +981,63 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str);
      ]
  }
  
-+fn codex_error_kind(error: &CodexErr) -> String {
-+    let kind = match error.details() {
-+        CodexErrorDetails::TurnAborted => "TurnAborted",
-+        CodexErrorDetails::SessionBudgetExceeded => "SessionBudgetExceeded",
-+        CodexErrorDetails::Stream(..) => "Stream",
-+        CodexErrorDetails::ContextWindowExceeded => "ContextWindowExceeded",
-+        CodexErrorDetails::ThreadNotFound(_) => "ThreadNotFound",
-+        CodexErrorDetails::AgentLimitReached { .. } => "AgentLimitReached",
-+        CodexErrorDetails::SessionConfiguredNotFirstEvent => "SessionConfiguredNotFirstEvent",
-+        CodexErrorDetails::Timeout => "Timeout",
-+        CodexErrorDetails::RequestTimeout => "RequestTimeout",
-+        CodexErrorDetails::Spawn => "Spawn",
-+        CodexErrorDetails::Interrupted => "Interrupted",
-+        CodexErrorDetails::UnexpectedStatus(_) => "UnexpectedStatus",
-+        CodexErrorDetails::InvalidRequest(_) => "InvalidRequest",
-+        CodexErrorDetails::InvalidImageRequest() => "InvalidImageRequest",
-+        CodexErrorDetails::UsageLimitReached(_) => "UsageLimitReached",
-+        CodexErrorDetails::ServerOverloaded => "ServerOverloaded",
-+        CodexErrorDetails::CyberPolicy { .. } => "CyberPolicy",
-+        CodexErrorDetails::MisalignmentPolicyViolation { .. } => "MisalignmentPolicyViolation",
-+        CodexErrorDetails::ResponseStreamFailed(_) => "ResponseStreamFailed",
-+        CodexErrorDetails::ConnectionFailed(_) => "ConnectionFailed",
-+        CodexErrorDetails::QuotaExceeded => "QuotaExceeded",
-+        CodexErrorDetails::UsageNotIncluded => "UsageNotIncluded",
-+        CodexErrorDetails::InternalServerError => "InternalServerError",
-+        CodexErrorDetails::RetryLimit(_) => "RetryLimit",
-+        CodexErrorDetails::InternalAgentDied => "InternalAgentDied",
-+        CodexErrorDetails::Sandbox(_) => "Sandbox",
-+        CodexErrorDetails::LandlockSandboxExecutableNotProvided => {
-+            "LandlockSandboxExecutableNotProvided"
++fn model_request_error_category(error: &CodexErr) -> codex_hooks::ModelRequestErrorCategory {
++    use codex_hooks::ModelRequestErrorCategory as Category;
++
++    match error.details() {
++        CodexErrorDetails::Stream(_)
++        | CodexErrorDetails::ResponseStreamFailed(_)
++        | CodexErrorDetails::ConnectionFailed(_)
++        | CodexErrorDetails::Io(_) => Category::Transport,
++        CodexErrorDetails::Timeout | CodexErrorDetails::RequestTimeout => Category::Timeout,
++        CodexErrorDetails::UnexpectedStatus(response) => match response.status.as_u16() {
++            408 => Category::Timeout,
++            429 => Category::RateLimit,
++            500..=599 => Category::Server,
++            _ => Category::InvalidRequest,
++        },
++        CodexErrorDetails::RetryLimit(error) => match error.status.as_u16() {
++            408 => Category::Timeout,
++            429 => Category::RateLimit,
++            500..=599 => Category::Server,
++            _ => Category::Other,
++        },
++        CodexErrorDetails::SessionBudgetExceeded
++        | CodexErrorDetails::UsageLimitReached(_)
++        | CodexErrorDetails::QuotaExceeded
++        | CodexErrorDetails::UsageNotIncluded => Category::UsageLimit,
++        CodexErrorDetails::ContextWindowExceeded => Category::ContextWindow,
++        CodexErrorDetails::CyberPolicy { .. }
++        | CodexErrorDetails::MisalignmentPolicyViolation { .. } => Category::Policy,
++        CodexErrorDetails::Sandbox(_) | CodexErrorDetails::LandlockSandboxExecutableNotProvided => {
++            Category::Sandbox
 +        }
-+        CodexErrorDetails::UnsupportedOperation(_) => "UnsupportedOperation",
-+        CodexErrorDetails::RefreshTokenFailed(_) => "RefreshTokenFailed",
-+        CodexErrorDetails::Fatal(_) => "Fatal",
-+        CodexErrorDetails::Io(_) => "Io",
-+        CodexErrorDetails::Json(_) => "Json",
 +        #[cfg(target_os = "linux")]
-+        CodexErrorDetails::LandlockRuleset(_) => "LandlockRuleset",
-+        #[cfg(target_os = "linux")]
-+        CodexErrorDetails::LandlockPathFd(_) => "LandlockPathFd",
-+        CodexErrorDetails::TokioJoin(_) => "TokioJoin",
-+        CodexErrorDetails::EnvVar(_) => "EnvVar",
-+        CodexErrorDetails::ToolCollision(_) => "ToolCollision",
-+    };
-+    kind.to_string()
++        CodexErrorDetails::LandlockRuleset(_) | CodexErrorDetails::LandlockPathFd(_) => {
++            Category::Sandbox
++        }
++        CodexErrorDetails::InvalidRequest(_)
++        | CodexErrorDetails::InvalidImageRequest()
++        | CodexErrorDetails::UnsupportedOperation(_)
++        | CodexErrorDetails::RefreshTokenFailed(_)
++        | CodexErrorDetails::ToolCollision(_) => Category::InvalidRequest,
++        CodexErrorDetails::ServerOverloaded | CodexErrorDetails::InternalServerError => {
++            Category::Server
++        }
++        CodexErrorDetails::SessionConfiguredNotFirstEvent
++        | CodexErrorDetails::InternalAgentDied
++        | CodexErrorDetails::Fatal(_)
++        | CodexErrorDetails::Json(_)
++        | CodexErrorDetails::TokioJoin(_)
++        | CodexErrorDetails::EnvVar(_) => Category::Internal,
++        CodexErrorDetails::TurnAborted
++        | CodexErrorDetails::ThreadNotFound(_)
++        | CodexErrorDetails::AgentLimitReached { .. }
++        | CodexErrorDetails::Spawn
++        | CodexErrorDetails::Interrupted => Category::Other,
++    }
 +}
 +
  fn hook_permission_mode(turn_context: &TurnContext) -> String {
      match turn_context.approval_policy() {
          AskForApproval::Never => "bypassPermissions",
+@@ -865,6 +1078,10 @@ fn compaction_trigger_label(value: CompactionTrigger) -> &'static str {
+ 
+ #[cfg(test)]
+ mod tests {
++    use codex_hooks::ModelRequestErrorCategory;
++    use codex_protocol::error::CodexErr;
++    use codex_protocol::error::CodexErrorDetails;
++    use codex_protocol::error::UnexpectedResponseError;
+     use codex_protocol::models::ContentItem;
+     use codex_protocol::protocol::HookEventName;
+     use codex_protocol::protocol::HookExecutionMode;
+@@ -879,12 +1096,73 @@ mod tests {
+     use super::emit_hook_started_events;
+     use super::hook_run_analytics_payload;
+     use super::hook_run_metric_tags;
++    use super::model_request_error_category;
+     use crate::session::tests::make_session_and_context;
+     use crate::session::tests::make_session_and_context_with_rx;
+     use codex_protocol::protocol::HookCompletedEvent;
+     use codex_protocol::protocol::HookRunSummary;
+     use codex_utils_absolute_path::test_support::PathBufExt;
+     use codex_utils_absolute_path::test_support::test_path_buf;
++    use http::StatusCode;
++
++    fn unexpected_status(status: StatusCode) -> CodexErr {
++        CodexErrorDetails::UnexpectedStatus(UnexpectedResponseError {
++            status,
++            body: String::new(),
++            user_message: None,
++            url: None,
++            cf_ray: None,
++            request_id: None,
++            identity_authorization_error: None,
++            identity_error_code: None,
++        })
++        .into()
++    }
++
++    #[test]
++    fn model_request_errors_map_to_stable_categories() {
++        for (error, category) in [
++            (
++                CodexErr::Stream("disconnected".to_string()),
++                ModelRequestErrorCategory::Transport,
++            ),
++            (CodexErr::RequestTimeout, ModelRequestErrorCategory::Timeout),
++            (
++                unexpected_status(StatusCode::TOO_MANY_REQUESTS),
++                ModelRequestErrorCategory::RateLimit,
++            ),
++            (
++                CodexErr::QuotaExceeded,
++                ModelRequestErrorCategory::UsageLimit,
++            ),
++            (
++                CodexErr::ContextWindowExceeded,
++                ModelRequestErrorCategory::ContextWindow,
++            ),
++            (
++                CodexErrorDetails::CyberPolicy {
++                    message: "blocked".to_string(),
++                }
++                .into(),
++                ModelRequestErrorCategory::Policy,
++            ),
++            (
++                CodexErr::InvalidRequest("bad input".to_string()),
++                ModelRequestErrorCategory::InvalidRequest,
++            ),
++            (
++                unexpected_status(StatusCode::SERVICE_UNAVAILABLE),
++                ModelRequestErrorCategory::Server,
++            ),
++            (
++                CodexErr::InternalAgentDied,
++                ModelRequestErrorCategory::Internal,
++            ),
++            (CodexErr::TurnAborted, ModelRequestErrorCategory::Other),
++        ] {
++            assert_eq!(model_request_error_category(&error), category);
++        }
++    }
+ 
+     #[test]
+     fn additional_context_messages_stay_separate_and_ordered() {
 diff --git a/codex-rs/core/src/responses_retry.rs b/codex-rs/core/src/responses_retry.rs
-index 178c13df494f0c3a73f646ef526230945c0faeb8..cee9b23dc6a1f39aadf3fc81947ded15521f4f93 100644
+index 178c13df494f0c3a73f646ef526230945c0faeb8..56b0657621bc5cce1b4a413c9e4a5ffe0e451bfa 100644
 --- a/codex-rs/core/src/responses_retry.rs
 +++ b/codex-rs/core/src/responses_retry.rs
-@@ -1,8 +1,12 @@
+@@ -1,13 +1,18 @@
  //! Shared retry and transport fallback decisions for Responses requests.
  
 +use std::sync::Arc;
@@ -536,7 +701,13 @@ index 178c13df494f0c3a73f646ef526230945c0faeb8..cee9b23dc6a1f39aadf3fc81947ded15
  use crate::session::session::Session;
  use crate::session::turn_context::TurnContext;
  use crate::util::backoff;
-@@ -23,10 +27,20 @@ pub(crate) enum ResponsesStreamRequest {
+ use codex_client::RetryOperation;
+ use codex_features::Feature;
++use codex_hooks::ModelRequestNextAction;
+ use codex_protocol::error::CodexErr;
+ use codex_protocol::error::CodexErrorDetails;
+ use codex_protocol::protocol::EventMsg;
+@@ -23,10 +28,20 @@ pub(crate) enum ResponsesStreamRequest {
      RemoteCompactionV2,
  }
  
@@ -557,7 +728,7 @@ index 178c13df494f0c3a73f646ef526230945c0faeb8..cee9b23dc6a1f39aadf3fc81947ded15
  }
  
  impl Default for ResponsesStreamRetryState {
-@@ -35,10 +49,17 @@ impl Default for ResponsesStreamRetryState {
+@@ -35,10 +50,17 @@ impl Default for ResponsesStreamRetryState {
              retries: 0,
              connection_retries: 0,
              connection_retry_delay: INITIAL_CONNECTION_RETRY_DELAY,
@@ -575,7 +746,7 @@ index 178c13df494f0c3a73f646ef526230945c0faeb8..cee9b23dc6a1f39aadf3fc81947ded15
  /// Handles a retryable stream error and returns `Ok(())` when the caller should
  /// retry the request loop.
  pub(crate) async fn handle_retryable_response_stream_error(
-@@ -46,8 +67,8 @@ pub(crate) async fn handle_retryable_response_stream_error(
+@@ -46,8 +68,8 @@ pub(crate) async fn handle_retryable_response_stream_error(
      max_retries: u64,
      err: CodexErr,
      client_session: &mut ModelClientSession,
@@ -586,7 +757,7 @@ index 178c13df494f0c3a73f646ef526230945c0faeb8..cee9b23dc6a1f39aadf3fc81947ded15
      request: ResponsesStreamRequest,
  ) -> Result<(), CodexErr> {
      let operation = match request {
-@@ -55,15 +76,41 @@ pub(crate) async fn handle_retryable_response_stream_error(
+@@ -55,15 +77,45 @@ pub(crate) async fn handle_retryable_response_stream_error(
          ResponsesStreamRequest::RemoteCompactionV2 => RetryOperation::RemoteCompactionV2,
      };
  
@@ -605,7 +776,11 @@ index 178c13df494f0c3a73f646ef526230945c0faeb8..cee9b23dc6a1f39aadf3fc81947ded15
 +        && retry_state.retries >= max_retries
 +        && sess.services.model_client.responses_websocket_enabled();
 +    let budget_will_retry = !unbounded_connection_will_retry && retry_state.retries < max_retries;
-+    let will_retry = unbounded_connection_will_retry || budget_will_retry || fallback_will_retry;
++    let next_action = visible_next_action(
++        unbounded_connection_will_retry,
++        budget_will_retry,
++        fallback_will_retry,
++    );
 +    let next_retry_attempt = if unbounded_connection_will_retry || budget_will_retry {
 +        Some(retry_state.hook_retry_attempt.saturating_add(1))
 +    } else if fallback_will_retry {
@@ -613,25 +788,25 @@ index 178c13df494f0c3a73f646ef526230945c0faeb8..cee9b23dc6a1f39aadf3fc81947ded15
 +    } else {
 +        None
 +    };
-+    run_request_error_hooks(
-+        sess,
-+        turn_context,
-+        ModelRequestFailure::new(
-+            request.hook_context(),
-+            retry_state.hook_retry_attempt,
-+            max_retries,
-+            will_retry,
-+            next_retry_attempt,
-+            &err,
-+        ),
-+    )
-+    .await;
++    if next_action != ModelRequestNextAction::Stop {
++        run_request_error_hooks(
++            sess,
++            turn_context,
++            ModelRequestFailure::new(
++                request.hook_context(),
++                retry_state.hook_retry_attempt,
++                next_action,
++                &err,
++            ),
++        )
++        .await;
++    }
 +
 +    if unbounded_connection_will_retry {
          let retry_delay = retry_state.connection_retry_delay;
          warn!(
              turn_id = %turn_context.sub_id,
-@@ -79,6 +126,8 @@ pub(crate) async fn handle_retryable_response_stream_error(
+@@ -79,6 +131,8 @@ pub(crate) async fn handle_retryable_response_stream_error(
          retry_state.connection_retry_delay = retry_delay
              .saturating_mul(2)
              .min(MAX_CONNECTION_RETRY_DELAY);
@@ -640,7 +815,7 @@ index 178c13df494f0c3a73f646ef526230945c0faeb8..cee9b23dc6a1f39aadf3fc81947ded15
          return Ok(());
      }
  
-@@ -96,6 +145,7 @@ pub(crate) async fn handle_retryable_response_stream_error(
+@@ -96,6 +150,7 @@ pub(crate) async fn handle_retryable_response_stream_error(
          )
          .await;
          retry_state.retries = 0;
@@ -648,7 +823,7 @@ index 178c13df494f0c3a73f646ef526230945c0faeb8..cee9b23dc6a1f39aadf3fc81947ded15
          return Ok(());
      }
  
-@@ -122,6 +172,8 @@ pub(crate) async fn handle_retryable_response_stream_error(
+@@ -122,12 +177,28 @@ pub(crate) async fn handle_retryable_response_stream_error(
          }
          codex_client::record_retry!(retry_count, delay, operation);
          tokio::time::sleep(delay).await;
@@ -657,8 +832,59 @@ index 178c13df494f0c3a73f646ef526230945c0faeb8..cee9b23dc6a1f39aadf3fc81947ded15
          return Ok(());
      }
  
+     Err(err)
+ }
+ 
++fn visible_next_action(
++    unbounded_connection_will_retry: bool,
++    budget_will_retry: bool,
++    fallback_will_retry: bool,
++) -> ModelRequestNextAction {
++    if unbounded_connection_will_retry || budget_will_retry {
++        ModelRequestNextAction::Retry
++    } else if fallback_will_retry {
++        ModelRequestNextAction::Fallback
++    } else {
++        ModelRequestNextAction::Stop
++    }
++}
++
+ fn log_retry(
+     request: ResponsesStreamRequest,
+     turn_context: &TurnContext,
+diff --git a/codex-rs/core/src/responses_retry_tests.rs b/codex-rs/core/src/responses_retry_tests.rs
+index b6465ded37cb6d7eccd5906cdc39e2b12dc3e1dd..9bbbbc0f9701740549661b1a567574baa8896669 100644
+--- a/codex-rs/core/src/responses_retry_tests.rs
++++ b/codex-rs/core/src/responses_retry_tests.rs
+@@ -41,3 +41,26 @@ async fn sampling_retry_logs_stream_error_context() {
+         "sampling_error=stream disconnected before completion: websocket closed by server before response.completed"
+     ));
+ }
++use codex_hooks::ModelRequestNextAction;
++
++use super::visible_next_action;
++
++#[test]
++fn visible_retry_fallback_and_stop_decisions_are_distinct() {
++    assert_eq!(
++        visible_next_action(true, false, false),
++        ModelRequestNextAction::Retry
++    );
++    assert_eq!(
++        visible_next_action(false, true, false),
++        ModelRequestNextAction::Retry
++    );
++    assert_eq!(
++        visible_next_action(false, false, true),
++        ModelRequestNextAction::Fallback
++    );
++    assert_eq!(
++        visible_next_action(false, false, false),
++        ModelRequestNextAction::Stop
++    );
++}
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..241be0415dbc345f02d829ea99694711a2e795e2 100644
+index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..08cb84660ec698c26688f4bad4a1999085118217 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -14,12 +14,16 @@ use crate::connectors;
@@ -678,7 +904,7 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..241be0415dbc345f02d829ea99694711
  use crate::hook_runtime::run_turn_stop_hooks;
  use crate::mcp_skill_dependencies::maybe_prompt_and_install_mcp_dependencies;
  use crate::mentions::build_connector_slug_counts;
-@@ -1383,9 +1387,20 @@ async fn run_sampling_request(
+@@ -1383,9 +1387,18 @@ async fn run_sampling_request(
              Ok(output) => {
                  return Ok((output, original_input.unwrap_or(prompt.input)));
              }
@@ -690,9 +916,7 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..241be0415dbc345f02d829ea99694711
 +                    let failure = ModelRequestFailure::new(
 +                        ModelRequestHookContext::sampling(),
 +                        retry_state.retry_attempt(),
-+                        max_retries,
-+                        /*will_retry*/ false,
-+                        /*next_retry_attempt*/ None,
++                        codex_hooks::ModelRequestNextAction::Stop,
 +                        &err,
 +                    );
 +                    run_request_error_hooks(&sess, &turn_context, failure.clone()).await;
@@ -700,16 +924,14 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..241be0415dbc345f02d829ea99694711
                      return Err(err);
                  }
                  CodexErrorDetails::UsageLimitReached(e) => {
-@@ -1393,6 +1408,16 @@ async fn run_sampling_request(
+@@ -1393,6 +1406,14 @@ async fn run_sampling_request(
                      if let Some(rate_limits) = rate_limits {
                          sess.update_rate_limits(&turn_context, *rate_limits).await;
                      }
 +                    let failure = ModelRequestFailure::new(
 +                        ModelRequestHookContext::sampling(),
 +                        retry_state.retry_attempt(),
-+                        max_retries,
-+                        /*will_retry*/ false,
-+                        /*next_retry_attempt*/ None,
++                        codex_hooks::ModelRequestNextAction::Stop,
 +                        &err,
 +                    );
 +                    run_request_error_hooks(&sess, &turn_context, failure.clone()).await;
@@ -717,16 +939,14 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..241be0415dbc345f02d829ea99694711
                      return Err(err);
                  }
                  _ => err,
-@@ -1404,10 +1429,21 @@ async fn run_sampling_request(
+@@ -1404,10 +1425,19 @@ async fn run_sampling_request(
          }
  
          if !err.is_retryable() {
 +            let failure = ModelRequestFailure::new(
 +                ModelRequestHookContext::sampling(),
 +                retry_state.retry_attempt(),
-+                max_retries,
-+                /*will_retry*/ false,
-+                /*next_retry_attempt*/ None,
++                codex_hooks::ModelRequestNextAction::Stop,
 +                &err,
 +            );
 +            run_request_error_hooks(&sess, &turn_context, failure.clone()).await;
@@ -740,7 +960,7 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..241be0415dbc345f02d829ea99694711
              &mut retry_state,
              max_retries,
              err,
-@@ -1416,7 +1452,19 @@ async fn run_sampling_request(
+@@ -1416,7 +1446,18 @@ async fn run_sampling_request(
              &turn_context,
              ResponsesStreamRequest::Sampling,
          )
@@ -750,18 +970,17 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..241be0415dbc345f02d829ea99694711
 +            let failure = ModelRequestFailure::new(
 +                ModelRequestHookContext::sampling(),
 +                retry_attempt,
-+                max_retries,
-+                /*will_retry*/ false,
-+                /*next_retry_attempt*/ None,
++                codex_hooks::ModelRequestNextAction::Stop,
 +                &err,
 +            );
++            run_request_error_hooks(&sess, &turn_context, failure.clone()).await;
 +            run_abnormal_stop_hooks(&sess, &turn_context, failure).await;
 +            return Err(err);
 +        }
          turn_context.turn_timing_state.record_sampling_retry();
      }
  }
-@@ -1558,6 +1606,12 @@ struct SamplingRequestResult {
+@@ -1558,6 +1599,12 @@ struct SamplingRequestResult {
      last_agent_message: Option<String>,
  }
  
@@ -774,7 +993,7 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..241be0415dbc345f02d829ea99694711
  /// Ephemeral per-response state for streaming a single proposed plan.
  /// This is intentionally not persisted or stored in session/state since it
  /// only exists while a response is actively streaming. The final plan text
-@@ -2155,7 +2209,7 @@ async fn try_run_sampling_request(
+@@ -2155,7 +2202,7 @@ async fn try_run_sampling_request(
      turn_diff_tracker: SharedTurnDiffTracker,
      prompt: &Prompt,
      cancellation_token: CancellationToken,
@@ -783,7 +1002,7 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..241be0415dbc345f02d829ea99694711
      let turn_context = Arc::clone(&step_context.turn);
      feedback_tags!(
          model = step_context.model_info.slug.clone(),
-@@ -2176,7 +2230,7 @@ async fn try_run_sampling_request(
+@@ -2176,7 +2223,7 @@ async fn try_run_sampling_request(
          .features
          .enabled(Feature::ConcurrentReasoningSummaries)
          && turn_context.provider.info().is_openai();
@@ -792,7 +1011,7 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..241be0415dbc345f02d829ea99694711
          .stream(
              prompt,
              &step_context.model_info,
-@@ -2189,7 +2243,14 @@ async fn try_run_sampling_request(
+@@ -2189,7 +2236,14 @@ async fn try_run_sampling_request(
          )
          .instrument(trace_span!("stream_request"))
          .or_cancel(&cancellation_token)
@@ -808,7 +1027,7 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..241be0415dbc345f02d829ea99694711
      let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
          FuturesOrdered::new();
      let mut needs_follow_up = false;
-@@ -2216,7 +2277,7 @@ async fn try_run_sampling_request(
+@@ -2216,7 +2270,7 @@ async fn try_run_sampling_request(
          !sess.services.extensions.turn_item_contributors().is_empty();
      let mut active_item_is_streaming_to_client = false;
      let receiving_span = trace_span!("receiving_stream");
@@ -817,7 +1036,7 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..241be0415dbc345f02d829ea99694711
          let handle_responses = trace_span!(
              parent: &receiving_span,
              "handle_responses",
-@@ -2240,17 +2301,17 @@ async fn try_run_sampling_request(
+@@ -2240,17 +2294,17 @@ async fn try_run_sampling_request(
          {
              Ok(event) => event,
              Err(codex_async_utils::CancelErr::Cancelled) => {
@@ -839,7 +1058,7 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..241be0415dbc345f02d829ea99694711
              }
          };
  
-@@ -2355,7 +2416,7 @@ async fn try_run_sampling_request(
+@@ -2355,7 +2409,7 @@ async fn try_run_sampling_request(
                          .await
                      {
                          Ok(output_result) => output_result,
@@ -848,7 +1067,7 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..241be0415dbc345f02d829ea99694711
                      };
                  if let Some(tool_future) = output_result.tool_future {
                      in_flight.push_back(tool_future);
-@@ -2541,7 +2602,7 @@ async fn try_run_sampling_request(
+@@ -2541,7 +2595,7 @@ async fn try_run_sampling_request(
                  should_emit_token_count = true;
                  should_emit_turn_diff = true;
                  if let Err(err) = budget_result {
@@ -857,7 +1076,7 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..241be0415dbc345f02d829ea99694711
                  }
                  if let Some(false) = end_turn {
                      needs_follow_up = true;
-@@ -2715,7 +2776,9 @@ async fn try_run_sampling_request(
+@@ -2715,7 +2769,9 @@ async fn try_run_sampling_request(
      } else {
          Some(turn_context.turn_timing_state.begin_tool_blocking())
      };
@@ -868,7 +1087,7 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..241be0415dbc345f02d829ea99694711
      drop(tool_blocking_timing_guard);
  
      if should_emit_token_count {
-@@ -2727,7 +2790,7 @@ async fn try_run_sampling_request(
+@@ -2727,7 +2783,7 @@ async fn try_run_sampling_request(
      }
  
      if cancellation_token.is_cancelled() {
@@ -903,6 +1122,329 @@ index cde3fc7d728e1447678f7a4e1214f72759f789ce..9c45e9bfe524b5557aa004f72a156b9d
          for contributor in self.services.extensions.turn_lifecycle_contributors() {
              contributor
                  .on_turn_error(codex_extension_api::TurnErrorInput {
+diff --git a/codex-rs/core/tests/suite/compact.rs b/codex-rs/core/tests/suite/compact.rs
+index 02e555ced01d585a80d230ca38429ad5b04a4015..be52d597978d1a1b4554f4a852a48d3e5ec09392 100644
+--- a/codex-rs/core/tests/suite/compact.rs
++++ b/codex-rs/core/tests/suite/compact.rs
+@@ -271,6 +271,59 @@ with Path(r"{manual_post_log_path}").open("a", encoding="utf-8") as handle:
+     fs::write(home.join("hooks.json"), hooks.to_string()).expect("write hooks.json");
+ }
+ 
++fn write_model_request_failure_hooks(home: &Path) {
++    let script_path = home.join("model_request_failure.py");
++    let log_path = home.join("model_request_failure_log.jsonl");
++    let script = format!(
++        r#"import json
++from pathlib import Path
++import sys
++
++payload = json.load(sys.stdin)
++with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
++    handle.write(json.dumps(payload) + "\n")
++"#,
++        log_path = log_path.display(),
++    );
++    let command = python_hook_command(&script_path);
++    let hooks = json!({
++        "hooks": {
++            "RequestError": [{
++                "hooks": [{
++                    "type": "command",
++                    "command": command,
++                }]
++            }],
++            "AbnormalStop": [{
++                "hooks": [{
++                    "type": "command",
++                    "command": python_hook_command(&script_path),
++                }]
++            }]
++        }
++    });
++
++    fs::write(&script_path, script).expect("write model request failure hook script");
++    fs::write(home.join("hooks.json"), hooks.to_string()).expect("write hooks.json");
++}
++
++async fn wait_for_model_request_failure_inputs(home: &Path, count: usize) -> Vec<Value> {
++    let log_path = home.join("model_request_failure_log.jsonl");
++    tokio::time::timeout(std::time::Duration::from_secs(10), async {
++        loop {
++            if log_path.exists() {
++                let inputs = read_hook_inputs(&log_path);
++                if inputs.len() >= count {
++                    return inputs;
++                }
++            }
++            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
++        }
++    })
++    .await
++    .expect("model request failure hooks should complete")
++}
++
+ fn non_openai_model_provider(server: &MockServer) -> ModelProviderInfo {
+     let mut provider =
+         built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone();
+@@ -2550,12 +2603,14 @@ async fn pre_sampling_compact_falls_back_after_previous_model_invalid_request_on
+ 
+     let model_provider = openai_model_provider(&server);
+     let mut builder = test_codex()
++        .with_pre_build_hook(write_model_request_failure_hooks)
+         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+         .with_model(retired_model)
+         .with_config(move |config| {
+             config.model_provider = model_provider;
+             set_test_compact_prompt(config);
+             let _ = config.features.enable(Feature::RemoteCompactionV2);
++            trust_discovered_hooks(config);
+         });
+     let test = builder.build(&server).await.expect("build test codex");
+ 
+@@ -2599,6 +2654,19 @@ async fn pre_sampling_compact_falls_back_after_previous_model_invalid_request_on
+     );
+     assert_eq!(requests[2].body_json()["model"].as_str(), Some(next_model));
+     assert_eq!(requests[3].body_json()["model"].as_str(), Some(next_model));
++
++    let hook_inputs =
++        wait_for_model_request_failure_inputs(&test.codex_home_path(), /*count*/ 1).await;
++    assert_eq!(hook_inputs.len(), 1);
++    assert_eq!(hook_inputs[0]["hookEventName"], "RequestError");
++    assert_eq!(hook_inputs[0]["operation"], "remoteCompact");
++    assert_eq!(hook_inputs[0]["nextAction"], "fallback");
++    assert_eq!(hook_inputs[0]["model"], retired_model);
++    assert!(
++        hook_inputs[0]["error"]["message"]
++            .as_str()
++            .is_some_and(|message| message.contains("previous-model compaction was rejected"))
++    );
+ }
+ 
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+@@ -2655,12 +2723,14 @@ async fn pre_sampling_legacy_remote_compact_falls_back_after_previous_model_inva
+ 
+     let model_provider = openai_model_provider(&server);
+     let mut builder = test_codex()
++        .with_pre_build_hook(write_model_request_failure_hooks)
+         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+         .with_model(retired_model)
+         .with_config(move |config| {
+             config.model_provider = model_provider;
+             set_test_compact_prompt(config);
+             let _ = config.features.disable(Feature::RemoteCompactionV2);
++            trust_discovered_hooks(config);
+         });
+     let test = builder.build(&server).await.expect("build test codex");
+ 
+@@ -2705,6 +2775,208 @@ async fn pre_sampling_legacy_remote_compact_falls_back_after_previous_model_inva
+         Some(next_model)
+     );
+     assert_eq!(requests[1].body_json()["model"].as_str(), Some(next_model));
++
++    let hook_inputs =
++        wait_for_model_request_failure_inputs(&test.codex_home_path(), /*count*/ 1).await;
++    assert_eq!(hook_inputs.len(), 1);
++    assert_eq!(hook_inputs[0]["hookEventName"], "RequestError");
++    assert_eq!(hook_inputs[0]["operation"], "remoteCompact");
++    assert_eq!(hook_inputs[0]["nextAction"], "fallback");
++    assert_eq!(hook_inputs[0]["model"], retired_model);
++    assert!(
++        hook_inputs[0]["error"]["message"]
++            .as_str()
++            .is_some_and(|message| message.contains("previous-model compaction was rejected"))
++    );
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn pre_sampling_legacy_remote_compact_reports_fallback_failure_and_final_error() {
++    skip_if_no_network!();
++
++    let server = MockServer::start().await;
++    let retired_model = "gpt-5.6";
++    let previous_model_family = "gpt-5.6";
++    let next_model = "gpt-5.5";
++    let mut previous_model_info =
++        model_info_with_context_window("gpt-5.4", /*context_window*/ 273_000);
++    previous_model_info.slug = previous_model_family.to_string();
++    let mut next_model_info =
++        model_info_with_context_window("gpt-5.4", /*context_window*/ 125_000);
++    next_model_info.slug = next_model.to_string();
++
++    let models_mock = mount_models_once(
++        &server,
++        ModelsResponse {
++            models: vec![previous_model_info, next_model_info],
++        },
++    )
++    .await;
++    let request_log = mount_sse_sequence(
++        &server,
++        vec![sse(vec![
++            ev_assistant_message("m1", "before switch"),
++            ev_completed_with_tokens("r1", /*total_tokens*/ 120_000),
++        ])],
++    )
++    .await;
++    let compact_request_log = mount_compact_response_sequence(
++        &server,
++        vec![
++            invalid_request_response("primary previous-model compact failure"),
++            invalid_request_response("actual fallback compact failure"),
++        ],
++    )
++    .await;
++
++    let model_provider = openai_model_provider(&server);
++    let mut builder = test_codex()
++        .with_pre_build_hook(write_model_request_failure_hooks)
++        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
++        .with_model(retired_model)
++        .with_config(move |config| {
++            config.model_provider = model_provider;
++            set_test_compact_prompt(config);
++            let _ = config.features.disable(Feature::RemoteCompactionV2);
++            trust_discovered_hooks(config);
++        });
++    let test = builder.build(&server).await.expect("build test codex");
++
++    test.codex
++        .start_or_steer_turn(disabled_permission_user_turn(
++            "before switch",
++            test.cwd.path().to_path_buf(),
++            retired_model.to_string(),
++        ))
++        .await
++        .expect("submit first user turn");
++    wait_for_event(&test.codex, |event| {
++        matches!(event, EventMsg::TurnComplete(_))
++    })
++    .await;
++
++    test.codex
++        .start_or_steer_turn(disabled_permission_user_turn(
++            "after switch",
++            test.cwd.path().to_path_buf(),
++            next_model.to_string(),
++        ))
++        .await
++        .expect("submit smaller-model turn");
++    let error_message = wait_for_event_match(&test.codex, |event| match event {
++        EventMsg::Error(error) => Some(error.message.clone()),
++        _ => None,
++    })
++    .await;
++    assert!(error_message.contains("actual fallback compact failure"));
++    wait_for_event(&test.codex, |event| {
++        matches!(event, EventMsg::TurnComplete(_))
++    })
++    .await;
++
++    assert_eq!(models_mock.requests().len(), 1);
++    assert_eq!(request_log.requests().len(), 1);
++    assert_eq!(compact_request_log.requests().len(), 2);
++
++    let hook_inputs =
++        wait_for_model_request_failure_inputs(&test.codex_home_path(), /*count*/ 3).await;
++    assert_eq!(hook_inputs.len(), 3);
++    let primary_fallback = hook_inputs
++        .iter()
++        .find(|input| input["hookEventName"] == "RequestError" && input["nextAction"] == "fallback")
++        .expect("primary fallback RequestError");
++    assert_eq!(primary_fallback["model"], retired_model);
++    assert!(
++        primary_fallback["error"]["message"]
++            .as_str()
++            .is_some_and(|message| message.contains("primary previous-model compact failure"))
++    );
++
++    for event_name in ["RequestError", "AbnormalStop"] {
++        let final_stop = hook_inputs
++            .iter()
++            .find(|input| input["hookEventName"] == event_name && input["nextAction"] == "stop")
++            .unwrap_or_else(|| panic!("final {event_name} stop"));
++        assert_eq!(final_stop["model"], next_model);
++        assert!(
++            final_stop["error"]["message"]
++                .as_str()
++                .is_some_and(|message| message.contains("actual fallback compact failure"))
++        );
++    }
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn sampling_internal_http_retries_emit_one_visible_stop_decision() {
++    skip_if_no_network!();
++
++    let server = MockServer::start().await;
++    let request_log = mount_response_sequence(
++        &server,
++        vec![
++            wiremock::ResponseTemplate::new(/*status*/ 500)
++                .insert_header("retry-after-ms", "0")
++                .set_body_json(json!({"error": {"message": "internal attempt one"}})),
++            wiremock::ResponseTemplate::new(/*status*/ 500)
++                .insert_header("retry-after-ms", "0")
++                .set_body_json(json!({"error": {"message": "internal attempt two"}})),
++        ],
++    )
++    .await;
++    let mut model_provider = openai_model_provider(&server);
++    model_provider.request_max_retries = Some(1);
++    model_provider.stream_max_retries = Some(0);
++    let mut builder = test_codex()
++        .with_pre_build_hook(write_model_request_failure_hooks)
++        .with_model("gpt-test")
++        .with_config(move |config| {
++            config.model_provider = model_provider;
++            trust_discovered_hooks(config);
++        });
++    let test = builder.build(&server).await.expect("build test codex");
++
++    test.codex
++        .start_or_steer_turn(disabled_permission_user_turn(
++            "exercise internal request retries",
++            test.cwd.path().to_path_buf(),
++            "gpt-test".to_string(),
++        ))
++        .await
++        .expect("submit turn");
++    wait_for_event_match(&test.codex, |event| match event {
++        EventMsg::Error(error) => Some(error.message.clone()),
++        _ => None,
++    })
++    .await;
++    wait_for_event(&test.codex, |event| {
++        matches!(event, EventMsg::TurnComplete(_))
++    })
++    .await;
++
++    assert_eq!(request_log.requests().len(), 2);
++    let hook_inputs =
++        wait_for_model_request_failure_inputs(&test.codex_home_path(), /*count*/ 2).await;
++    assert_eq!(
++        hook_inputs
++            .iter()
++            .filter(|input| input["hookEventName"] == "RequestError")
++            .count(),
++        1
++    );
++    assert_eq!(
++        hook_inputs
++            .iter()
++            .filter(|input| input["hookEventName"] == "AbnormalStop")
++            .count(),
++        1
++    );
++    let request_error = hook_inputs
++        .iter()
++        .find(|input| input["hookEventName"] == "RequestError")
++        .expect("visible RequestError");
++    assert_eq!(request_error["operation"], "sampling");
++    assert_eq!(request_error["nextAction"], "stop");
++    assert_eq!(request_error["attempt"], 0);
+ }
+ 
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
 index 69b4903af27ae334bc0367cec3991cdb6b88b159..a3e5aa3c960817cfdb20c428b6b83b0b3b9d30a9 100644
 --- a/codex-rs/ext/extension-api/src/lib.rs
@@ -943,7 +1485,7 @@ index 923f436581b36c90556030ebdfc8e1dc30969ab4..3c60c7247e8959303a6a9d5eb5ebdd6e
          })
      }
 diff --git a/codex-rs/hooks/src/engine/dispatcher.rs b/codex-rs/hooks/src/engine/dispatcher.rs
-index 8361de803ad1ddd66e04ac9d3f8cfd7ca4375506..0947a3e0547708b0eca17bc3503764ac5f516126 100644
+index 8361de803ad1ddd66e04ac9d3f8cfd7ca4375506..b377fa74f4f109241d2cdfd371215a9f961d17e1 100644
 --- a/codex-rs/hooks/src/engine/dispatcher.rs
 +++ b/codex-rs/hooks/src/engine/dispatcher.rs
 @@ -64,7 +64,10 @@ pub(crate) fn select_handlers_for_matcher_inputs(
@@ -958,7 +1500,84 @@ index 8361de803ad1ddd66e04ac9d3f8cfd7ca4375506..0947a3e0547708b0eca17bc3503764ac
          })
          .cloned()
          .collect()
-@@ -185,6 +188,8 @@ pub(crate) fn scope_for_event(event_name: HookEventName) -> HookScope {
+@@ -151,6 +154,76 @@ pub(crate) async fn execute_handlers<T: 'static>(
+     completed.into_iter().map(|(_, parsed)| parsed).collect()
+ }
+ 
++/// Execute every selected handler directly with a fixed concurrency bound.
++///
++/// Notification events use this path even for handlers configured as async:
++/// the notification itself is already detached from the model flow, and
++/// awaiting the handler here is what makes the per-event concurrency limit
++/// authoritative.
++pub(crate) async fn execute_handlers_bounded<T: 'static>(
++    engine: &ClaudeHooksEngine,
++    handlers: Vec<ConfiguredHandler>,
++    input_json: String,
++    cwd: &Path,
++    turn_id: Option<String>,
++    max_concurrency: usize,
++    parse: fn(&ConfiguredHandler, HandlerRunResult, Option<String>) -> ParsedHandler<T>,
++) -> Vec<ParsedHandler<T>> {
++    assert!(max_concurrency > 0, "handler concurrency must be non-zero");
++
++    let mut remaining = handlers.into_iter().enumerate();
++    let mut pending = FuturesUnordered::new();
++    let mut completed = Vec::new();
++    let mut completion_order = 0;
++
++    loop {
++        while pending.len() < max_concurrency {
++            let Some((configured_order, handler)) = remaining.next() else {
++                break;
++            };
++            let input_json = input_json.clone();
++            let turn_id = turn_id.clone();
++            pending.push(async move {
++                let result = match &handler.kind {
++                    ConfiguredHandlerKind::Command { command, env, .. } => {
++                        run_command(
++                            &engine.command_runtime,
++                            &handler,
++                            command,
++                            env,
++                            &input_json,
++                            cwd,
++                        )
++                        .await
++                    }
++                    ConfiguredHandlerKind::McpTool {
++                        server,
++                        tool,
++                        input,
++                    } => {
++                        let executor = engine.mcp_executor.as_deref()?;
++                        run_mcp_tool(executor, &handler, server, tool, input, &input_json).await
++                    }
++                };
++                Some((configured_order, parse(&handler, result, turn_id)))
++            });
++        }
++
++        let Some(result) = pending.next().await else {
++            break;
++        };
++        let Some((configured_order, mut parsed)) = result else {
++            continue;
++        };
++        parsed.completion_order = completion_order;
++        completion_order += 1;
++        completed.push((configured_order, parsed));
++    }
++
++    completed.sort_by_key(|(configured_order, _)| *configured_order);
++    completed.into_iter().map(|(_, parsed)| parsed).collect()
++}
++
+ pub(crate) fn completed_summary(
+     handler: &ConfiguredHandler,
+     run_result: &HandlerRunResult,
+@@ -185,6 +258,8 @@ pub(crate) fn scope_for_event(event_name: HookEventName) -> HookScope {
          | HookEventName::PostToolUse
          | HookEventName::PreCompact
          | HookEventName::PostCompact
@@ -967,7 +1586,7 @@ index 8361de803ad1ddd66e04ac9d3f8cfd7ca4375506..0947a3e0547708b0eca17bc3503764ac
          | HookEventName::UserPromptSubmit
          | HookEventName::SubagentStop
          | HookEventName::Stop => HookScope::Turn,
-@@ -201,6 +206,8 @@ pub(crate) fn hook_event_name_label(event_name: HookEventName) -> &'static str {
+@@ -201,6 +276,8 @@ pub(crate) fn hook_event_name_label(event_name: HookEventName) -> &'static str {
          HookEventName::SessionStart => "SessionStart",
          HookEventName::SessionEnd => "SessionEnd",
          HookEventName::UserPromptSubmit => "UserPromptSubmit",
@@ -1035,7 +1654,7 @@ index c9f44ece9e9a9a222e7c17d86d87d2f76c095d2f..c5d3f7a990e14964cce9145dd797468b
          &self,
          request: &UserPromptSubmitRequest,
 diff --git a/codex-rs/hooks/src/engine/output_parser.rs b/codex-rs/hooks/src/engine/output_parser.rs
-index d4c71a172bcf9f8df79bb6598f72018c3d704c4b..a30f1f8cda6eea5691850a41cabd53d104a0e75e 100644
+index d4c71a172bcf9f8df79bb6598f72018c3d704c4b..a347fe0231540944a4b0c647c68b9f38fc927029 100644
 --- a/codex-rs/hooks/src/engine/output_parser.rs
 +++ b/codex-rs/hooks/src/engine/output_parser.rs
 @@ -64,9 +64,11 @@ pub(crate) struct StopOutput {
@@ -1088,10 +1707,43 @@ index d4c71a172bcf9f8df79bb6598f72018c3d704c4b..a30f1f8cda6eea5691850a41cabd53d1
 +    let wire: AbnormalStopCommandOutputWire = parse_json(stdout)?;
 +    Some(StatelessHookOutput {
 +        universal: UniversalOutput::from(wire.universal),
-+        suppress_turn_error_lifecycle: wire.suppress_turn_error_lifecycle,
++        suppress_turn_error_lifecycle: wire.suppress,
          invalid_reason: None,
      })
  }
+@@ -512,6 +535,7 @@ mod tests {
+     use pretty_assertions::assert_eq;
+     use serde_json::json;
+ 
++    use super::parse_abnormal_stop;
+     use super::parse_permission_request;
+     use super::parse_user_prompt_submit;
+ 
+@@ -533,6 +557,24 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn abnormal_stop_accepts_stable_suppress_and_rejects_old_or_unknown_fields() {
++        let parsed = parse_abnormal_stop(r#"{"suppress":true}"#)
++            .expect("stable abnormal stop output should parse");
++        assert_eq!(parsed.suppress_turn_error_lifecycle, Some(true));
++
++        for stdout in [
++            r#"{"suppressTurnErrorLifecycle":true}"#,
++            r#"{"suppress":true,"unknown":false}"#,
++            r#"{"suppress":"true"}"#,
++        ] {
++            assert!(
++                parse_abnormal_stop(stdout).is_none(),
++                "invalid abnormal stop output should fail: {stdout}"
++            );
++        }
++    }
++
+     #[test]
+     fn permission_request_rejects_reserved_updated_input_field() {
+         let parsed = parse_permission_request(
 diff --git a/codex-rs/hooks/src/engine/schema_loader.rs b/codex-rs/hooks/src/engine/schema_loader.rs
 index e5fbf42d2cf3aa86c1b484c935a5cfb95e49efab..10a28522685614da5b8aff4d39d28174a307c9dd 100644
 --- a/codex-rs/hooks/src/engine/schema_loader.rs
@@ -1142,7 +1794,7 @@ index e5fbf42d2cf3aa86c1b484c935a5cfb95e49efab..10a28522685614da5b8aff4d39d28174
          assert_eq!(schemas.pre_tool_use_command_output["type"], "object");
          assert_eq!(schemas.pre_compact_command_input["type"], "object");
 diff --git a/codex-rs/hooks/src/lib.rs b/codex-rs/hooks/src/lib.rs
-index 7536bda0b413e5e39dfb6e589907687ad65f5010..b65013799318f26ec35ea8de8a1384f349fa0fb8 100644
+index 7536bda0b413e5e39dfb6e589907687ad65f5010..0584d45071121ff6510bba243cbbf9b78504e304 100644
 --- a/codex-rs/hooks/src/lib.rs
 +++ b/codex-rs/hooks/src/lib.rs
 @@ -18,12 +18,14 @@ pub use engine::HookListEntry;
@@ -1161,17 +1813,29 @@ index 7536bda0b413e5e39dfb6e589907687ad65f5010..b65013799318f26ec35ea8de8a1384f3
      "SessionStart",
      "SessionEnd",
      "UserPromptSubmit",
-@@ -53,6 +55,9 @@ pub use events::compact::PostCompactRequest;
+@@ -53,6 +55,13 @@ pub use events::compact::PostCompactRequest;
  pub use events::compact::PreCompactOutcome;
  pub use events::compact::PreCompactRequest;
  pub use events::compact::StatelessHookOutcome;
 +pub use events::model_request::AbnormalStopRequest;
++pub use events::model_request::ModelRequestError;
++pub use events::model_request::ModelRequestErrorCategory;
++pub use events::model_request::ModelRequestNextAction;
++pub use events::model_request::ModelRequestOperation;
 +pub use events::model_request::NotificationHookOutcome;
 +pub use events::model_request::RequestErrorRequest;
  pub use events::permission_request::PermissionRequestDecision;
  pub use events::permission_request::PermissionRequestOutcome;
  pub use events::permission_request::PermissionRequestRequest;
-@@ -96,6 +101,8 @@ pub fn hook_event_key_label(event_name: HookEventName) -> &'static str {
+@@ -78,6 +87,7 @@ pub use mcp::HookMcpExecutor;
+ pub use registry::HookListOutcome;
+ pub use registry::Hooks;
+ pub use registry::HooksConfig;
++pub use registry::RequestErrorDispatch;
+ pub use registry::command_from_argv;
+ pub use registry::list_hooks;
+ pub use schema::write_schema_fixtures;
+@@ -96,6 +106,8 @@ pub fn hook_event_key_label(event_name: HookEventName) -> &'static str {
          HookEventName::PostToolUse => "post_tool_use",
          HookEventName::PreCompact => "pre_compact",
          HookEventName::PostCompact => "post_compact",
@@ -1181,7 +1845,7 @@ index 7536bda0b413e5e39dfb6e589907687ad65f5010..b65013799318f26ec35ea8de8a1384f3
          HookEventName::SessionEnd => "session_end",
          HookEventName::UserPromptSubmit => "user_prompt_submit",
 diff --git a/codex-rs/hooks/src/registry.rs b/codex-rs/hooks/src/registry.rs
-index f45a645e3d0fb7d8e6ca3dad594c2cc7cd254273..4804a67db61285c844c3fb253fc427bf6064f83e 100644
+index f45a645e3d0fb7d8e6ca3dad594c2cc7cd254273..98099223c270a5072731767f4b3d1d5f9196dcf1 100644
 --- a/codex-rs/hooks/src/registry.rs
 +++ b/codex-rs/hooks/src/registry.rs
 @@ -6,6 +6,9 @@ use crate::events::compact::PostCompactRequest;
@@ -1194,7 +1858,124 @@ index f45a645e3d0fb7d8e6ca3dad594c2cc7cd254273..4804a67db61285c844c3fb253fc427bf
  use crate::events::permission_request::PermissionRequestOutcome;
  use crate::events::permission_request::PermissionRequestRequest;
  use crate::events::post_tool_use::PostToolUseOutcome;
-@@ -226,6 +229,28 @@ impl Hooks {
+@@ -26,13 +29,100 @@ use crate::types::HookEvent;
+ use crate::types::HookPayload;
+ use crate::types::HookResponse;
+ use async_channel::Receiver;
++use async_channel::Sender;
++use async_channel::TrySendError;
+ use codex_config::ConfigLayerStack;
+ use codex_plugin::PluginHookSource;
+ use codex_protocol::ThreadId;
+ use codex_protocol::shell_environment::scrub_non_inheritable_env_vars;
+ use std::sync::Arc;
++use std::sync::atomic::AtomicBool;
++use std::sync::atomic::Ordering;
+ use std::time::Duration;
+ use tokio::process::Command;
++use tokio::sync::oneshot;
++
++use crate::events::model_request::REQUEST_ERROR_QUEUE_CAPACITY;
++
++struct RequestErrorJob {
++    request: RequestErrorRequest,
++    outcome_sender: oneshot::Sender<NotificationHookOutcome>,
++}
++
++#[derive(Clone)]
++struct RequestErrorDispatcher {
++    sender: Sender<RequestErrorJob>,
++    receiver: Receiver<RequestErrorJob>,
++    worker_started: Arc<AtomicBool>,
++}
++
++impl RequestErrorDispatcher {
++    fn new() -> Self {
++        let (sender, receiver) = async_channel::bounded(REQUEST_ERROR_QUEUE_CAPACITY);
++        Self {
++            sender,
++            receiver,
++            worker_started: Arc::new(AtomicBool::new(false)),
++        }
++    }
++
++    fn enqueue(
++        &self,
++        engine: ClaudeHooksEngine,
++        request: RequestErrorRequest,
++    ) -> RequestErrorDispatch {
++        let turn_id = request.turn_id.clone();
++        let (outcome_sender, outcome_receiver) = oneshot::channel();
++        let job = RequestErrorJob {
++            request,
++            outcome_sender,
++        };
++        match self.sender.try_send(job) {
++            Ok(()) => {
++                self.ensure_worker(engine);
++                RequestErrorDispatch::Queued(outcome_receiver)
++            }
++            Err(TrySendError::Full(_)) => RequestErrorDispatch::Rejected(
++                crate::events::model_request::request_error_dispatch_failure(
++                    &engine.handlers,
++                    turn_id,
++                    format!(
++                        "RequestError hook queue is full (capacity {REQUEST_ERROR_QUEUE_CAPACITY})"
++                    ),
++                ),
++            ),
++            Err(TrySendError::Closed(_)) => RequestErrorDispatch::Rejected(
++                crate::events::model_request::request_error_dispatch_failure(
++                    &engine.handlers,
++                    turn_id,
++                    "RequestError hook queue is closed",
++                ),
++            ),
++        }
++    }
++
++    fn ensure_worker(&self, engine: ClaudeHooksEngine) {
++        if self
++            .worker_started
++            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
++            .is_err()
++        {
++            return;
++        }
++        let receiver = self.receiver.clone();
++        tokio::spawn(async move {
++            while let Ok(job) = receiver.recv().await {
++                let outcome = engine.run_request_error(job.request).await;
++                let _ = job.outcome_sender.send(outcome);
++            }
++        });
++    }
++}
++
++pub enum RequestErrorDispatch {
++    Queued(oneshot::Receiver<NotificationHookOutcome>),
++    Rejected(NotificationHookOutcome),
++}
+ 
+ #[derive(Default, Clone)]
+ pub struct HooksConfig {
+@@ -57,6 +147,7 @@ pub struct HookListOutcome {
+ pub struct Hooks {
+     after_agent: Vec<Hook>,
+     engine: ClaudeHooksEngine,
++    request_error_dispatcher: RequestErrorDispatcher,
+ }
+ 
+ impl Hooks {
+@@ -113,6 +204,7 @@ impl Hooks {
+         Self {
+             after_agent,
+             engine,
++            request_error_dispatcher: RequestErrorDispatcher::new(),
+         }
+     }
+ 
+@@ -226,6 +318,29 @@ impl Hooks {
          self.engine.run_post_compact(request).await
      }
  
@@ -1205,8 +1986,9 @@ index f45a645e3d0fb7d8e6ca3dad594c2cc7cd254273..4804a67db61285c844c3fb253fc427bf
 +        self.engine.preview_request_error(request)
 +    }
 +
-+    pub async fn run_request_error(&self, request: RequestErrorRequest) -> NotificationHookOutcome {
-+        self.engine.run_request_error(request).await
++    pub fn enqueue_request_error(&self, request: RequestErrorRequest) -> RequestErrorDispatch {
++        self.request_error_dispatcher
++            .enqueue(self.engine.clone(), request)
 +    }
 +
 +    pub fn preview_abnormal_stop(
@@ -1223,6 +2005,218 @@ index f45a645e3d0fb7d8e6ca3dad594c2cc7cd254273..4804a67db61285c844c3fb253fc427bf
      pub fn preview_user_prompt_submit(
          &self,
          request: &UserPromptSubmitRequest,
+@@ -287,3 +402,211 @@ pub fn command_from_argv(argv: &[String]) -> Option<Command> {
+     scrub_non_inheritable_env_vars(command.as_std_mut());
+     Some(command)
+ }
++
++#[cfg(test)]
++mod tests {
++    use std::sync::Arc;
++    use std::sync::Mutex;
++    use std::sync::atomic::AtomicBool;
++    use std::sync::atomic::Ordering;
++
++    use codex_protocol::ThreadId;
++    use codex_protocol::protocol::HookEventName;
++    use codex_protocol::protocol::HookRunStatus;
++    use codex_protocol::protocol::HookSource;
++    use codex_utils_absolute_path::AbsolutePathBuf;
++    use futures::FutureExt;
++    use futures::future::BoxFuture;
++    use serde_json::Map;
++    use serde_json::Value;
++    use tokio::sync::Notify;
++
++    use super::RequestErrorDispatch;
++    use super::RequestErrorDispatcher;
++    use crate::engine::ClaudeHooksEngine;
++    use crate::engine::CommandShell;
++    use crate::engine::ConfiguredHandler;
++    use crate::engine::ConfiguredHandlerKind;
++    use crate::engine::command_runner::CommandHookRuntime;
++    use crate::events::model_request::ModelRequestError;
++    use crate::events::model_request::ModelRequestErrorCategory;
++    use crate::events::model_request::ModelRequestNextAction;
++    use crate::events::model_request::ModelRequestOperation;
++    use crate::events::model_request::REQUEST_ERROR_QUEUE_CAPACITY;
++    use crate::events::model_request::RequestErrorRequest;
++    use crate::mcp::HookMcpCall;
++    use crate::mcp::HookMcpExecutor;
++
++    struct BlockingMcpExecutor {
++        started: Notify,
++        release: Notify,
++        released: AtomicBool,
++        attempts: Mutex<Vec<u64>>,
++    }
++
++    impl BlockingMcpExecutor {
++        fn unblock(&self) {
++            self.released.store(true, Ordering::Release);
++            self.release.notify_waiters();
++        }
++    }
++
++    impl HookMcpExecutor for BlockingMcpExecutor {
++        fn execute(&self, call: HookMcpCall) -> BoxFuture<'_, anyhow::Result<String>> {
++            async move {
++                let attempt = call
++                    .input
++                    .get("attempt")
++                    .and_then(Value::as_u64)
++                    .expect("expanded attempt");
++                self.attempts.lock().expect("lock attempts").push(attempt);
++                self.started.notify_one();
++                while !self.released.load(Ordering::Acquire) {
++                    self.release.notified().await;
++                }
++                Ok(String::new())
++            }
++            .boxed()
++        }
++    }
++
++    fn cwd() -> AbsolutePathBuf {
++        AbsolutePathBuf::current_dir().expect("current dir")
++    }
++
++    fn engine(executor: Arc<dyn HookMcpExecutor>) -> ClaudeHooksEngine {
++        let (result_sender, _result_receiver) = async_channel::unbounded();
++        let mut engine = ClaudeHooksEngine::new(
++            /*enabled*/ true,
++            /*bypass_hook_trust*/ false,
++            /*config_layer_stack*/ None,
++            Vec::new(),
++            Vec::new(),
++            CommandHookRuntime::new(
++                CommandShell {
++                    program: String::new(),
++                    args: Vec::new(),
++                },
++                ThreadId::new(),
++                result_sender,
++            ),
++            Some(executor),
++        );
++        engine.handlers = vec![ConfiguredHandler {
++            event_name: HookEventName::RequestError,
++            matcher: None,
++            timeout_sec: 60,
++            status_message: None,
++            additional_context_limit: Default::default(),
++            source_path: cwd().join("request-error.json"),
++            source: HookSource::User,
++            display_order: 0,
++            kind: ConfiguredHandlerKind::McpTool {
++                server: "test".to_string(),
++                tool: "record".to_string(),
++                input: Map::from_iter([(
++                    "attempt".to_string(),
++                    Value::String("${attempt}".to_string()),
++                )]),
++            },
++        }];
++        engine
++    }
++
++    fn request(attempt: u64) -> RequestErrorRequest {
++        RequestErrorRequest {
++            session_id: ThreadId::new(),
++            turn_id: format!("turn-{attempt}"),
++            transcript_path: None,
++            cwd: cwd(),
++            model: "gpt-test".to_string(),
++            provider: "openai".to_string(),
++            operation: ModelRequestOperation::Sampling,
++            endpoint_path: "/responses".to_string(),
++            attempt,
++            next_action: ModelRequestNextAction::Retry,
++            error: ModelRequestError {
++                category: ModelRequestErrorCategory::Transport,
++                message: "disconnected".to_string(),
++            },
++        }
++    }
++
++    #[tokio::test]
++    async fn request_error_dispatcher_preserves_fifo_order() {
++        let executor = Arc::new(BlockingMcpExecutor {
++            started: Notify::new(),
++            release: Notify::new(),
++            released: AtomicBool::new(false),
++            attempts: Mutex::new(Vec::new()),
++        });
++        let engine = engine(executor.clone());
++        let dispatcher = RequestErrorDispatcher::new();
++        let mut receivers = Vec::new();
++
++        for attempt in 0..4 {
++            match dispatcher.enqueue(engine.clone(), request(attempt)) {
++                RequestErrorDispatch::Queued(receiver) => receivers.push(receiver),
++                RequestErrorDispatch::Rejected(_) => panic!("queue unexpectedly rejected"),
++            }
++        }
++        executor.started.notified().await;
++        executor.unblock();
++        for receiver in receivers {
++            receiver.await.expect("queue worker outcome");
++        }
++
++        assert_eq!(
++            *executor.attempts.lock().expect("lock attempts"),
++            vec![0, 1, 2, 3]
++        );
++    }
++
++    #[tokio::test]
++    async fn request_error_dispatcher_rejects_overflow_without_waiting() {
++        let executor = Arc::new(BlockingMcpExecutor {
++            started: Notify::new(),
++            release: Notify::new(),
++            released: AtomicBool::new(false),
++            attempts: Mutex::new(Vec::new()),
++        });
++        let engine = engine(executor.clone());
++        let dispatcher = RequestErrorDispatcher::new();
++
++        let first = match dispatcher.enqueue(engine.clone(), request(0)) {
++            RequestErrorDispatch::Queued(receiver) => receiver,
++            RequestErrorDispatch::Rejected(_) => panic!("first event rejected"),
++        };
++        executor.started.notified().await;
++
++        let mut queued = Vec::new();
++        for attempt in 1..=REQUEST_ERROR_QUEUE_CAPACITY as u64 {
++            match dispatcher.enqueue(engine.clone(), request(attempt)) {
++                RequestErrorDispatch::Queued(receiver) => queued.push(receiver),
++                RequestErrorDispatch::Rejected(_) => panic!("queue rejected before capacity"),
++            }
++        }
++        let rejected =
++            match dispatcher.enqueue(engine, request(REQUEST_ERROR_QUEUE_CAPACITY as u64 + 1)) {
++                RequestErrorDispatch::Queued(_) => panic!("overflow event was queued"),
++                RequestErrorDispatch::Rejected(outcome) => outcome,
++            };
++        assert_eq!(rejected.hook_events.len(), 1);
++        assert_eq!(rejected.hook_events[0].run.status, HookRunStatus::Failed);
++        assert!(
++            rejected.hook_events[0].run.entries[0]
++                .text
++                .contains("capacity 64")
++        );
++
++        executor.unblock();
++        first.await.expect("first queue outcome");
++        for receiver in queued {
++            receiver.await.expect("queued outcome");
++        }
++        assert_eq!(
++            executor.attempts.lock().expect("lock attempts").len(),
++            REQUEST_ERROR_QUEUE_CAPACITY + 1
++        );
++    }
++}
 diff --git a/codex-rs/tui/src/bottom_pane/hooks_browser_view.rs b/codex-rs/tui/src/bottom_pane/hooks_browser_view.rs
 index 2a765613bfd77aefd6f278af14aaf2e710525034..45e5f21cf132bb3ddaa7363eab48cb0f0f7112b2 100644
 --- a/codex-rs/tui/src/bottom_pane/hooks_browser_view.rs

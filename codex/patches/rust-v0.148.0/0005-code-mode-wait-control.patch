@@ -1,5 +1,5 @@
 diff --git a/codex-rs/code-mode-host/src/grpc/conversions.rs b/codex-rs/code-mode-host/src/grpc/conversions.rs
-index a9dcabcab33d8453016eba0b6161bc64b54eab46..b347a999ab2998df197c24548004405c01326c67 100644
+index a9dcabcab33d8453016eba0b6161bc64b54eab46..a2f903213630b3ea41f6df994d6f12f3cf98e252 100644
 --- a/codex-rs/code-mode-host/src/grpc/conversions.rs
 +++ b/codex-rs/code-mode-host/src/grpc/conversions.rs
 @@ -6,6 +6,7 @@ use codex_code_mode_protocol::ImageDetail;
@@ -10,7 +10,7 @@ index a9dcabcab33d8453016eba0b6161bc64b54eab46..b347a999ab2998df197c24548004405c
  use codex_code_mode_protocol::grpc as proto;
  use codex_protocol::ToolName;
  use serde_json::Value as JsonValue;
-@@ -84,10 +85,16 @@ pub(super) fn execution_outcome(response: RuntimeResponse) -> proto::ExecutionOu
+@@ -84,10 +85,17 @@ pub(super) fn execution_outcome(response: RuntimeResponse) -> proto::ExecutionOu
          RuntimeResponse::Yielded {
              cell_id,
              content_items,
@@ -23,11 +23,47 @@ index a9dcabcab33d8453016eba0b6161bc64b54eab46..b347a999ab2998df197c24548004405c
 +                reason: match reason {
 +                    YieldReason::Timer => proto::YieldReason::Timer,
 +                    YieldReason::Explicit => proto::YieldReason::Explicit,
++                    YieldReason::TerminalWaitDecision => proto::YieldReason::TerminalWaitDecision,
 +                } as i32,
 +            }),
          ),
          RuntimeResponse::Terminated {
              cell_id,
+diff --git a/codex-rs/code-mode-host/src/grpc/conversions_tests.rs b/codex-rs/code-mode-host/src/grpc/conversions_tests.rs
+index 61d49156dbfc3a6aae54e7e6712ba3282c6f825d..a4e04cba2ee3e22be158c839c9debc3e8c1270e8 100644
+--- a/codex-rs/code-mode-host/src/grpc/conversions_tests.rs
++++ b/codex-rs/code-mode-host/src/grpc/conversions_tests.rs
+@@ -2,6 +2,7 @@ use codex_code_mode_protocol::CellId;
+ use codex_code_mode_protocol::FunctionCallOutputContentItem;
+ use codex_code_mode_protocol::ImageDetail;
+ use codex_code_mode_protocol::RuntimeResponse;
++use codex_code_mode_protocol::YieldReason;
+ use codex_code_mode_protocol::grpc as proto;
+ use pretty_assertions::assert_eq;
+ use tonic::Code;
+@@ -9,6 +10,22 @@ use tonic::Code;
+ use super::execute_request;
+ use super::execution_outcome;
+ 
++#[test]
++fn terminal_wait_decision_yield_reason_round_trips_to_grpc() {
++    let outcome = execution_outcome(RuntimeResponse::Yielded {
++        cell_id: CellId::new("cell".to_string()),
++        content_items: Vec::new(),
++        reason: YieldReason::TerminalWaitDecision,
++    });
++    let Some(proto::execution_outcome::Outcome::Yielded(yielded)) = outcome.outcome else {
++        panic!("expected yielded outcome");
++    };
++    assert_eq!(
++        proto::YieldReason::try_from(yielded.reason),
++        Ok(proto::YieldReason::TerminalWaitDecision)
++    );
++}
++
+ #[test]
+ fn rejects_missing_names_unknown_tool_kinds_and_invalid_json_schemas() {
+     let definition = proto::ToolDefinition {
 diff --git a/codex-rs/code-mode-host/src/grpc/service_tests.rs b/codex-rs/code-mode-host/src/grpc/service_tests.rs
 index 81b96cedd9dc334413a7222d50cb0fed2c7bfc8a..a144550584a6c1ded7e748e2f4d67d1d5f9cc221 100644
 --- a/codex-rs/code-mode-host/src/grpc/service_tests.rs
@@ -43,8 +79,188 @@ index 81b96cedd9dc334413a7222d50cb0fed2c7bfc8a..a144550584a6c1ded7e748e2f4d67d1d
                      )),
                  }
              )),
+diff --git a/codex-rs/code-mode-host/tests/grpc.rs b/codex-rs/code-mode-host/tests/grpc.rs
+index 87a248c54566d5856960cbbd190429d99a3523ac..fcbb5e6c0dd8f1bc3a388031bf04eb57b8b2cb26 100644
+--- a/codex-rs/code-mode-host/tests/grpc.rs
++++ b/codex-rs/code-mode-host/tests/grpc.rs
+@@ -557,6 +557,7 @@ async fn concurrent_wait_rejects_without_displacing_the_active_observer() -> Res
+         RuntimeResponse::Yielded {
+             cell_id: running_cell.clone(),
+             content_items: Vec::new(),
++            reason: codex_code_mode_protocol::YieldReason::Timer,
+         }
+     );
+ 
+@@ -591,6 +592,7 @@ async fn concurrent_wait_rejects_without_displacing_the_active_observer() -> Res
+         WaitOutcome::LiveCell(RuntimeResponse::Yielded {
+             cell_id: running_cell.clone(),
+             content_items: Vec::new(),
++            reason: codex_code_mode_protocol::YieldReason::Timer,
+         })
+     );
+     assert_eq!(
+@@ -628,6 +630,7 @@ async fn dropping_a_wait_retires_its_observer_before_the_next_wait() -> Result<(
+         RuntimeResponse::Yielded {
+             cell_id: running_cell.clone(),
+             content_items: Vec::new(),
++            reason: codex_code_mode_protocol::YieldReason::Timer,
+         }
+     );
+ 
+@@ -656,6 +659,7 @@ async fn dropping_a_wait_retires_its_observer_before_the_next_wait() -> Result<(
+         WaitOutcome::LiveCell(RuntimeResponse::Yielded {
+             cell_id: running_cell.clone(),
+             content_items: Vec::new(),
++            reason: codex_code_mode_protocol::YieldReason::Timer,
+         })
+     );
+     assert_eq!(
+@@ -688,6 +692,7 @@ async fn dropping_a_session_off_runtime_retires_its_active_cells() -> Result<()>
+         RuntimeResponse::Yielded {
+             cell_id: cell_id("1"),
+             content_items: Vec::new(),
++            reason: codex_code_mode_protocol::YieldReason::Timer,
+         }
+     );
+ 
+@@ -840,6 +845,7 @@ async fn sessions_enforce_independent_yield_limits() -> Result<()> {
+         RuntimeResponse::Yielded {
+             cell_id: cell_id("1"),
+             content_items: Vec::new(),
++            reason: codex_code_mode_protocol::YieldReason::Timer,
+         }
+     );
+     assert_eq!(
+@@ -856,6 +862,7 @@ async fn sessions_enforce_independent_yield_limits() -> Result<()> {
+         WaitOutcome::LiveCell(RuntimeResponse::Yielded {
+             cell_id: cell_id("1"),
+             content_items: Vec::new(),
++            reason: codex_code_mode_protocol::YieldReason::Timer,
+         })
+     );
+     assert_eq!(
+@@ -881,6 +888,7 @@ async fn sessions_enforce_independent_yield_limits() -> Result<()> {
+         RuntimeResponse::Yielded {
+             cell_id: cell_id("2"),
+             content_items: Vec::new(),
++            reason: codex_code_mode_protocol::YieldReason::Timer,
+         }
+     );
+     limited.shutdown().await.map_err(anyhow::Error::msg)?;
+@@ -1080,6 +1088,7 @@ async fn cached_session_recovers_after_a_remote_host_restarts() -> Result<()> {
+         Ok(RuntimeResponse::Yielded {
+             cell_id: replacement_cell_id.clone(),
+             content_items: Vec::new(),
++            reason: codex_code_mode_protocol::YieldReason::Timer,
+         })
+     );
+     assert_eq!(
+@@ -1093,6 +1102,7 @@ async fn cached_session_recovers_after_a_remote_host_restarts() -> Result<()> {
+         WaitOutcome::LiveCell(RuntimeResponse::Yielded {
+             cell_id: replacement_cell_id.clone(),
+             content_items: Vec::new(),
++            reason: codex_code_mode_protocol::YieldReason::Timer,
+         })
+     );
+     assert_eq!(
+diff --git a/codex-rs/code-mode-host/tests/grpc_notifications.rs b/codex-rs/code-mode-host/tests/grpc_notifications.rs
+index c3590ef43b2866ca73076f85323f1947bb171d9e..17e9f9165f4b60c3a2821ce9d049e7fd8f96df5c 100644
+--- a/codex-rs/code-mode-host/tests/grpc_notifications.rs
++++ b/codex-rs/code-mode-host/tests/grpc_notifications.rs
+@@ -190,6 +190,7 @@ async fn completed_waits_drain_pending_notifications_before_returning() -> Resul
+         RuntimeResponse::Yielded {
+             cell_id: cell_id("1"),
+             content_items: Vec::new(),
++            reason: codex_code_mode_protocol::YieldReason::Explicit,
+         }
+     );
+ 
+@@ -247,6 +248,7 @@ async fn termination_cancels_pending_notifications() -> Result<()> {
+         RuntimeResponse::Yielded {
+             cell_id: cell_id("1"),
+             content_items: Vec::new(),
++            reason: codex_code_mode_protocol::YieldReason::Timer,
+         }
+     );
+     assert_eq!(
+diff --git a/codex-rs/code-mode-host/tests/stdio.rs b/codex-rs/code-mode-host/tests/stdio.rs
+index d41c548f793787b9f0669cb3d5934e35989362c5..b16811266144581908b9d5afcbd113a62c12fe4b 100644
+--- a/codex-rs/code-mode-host/tests/stdio.rs
++++ b/codex-rs/code-mode-host/tests/stdio.rs
+@@ -258,6 +258,7 @@ async fn session_execution_limits_are_isolated_on_a_shared_process_host() {
+         RuntimeResponse::Yielded {
+             cell_id: cell_id("1"),
+             content_items: Vec::new(),
++            reason: codex_code_mode_protocol::YieldReason::Timer,
+         }
+     );
+     assert_eq!(
+@@ -274,6 +275,7 @@ async fn session_execution_limits_are_isolated_on_a_shared_process_host() {
+         WaitOutcome::LiveCell(RuntimeResponse::Yielded {
+             cell_id: cell_id("1"),
+             content_items: Vec::new(),
++            reason: codex_code_mode_protocol::YieldReason::Timer,
+         })
+     );
+ 
+@@ -357,6 +359,7 @@ text(result.value);
+         RuntimeResponse::Yielded {
+             cell_id: cell_id("3"),
+             content_items: Vec::new(),
++            reason: codex_code_mode_protocol::YieldReason::Timer,
+         }
+     );
+     assert_eq!(
+@@ -370,6 +373,7 @@ text(result.value);
+         WaitOutcome::LiveCell(RuntimeResponse::Yielded {
+             cell_id: cell_id("3"),
+             content_items: Vec::new(),
++            reason: codex_code_mode_protocol::YieldReason::Timer,
+         })
+     );
+     assert_eq!(
+@@ -408,6 +412,7 @@ async fn dropping_long_wait_releases_observer_before_next_wait() {
+         RuntimeResponse::Yielded {
+             cell_id: running_cell_id.clone(),
+             content_items: Vec::new(),
++            reason: codex_code_mode_protocol::YieldReason::Timer,
+         }
+     );
+ 
+@@ -439,6 +444,7 @@ async fn dropping_long_wait_releases_observer_before_next_wait() {
+         WaitOutcome::LiveCell(RuntimeResponse::Yielded {
+             cell_id: running_cell_id.clone(),
+             content_items: Vec::new(),
++            reason: codex_code_mode_protocol::YieldReason::Timer,
+         })
+     );
+     session
+@@ -500,6 +506,7 @@ return;
+             content_items: vec![FunctionCallOutputContentItem::InputText {
+                 text: "hello world".to_string(),
+             }],
++            reason: codex_code_mode_protocol::YieldReason::Explicit,
+         }
+     );
+ 
+@@ -763,6 +770,7 @@ async fn child_process_loss_cleans_up_and_rebuilds_the_shared_host() {
+         RuntimeResponse::Yielded {
+             cell_id: cell_a.clone(),
+             content_items: Vec::new(),
++            reason: codex_code_mode_protocol::YieldReason::Timer,
+         }
+     );
+     assert_eq!(
+@@ -785,6 +793,7 @@ async fn child_process_loss_cleans_up_and_rebuilds_the_shared_host() {
+         RuntimeResponse::Yielded {
+             cell_id: cell_b.clone(),
+             content_items: Vec::new(),
++            reason: codex_code_mode_protocol::YieldReason::Timer,
+         }
+     );
+ 
 diff --git a/codex-rs/code-mode-protocol/src/host/host_tests.rs b/codex-rs/code-mode-protocol/src/host/host_tests.rs
-index 7404cb6d4d8d63171d0874b539da06f59be68f00..26681ec430740389941138d3ee2e7bc4a5a95e58 100644
+index 7404cb6d4d8d63171d0874b539da06f59be68f00..095150b9c72b88a7e583182ee48066ac30fb1f0e 100644
 --- a/codex-rs/code-mode-protocol/src/host/host_tests.rs
 +++ b/codex-rs/code-mode-protocol/src/host/host_tests.rs
 @@ -590,6 +590,7 @@ fn host_to_client_v1_variants_are_pinned() {
@@ -55,6 +271,39 @@ index 7404cb6d4d8d63171d0874b539da06f59be68f00..26681ec430740389941138d3ee2e7bc4
                  }),
              },
              json!({
+@@ -681,6 +682,32 @@ fn host_to_client_v1_variants_are_pinned() {
+             },
+         }),
+     );
++    assert_wire_round_trip(
++        HostToClient::InitialResponse {
++            id: request_id(/*value*/ 81),
++            result: WireResult::Ok {
++                value: WireRuntimeResponse::Yielded {
++                    cell_id: cell_id("cell-1"),
++                    content_items: Vec::new(),
++                    reason: crate::YieldReason::TerminalWaitDecision,
++                },
++            },
++        },
++        json!({
++            "type": "execute/initialResponse",
++            "id": 81,
++            "result": {
++                "status": "ok",
++                "value": {
++                    "Yielded": {
++                        "cell_id": "cell-1",
++                        "content_items": [],
++                        "reason": "TerminalWaitDecision",
++                    },
++                },
++            },
++        }),
++    );
+     assert_wire_round_trip(
+         HostToClient::InitialResponse {
+             id: request_id(/*value*/ 8),
 diff --git a/codex-rs/code-mode-protocol/src/host/payload.rs b/codex-rs/code-mode-protocol/src/host/payload.rs
 index cee3501e3a422f49701189f4fb6127deb25bddcb..f1aca933ea06e1291f1d247be3b6d7b0ac139377 100644
 --- a/codex-rs/code-mode-protocol/src/host/payload.rs
@@ -115,7 +364,7 @@ index 93eed078a4eb562778b01ef6f539aca12289f19f..8b2edf127723187766bb8daac8ac45ea
  pub use session::CodeModeSession;
  pub use session::CodeModeSessionCellExecutionLimits;
 diff --git a/codex-rs/code-mode-protocol/src/runtime.rs b/codex-rs/code-mode-protocol/src/runtime.rs
-index 147822063fc1cc7b4739efb2e175decef7489385..8885100787825b9b91c6cc2f2153793dc6122ee9 100644
+index 147822063fc1cc7b4739efb2e175decef7489385..a3e2bc3d8832425b9596ade7b11c2b4770b6cc44 100644
 --- a/codex-rs/code-mode-protocol/src/runtime.rs
 +++ b/codex-rs/code-mode-protocol/src/runtime.rs
 @@ -67,6 +67,8 @@ pub enum RuntimeResponse {
@@ -127,7 +376,7 @@ index 147822063fc1cc7b4739efb2e175decef7489385..8885100787825b9b91c6cc2f2153793d
      },
      Terminated {
          cell_id: CellId,
-@@ -79,6 +81,17 @@ pub enum RuntimeResponse {
+@@ -79,6 +81,18 @@ pub enum RuntimeResponse {
      },
  }
  
@@ -136,6 +385,7 @@ index 147822063fc1cc7b4739efb2e175decef7489385..8885100787825b9b91c6cc2f2153793d
 +    #[default]
 +    Timer,
 +    Explicit,
++    TerminalWaitDecision,
 +}
 +
 +fn yield_reason_is_timer(reason: &YieldReason) -> bool {
@@ -423,7 +673,7 @@ index 8b54e1f32eb3d42093397bdabd6602498cf6ace4..e27b90ab0d43ea9b40ab3935a0c123ea
      Pending {
          content_items: Vec<OutputItem>,
 diff --git a/codex-rs/code-mode/src/grpc_session/conversion.rs b/codex-rs/code-mode/src/grpc_session/conversion.rs
-index dd77766067adcdd710df597c8bf15e6c5a748ebc..4e78d6dd42eeeb7ffe4290fc2f5ee50393f179c4 100644
+index dd77766067adcdd710df597c8bf15e6c5a748ebc..12943f4e842dc1420c0c0b07455fd537c751c056 100644
 --- a/codex-rs/code-mode/src/grpc_session/conversion.rs
 +++ b/codex-rs/code-mode/src/grpc_session/conversion.rs
 @@ -7,6 +7,7 @@ use codex_code_mode_protocol::ImageDetail;
@@ -434,7 +684,7 @@ index dd77766067adcdd710df597c8bf15e6c5a748ebc..4e78d6dd42eeeb7ffe4290fc2f5ee503
  use codex_code_mode_protocol::grpc;
  use codex_protocol::ToolName;
  
-@@ -100,10 +101,23 @@ pub(super) fn runtime_response(outcome: grpc::ExecutionOutcome) -> Result<Runtim
+@@ -100,10 +101,24 @@ pub(super) fn runtime_response(outcome: grpc::ExecutionOutcome) -> Result<Runtim
          .outcome
          .ok_or_else(|| "code-mode execution omitted its outcome".to_string())?
      {
@@ -446,6 +696,7 @@ index dd77766067adcdd710df597c8bf15e6c5a748ebc..4e78d6dd42eeeb7ffe4290fc2f5ee503
 +            let reason = match grpc::YieldReason::try_from(yielded.reason) {
 +                Ok(grpc::YieldReason::Unspecified | grpc::YieldReason::Timer) => YieldReason::Timer,
 +                Ok(grpc::YieldReason::Explicit) => YieldReason::Explicit,
++                Ok(grpc::YieldReason::TerminalWaitDecision) => YieldReason::TerminalWaitDecision,
 +                Err(_) => {
 +                    return Err(format!(
 +                        "code-mode execution has invalid yield reason {}",
@@ -463,7 +714,7 @@ index dd77766067adcdd710df597c8bf15e6c5a748ebc..4e78d6dd42eeeb7ffe4290fc2f5ee503
              cell_id,
              content_items,
 diff --git a/codex-rs/code-mode/src/grpc_session/conversion_tests.rs b/codex-rs/code-mode/src/grpc_session/conversion_tests.rs
-index ef7847c9697bfcd2b9183654fc924fc23826fac4..67286962c61dd45d4a45c772af4ca092ecc4ecb7 100644
+index ef7847c9697bfcd2b9183654fc924fc23826fac4..b1bf96091af2ce3a602ddd173c2317ab8110d1cb 100644
 --- a/codex-rs/code-mode/src/grpc_session/conversion_tests.rs
 +++ b/codex-rs/code-mode/src/grpc_session/conversion_tests.rs
 @@ -7,6 +7,7 @@ use codex_code_mode_protocol::ImageDetail;
@@ -485,7 +736,7 @@ index ef7847c9697bfcd2b9183654fc924fc23826fac4..67286962c61dd45d4a45c772af4ca092
          )),
      };
  
-@@ -190,10 +193,38 @@ fn invalid_output_enums_and_missing_oneofs_are_rejected() {
+@@ -190,10 +193,42 @@ fn invalid_output_enums_and_missing_oneofs_are_rejected() {
              })),
          }],
          outcome: Some(grpc::execution_outcome::Outcome::Yielded(
@@ -506,6 +757,10 @@ index ef7847c9697bfcd2b9183654fc924fc23826fac4..67286962c61dd45d4a45c772af4ca092
 +        (grpc::YieldReason::Unspecified, YieldReason::Timer),
 +        (grpc::YieldReason::Timer, YieldReason::Timer),
 +        (grpc::YieldReason::Explicit, YieldReason::Explicit),
++        (
++            grpc::YieldReason::TerminalWaitDecision,
++            YieldReason::TerminalWaitDecision,
++        ),
 +    ] {
 +        assert_eq!(
 +            runtime_response(grpc::ExecutionOutcome {
@@ -686,10 +941,10 @@ index 87d260be4e7fece993060e39cc887331ccdb37ac..8b06c5a63098c848ec2cd739039ad46c
          // is produced by `handle_runtime_response` and later linked through
          // `CodeCell.output_item_ids` in the reduced trace.
 diff --git a/codex-rs/core/src/tools/code_mode/mod.rs b/codex-rs/core/src/tools/code_mode/mod.rs
-index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..09139e4031251a7d9858b63a61eeb949c0b9f417 100644
+index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..d58653eed07d593ce9d7ec383dce89cc016aae9a 100644
 --- a/codex-rs/core/src/tools/code_mode/mod.rs
 +++ b/codex-rs/core/src/tools/code_mode/mod.rs
-@@ -6,7 +6,10 @@ mod telemetry;
+@@ -6,8 +6,12 @@ mod telemetry;
  mod wait_handler;
  pub(crate) mod wait_spec;
  
@@ -698,9 +953,11 @@ index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..09139e4031251a7d9858b63a61eeb949
  use std::sync::Arc;
 +use std::sync::Mutex as StdMutex;
  use std::sync::atomic::AtomicBool;
++use std::sync::atomic::AtomicU64;
  use std::sync::atomic::Ordering;
  use std::time::Duration;
-@@ -20,6 +23,7 @@ use codex_code_mode::RuntimeResponse;
+ 
+@@ -20,6 +24,7 @@ use codex_code_mode::RuntimeResponse;
  use codex_protocol::models::FunctionCallOutputContentItem;
  use futures::future::join_all;
  use serde_json::Value as JsonValue;
@@ -708,7 +965,7 @@ index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..09139e4031251a7d9858b63a61eeb949
  use tokio::sync::OnceCell;
  use tokio_util::sync::CancellationToken;
  
-@@ -72,6 +76,7 @@ pub(crate) struct CodeModeService {
+@@ -72,6 +77,7 @@ pub(crate) struct CodeModeService {
      availability: Result<(), String>,
      dispatch_broker: Arc<CodeModeDispatchBroker>,
      default_exec_yield_time_ms: u64,
@@ -716,7 +973,7 @@ index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..09139e4031251a7d9858b63a61eeb949
      shutting_down: AtomicBool,
      unavailable_warning_emitted: AtomicBool,
  }
-@@ -89,6 +94,7 @@ impl CodeModeService {
+@@ -89,6 +95,7 @@ impl CodeModeService {
              availability,
              dispatch_broker,
              default_exec_yield_time_ms: config.default_exec_yield_time_ms,
@@ -724,7 +981,7 @@ index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..09139e4031251a7d9858b63a61eeb949
              shutting_down: AtomicBool::new(false),
              unavailable_warning_emitted: AtomicBool::new(false),
          }
-@@ -182,6 +188,52 @@ impl CodeModeService {
+@@ -182,6 +189,61 @@ impl CodeModeService {
  
      pub(crate) fn finish_cell_dispatch(&self, cell_id: &CellId) {
          self.dispatch_broker.close_cell(cell_id);
@@ -759,14 +1016,23 @@ index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..09139e4031251a7d9858b63a61eeb949
 +        self.terminal_wait_leases.snapshot(cell_id.as_str())
 +    }
 +
-+    fn should_absorb_timer_yield(&self, cell_id: &CellId, snapshot: TerminalWaitSnapshot) -> bool {
++    fn classify_yield_reason(
++        &self,
++        cell_id: &CellId,
++        snapshot: TerminalWaitSnapshot,
++        reason: codex_code_mode::YieldReason,
++    ) -> codex_code_mode::YieldReason {
 +        self.terminal_wait_leases
-+            .should_absorb(cell_id.as_str(), snapshot)
++            .classify_yield_reason(cell_id.as_str(), snapshot, reason)
 +    }
 +
-+    async fn wait_for_terminal_wait_release(&self, cell_id: &CellId) -> TerminalWaitSnapshot {
++    async fn resume_terminal_wait_decision_once(
++        &self,
++        cell_id: &CellId,
++        snapshot: TerminalWaitSnapshot,
++    ) -> Option<TerminalWaitSnapshot> {
 +        self.terminal_wait_leases
-+            .wait_until_idle_and_consume(cell_id.as_str())
++            .resume_once(cell_id.as_str(), snapshot)
 +            .await
 +    }
 +
@@ -777,24 +1043,25 @@ index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..09139e4031251a7d9858b63a61eeb949
      }
  
      pub(crate) fn start_turn_worker(
-@@ -230,6 +282,275 @@ impl CodeModeService {
+@@ -230,6 +292,329 @@ impl CodeModeService {
      }
  }
  
-+#[derive(Clone, Copy)]
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 +pub(super) struct TerminalWaitSnapshot {
-+    epoch: u64,
++    lease_id: u64,
 +}
 +
 +#[derive(Default)]
 +struct TerminalWaitLeases {
 +    states: StdMutex<HashMap<String, TerminalWaitLeaseState>>,
++    next_lease_id: AtomicU64,
 +}
 +
 +struct TerminalWaitLeaseState {
-+    active: usize,
-+    epoch: u64,
-+    consumed_epoch: u64,
++    active_lease_ids: HashSet<u64>,
++    latest_lease_id: u64,
++    resumed_lease_id: u64,
 +    pending_decisions: HashSet<String>,
 +    notify: Arc<Notify>,
 +}
@@ -802,6 +1069,7 @@ index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..09139e4031251a7d9858b63a61eeb949
 +pub(crate) struct TerminalWaitLease {
 +    leases: Arc<TerminalWaitLeases>,
 +    cell_id: String,
++    lease_id: u64,
 +}
 +
 +struct TerminalWaitDecision {
@@ -812,6 +1080,17 @@ index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..09139e4031251a7d9858b63a61eeb949
 +
 +impl TerminalWaitLeases {
 +    fn acquire(self: &Arc<Self>, cell_id: &str) -> TerminalWaitLease {
++        let lease_id = self
++            .next_lease_id
++            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
++                value.checked_add(1)
++            })
++            .map(|previous| {
++                previous
++                    .checked_add(1)
++                    .expect("terminal-wait lease id update must match fetch_update")
++            })
++            .expect("terminal-wait lease id space exhausted");
 +        let mut states = self
 +            .states
 +            .lock()
@@ -819,18 +1098,19 @@ index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..09139e4031251a7d9858b63a61eeb949
 +        let state = states
 +            .entry(cell_id.to_string())
 +            .or_insert_with(|| TerminalWaitLeaseState {
-+                active: 0,
-+                epoch: 0,
-+                consumed_epoch: 0,
++                active_lease_ids: HashSet::new(),
++                latest_lease_id: 0,
++                resumed_lease_id: 0,
 +                pending_decisions: HashSet::new(),
 +                notify: Arc::new(Notify::new()),
 +            });
-+        state.active = state.active.saturating_add(1);
-+        state.epoch = state.epoch.wrapping_add(1);
++        state.active_lease_ids.insert(lease_id);
++        state.latest_lease_id = lease_id;
 +        drop(states);
 +        TerminalWaitLease {
 +            leases: Arc::clone(self),
 +            cell_id: cell_id.to_string(),
++            lease_id,
 +        }
 +    }
 +
@@ -846,9 +1126,9 @@ index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..09139e4031251a7d9858b63a61eeb949
 +        let state = states
 +            .entry(cell_id.to_string())
 +            .or_insert_with(|| TerminalWaitLeaseState {
-+                active: 0,
-+                epoch: 0,
-+                consumed_epoch: 0,
++                active_lease_ids: HashSet::new(),
++                latest_lease_id: 0,
++                resumed_lease_id: 0,
 +                pending_decisions: HashSet::new(),
 +                notify: Arc::new(Notify::new()),
 +            });
@@ -886,21 +1166,41 @@ index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..09139e4031251a7d9858b63a61eeb949
 +            .lock()
 +            .unwrap_or_else(std::sync::PoisonError::into_inner);
 +        TerminalWaitSnapshot {
-+            epoch: states.get(cell_id).map_or(0, |state| state.consumed_epoch),
++            lease_id: states
++                .get(cell_id)
++                .map_or(0, |state| state.resumed_lease_id),
 +        }
 +    }
 +
-+    fn should_absorb(&self, cell_id: &str, snapshot: TerminalWaitSnapshot) -> bool {
++    fn classify_yield_reason(
++        &self,
++        cell_id: &str,
++        snapshot: TerminalWaitSnapshot,
++        reason: codex_code_mode::YieldReason,
++    ) -> codex_code_mode::YieldReason {
++        if reason == codex_code_mode::YieldReason::Explicit {
++            return reason;
++        }
 +        let states = self
 +            .states
 +            .lock()
 +            .unwrap_or_else(std::sync::PoisonError::into_inner);
-+        states
-+            .get(cell_id)
-+            .is_some_and(|state| state.active > 0 || state.epoch != snapshot.epoch)
++        let has_unresumed_lease = states.get(cell_id).is_some_and(|state| {
++            state.latest_lease_id > snapshot.lease_id
++                && state.resumed_lease_id < state.latest_lease_id
++        });
++        if has_unresumed_lease {
++            codex_code_mode::YieldReason::TerminalWaitDecision
++        } else {
++            codex_code_mode::YieldReason::Timer
++        }
 +    }
 +
-+    async fn wait_until_idle_and_consume(&self, cell_id: &str) -> TerminalWaitSnapshot {
++    async fn resume_once(
++        &self,
++        cell_id: &str,
++        snapshot: TerminalWaitSnapshot,
++    ) -> Option<TerminalWaitSnapshot> {
 +        loop {
 +            let notify = {
 +                let mut states = self
@@ -908,13 +1208,18 @@ index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..09139e4031251a7d9858b63a61eeb949
 +                    .lock()
 +                    .unwrap_or_else(std::sync::PoisonError::into_inner);
 +                let Some(state) = states.get_mut(cell_id) else {
-+                    return TerminalWaitSnapshot { epoch: 0 };
++                    return None;
 +                };
-+                if state.active == 0 {
-+                    state.consumed_epoch = state.epoch;
-+                    return TerminalWaitSnapshot {
-+                        epoch: state.consumed_epoch,
-+                    };
++                if state.latest_lease_id <= snapshot.lease_id
++                    || state.resumed_lease_id >= state.latest_lease_id
++                {
++                    return None;
++                }
++                if state.active_lease_ids.is_empty() {
++                    state.resumed_lease_id = state.latest_lease_id;
++                    return Some(TerminalWaitSnapshot {
++                        lease_id: state.resumed_lease_id,
++                    });
 +                }
 +                Arc::clone(&state.notify)
 +            };
@@ -924,7 +1229,7 @@ index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..09139e4031251a7d9858b63a61eeb949
 +                .lock()
 +                .unwrap_or_else(std::sync::PoisonError::into_inner)
 +                .get(cell_id)
-+                .is_none_or(|state| state.active == 0)
++                .is_none_or(|state| state.active_lease_ids.is_empty())
 +            {
 +                continue;
 +            }
@@ -984,7 +1289,9 @@ index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..09139e4031251a7d9858b63a61eeb949
 +            let Some(state) = states.get_mut(&self.cell_id) else {
 +                return;
 +            };
-+            state.active = state.active.saturating_sub(1);
++            if !state.active_lease_ids.remove(&self.lease_id) {
++                return;
++            }
 +            Arc::clone(&state.notify)
 +        };
 +        notify.notify_waiters();
@@ -1010,20 +1317,33 @@ index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..09139e4031251a7d9858b63a61eeb949
 +            RuntimeResponse::Yielded {
 +                cell_id,
 +                mut content_items,
-+                reason: codex_code_mode::YieldReason::Timer,
++                reason,
 +            } => {
 +                let service = &exec.session.services.code_mode_service;
-+                service.wait_for_terminal_wait_decisions(&cell_id).await;
-+                if !service.should_absorb_timer_yield(&cell_id, snapshot) {
++                if reason != codex_code_mode::YieldReason::Explicit {
++                    service.wait_for_terminal_wait_decisions(&cell_id).await;
++                }
++                let reason = service.classify_yield_reason(&cell_id, snapshot, reason);
++                if reason != codex_code_mode::YieldReason::TerminalWaitDecision {
 +                    content_items.splice(0..0, buffered_items);
 +                    return Ok(RuntimeResponse::Yielded {
 +                        cell_id,
 +                        content_items,
-+                        reason: codex_code_mode::YieldReason::Timer,
++                        reason,
 +                    });
 +                }
 +                buffered_items.append(&mut content_items);
-+                snapshot = service.wait_for_terminal_wait_release(&cell_id).await;
++                let Some(resumed_snapshot) = service
++                    .resume_terminal_wait_decision_once(&cell_id, snapshot)
++                    .await
++                else {
++                    return Ok(RuntimeResponse::Yielded {
++                        cell_id,
++                        content_items: buffered_items,
++                        reason: codex_code_mode::YieldReason::Timer,
++                    });
++                };
++                snapshot = resumed_snapshot;
 +                response = service
 +                    .wait(codex_code_mode::WaitRequest {
 +                        cell_id,
@@ -1053,7 +1373,7 @@ index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..09139e4031251a7d9858b63a61eeb949
  pub(super) async fn handle_runtime_response(
      exec: &ExecContext,
      response: RuntimeResponse,
-@@ -348,6 +669,21 @@ async fn call_nested_tool(
+@@ -348,6 +733,21 @@ async fn call_nested_tool(
          Err(error) => return Err(FunctionCallError::RespondToModel(error)),
      };
  
@@ -1075,7 +1395,7 @@ index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..09139e4031251a7d9858b63a61eeb949
      let call = ToolCall {
          tool_name: tool_name.with_default_namespace(),
          call_id: format!("{PUBLIC_TOOL_NAME}-{}", uuid::Uuid::new_v4()),
-@@ -421,6 +757,9 @@ fn build_freeform_tool_payload(
+@@ -421,6 +821,9 @@ fn build_freeform_tool_payload(
  
  #[cfg(test)]
  mod tests {
@@ -1085,22 +1405,39 @@ index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..09139e4031251a7d9858b63a61eeb949
      use super::build_nested_tool_payload;
      use super::truncate_code_mode_result;
      use crate::tools::context::ToolPayload;
-@@ -429,6 +768,33 @@ mod tests {
+@@ -429,6 +832,87 @@ mod tests {
      use codex_tools::ToolName;
      use serde_json::json;
  
 +    #[tokio::test]
-+    async fn terminal_wait_lease_epoch_covers_release_before_timer_yield() {
++    async fn terminal_wait_lease_classifies_early_yield_and_resumes_once() {
 +        let leases = Arc::new(TerminalWaitLeases::default());
 +        let snapshot = leases.snapshot("cell-1");
 +
 +        let lease = leases.acquire("cell-1");
-+        assert!(leases.should_absorb("cell-1", snapshot));
++        assert_eq!(
++            leases.classify_yield_reason("cell-1", snapshot, codex_code_mode::YieldReason::Timer,),
++            codex_code_mode::YieldReason::TerminalWaitDecision
++        );
 +        drop(lease);
 +
-+        assert!(leases.should_absorb("cell-1", snapshot));
-+        let after_release = leases.wait_until_idle_and_consume("cell-1").await;
-+        assert!(!leases.should_absorb("cell-1", after_release));
++        assert_eq!(
++            leases.classify_yield_reason("cell-1", snapshot, codex_code_mode::YieldReason::Timer,),
++            codex_code_mode::YieldReason::TerminalWaitDecision
++        );
++        let after_resume = leases
++            .resume_once("cell-1", snapshot)
++            .await
++            .expect("lease should resume once");
++        assert_eq!(
++            leases.classify_yield_reason(
++                "cell-1",
++                after_resume,
++                codex_code_mode::YieldReason::Timer,
++            ),
++            codex_code_mode::YieldReason::Timer
++        );
++        assert_eq!(leases.resume_once("cell-1", snapshot).await, None);
 +    }
 +
 +    #[tokio::test]
@@ -1113,7 +1450,44 @@ index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..09139e4031251a7d9858b63a61eeb949
 +        leases.wait_until_decided("cell-1").await;
 +        drop(decision);
 +
-+        assert!(!leases.should_absorb("cell-1", snapshot));
++        assert_eq!(
++            leases.classify_yield_reason("cell-1", snapshot, codex_code_mode::YieldReason::Timer,),
++            codex_code_mode::YieldReason::Timer
++        );
++    }
++
++    #[tokio::test]
++    async fn expired_terminal_wait_lease_cannot_release_a_reused_cell() {
++        let leases = Arc::new(TerminalWaitLeases::default());
++        let expired = leases.acquire("cell-1");
++        leases.clear("cell-1");
++
++        let snapshot = leases.snapshot("cell-1");
++        let current = leases.acquire("cell-1");
++        drop(expired);
++        assert_eq!(
++            leases.classify_yield_reason("cell-1", snapshot, codex_code_mode::YieldReason::Timer,),
++            codex_code_mode::YieldReason::TerminalWaitDecision
++        );
++
++        drop(current);
++        assert!(leases.resume_once("cell-1", snapshot).await.is_some());
++    }
++
++    #[test]
++    fn explicit_code_mode_yield_is_never_reclassified_as_terminal_wait() {
++        let leases = Arc::new(TerminalWaitLeases::default());
++        let snapshot = leases.snapshot("cell-1");
++        let _lease = leases.acquire("cell-1");
++
++        assert_eq!(
++            leases.classify_yield_reason(
++                "cell-1",
++                snapshot,
++                codex_code_mode::YieldReason::Explicit,
++            ),
++            codex_code_mode::YieldReason::Explicit
++        );
 +    }
 +
      #[test]
@@ -1227,7 +1601,7 @@ index 4f65cef15e9d683466a88f0c07ed0598998aae7c..5b46c5ec98a533ff9290d2ccdc994b79
                      .map_err(FunctionCallError::RespondToModel)
                      .map(boxed_tool_output)
 diff --git a/codex-rs/core/tests/suite/code_mode.rs b/codex-rs/core/tests/suite/code_mode.rs
-index f9429a1464234cb24f29f49765012ee9ba96c4b4..5c698be8f10f7858eb085323cc9f0eac0ac83242 100644
+index f9429a1464234cb24f29f49765012ee9ba96c4b4..b09d6eff7d4a4cf9be139ed8caa68d104d24108f 100644
 --- a/codex-rs/core/tests/suite/code_mode.rs
 +++ b/codex-rs/core/tests/suite/code_mode.rs
 @@ -3,6 +3,8 @@
@@ -1239,7 +1613,7 @@ index f9429a1464234cb24f29f49765012ee9ba96c4b4..5c698be8f10f7858eb085323cc9f0eac
  use codex_config::types::McpServerConfig;
  use codex_config::types::McpServerTransportConfig;
  use codex_core::StartThreadOptions;
-@@ -1754,6 +1756,187 @@ text(result.output);
+@@ -1754,6 +1756,199 @@ text(result.output);
      Ok(())
  }
  
@@ -1264,7 +1638,7 @@ index f9429a1464234cb24f29f49765012ee9ba96c4b4..5c698be8f10f7858eb085323cc9f0eac
 +                commands: vec![TerminalWaitCommandToml {
 +                    pattern: "^printf ".to_string(),
 +                    poll_interval_ms: 1000,
-+                    name: Some("printf".to_string()),
++                    name: "printf".to_string(),
 +                    enabled: true,
 +                    cwd_pattern: None,
 +                    max_output_tokens: Some(5),
@@ -1306,7 +1680,7 @@ index f9429a1464234cb24f29f49765012ee9ba96c4b4..5c698be8f10f7858eb085323cc9f0eac
 +                commands: vec![TerminalWaitCommandToml {
 +                    pattern: "^sleep ".to_string(),
 +                    poll_interval_ms: 200,
-+                    name: Some("slow nested exec".to_string()),
++                    name: "slow nested exec".to_string(),
 +                    enabled: true,
 +                    cwd_pattern: None,
 +                    max_output_tokens: None,
@@ -1328,7 +1702,8 @@ index f9429a1464234cb24f29f49765012ee9ba96c4b4..5c698be8f10f7858eb085323cc9f0eac
 +
 +#[cfg_attr(windows, ignore = "no exec_command on Windows")]
 +#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-+async fn code_mode_terminal_wait_control_terminates_the_implicit_process() -> Result<()> {
++async fn code_mode_terminal_wait_control_continues_and_terminates_the_implicit_process()
++-> Result<()> {
 +    skip_if_no_network!(Ok(()));
 +
 +    let server = responses::start_mock_server().await;
@@ -1340,11 +1715,17 @@ index f9429a1464234cb24f29f49765012ee9ba96c4b4..5c698be8f10f7858eb085323cc9f0eac
 +  cmd: "sleep 30",
 +  yield_time_ms: 1
 +});
++const continued = await tools.terminal_wait_control({ action: "continue" });
 +const stopped = await tools.terminal_wait_control({ action: "terminate" });
 +text(JSON.stringify({
 +  firstState: first.terminal_wait_state,
++  firstRule: first.terminal_wait_rule,
 +  firstActions: first.available_actions,
++  continuedState: continued.terminal_wait_state,
++  continuedRule: continued.terminal_wait_rule,
++  continuedActions: continued.available_actions,
 +  stoppedState: stopped.terminal_wait_state,
++  stoppedRule: stopped.terminal_wait_rule,
 +  stoppedPollInterval: stopped.poll_interval_ms,
 +  stoppedHasActions: "available_actions" in stopped,
 +}));
@@ -1354,7 +1735,7 @@ index f9429a1464234cb24f29f49765012ee9ba96c4b4..5c698be8f10f7858eb085323cc9f0eac
 +                commands: vec![TerminalWaitCommandToml {
 +                    pattern: "^sleep ".to_string(),
 +                    poll_interval_ms: 50,
-+                    name: Some("slow nested exec".to_string()),
++                    name: "slow nested exec".to_string(),
 +                    enabled: true,
 +                    cwd_pattern: None,
 +                    max_output_tokens: None,
@@ -1374,8 +1755,13 @@ index f9429a1464234cb24f29f49765012ee9ba96c4b4..5c698be8f10f7858eb085323cc9f0eac
 +        result,
 +        serde_json::json!({
 +            "firstState": "decision_required",
++            "firstRule": "slow nested exec",
 +            "firstActions": ["continue", "interrupt", "terminate"],
++            "continuedState": "decision_required",
++            "continuedRule": "slow nested exec",
++            "continuedActions": ["continue", "interrupt", "terminate"],
 +            "stoppedState": "terminated",
++            "stoppedRule": "slow nested exec",
 +            "stoppedPollInterval": 50,
 +            "stoppedHasActions": false,
 +        })
@@ -1405,7 +1791,7 @@ index f9429a1464234cb24f29f49765012ee9ba96c4b4..5c698be8f10f7858eb085323cc9f0eac
 +                commands: vec![TerminalWaitCommandToml {
 +                    pattern: "^printf ".to_string(),
 +                    poll_interval_ms: 200,
-+                    name: Some("nonmatching rule".to_string()),
++                    name: "nonmatching rule".to_string(),
 +                    enabled: true,
 +                    cwd_pattern: None,
 +                    max_output_tokens: None,
