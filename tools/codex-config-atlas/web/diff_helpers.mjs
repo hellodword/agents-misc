@@ -29,9 +29,9 @@ const CHANGE_ROW_KEYS = [
     kinds: new Set(["enum_values_added", "enum_values_removed"]),
   },
   {
-    label: "Optional",
-    rowKey: "optional",
-    kinds: new Set(["required_became_true", "required_became_false"]),
+    label: "Required",
+    rowKey: "required",
+    kinds: new Set(["required_changed"]),
   },
   {
     label: "Description",
@@ -67,6 +67,39 @@ export function stableValueKey(value) {
 
   const encoded = JSON.stringify(value);
   return typeof encoded === "string" ? encoded : String(value);
+}
+
+export function requiredState(field) {
+  const state = field?.required;
+  if (!new Set(["always", "conditional", "never"]).has(state)) {
+    throw new Error(
+      `field ${field?.path ?? "<unknown>"} has invalid required state: ${String(state)}`,
+    );
+  }
+  return state;
+}
+
+export function addedFieldCategory(required) {
+  if (required === "always") {
+    return "breakingLike";
+  }
+  if (required === "conditional") {
+    return "review";
+  }
+  if (required === "never") {
+    return "compatible";
+  }
+  throw new Error(`invalid required state: ${String(required)}`);
+}
+
+export function requiredChangeCategory(before, after) {
+  if (after === "always") {
+    return "breakingLike";
+  }
+  if (before === "conditional" || after === "conditional") {
+    return "review";
+  }
+  return "compatible";
 }
 
 function changeWithoutPath(change) {
@@ -176,8 +209,8 @@ export function renderFieldValue(field, rowKey) {
       return field.hasDefault ? formatValue(field.default) : "-";
     case "enum":
       return field.enum && field.enum.length ? field.enum.join(", ") : "-";
-    case "optional":
-      return field.required ? "no" : "yes";
+    case "required":
+      return requiredState(field);
     case "description":
       return field.description || "-";
     case "deprecated":

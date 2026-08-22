@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  addedFieldCategory,
   formatDeveloperDiff,
+  renderFieldValue,
+  requiredChangeCategory,
+  requiredState,
   suppressDuplicateProfileChanges,
 } from "../web/diff_helpers.mjs";
 
@@ -11,7 +15,7 @@ function field(path, overrides = {}) {
     path,
     kind: "scalar",
     types: ["string"],
-    required: false,
+    required: "never",
     hasDefault: false,
     default: null,
     enum: null,
@@ -64,6 +68,23 @@ test("suppresses only semantically identical profile changes", () => {
       (change) => change.path,
     ),
     [rootPath, profilePath],
+  );
+});
+
+test("classifies and renders required states without boolean compatibility", () => {
+  assert.equal(addedFieldCategory("always"), "breakingLike");
+  assert.equal(addedFieldCategory("conditional"), "review");
+  assert.equal(addedFieldCategory("never"), "compatible");
+  assert.equal(requiredChangeCategory("never", "always"), "breakingLike");
+  assert.equal(requiredChangeCategory("always", "conditional"), "review");
+  assert.equal(requiredChangeCategory("always", "never"), "compatible");
+  assert.equal(
+    renderFieldValue(field("value", { required: "conditional" }), "required"),
+    "conditional",
+  );
+  assert.throws(
+    () => requiredState(field("value", { required: false })),
+    /invalid required state/,
   );
 });
 

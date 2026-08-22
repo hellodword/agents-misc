@@ -156,6 +156,11 @@ select {
   color: var(--danger);
 }
 
+.chip-review {
+  background: #fff3cd;
+  color: #7a4b00;
+}
+
 .chip-behavior {
   color: var(--warning);
 }

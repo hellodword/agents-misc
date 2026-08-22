@@ -14,12 +14,13 @@ def field(
     default: object = MISSING,
     description: str = "Shared description",
     types: list[str] | None = None,
+    required: str = "never",
 ) -> dict[str, object]:
     return {
         "path": path,
         "kind": "scalar",
         "types": types or ["string"],
-        "required": False,
+        "required": required,
         "hasDefault": default is not MISSING,
         "default": None if default is MISSING else default,
         "enum": None,
@@ -126,6 +127,53 @@ class SchemaDiffProfileDeduplicationTests(unittest.TestCase):
             [change["path"] for change in payload["changes"]],
             ["profiles.<name>.feature.value"],
         )
+
+
+class SchemaDiffRequiredStateTests(unittest.TestCase):
+    def test_only_transition_to_always_is_directly_breaking(self) -> None:
+        cases = [
+            ("never", "always", "breakingLike"),
+            ("conditional", "always", "breakingLike"),
+            ("never", "conditional", "review"),
+            ("always", "conditional", "review"),
+            ("conditional", "never", "review"),
+            ("always", "never", "compatible"),
+        ]
+
+        for before, after, category in cases:
+            with self.subTest(before=before, after=after):
+                payload = build_schema_diff(
+                    "1",
+                    "2",
+                    [field("value", required=before)],
+                    [field("value", required=after)],
+                )
+                self.assertEqual(
+                    payload["changes"],
+                    [
+                        {
+                            "kind": "required_changed",
+                            "category": category,
+                            "path": "value",
+                            "from": before,
+                            "to": after,
+                        }
+                    ],
+                )
+                self.assertEqual(payload["summary"][category], 1)
+
+    def test_added_conditional_field_requires_review(self) -> None:
+        payload = build_schema_diff(
+            "1", "2", [], [field("value", required="conditional")]
+        )
+
+        self.assertEqual(payload["changes"][0]["category"], "review")
+
+    def test_rejects_removed_boolean_contract(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid required state"):
+            build_schema_diff(
+                "1", "2", [field("value")], [field("value", required=False)]
+            )
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ from typing import Any
 
 CATEGORY_LABELS = {
     "breakingLike": "Breaking-like",
+    "review": "Needs review",
     "behavior": "Behavior",
     "compatible": "Compatible",
     "documentation": "Documentation",
@@ -26,7 +27,34 @@ FIELD_SEMANTIC_KEYS = (
 
 
 def _field_index(fields: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    for field in fields:
+        _required_state(field)
     return {field["path"]: field for field in fields}
+
+
+def _required_state(field: dict[str, Any]) -> str:
+    state = field.get("required")
+    if state not in {"always", "conditional", "never"}:
+        raise ValueError(
+            f"field {field.get('path', '<unknown>')} has invalid required state: {state!r}"
+        )
+    return state
+
+
+def _added_field_category(required: str) -> str:
+    if required == "always":
+        return "breakingLike"
+    if required == "conditional":
+        return "review"
+    return "compatible"
+
+
+def _required_change_category(before: str, after: str) -> str:
+    if after == "always":
+        return "breakingLike"
+    if "conditional" in {before, after}:
+        return "review"
+    return "compatible"
 
 
 def _change_without_path(change: dict[str, Any]) -> dict[str, Any]:
@@ -139,7 +167,7 @@ def build_schema_diff(
             changes.append(
                 {
                     "kind": "field_added",
-                    "category": "breakingLike" if right["required"] else "compatible",
+                    "category": _added_field_category(right["required"]),
                     "path": path,
                     "to": {
                         "types": right["types"],
@@ -209,27 +237,25 @@ def build_schema_diff(
                 }
             )
 
-        if not left["required"] and right["required"]:
+        if left["required"] != right["required"]:
             changes.append(
                 {
-                    "kind": "required_became_true",
-                    "category": "breakingLike",
+                    "kind": "required_changed",
+                    "category": _required_change_category(
+                        left["required"], right["required"]
+                    ),
                     "path": path,
-                }
-            )
-        elif left["required"] and not right["required"]:
-            changes.append(
-                {
-                    "kind": "required_became_false",
-                    "category": "compatible",
-                    "path": path,
+                    "from": left["required"],
+                    "to": right["required"],
                 }
             )
 
         left_mode = left.get("additionalPropertiesMode")
         right_mode = right.get("additionalPropertiesMode")
         if left_mode != right_mode:
-            if _additional_properties_rank(right_mode) < _additional_properties_rank(left_mode):
+            if _additional_properties_rank(right_mode) < _additional_properties_rank(
+                left_mode
+            ):
                 category = "breakingLike"
                 kind = "additional_properties_restricted"
             else:
@@ -298,6 +324,7 @@ def build_schema_diff(
     changes = _suppress_duplicate_profile_changes(changes, before, after)
     summary = {
         "breakingLike": sum(item["category"] == "breakingLike" for item in changes),
+        "review": sum(item["category"] == "review" for item in changes),
         "behavior": sum(item["category"] == "behavior" for item in changes),
         "compatible": sum(item["category"] == "compatible" for item in changes),
         "documentation": sum(item["category"] == "documentation" for item in changes),
@@ -349,10 +376,10 @@ def render_schema_diff_markdown(payload: dict[str, Any]) -> str:
                 lines.append(f"- Description changed: `{path}`")
             elif kind == "deprecated_changed":
                 lines.append(f"- Deprecated changed: `{path}`")
-            elif kind == "required_became_true":
-                lines.append(f"- Field became required: `{path}`")
-            elif kind == "required_became_false":
-                lines.append(f"- Field became optional: `{path}`")
+            elif kind == "required_changed":
+                lines.append(f"- Required state changed: `{path}`")
+                lines.append(f"  - From: `{item['from']}`")
+                lines.append(f"  - To: `{item['to']}`")
             elif kind == "additional_properties_restricted":
                 lines.append(f"- Additional properties restricted: `{path}`")
             elif kind == "additional_properties_relaxed":

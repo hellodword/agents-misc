@@ -1,5 +1,8 @@
 import {
+  addedFieldCategory,
   formatDeveloperDiff,
+  requiredChangeCategory,
+  requiredState,
   renderFieldValue,
   stableValueKey,
   suppressDuplicateProfileChanges,
@@ -13,6 +16,11 @@ const state = {
 };
 
 const GROUP_SECTIONS = [
+  {
+    id: "review",
+    title: "Needs review",
+    chipClass: "chip-review",
+  },
   {
     id: "defaults",
     title: "Defaults changed",
@@ -132,6 +140,7 @@ function indexEnumValues(field) {
 function summarizeChanges(changes) {
   const summary = {
     breakingLike: 0,
+    review: 0,
     behavior: 0,
     compatible: 0,
     documentation: 0,
@@ -149,6 +158,9 @@ function summarizeChanges(changes) {
 function buildSchemaDiff(fromVersion, toVersion, fromPayload, toPayload) {
   const before = fromPayload.fieldIndex;
   const after = toPayload.fieldIndex;
+  for (const field of [...before.values(), ...after.values()]) {
+    requiredState(field);
+  }
   const changes = [];
   const allPaths = Array.from(
     new Set([...before.keys(), ...after.keys()]),
@@ -161,7 +173,7 @@ function buildSchemaDiff(fromVersion, toVersion, fromPayload, toPayload) {
     if (!left) {
       changes.push({
         kind: "field_added",
-        category: right.required ? "breakingLike" : "compatible",
+        category: addedFieldCategory(right.required),
         path,
         to: {
           types: right.types,
@@ -236,17 +248,13 @@ function buildSchemaDiff(fromVersion, toVersion, fromPayload, toPayload) {
       });
     }
 
-    if (!left.required && right.required) {
+    if (left.required !== right.required) {
       changes.push({
-        kind: "required_became_true",
-        category: "breakingLike",
+        kind: "required_changed",
+        category: requiredChangeCategory(left.required, right.required),
         path,
-      });
-    } else if (left.required && !right.required) {
-      changes.push({
-        kind: "required_became_false",
-        category: "compatible",
-        path,
+        from: left.required,
+        to: right.required,
       });
     }
 
@@ -411,6 +419,10 @@ function groupChanges(diffPayload, beforePayload, afterPayload) {
 function resolveGroupSection(group) {
   const kinds = new Set(group.changes.map((change) => change.kind));
 
+  if (group.changes.some((change) => change.category === "review")) {
+    return "review";
+  }
+
   if (
     kinds.has("default_changed") ||
     kinds.has("default_added") ||
@@ -483,7 +495,7 @@ function renderDiffGroup(group) {
   const rows = [
     ["Type", "type"],
     ["Default", "default"],
-    ["Optional", "optional"],
+    ["Required", "required"],
     ["Description", "description"],
   ];
 

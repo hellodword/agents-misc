@@ -6,6 +6,9 @@ from typing import Any
 
 PLACEHOLDER_KEY = "<name>"
 EXAMPLE_KEY = "example"
+REQUIRED_ALWAYS = "always"
+REQUIRED_CONDITIONAL = "conditional"
+REQUIRED_NEVER = "never"
 
 
 def _unique(values: list[Any]) -> list[Any]:
@@ -97,7 +100,9 @@ class SchemaResolver:
 
         return current, origin_pointer
 
-    def _merge_schema(self, base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    def _merge_schema(
+        self, base: dict[str, Any], overlay: dict[str, Any]
+    ) -> dict[str, Any]:
         merged = deepcopy(base)
         for key, value in overlay.items():
             if key in {"properties", "definitions"}:
@@ -108,7 +113,9 @@ class SchemaResolver:
             elif key == "required":
                 merged[key] = _unique(list(merged.get(key, [])) + list(value))
             elif key == "type":
-                merged[key] = _unique(_normalize_types(merged.get(key)) + _normalize_types(value))
+                merged[key] = _unique(
+                    _normalize_types(merged.get(key)) + _normalize_types(value)
+                )
             elif key == "enum":
                 merged[key] = _unique(list(merged.get(key, [])) + list(value))
             elif key == "deprecated":
@@ -123,8 +130,25 @@ class SchemaResolver:
         return merged
 
 
-def _merge_variant_summaries(base: dict[str, Any], variant: dict[str, Any]) -> dict[str, Any]:
-    summary = {
+def _empty_summary(*, object_feasible: bool) -> dict[str, Any]:
+    return {
+        "types": [],
+        "enum": [],
+        "description": None,
+        "deprecated": False,
+        "has_default": False,
+        "default": None,
+        "properties": {},
+        "required_states": {},
+        "additional_properties": None,
+        "object_feasible": object_feasible,
+    }
+
+
+def _merge_variant_metadata(
+    base: dict[str, Any], variant: dict[str, Any]
+) -> dict[str, Any]:
+    return {
         "types": _unique(base["types"] + variant["types"]),
         "enum": _unique(base["enum"] + variant["enum"]),
         "description": base["description"] or variant["description"],
@@ -132,33 +156,75 @@ def _merge_variant_summaries(base: dict[str, Any], variant: dict[str, Any]) -> d
         "has_default": base["has_default"] or variant["has_default"],
         "default": base["default"] if base["has_default"] else variant["default"],
         "properties": {**base["properties"], **variant["properties"]},
-        "required": _unique(base["required"] + variant["required"]),
-        "additional_properties": base["additional_properties"] or variant["additional_properties"],
+        "required_states": dict(base["required_states"]),
+        "additional_properties": base["additional_properties"]
+        or variant["additional_properties"],
+        "object_feasible": base["object_feasible"] or variant["object_feasible"],
     }
-    return summary
+
+
+def _object_is_feasible(summary: dict[str, Any]) -> bool:
+    types = summary["types"]
+    if types and "object" not in types:
+        return False
+    enum = summary["enum"]
+    if enum and not any(isinstance(value, dict) for value in enum):
+        return False
+    return True
+
+
+def _combine_required_states(left: str, right: str) -> str:
+    if REQUIRED_ALWAYS in {left, right}:
+        return REQUIRED_ALWAYS
+    if REQUIRED_CONDITIONAL in {left, right}:
+        return REQUIRED_CONDITIONAL
+    return REQUIRED_NEVER
+
+
+def _aggregate_variant_required_states(
+    branches: list[dict[str, Any]],
+) -> dict[str, str]:
+    feasible = [branch for branch in branches if branch["object_feasible"]]
+    if not feasible:
+        return {}
+
+    names = set().union(
+        *(
+            set(branch["properties"]) | set(branch["required_states"])
+            for branch in feasible
+        )
+    )
+    states: dict[str, str] = {}
+    for name in names:
+        branch_states = [
+            branch["required_states"].get(name, REQUIRED_NEVER) for branch in feasible
+        ]
+        if all(state == REQUIRED_ALWAYS for state in branch_states):
+            states[name] = REQUIRED_ALWAYS
+        elif all(state == REQUIRED_NEVER for state in branch_states):
+            states[name] = REQUIRED_NEVER
+        else:
+            states[name] = REQUIRED_CONDITIONAL
+    return states
 
 
 def _summarize_node(
     resolver: SchemaResolver,
-    node: dict[str, Any],
+    node: Any,
     pointer: str,
 ) -> tuple[dict[str, Any], str]:
     resolved, origin_pointer = resolver.resolve_node(node, pointer)
     if not isinstance(resolved, dict):
-        return (
-            {
-                "types": [],
-                "enum": [],
-                "description": None,
-                "deprecated": False,
-                "has_default": False,
-                "default": None,
-                "properties": {},
-                "required": [],
-                "additional_properties": None,
-            },
-            origin_pointer,
-        )
+        return _empty_summary(object_feasible=resolved is True), origin_pointer
+
+    properties = deepcopy(resolved.get("properties", {}))
+    required = resolved.get("required", [])
+    if not isinstance(required, list) or not all(
+        isinstance(item, str) for item in required
+    ):
+        raise ValueError(f"required must be an array of strings at {pointer}")
+    required_names = set(required)
+    property_names = set(properties) | required_names
 
     summary = {
         "types": _normalize_types(resolved.get("type")),
@@ -167,9 +233,13 @@ def _summarize_node(
         "deprecated": bool(resolved.get("deprecated", False)),
         "has_default": "default" in resolved,
         "default": resolved.get("default"),
-        "properties": deepcopy(resolved.get("properties", {})),
-        "required": list(resolved.get("required", [])),
+        "properties": properties,
+        "required_states": {
+            name: REQUIRED_ALWAYS if name in required_names else REQUIRED_NEVER
+            for name in property_names
+        },
         "additional_properties": resolved.get("additionalProperties"),
+        "object_feasible": False,
     }
 
     if "const" in resolved:
@@ -178,14 +248,21 @@ def _summarize_node(
     for branch_key in ("anyOf", "oneOf"):
         if branch_key not in resolved:
             continue
+        branch_summaries = []
         for index, branch in enumerate(resolved[branch_key]):
             branch_summary, _ = _summarize_node(
                 resolver, branch, _pointer_join(pointer, branch_key, index)
             )
-            summary = _merge_variant_summaries(summary, branch_summary)
+            branch_summaries.append(branch_summary)
+            summary = _merge_variant_metadata(summary, branch_summary)
+
+        for name, state in _aggregate_variant_required_states(branch_summaries).items():
+            current = summary["required_states"].get(name, REQUIRED_NEVER)
+            summary["required_states"][name] = _combine_required_states(current, state)
 
     summary["types"] = _unique(summary["types"])
     summary["enum"] = _unique(summary["enum"])
+    summary["object_feasible"] = _object_is_feasible(summary)
     return summary, origin_pointer
 
 
@@ -210,11 +287,13 @@ def normalize_schema(schema: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(resolved_root, dict):
         raise ValueError("schema root must be an object")
 
-    root_properties = resolved_root.get("properties", {})
-    root_required = set(resolved_root.get("required", []))
+    root_summary, _ = _summarize_node(resolver, schema, "#")
+    root_properties = root_summary["properties"]
     fields: dict[str, dict[str, Any]] = {}
 
-    def visit(node: dict[str, Any], pointer: str, parts: list[str], required: bool) -> None:
+    def visit(
+        node: dict[str, Any], pointer: str, parts: list[str], required: str
+    ) -> None:
         summary, origin_pointer = _summarize_node(resolver, node, pointer)
         path = _path_join(parts)
         field = {
@@ -249,7 +328,7 @@ def normalize_schema(schema: dict[str, Any]) -> list[dict[str, Any]]:
                 summary["properties"][property_name],
                 child_pointer,
                 parts + [property_name],
-                property_name in set(summary["required"]),
+                summary["required_states"].get(property_name, REQUIRED_NEVER),
             )
 
         additional = summary["additional_properties"]
@@ -258,7 +337,7 @@ def normalize_schema(schema: dict[str, Any]) -> list[dict[str, Any]]:
                 additional,
                 _pointer_join(pointer, "additionalProperties"),
                 parts + [PLACEHOLDER_KEY],
-                False,
+                REQUIRED_NEVER,
             )
 
     for property_name in sorted(root_properties):
@@ -266,7 +345,7 @@ def normalize_schema(schema: dict[str, Any]) -> list[dict[str, Any]]:
             root_properties[property_name],
             _pointer_join(root_pointer, "properties", property_name),
             [property_name],
-            property_name in root_required,
+            root_summary["required_states"].get(property_name, REQUIRED_NEVER),
         )
 
     return sorted(fields.values(), key=lambda item: item["path"].split("."))
