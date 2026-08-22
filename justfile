@@ -1,7 +1,9 @@
 set positional-arguments
 
-# Nix owns the complete viewer toolchain; Just only exposes human-facing commands.
+# Nix owns each task toolchain; public recipes only enter the matching shell.
+codex_nix := "nix develop .#codex --command"
 viewer_nix := "nix develop .#agents-viewer --command"
+agent_evals_nix := "nix develop .#agent-evals --command"
 
 # Enter the default development shell.
 dev:
@@ -21,20 +23,40 @@ check:
 
 # Validate rule structure, skill assets, and the eval corpus.
 check-agent-rules:
-  nix develop .#dev --command python3 scripts/check-agent-rules.py --root .
-  nix develop .#dev --command python3 -m unittest discover -s tests -p 'test_*.py'
+  nix develop .#dev --command just _check-agent-rules
+
+[private]
+_check-agent-rules:
+  @test "${AGENTS_MISC_SHELL:-}" = "dev" || { echo "error: run 'just check-agent-rules' to enter nix develop .#dev" >&2; exit 2; }
+  python3 scripts/check-agent-rules.py --root .
+  python3 -m unittest discover -s tests -p 'test_*.py'
 
 # Seed the independent Agent eval ChatGPT credential vault.
 agent-evals-auth-init *args:
-  nix develop .#dev --command python3 scripts/run-agent-evals.py auth-init "$@"
+  {{agent_evals_nix}} just -- _agent-evals-auth-init "$@"
+
+[private]
+_agent-evals-auth-init *args:
+  @test "${AGENTS_MISC_SHELL:-}" = "agent-evals" || { echo "error: run 'just agent-evals-auth-init' to enter nix develop .#agent-evals" >&2; exit 2; }
+  python3 scripts/run-agent-evals.py auth-init "$@"
 
 # Verify Agent eval prompt sources and the versioned no-execution-tool surface.
 agent-evals-preflight *args:
-  nix develop .#dev --command python3 scripts/run-agent-evals.py preflight "$@"
+  {{agent_evals_nix}} just -- _agent-evals-preflight "$@"
+
+[private]
+_agent-evals-preflight *args:
+  @test "${AGENTS_MISC_SHELL:-}" = "agent-evals" || { echo "error: run 'just agent-evals-preflight' to enter nix develop .#agent-evals" >&2; exit 2; }
+  python3 scripts/run-agent-evals.py preflight "$@"
 
 # Run isolated Codex route, behavior, judge, and certification evals.
 agent-evals *args:
-  nix develop .#dev --command python3 scripts/run-agent-evals.py run "$@"
+  {{agent_evals_nix}} just -- _agent-evals "$@"
+
+[private]
+_agent-evals *args:
+  @test "${AGENTS_MISC_SHELL:-}" = "agent-evals" || { echo "error: run 'just agent-evals' to enter nix develop .#agent-evals" >&2; exit 2; }
+  python3 scripts/run-agent-evals.py run "$@"
 
 # Build the default patched Codex package.
 build:
@@ -46,35 +68,75 @@ build-tools:
 
 # Validate the declarative Codex maintenance manifests.
 codex-manifest-check:
-  nix develop .#dev --command python3 -m unittest codex.tests.test_manifest
+  {{codex_nix}} just _codex-manifest-check
+
+[private]
+_codex-manifest-check:
+  @test "${AGENTS_MISC_SHELL:-}" = "codex" || { echo "error: run 'just codex-manifest-check' to enter nix develop .#codex" >&2; exit 2; }
+  python3 -m unittest codex.tests.test_manifest
 
 # Fetch the one pinned upstream Codex checkout.
 codex-fetch:
-  nix develop .#dev --command python3 codex/scripts/fetch-upstream.py
+  {{codex_nix}} just _codex-fetch
+
+[private]
+_codex-fetch:
+  @test "${AGENTS_MISC_SHELL:-}" = "codex" || { echo "error: run 'just codex-fetch' to enter nix develop .#codex" >&2; exit 2; }
+  python3 codex/scripts/fetch-upstream.py
 
 # Check whether the pinned Codex patches apply cumulatively.
 codex-apply-check:
-  nix develop .#dev --command python3 codex/scripts/apply-patches.py --check
+  {{codex_nix}} just _codex-apply-check
+
+[private]
+_codex-apply-check:
+  @test "${AGENTS_MISC_SHELL:-}" = "codex" || { echo "error: run 'just codex-apply-check' to enter nix develop .#codex" >&2; exit 2; }
+  python3 codex/scripts/apply-patches.py --check
 
 # Apply the pinned Codex patches.
 codex-apply:
-  nix develop .#dev --command python3 codex/scripts/apply-patches.py
+  {{codex_nix}} just _codex-apply
+
+[private]
+_codex-apply:
+  @test "${AGENTS_MISC_SHELL:-}" = "codex" || { echo "error: run 'just codex-apply' to enter nix develop .#codex" >&2; exit 2; }
+  python3 codex/scripts/apply-patches.py
 
 # Fully validate candidate patches without changing the checked-in patch set.
 codex-refresh-dry-run:
-  nix develop .#dev --command python3 codex/scripts/refresh-patches.py --dry-run
+  {{codex_nix}} just _codex-refresh-dry-run
+
+[private]
+_codex-refresh-dry-run:
+  @test "${AGENTS_MISC_SHELL:-}" = "codex" || { echo "error: run 'just codex-refresh-dry-run' to enter nix develop .#codex" >&2; exit 2; }
+  python3 codex/scripts/refresh-patches.py --dry-run
 
 # Atomically refresh the pinned Codex patch set.
 codex-refresh:
-  nix develop .#dev --command python3 codex/scripts/refresh-patches.py
+  {{codex_nix}} just _codex-refresh
+
+[private]
+_codex-refresh:
+  @test "${AGENTS_MISC_SHELL:-}" = "codex" || { echo "error: run 'just codex-refresh' to enter nix develop .#codex" >&2; exit 2; }
+  python3 codex/scripts/refresh-patches.py
 
 # Run cumulative apply, generation-drift, Cargo, and targeted Codex tests.
 codex-test:
-  nix develop .#dev --command python3 codex/scripts/test.py
+  {{codex_nix}} just _codex-test
+
+[private]
+_codex-test:
+  @test "${AGENTS_MISC_SHELL:-}" = "codex" || { echo "error: run 'just codex-test' to enter nix develop .#codex" >&2; exit 2; }
+  python3 codex/scripts/test.py
 
 # Run the manifest-defined Codex Cargo validation command.
 codex-build:
-  nix develop .#dev --command python3 codex/scripts/build.py
+  {{codex_nix}} just _codex-build
+
+[private]
+_codex-build:
+  @test "${AGENTS_MISC_SHELL:-}" = "codex" || { echo "error: run 'just codex-build' to enter nix develop .#codex" >&2; exit 2; }
+  python3 codex/scripts/build.py
 
 # Print current Codex config schema metadata.
 codex-config-atlas-current:
@@ -102,7 +164,12 @@ codex-config-atlas-gen-toml version mode="reference":
 
 # Run the viewer API with the non-embedded development shell.
 agents-viewer-api-dev *args:
-  {{viewer_nix}} cargo run --manifest-path tools/agents-viewer/Cargo.toml --bin agents-viewer -- {{args}}
+  {{viewer_nix}} just -- _agents-viewer-api-dev "$@"
+
+[private]
+_agents-viewer-api-dev *args:
+  @test "${AGENTS_MISC_SHELL:-}" = "agents-viewer" || { echo "error: run 'just agents-viewer-api-dev' to enter nix develop .#agents-viewer" >&2; exit 2; }
+  cargo run --manifest-path tools/agents-viewer/Cargo.toml --bin agents-viewer -- "$@"
 
 # Run the packaged viewer. Viewer settings come from config.toml.
 agents-viewer-run *args:
@@ -114,6 +181,7 @@ agents-viewer-web-dev:
 
 [private]
 _agents-viewer-web-dev:
+  @test "${AGENTS_MISC_SHELL:-}" = "agents-viewer" || { echo "error: run 'just agents-viewer-web-dev' to enter nix develop .#agents-viewer" >&2; exit 2; }
   npm --prefix tools/agents-viewer/web ci
   npm --prefix tools/agents-viewer/web run dev
 
@@ -127,6 +195,7 @@ agents-viewer-test:
 
 [private]
 _agents-viewer-test:
+  @test "${AGENTS_MISC_SHELL:-}" = "agents-viewer" || { echo "error: run 'just agents-viewer-test' to enter nix develop .#agents-viewer" >&2; exit 2; }
   cargo test --manifest-path tools/agents-viewer/Cargo.toml
   npm --prefix tools/agents-viewer/web ci
   npm --prefix tools/agents-viewer/web run test
@@ -137,22 +206,34 @@ agents-viewer-e2e *args:
 
 [private]
 _agents-viewer-build-embedded-debug:
+  @test "${AGENTS_MISC_SHELL:-}" = "agents-viewer" || { echo "error: run 'just agents-viewer-e2e' to enter nix develop .#agents-viewer" >&2; exit 2; }
   npm --prefix tools/agents-viewer/web ci
   npm --prefix tools/agents-viewer/web run build
   cargo build --manifest-path tools/agents-viewer/Cargo.toml --bin agents-viewer --features embedded-ui
 
 [private]
 _agents-viewer-e2e *args:
+  @test "${AGENTS_MISC_SHELL:-}" = "agents-viewer" || { echo "error: run 'just agents-viewer-e2e' to enter nix develop .#agents-viewer" >&2; exit 2; }
   just _agents-viewer-build-embedded-debug
   npm --prefix tools/agents-viewer/web run e2e -- "$@"
 
 # Export TypeScript API bindings from Rust DTOs.
 agents-viewer-generate:
-  {{viewer_nix}} cargo run --manifest-path tools/agents-viewer/Cargo.toml --bin export_types -- --write
+  {{viewer_nix}} just _agents-viewer-generate
+
+[private]
+_agents-viewer-generate:
+  @test "${AGENTS_MISC_SHELL:-}" = "agents-viewer" || { echo "error: run 'just agents-viewer-generate' to enter nix develop .#agents-viewer" >&2; exit 2; }
+  cargo run --manifest-path tools/agents-viewer/Cargo.toml --bin export_types -- --write
 
 # Confirm checked-in TypeScript bindings match Rust DTOs.
 agents-viewer-generate-check:
-  {{viewer_nix}} cargo run --manifest-path tools/agents-viewer/Cargo.toml --bin export_types -- --check
+  {{viewer_nix}} just _agents-viewer-generate-check
+
+[private]
+_agents-viewer-generate-check:
+  @test "${AGENTS_MISC_SHELL:-}" = "agents-viewer" || { echo "error: run 'just agents-viewer-generate-check' to enter nix develop .#agents-viewer" >&2; exit 2; }
+  cargo run --manifest-path tools/agents-viewer/Cargo.toml --bin export_types -- --check
 
 # Run ignored large gates plus Linux syscall read-only validation.
 agents-viewer-acceptance-large:
@@ -160,6 +241,7 @@ agents-viewer-acceptance-large:
 
 [private]
 _agents-viewer-acceptance-large:
+  @test "${AGENTS_MISC_SHELL:-}" = "agents-viewer" || { echo "error: run 'just agents-viewer-acceptance-large' to enter nix develop .#agents-viewer" >&2; exit 2; }
   cargo test --manifest-path tools/agents-viewer/Cargo.toml --test performance -- --ignored --nocapture --test-threads=1
   cargo test --manifest-path tools/agents-viewer/Cargo.toml --test read_only_strace -- --ignored --nocapture
 
@@ -169,6 +251,7 @@ agents-viewer-verify:
 
 [private]
 _agents-viewer-verify:
+  @test "${AGENTS_MISC_SHELL:-}" = "agents-viewer" || { echo "error: run 'just agents-viewer-verify' to enter nix develop .#agents-viewer" >&2; exit 2; }
   cargo run --manifest-path tools/agents-viewer/Cargo.toml --bin export_types -- --check
   cargo fmt --manifest-path tools/agents-viewer/Cargo.toml --all -- --check
   cargo clippy --manifest-path tools/agents-viewer/Cargo.toml --all-targets -- -D warnings

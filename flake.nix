@@ -31,7 +31,7 @@
       inherit (nixpkgs) lib;
 
       codexProject = import ./nix/codex.nix {
-        inherit lib llm-agents;
+        inherit lib llm-agents nixpkgs;
       };
 
       inherit (codexProject)
@@ -94,6 +94,7 @@
         inherit
           lib
           nixpkgs
+          codexFor
           supportedSystems
           ;
       };

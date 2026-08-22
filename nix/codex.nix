@@ -1,6 +1,7 @@
 {
   lib,
   llm-agents,
+  nixpkgs,
 }:
 
 let
@@ -59,12 +60,21 @@ let
   ) patchOrder;
 
   patchCodex =
-    codex:
+    pkgs: codex:
     codex.overrideAttrs (
       old:
       let
         version = old.version or (builtins.parseDrvName old.name).version;
         packageRef = "rust-v${version}";
+        gitPatchPhase = ''
+          runHook prePatch
+          chmod -R u+w ..
+          for patch in $patches; do
+            echo "applying patch $patch"
+            (cd .. && git apply --binary --whitespace=nowarn "$patch")
+          done
+          runHook postPatch
+        '';
       in
       if unknownUpstreamFields != [ ] then
         throw "agents-misc: unknown field(s) in codex/upstream.toml: ${lib.concatStringsSep ", " unknownUpstreamFields}"
@@ -76,15 +86,24 @@ let
         throw "agents-misc: empty codex patch series for ${upstream.ref}"
       else
         {
+          cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
+            inherit (old) pname src;
+            inherit version;
+            sourceRoot = old.sourceRoot or "source/codex-rs";
+            patches = (old.patches or [ ]) ++ patchPaths;
+            nativeBuildInputs = [ pkgs.gitMinimal ];
+            patchPhase = gitPatchPhase;
+            hash = "sha256-TCY5pdWvarEqVo8d9cHt3O7+tHbGSrAilx5q7GnXz8Y=";
+          };
           patches = (old.patches or [ ]) ++ patchPaths;
 
+          nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.gitMinimal ];
+
           # llm-agents.nix builds from source/codex-rs, while these patches
-          # are generated against the OpenAI Codex repository root.
-          patchFlags = [
-            "-p1"
-            "-d"
-            ".."
-          ];
+          # are generated against the OpenAI Codex repository root. Git apply
+          # is required because the generated-contract patch owns binary
+          # precomputed schemas in addition to text files.
+          patchPhase = gitPatchPhase;
 
           passthru = (old.passthru or { }) // {
             agentsMiscPatch = builtins.head patchPaths;
@@ -96,7 +115,8 @@ let
     );
 
   supportedSystems = builtins.attrNames llm-agents.packages;
-  codexFor = system: patchCodex llm-agents.packages.${system}.codex;
+  codexFor =
+    system: patchCodex (import nixpkgs { inherit system; }) llm-agents.packages.${system}.codex;
 in
 {
   inherit
