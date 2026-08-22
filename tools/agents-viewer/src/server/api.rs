@@ -12,6 +12,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sqlx::{QueryBuilder, Row as _, Sqlite};
 
+use crate::index::coordinator::CoordinatorError;
 use crate::index::search::{ArchiveFilter, SearchFilters, SearchRequest, search as search_index};
 use crate::model::{
     ApiPage, ContentChunk, ContentField, Diagnostic, EntryKind, EntryListItem, GitMetadata,
@@ -133,7 +134,7 @@ async fn sessions(
         .iter()
         .map(session_from_row)
         .collect::<Result<Vec<_>, _>>()?;
-    apply_freshness(&state, &mut data);
+    apply_freshness(&state, &mut data)?;
     let next_cursor = if previous || has_more {
         data.last().map(|item| {
             cursor::encode(
@@ -195,7 +196,7 @@ async fn session_groups(
         .iter()
         .map(session_from_row)
         .collect::<Result<Vec<_>, _>>()?;
-    apply_freshness(&state, &mut sessions);
+    apply_freshness(&state, &mut sessions)?;
     let mut groups = build_session_groups(sessions);
     groups.retain(|group| group_matches(group, &query, archived));
     groups.sort_by(|left, right| {
@@ -436,7 +437,7 @@ async fn session_detail(
             .map(diagnostic_from_row)
             .collect::<Result<Vec<_>, _>>()?;
     let mut summary = session_from_row(&row)?;
-    apply_session_freshness(&state, &mut summary);
+    apply_session_freshness(&state, &mut summary)?;
     Ok(Json(SessionDetail {
         summary,
         diagnostics,
@@ -465,7 +466,7 @@ async fn sync_session(
         .ok_or_else(|| ApiFailure::service_unavailable("session synchronization is unavailable"))?;
     let status = coordinator
         .ensure_session(&session_id)
-        .map_err(|_| ApiFailure::service_unavailable("session synchronization queue is full"))?;
+        .map_err(|error| coordinator_failure(error, &session_id))?;
     if status.state == SessionSyncState::NotFound {
         return Err(ApiFailure::not_found("session source does not exist"));
     }
@@ -1084,7 +1085,7 @@ async fn search(
             .fetch_one(state.database.pool())
             .await?;
         let mut session = session_from_row(&row)?;
-        apply_session_freshness(&state, &mut session);
+        apply_session_freshness(&state, &mut session)?;
         hits.push(SearchHit {
             session,
             entry_id: hit.entry_id,
@@ -1168,15 +1169,32 @@ fn session_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<SessionSummary, Api
     })
 }
 
-fn apply_freshness(state: &AppState, sessions: &mut [SessionSummary]) {
+fn apply_freshness(state: &AppState, sessions: &mut [SessionSummary]) -> Result<(), ApiFailure> {
     for session in sessions {
-        apply_session_freshness(state, session);
+        apply_session_freshness(state, session)?;
     }
+    Ok(())
 }
 
-fn apply_session_freshness(state: &AppState, session: &mut SessionSummary) {
+fn apply_session_freshness(
+    state: &AppState,
+    session: &mut SessionSummary,
+) -> Result<(), ApiFailure> {
     if let Some(coordinator) = &state.coordinator {
-        session.freshness = coordinator.freshness(&session.id);
+        session.freshness = coordinator
+            .freshness(&session.id)
+            .map_err(|error| coordinator_failure(error, &session.id))?;
+    }
+    Ok(())
+}
+
+fn coordinator_failure(error: CoordinatorError, session_id: &str) -> ApiFailure {
+    if error.is_internal() {
+        tracing::error!(%error, %session_id, "session coordination failed");
+        ApiFailure::internal()
+    } else {
+        tracing::warn!(%error, %session_id, "session synchronization could not be queued");
+        ApiFailure::service_unavailable("session synchronization queue is full")
     }
 }
 
@@ -1558,3 +1576,6 @@ fn decode_string_enum<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, 
         value.to_owned(),
     ))?)
 }
+
+#[cfg(test)]
+mod tests;

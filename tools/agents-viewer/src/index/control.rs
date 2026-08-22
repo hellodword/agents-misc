@@ -10,6 +10,12 @@ pub const MAX_CONCURRENT_SOURCE_READS: usize = 2;
 pub const MAX_READ_CHUNK_BYTES: usize = 64 * 1024;
 pub const BACKGROUND_BYTES_PER_SECOND: usize = 8 * 1024 * 1024;
 
+#[derive(Debug, thiserror::Error)]
+pub enum IoGateError {
+    #[error("{context}: I/O gate mutex poisoned")]
+    LockPoisoned { context: &'static str },
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
 pub enum WorkPriority {
@@ -87,23 +93,25 @@ impl IoGate {
         }
     }
 
-    #[must_use]
-    pub fn register(&self, priority: WorkPriority) -> ScanLease {
-        let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        self.inner
+    pub fn register(&self, priority: WorkPriority) -> Result<ScanLease, IoGateError> {
+        let mut state = self
+            .inner
             .state
             .lock()
-            .expect("I/O gate mutex poisoned")
-            .tasks
-            .insert(id, priority);
+            .map_err(|_| IoGateError::LockPoisoned {
+                context: "registering an index scan",
+            })?;
+        let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        state.tasks.insert(id, priority);
+        drop(state);
         self.inner.changed.notify_all();
-        ScanLease {
+        Ok(ScanLease {
             inner: Arc::new(LeaseInner {
                 id,
                 priority: AtomicU8::new(priority as u8),
                 gate: Arc::clone(&self.inner),
             }),
-        }
+        })
     }
 
     #[must_use]
@@ -118,23 +126,26 @@ impl ScanLease {
         WorkPriority::from_u8(self.inner.priority.load(Ordering::Acquire))
     }
 
-    pub fn promote(&self, priority: WorkPriority) {
-        let previous = self
-            .inner
-            .priority
-            .fetch_max(priority as u8, Ordering::AcqRel);
-        if previous >= priority as u8 {
-            return;
-        }
+    pub fn promote(&self, priority: WorkPriority) -> Result<(), IoGateError> {
         let mut state = self
             .inner
             .gate
             .state
             .lock()
-            .expect("I/O gate mutex poisoned");
+            .map_err(|_| IoGateError::LockPoisoned {
+                context: "promoting an index scan",
+            })?;
+        let previous = self
+            .inner
+            .priority
+            .fetch_max(priority as u8, Ordering::AcqRel);
+        if previous >= priority as u8 {
+            return Ok(());
+        }
         state.tasks.insert(self.inner.id, priority);
         drop(state);
         self.inner.gate.changed.notify_all();
+        Ok(())
     }
 
     pub fn before_io(
@@ -143,12 +154,11 @@ impl ScanLease {
         shutdown: &CancellationToken,
     ) -> io::Result<IoPermit> {
         let requested_bytes = requested_bytes.clamp(1, MAX_READ_CHUNK_BYTES);
-        let mut state = self
-            .inner
-            .gate
-            .state
-            .lock()
-            .expect("I/O gate mutex poisoned");
+        let mut state = self.inner.gate.state.lock().map_err(|_| {
+            io::Error::other(IoGateError::LockPoisoned {
+                context: "acquiring an index I/O permit",
+            })
+        })?;
         loop {
             if shutdown.is_cancelled() {
                 return Err(io::Error::new(
@@ -182,7 +192,11 @@ impl ScanLease {
                 .gate
                 .changed
                 .wait_timeout(state, Duration::from_millis(10))
-                .expect("I/O gate mutex poisoned");
+                .map_err(|_| {
+                    io::Error::other(IoGateError::LockPoisoned {
+                        context: "waiting for an index I/O permit",
+                    })
+                })?;
             state = next;
         }
     }
@@ -204,7 +218,13 @@ impl IoPermit {
 
 impl Drop for IoPermit {
     fn drop(&mut self) {
-        let mut state = self.gate.state.lock().expect("I/O gate mutex poisoned");
+        let Ok(mut state) = self.gate.state.lock() else {
+            let error = IoGateError::LockPoisoned {
+                context: "releasing an index I/O permit",
+            };
+            tracing::error!(%error, "index I/O permit cleanup failed");
+            return;
+        };
         state.active_io = state.active_io.saturating_sub(1);
         drop(state);
         self.gate.changed.notify_all();
@@ -213,7 +233,13 @@ impl Drop for IoPermit {
 
 impl Drop for LeaseInner {
     fn drop(&mut self) {
-        let mut state = self.gate.state.lock().expect("I/O gate mutex poisoned");
+        let Ok(mut state) = self.gate.state.lock() else {
+            let error = IoGateError::LockPoisoned {
+                context: "unregistering an index scan",
+            };
+            tracing::error!(%error, "index scan cleanup failed");
+            return;
+        };
         state.tasks.remove(&self.id);
         drop(state);
         self.gate.changed.notify_all();
@@ -235,26 +261,58 @@ mod tests {
 
     #[test]
     fn promotion_is_monotonic() {
-        let lease = IoGate::new().register(WorkPriority::Background);
-        lease.promote(WorkPriority::Recent);
-        lease.promote(WorkPriority::Background);
+        let lease = IoGate::new().register(WorkPriority::Background).unwrap();
+        lease.promote(WorkPriority::Recent).unwrap();
+        lease.promote(WorkPriority::Background).unwrap();
         assert_eq!(lease.priority(), WorkPriority::Recent);
-        lease.promote(WorkPriority::Interactive);
+        lease.promote(WorkPriority::Interactive).unwrap();
         assert_eq!(lease.priority(), WorkPriority::Interactive);
     }
 
     #[test]
     fn higher_priority_work_preempts_at_a_permit_boundary() {
         let gate = IoGate::new();
-        let background = gate.register(WorkPriority::Background);
+        let background = gate.register(WorkPriority::Background).unwrap();
         let first = background
             .before_io(MAX_READ_CHUNK_BYTES, &CancellationToken::new())
             .unwrap();
-        let interactive = gate.register(WorkPriority::Interactive);
+        let interactive = gate.register(WorkPriority::Interactive).unwrap();
         drop(first);
         let permit = interactive
             .before_io(MAX_READ_CHUNK_BYTES, &CancellationToken::new())
             .unwrap();
         assert_eq!(permit.max_bytes(), MAX_READ_CHUNK_BYTES);
+    }
+
+    #[test]
+    fn poisoned_gate_returns_a_typed_error_and_cleanup_does_not_panic() {
+        let gate = IoGate::new();
+        let lease = gate.register(WorkPriority::Recent).unwrap();
+        let inner = Arc::clone(&gate.inner);
+        let injected = std::thread::spawn(move || {
+            let Ok(_guard) = inner.state.lock() else {
+                panic!("I/O gate was already poisoned before fault injection");
+            };
+            panic!("injected I/O gate lock poison");
+        })
+        .join();
+        assert!(injected.is_err(), "fault injection must poison the lock");
+
+        let next_id = gate.inner.next_id.load(Ordering::Relaxed);
+        assert!(matches!(
+            gate.register(WorkPriority::Recent),
+            Err(IoGateError::LockPoisoned {
+                context: "registering an index scan"
+            })
+        ));
+        assert_eq!(gate.inner.next_id.load(Ordering::Relaxed), next_id);
+        assert!(matches!(
+            lease.promote(WorkPriority::Interactive),
+            Err(IoGateError::LockPoisoned {
+                context: "promoting an index scan"
+            })
+        ));
+        assert_eq!(lease.priority(), WorkPriority::Recent);
+        assert!(std::panic::catch_unwind(|| drop(lease)).is_ok());
     }
 }

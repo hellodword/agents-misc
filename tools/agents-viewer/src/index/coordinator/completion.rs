@@ -10,13 +10,13 @@ impl RuntimeScheduler {
         if actual.priority >= WorkPriority::Recent {
             self.last_high_activity = Instant::now();
             if self.background_hold.is_none() {
-                self.background_hold = Some(self.gate.register(WorkPriority::Recent));
+                self.background_hold = Some(self.gate.register(WorkPriority::Recent)?);
             }
         }
         match completion.result {
             Ok(outcome) => {
                 {
-                    let mut shared = self.shared.write().expect("index catalog lock poisoned");
+                    let mut shared = self.write_shared("recording successful scan completion")?;
                     shared
                         .freshness
                         .insert(outcome.session_id.clone(), SessionFreshness::Current);
@@ -63,13 +63,11 @@ impl RuntimeScheduler {
             }
             Err(error) if !self.shutdown.is_cancelled() => {
                 let has_snapshot = self
-                    .shared
-                    .read()
-                    .expect("index catalog lock poisoned")
+                    .read_shared("reading snapshot state after a failed scan")?
                     .snapshots
                     .contains(&session_id);
                 {
-                    let mut shared = self.shared.write().expect("index catalog lock poisoned");
+                    let mut shared = self.write_shared("recording failed scan completion")?;
                     shared.freshness.insert(
                         session_id.clone(),
                         if has_snapshot {
@@ -98,16 +96,14 @@ impl RuntimeScheduler {
             Err(_) => {}
         }
         if let Some(deferred) = self.deferred.remove(&session_id) {
-            self.enqueue(deferred);
+            self.enqueue(deferred)?;
         }
         Ok(())
     }
 
     pub(super) async fn ensure_session(&mut self, session_id: &str) -> Result<()> {
         let source = self
-            .shared
-            .read()
-            .expect("index catalog lock poisoned")
+            .read_shared("locating a session requested for synchronization")?
             .catalog
             .get(session_id)
             .cloned();
@@ -126,9 +122,7 @@ impl RuntimeScheduler {
             return Ok(());
         }
         let state = if self
-            .shared
-            .read()
-            .expect("index catalog lock poisoned")
+            .read_shared("resolving a missing synchronized session")?
             .freshness
             .get(session_id)
             == Some(&SessionFreshness::SourceMissing)
@@ -137,7 +131,7 @@ impl RuntimeScheduler {
         } else {
             SessionSyncState::NotFound
         };
-        self.clear_sync_state(session_id);
+        self.clear_sync_state(session_id)?;
         self.publish_session_state(session_id, state).await;
         Ok(())
     }
@@ -221,9 +215,7 @@ impl RuntimeScheduler {
         for source in rediscovered {
             let source = Arc::new(source);
             let existing = self
-                .shared
-                .read()
-                .expect("index catalog lock poisoned")
+                .read_shared("reading the targeted source catalog")?
                 .catalog
                 .get(&source.session_id)
                 .cloned();
@@ -241,14 +233,12 @@ impl RuntimeScheduler {
                 .as_ref()
                 .is_some_and(|stored| metadata_matches(stored, &source));
             let has_snapshot = self
-                .shared
-                .read()
-                .expect("index catalog lock poisoned")
+                .read_shared("reading the targeted session snapshot state")?
                 .snapshots
                 .contains(&source.session_id);
             self.hot_sessions.insert(source.session_id.clone());
             {
-                let mut shared = self.shared.write().expect("index catalog lock poisoned");
+                let mut shared = self.write_shared("updating the targeted source catalog")?;
                 shared
                     .catalog
                     .insert(source.session_id.clone(), Arc::clone(&source));
@@ -272,9 +262,7 @@ impl RuntimeScheduler {
                         .await?;
                 }
                 if self
-                    .shared
-                    .write()
-                    .expect("index catalog lock poisoned")
+                    .write_shared("resolving a current session synchronization")?
                     .sync_states
                     .remove(&source.session_id)
                     .is_some()
@@ -282,7 +270,7 @@ impl RuntimeScheduler {
                     resolved_current.push(source.session_id.clone());
                 }
             } else {
-                self.enqueue(WorkItem::new(source, priority, None));
+                self.enqueue(WorkItem::new(source, priority, None))?;
             }
         }
         let mut mark_missing = Vec::new();
@@ -294,9 +282,7 @@ impl RuntimeScheduler {
                 mark_missing.push(source);
             }
             let matches = self
-                .shared
-                .read()
-                .expect("index catalog lock poisoned")
+                .read_shared("locating deleted sources in the catalog")?
                 .catalog
                 .iter()
                 .filter(|(_, source)| source.path == path || source.path.starts_with(&path))
@@ -307,7 +293,7 @@ impl RuntimeScheduler {
                     continue;
                 }
                 {
-                    let mut shared = self.shared.write().expect("index catalog lock poisoned");
+                    let mut shared = self.write_shared("removing a deleted source")?;
                     shared.catalog.remove(&session_id);
                     if shared.snapshots.contains(&session_id) {
                         shared
@@ -337,13 +323,13 @@ impl RuntimeScheduler {
             self.publish_session_state(&session_id, SessionSyncState::SourceMissing)
                 .await;
         }
-        self.start_available();
+        self.start_available()?;
         Ok(())
     }
 
     pub(super) async fn audit_hot_sessions(&mut self, generation: u64) -> Result<()> {
         let mut paths = {
-            let shared = self.shared.read().expect("index catalog lock poisoned");
+            let shared = self.read_shared("auditing hot session sources")?;
             self.hot_sessions
                 .iter()
                 .filter_map(|session_id| shared.catalog.get(session_id))
@@ -376,7 +362,7 @@ impl RuntimeScheduler {
                 .context("targeted source rediscovery task panicked")??
         {
             self.hot_sessions.insert(source.session_id.clone());
-            self.enqueue(WorkItem::new(Arc::new(source), priority, None));
+            self.enqueue(WorkItem::new(Arc::new(source), priority, None))?;
         }
         Ok(())
     }
@@ -447,20 +433,18 @@ impl RuntimeScheduler {
         Ok(())
     }
 
-    pub(super) fn set_sync_state(&self, session_id: &str, state: SessionSyncState) {
-        self.shared
-            .write()
-            .expect("index catalog lock poisoned")
+    pub(super) fn set_sync_state(&self, session_id: &str, state: SessionSyncState) -> Result<()> {
+        self.write_shared("updating session synchronization state")?
             .sync_states
             .insert(session_id.to_owned(), state);
+        Ok(())
     }
 
-    pub(super) fn clear_sync_state(&self, session_id: &str) {
-        self.shared
-            .write()
-            .expect("index catalog lock poisoned")
+    pub(super) fn clear_sync_state(&self, session_id: &str) -> Result<()> {
+        self.write_shared("clearing session synchronization state")?
             .sync_states
             .remove(session_id);
+        Ok(())
     }
 
     pub(super) async fn publish_session_state(&self, session_id: &str, state: SessionSyncState) {

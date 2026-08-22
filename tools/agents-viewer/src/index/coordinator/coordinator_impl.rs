@@ -155,19 +155,22 @@ impl IndexCoordinator {
             let lease = gate.register(WorkPriority::Recent);
             let bytes = source.source.size_bytes;
             async move {
-                (
-                    bytes,
-                    scan_source_with_lease(
-                        database,
-                        writer,
-                        source,
-                        max_event_bytes,
-                        now_micros,
-                        scan_shutdown,
-                        lease,
-                    )
-                    .await,
-                )
+                let result = match lease {
+                    Ok(lease) => {
+                        scan_source_with_lease(
+                            database,
+                            writer,
+                            source,
+                            max_event_bytes,
+                            now_micros,
+                            scan_shutdown,
+                            lease,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error.into()),
+                };
+                (bytes, result)
             }
         }))
         .buffer_unordered(MAX_PARSER_TASKS);
@@ -270,7 +273,7 @@ impl IndexCoordinator {
             .apply_full_discovery(discovery, generation, now_micros, foreground_first)
             .await?;
         let mut bootstrap_pending = foreground_first;
-        runtime.start_available();
+        runtime.start_available()?;
         runtime.maybe_finalize_cycle(&mut bootstrap_pending).await?;
 
         let mut scheduler_tick = tokio::time::interval(SCHEDULER_TICK);
@@ -337,7 +340,7 @@ impl IndexCoordinator {
                 _ = scheduler_tick.tick() => {}
             }
             if !draining {
-                runtime.start_available();
+                runtime.start_available()?;
                 runtime.maybe_finalize_cycle(&mut bootstrap_pending).await?;
                 runtime.flush_relationships_if_idle().await?;
                 if recovery_requested
@@ -399,11 +402,29 @@ impl IndexCoordinator {
 }
 
 impl CoordinatorHandle {
-    pub fn ensure_session(&self, session_id: &str) -> Result<SessionSyncStatus> {
+    #[cfg(test)]
+    pub(crate) fn poison_catalog_for_test(&self) {
+        let shared = Arc::clone(&self.shared);
+        let injected = std::thread::spawn(move || {
+            let Ok(_guard) = shared.write() else {
+                panic!("catalog lock was already poisoned before fault injection");
+            };
+            panic!("injected index catalog lock poison");
+        })
+        .join();
+        assert!(injected.is_err(), "fault injection must poison the lock");
+    }
+
+    pub fn ensure_session(
+        &self,
+        session_id: &str,
+    ) -> std::result::Result<SessionSyncStatus, CoordinatorError> {
         let mut shared = self
             .shared
             .write()
-            .map_err(|_| anyhow!("index catalog lock poisoned"))?;
+            .map_err(|_| CoordinatorError::LockPoisoned {
+                context: "queueing direct session synchronization",
+            })?;
         let has_snapshot = shared.snapshots.contains(session_id);
         if let Some(state) = shared.sync_states.get(session_id).copied() {
             return Ok(SessionSyncStatus {
@@ -433,9 +454,9 @@ impl CoordinatorHandle {
                 .try_send(CoordinatorCommand::EnsureSession(session_id.to_owned()))
             {
                 shared.sync_states.remove(session_id);
-                return Err(anyhow!(
-                    "direct synchronization queue is unavailable: {error}"
-                ));
+                return Err(CoordinatorError::QueueUnavailable {
+                    reason: error.to_string(),
+                });
             }
         }
         Ok(SessionSyncStatus {
@@ -445,12 +466,19 @@ impl CoordinatorHandle {
         })
     }
 
-    #[must_use]
-    pub fn freshness(&self, session_id: &str) -> SessionFreshness {
-        self.shared
+    pub fn freshness(
+        &self,
+        session_id: &str,
+    ) -> std::result::Result<SessionFreshness, CoordinatorError> {
+        Ok(self
+            .shared
             .read()
-            .ok()
-            .and_then(|shared| shared.freshness.get(session_id).copied())
-            .unwrap_or(SessionFreshness::Checking)
+            .map_err(|_| CoordinatorError::LockPoisoned {
+                context: "reading session freshness",
+            })?
+            .freshness
+            .get(session_id)
+            .copied()
+            .unwrap_or(SessionFreshness::Checking))
     }
 }

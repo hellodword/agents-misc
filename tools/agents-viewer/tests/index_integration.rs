@@ -995,7 +995,7 @@ async fn append_reads_only_the_suffix_plus_two_bounded_fingerprint_windows() {
         1024 * 1024,
         chrono::Utc::now().timestamp_micros(),
         CancellationToken::new(),
-        gate.register(WorkPriority::Recent),
+        gate.register(WorkPriority::Recent).unwrap(),
     )
     .await
     .unwrap();

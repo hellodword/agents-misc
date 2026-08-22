@@ -216,7 +216,7 @@ pub async fn scan_source(
     shutdown: CancellationToken,
 ) -> Result<ScanOutcome> {
     let gate = IoGate::new();
-    let lease = gate.register(WorkPriority::Recent);
+    let lease = gate.register(WorkPriority::Recent)?;
     scan_source_with_lease(
         database,
         writer,

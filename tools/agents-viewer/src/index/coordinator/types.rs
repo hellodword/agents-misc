@@ -34,6 +34,22 @@ pub struct CoordinatorHandle {
     pub(super) commands: mpsc::Sender<CoordinatorCommand>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum CoordinatorError {
+    #[error("{context}: index catalog lock poisoned")]
+    LockPoisoned { context: &'static str },
+
+    #[error("direct synchronization queue is unavailable: {reason}")]
+    QueueUnavailable { reason: String },
+}
+
+impl CoordinatorError {
+    #[must_use]
+    pub fn is_internal(&self) -> bool {
+        matches!(self, Self::LockPoisoned { .. })
+    }
+}
+
 #[derive(Default)]
 pub(super) struct SharedState {
     pub(super) catalog_ready: bool,
@@ -213,4 +229,24 @@ pub(super) struct RuntimeScheduler {
     pub(super) background_hold: Option<ScanLease>,
     pub(super) cycle: Option<ActiveCycle>,
     pub(super) relationships_dirty: bool,
+}
+
+impl RuntimeScheduler {
+    pub(super) fn read_shared(
+        &self,
+        context: &'static str,
+    ) -> std::result::Result<RwLockReadGuard<'_, SharedState>, CoordinatorError> {
+        self.shared
+            .read()
+            .map_err(|_| CoordinatorError::LockPoisoned { context })
+    }
+
+    pub(super) fn write_shared(
+        &self,
+        context: &'static str,
+    ) -> std::result::Result<RwLockWriteGuard<'_, SharedState>, CoordinatorError> {
+        self.shared
+            .write()
+            .map_err(|_| CoordinatorError::LockPoisoned { context })
+    }
 }

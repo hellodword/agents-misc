@@ -2,7 +2,7 @@ use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
@@ -39,6 +39,7 @@ use types::{
     SCHEDULER_TICK, SharedState, SourceFingerprint, StoredSource, WorkCompletion, WorkItem,
 };
 pub use types::{
-    BACKGROUND_IDLE_DELAY, CoordinatorHandle, DIRECT_SYNC_QUEUE_CAPACITY, FULL_SWEEP_INTERVAL,
-    HOT_REFRESH_INTERVAL, IndexCoordinator, IndexUpdate, MAX_PARSER_TASKS, ReconcileReport,
+    BACKGROUND_IDLE_DELAY, CoordinatorError, CoordinatorHandle, DIRECT_SYNC_QUEUE_CAPACITY,
+    FULL_SWEEP_INTERVAL, HOT_REFRESH_INTERVAL, IndexCoordinator, IndexUpdate, MAX_PARSER_TASKS,
+    ReconcileReport,
 };

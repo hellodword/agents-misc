@@ -138,7 +138,7 @@ async fn hot_audit_requeues_a_completed_session_without_a_watcher_event() {
         .apply_full_discovery(discovery, 1, now_micros, false)
         .await
         .unwrap();
-    runtime.start_available();
+    runtime.start_available().unwrap();
     let completion = tokio::time::timeout(Duration::from_secs(2), completion_receiver.recv())
         .await
         .unwrap()
@@ -183,7 +183,7 @@ async fn hot_audit_requeues_a_completed_session_without_a_watcher_event() {
         background.source.session_id.clone(),
         InflightWork {
             work: background,
-            lease: runtime.gate.register(WorkPriority::Background),
+            lease: runtime.gate.register(WorkPriority::Background).unwrap(),
         },
     );
     runtime.audit_hot_sessions(3).await.unwrap();

@@ -94,9 +94,10 @@ impl RuntimeScheduler {
             };
             freshness.insert(source.session_id.clone(), session_freshness);
             catalog.insert(source.session_id.clone(), Arc::clone(&source));
-            if current && stored_source.is_some_and(|stored| stored.scan_state == "source_missing")
+            if let Some(stored) = stored_source
+                && current
+                && stored.scan_state == "source_missing"
             {
-                let stored = stored_source.expect("checked above");
                 present.push((stored.root_kind, stored.relative_path.clone()));
             }
             match automatic_priority(self.policy, &source, now_micros) {
@@ -117,7 +118,7 @@ impl RuntimeScheduler {
                             Arc::clone(&source),
                             WorkPriority::Recent,
                             Some(generation),
-                        ));
+                        ))?;
                     }
                 }
                 Some(WorkPriority::Background) => {
@@ -130,7 +131,7 @@ impl RuntimeScheduler {
                             Arc::clone(&source),
                             WorkPriority::Background,
                             None,
-                        ));
+                        ))?;
                     }
                 }
                 Some(WorkPriority::Interactive) => unreachable!(),
@@ -155,7 +156,7 @@ impl RuntimeScheduler {
         self.hot_sessions
             .retain(|session_id| discovered_ids.contains(session_id));
         {
-            let mut shared = self.shared.write().expect("index catalog lock poisoned");
+            let mut shared = self.write_shared("installing full discovery state")?;
             shared.catalog_ready = true;
             shared.catalog = catalog;
             shared.freshness = freshness;
@@ -194,43 +195,44 @@ impl RuntimeScheduler {
         Ok(())
     }
 
-    pub(super) fn enqueue(&mut self, mut work: WorkItem) {
+    pub(super) fn enqueue(&mut self, mut work: WorkItem) -> Result<()> {
         let session_id = work.source.session_id.clone();
         if work.priority >= WorkPriority::Recent {
             self.last_high_activity = Instant::now();
             if self.background_hold.is_none() {
-                self.background_hold = Some(self.gate.register(WorkPriority::Recent));
+                self.background_hold = Some(self.gate.register(WorkPriority::Recent)?);
             }
         }
         if let Some(inflight) = self.inflight.get_mut(&session_id) {
-            inflight.lease.promote(work.priority);
+            inflight.lease.promote(work.priority)?;
             if inflight.work.fingerprint == work.fingerprint {
                 inflight.work.priority = inflight.work.priority.max(work.priority);
                 inflight.work.cycle_generation =
                     inflight.work.cycle_generation.or(work.cycle_generation);
-                return;
+                return Ok(());
             }
             if let Some(existing) = self.deferred.get(&session_id) {
                 work.priority = work.priority.max(existing.priority);
                 work.cycle_generation = work.cycle_generation.or(existing.cycle_generation);
             }
             self.deferred.insert(session_id.clone(), work);
-            self.set_sync_state(&session_id, SessionSyncState::Queued);
-            return;
+            self.set_sync_state(&session_id, SessionSyncState::Queued)?;
+            return Ok(());
         }
         if let Some(existing) = self.queued.get(&session_id) {
             work.priority = work.priority.max(existing.priority);
             work.cycle_generation = work.cycle_generation.or(existing.cycle_generation);
             if work.fingerprint == existing.fingerprint && work.priority == existing.priority {
-                return;
+                return Ok(());
             }
         }
         self.queued.insert(session_id.clone(), work.clone());
         self.queue.push(work);
-        self.set_sync_state(&session_id, SessionSyncState::Queued);
+        self.set_sync_state(&session_id, SessionSyncState::Queued)?;
+        Ok(())
     }
 
-    pub(super) fn start_available(&mut self) {
+    pub(super) fn start_available(&mut self) -> Result<()> {
         if self.last_high_activity.elapsed() >= BACKGROUND_IDLE_DELAY {
             self.background_hold = None;
         }
@@ -252,7 +254,7 @@ impl RuntimeScheduler {
                     break;
                 }
                 let work = self.pop_valid().expect("peeked valid work");
-                self.start(work);
+                self.start(work)?;
                 continue;
             }
             let background_active = self
@@ -264,10 +266,11 @@ impl RuntimeScheduler {
                 && self.last_high_activity.elapsed() >= BACKGROUND_IDLE_DELAY
             {
                 let work = self.pop_valid().expect("peeked valid work");
-                self.start(work);
+                self.start(work)?;
             }
             break;
         }
+        Ok(())
     }
 
     pub(super) fn peek_valid(&mut self) -> Option<&WorkItem> {
@@ -295,9 +298,9 @@ impl RuntimeScheduler {
         Some(work)
     }
 
-    pub(super) fn start(&mut self, work: WorkItem) {
+    pub(super) fn start(&mut self, work: WorkItem) -> Result<()> {
         let session_id = work.source.session_id.clone();
-        let lease = self.gate.register(work.priority);
+        let lease = self.gate.register(work.priority)?;
         self.inflight.insert(
             session_id.clone(),
             InflightWork {
@@ -305,7 +308,7 @@ impl RuntimeScheduler {
                 lease: lease.clone(),
             },
         );
-        self.set_sync_state(&session_id, SessionSyncState::Indexing);
+        self.set_sync_state(&session_id, SessionSyncState::Indexing)?;
         let database = self.database.clone();
         let writer = self.writer.clone();
         let shutdown = self.shutdown.clone();
@@ -326,5 +329,6 @@ impl RuntimeScheduler {
                 .send(WorkCompletion { work, result })
                 .await;
         });
+        Ok(())
     }
 }
