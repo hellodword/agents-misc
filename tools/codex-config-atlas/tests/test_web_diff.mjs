@@ -1,14 +1,21 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
   addedFieldCategory,
+  buildSchemaDiff,
   formatDeveloperDiff,
   renderFieldValue,
   requiredChangeCategory,
   requiredState,
+  stableValueKey,
   suppressDuplicateProfileChanges,
 } from "../web/diff_helpers.mjs";
+
+const golden = JSON.parse(
+  readFileSync(new URL("fixtures/schema-diff-golden.json", import.meta.url)),
+);
 
 function field(path, overrides = {}) {
   return {
@@ -24,6 +31,14 @@ function field(path, overrides = {}) {
     additionalPropertiesMode: null,
     ...overrides,
   };
+}
+
+function fieldFromGolden(item) {
+  return field(item.path, {
+    types: item.types ?? ["string"],
+    required: item.required ?? "never",
+    enum: item.enum ?? null,
+  });
 }
 
 test("suppresses only semantically identical profile changes", () => {
@@ -86,6 +101,37 @@ test("classifies and renders required states without boolean compatibility", () 
     () => requiredState(field("value", { required: false })),
     /invalid required state/,
   );
+});
+
+test("matches the shared canonical JSON and schema diff golden cases", () => {
+  for (const item of golden.canonicalValues) {
+    assert.equal(stableValueKey(item.value), item.key);
+  }
+  for (const item of golden.diffCases) {
+    assert.deepEqual(
+      buildSchemaDiff(
+        item.from,
+        item.to,
+        item.fromFields.map(fieldFromGolden),
+        item.toFields.map(fieldFromGolden),
+      ),
+      item.expected,
+      item.name,
+    );
+  }
+  assert.throws(() => stableValueKey(Number.NaN), /JSON numbers must be finite/);
+  assert.throws(() => stableValueKey(undefined), /not JSON-compatible/);
+
+  const before = [field("choice")];
+  const after = [field("choice", { enum: [undefined] })];
+  const originalBefore = [...before];
+  const originalAfterEnum = [...after[0].enum];
+  assert.throws(
+    () => buildSchemaDiff("1", "2", before, after),
+    /not JSON-compatible/,
+  );
+  assert.deepEqual(before, originalBefore);
+  assert.deepEqual(after[0].enum, originalAfterEnum);
 });
 
 test("formats the developer-console diff contract", () => {

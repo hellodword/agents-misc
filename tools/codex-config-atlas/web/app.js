@@ -1,11 +1,8 @@
 import {
-  addedFieldCategory,
+  buildSchemaDiff,
   formatDeveloperDiff,
-  requiredChangeCategory,
-  requiredState,
   renderFieldValue,
-  stableValueKey,
-  suppressDuplicateProfileChanges,
+  summarizeChanges,
 } from "./diff_helpers.mjs";
 
 const state = {
@@ -100,239 +97,6 @@ function normalizeSelection(fromVersion, toVersion) {
   return { fromVersion: from, toVersion: to };
 }
 
-function compareStableValues(left, right) {
-  return stableValueKey(left).localeCompare(stableValueKey(right));
-}
-
-function additionalPropertiesRank(mode) {
-  const order = {
-    forbid: 0,
-    typed: 1,
-    allow_any: 2,
-  };
-  return order[mode] ?? 0;
-}
-
-function setIsSubset(left, right) {
-  for (const value of left) {
-    if (!right.has(value)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function setsEqual(left, right) {
-  return left.size === right.size && setIsSubset(left, right);
-}
-
-function indexEnumValues(field) {
-  const index = new Map();
-  for (const value of field.enum ?? []) {
-    const key = stableValueKey(value);
-    if (!index.has(key)) {
-      index.set(key, value);
-    }
-  }
-  return index;
-}
-
-function summarizeChanges(changes) {
-  const summary = {
-    breakingLike: 0,
-    review: 0,
-    behavior: 0,
-    compatible: 0,
-    documentation: 0,
-  };
-
-  for (const change of changes) {
-    if (summary[change.category] !== undefined) {
-      summary[change.category] += 1;
-    }
-  }
-
-  return summary;
-}
-
-function buildSchemaDiff(fromVersion, toVersion, fromPayload, toPayload) {
-  const before = fromPayload.fieldIndex;
-  const after = toPayload.fieldIndex;
-  for (const field of [...before.values(), ...after.values()]) {
-    requiredState(field);
-  }
-  const changes = [];
-  const allPaths = Array.from(
-    new Set([...before.keys(), ...after.keys()]),
-  ).sort((left, right) => left.localeCompare(right));
-
-  for (const path of allPaths) {
-    const left = before.get(path);
-    const right = after.get(path);
-
-    if (!left) {
-      changes.push({
-        kind: "field_added",
-        category: addedFieldCategory(right.required),
-        path,
-        to: {
-          types: right.types,
-          hasDefault: right.hasDefault,
-          required: right.required,
-        },
-      });
-      continue;
-    }
-
-    if (!right) {
-      changes.push({
-        kind: "field_removed",
-        category: "breakingLike",
-        path,
-        from: {
-          types: left.types,
-          hasDefault: left.hasDefault,
-          required: left.required,
-        },
-      });
-      continue;
-    }
-
-    const leftTypes = new Set(left.types ?? []);
-    const rightTypes = new Set(right.types ?? []);
-    if (!setsEqual(leftTypes, rightTypes)) {
-      let kind = "type_changed";
-      let category = "breakingLike";
-
-      if (setIsSubset(rightTypes, leftTypes)) {
-        kind = "type_narrowed";
-      } else if (setIsSubset(leftTypes, rightTypes)) {
-        kind = "type_widened";
-        category = "compatible";
-      }
-
-      changes.push({
-        kind,
-        category,
-        path,
-        from: Array.from(leftTypes).sort(),
-        to: Array.from(rightTypes).sort(),
-      });
-    }
-
-    const leftEnum = indexEnumValues(left);
-    const rightEnum = indexEnumValues(right);
-    const removedEnum = Array.from(leftEnum.entries())
-      .filter(([key]) => !rightEnum.has(key))
-      .map(([, value]) => value)
-      .sort(compareStableValues);
-    if (removedEnum.length > 0) {
-      changes.push({
-        kind: "enum_values_removed",
-        category: "breakingLike",
-        path,
-        values: removedEnum,
-      });
-    }
-
-    const addedEnum = Array.from(rightEnum.entries())
-      .filter(([key]) => !leftEnum.has(key))
-      .map(([, value]) => value)
-      .sort(compareStableValues);
-    if (addedEnum.length > 0) {
-      changes.push({
-        kind: "enum_values_added",
-        category: "compatible",
-        path,
-        values: addedEnum,
-      });
-    }
-
-    if (left.required !== right.required) {
-      changes.push({
-        kind: "required_changed",
-        category: requiredChangeCategory(left.required, right.required),
-        path,
-        from: left.required,
-        to: right.required,
-      });
-    }
-
-    const leftMode = left.additionalPropertiesMode;
-    const rightMode = right.additionalPropertiesMode;
-    if (leftMode !== rightMode) {
-      const restricted =
-        additionalPropertiesRank(rightMode) <
-        additionalPropertiesRank(leftMode);
-      changes.push({
-        kind: restricted
-          ? "additional_properties_restricted"
-          : "additional_properties_relaxed",
-        category: restricted ? "breakingLike" : "compatible",
-        path,
-        from: leftMode,
-        to: rightMode,
-      });
-    }
-
-    if (left.hasDefault && right.hasDefault) {
-      if (stableValueKey(left.default) !== stableValueKey(right.default)) {
-        changes.push({
-          kind: "default_changed",
-          category: "behavior",
-          path,
-          from: left.default,
-          to: right.default,
-        });
-      }
-    } else if (left.hasDefault && !right.hasDefault) {
-      changes.push({
-        kind: "default_removed",
-        category: "behavior",
-        path,
-        from: left.default,
-      });
-    } else if (!left.hasDefault && right.hasDefault) {
-      changes.push({
-        kind: "default_added",
-        category: "behavior",
-        path,
-        to: right.default,
-      });
-    }
-
-    if ((left.description ?? "") !== (right.description ?? "")) {
-      changes.push({
-        kind: "description_changed",
-        category: "documentation",
-        path,
-      });
-    }
-
-    if (Boolean(left.deprecated) !== Boolean(right.deprecated)) {
-      changes.push({
-        kind: "deprecated_changed",
-        category: "documentation",
-        path,
-        from: Boolean(left.deprecated),
-        to: Boolean(right.deprecated),
-      });
-    }
-  }
-
-  const visibleChanges = suppressDuplicateProfileChanges(
-    changes,
-    before,
-    after,
-  );
-  return {
-    from: fromVersion,
-    to: toVersion,
-    summary: summarizeChanges(visibleChanges),
-    changes: visibleChanges,
-  };
-}
-
 function emptyDiffPayload(fromVersion, toVersion) {
   return {
     from: fromVersion,
@@ -347,7 +111,12 @@ function getDiffPayload(fromVersion, toVersion, fromPayload, toPayload) {
   if (!state.diffCache.has(key)) {
     state.diffCache.set(
       key,
-      buildSchemaDiff(fromVersion, toVersion, fromPayload, toPayload),
+      buildSchemaDiff(
+        fromVersion,
+        toVersion,
+        fromPayload.fields,
+        toPayload.fields,
+      ),
     );
   }
   return state.diffCache.get(key);

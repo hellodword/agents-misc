@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
+from copy import deepcopy
+import io
+import json
+from pathlib import Path
 import unittest
+from unittest.mock import patch
 
+from codex_config_atlas.cli import main as cli_main
+from codex_config_atlas.json_value import canonical_json_key
 from codex_config_atlas.schema_diff import build_schema_diff
 
 
 MISSING = object()
+GOLDEN_PATH = Path(__file__).parent / "fixtures" / "schema-diff-golden.json"
 
 
 def field(
@@ -174,6 +183,114 @@ class SchemaDiffRequiredStateTests(unittest.TestCase):
             build_schema_diff(
                 "1", "2", [field("value")], [field("value", required=False)]
             )
+
+
+class SchemaDiffGoldenTests(unittest.TestCase):
+    def test_canonical_json_keys_and_diff_payloads(self) -> None:
+        fixture = json.loads(GOLDEN_PATH.read_text())
+
+        for item in fixture["canonicalValues"]:
+            with self.subTest(value=item["value"]):
+                self.assertEqual(canonical_json_key(item["value"]), item["key"])
+
+        for case in fixture["diffCases"]:
+            with self.subTest(case=case["name"]):
+                from_fields = [field_from_golden(item) for item in case["fromFields"]]
+                to_fields = [field_from_golden(item) for item in case["toFields"]]
+                payload = build_schema_diff(
+                    case["from"],
+                    case["to"],
+                    from_fields,
+                    to_fields,
+                )
+                self.assertEqual(payload, case["expected"])
+
+                output = io.StringIO()
+                schemas = [
+                    (schema_from_golden(case["fromFields"]), {}),
+                    (schema_from_golden(case["toFields"]), {}),
+                ]
+                with (
+                    patch(
+                        "codex_config_atlas.cli._load_version_inputs",
+                        side_effect=schemas,
+                    ),
+                    redirect_stdout(output),
+                ):
+                    exit_code = cli_main(
+                        [
+                            "diff",
+                            "--schemas",
+                            ".",
+                            "--from",
+                            case["from"],
+                            "--to",
+                            case["to"],
+                            "--format",
+                            "json",
+                        ]
+                    )
+                self.assertEqual(exit_code, 0)
+                self.assertEqual(json.loads(output.getvalue()), case["expected"])
+
+    def test_rejects_non_json_enum_numbers(self) -> None:
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "JSON numbers must be finite"):
+                    canonical_json_key(value)
+
+    def test_failed_enum_diff_does_not_mutate_inputs(self) -> None:
+        before = [field("choice")]
+        after = [{**field("choice"), "enum": [float("inf")]}]
+        original_before = deepcopy(before)
+        original_after = deepcopy(after)
+
+        with self.assertRaisesRegex(ValueError, "JSON numbers must be finite"):
+            build_schema_diff("1", "2", before, after)
+
+        self.assertEqual(before, original_before)
+        self.assertEqual(after, original_after)
+
+
+def field_from_golden(item: dict[str, object]) -> dict[str, object]:
+    return {
+        **field(
+            str(item["path"]),
+            types=item.get("types") or ["string"],
+            required=str(item.get("required", "never")),
+        ),
+        "enum": item.get("enum"),
+    }
+
+
+def schema_from_golden(items: list[dict[str, object]]) -> dict[str, object]:
+    properties: dict[str, object] = {}
+    always: list[str] = []
+    conditional: list[str] = []
+    for item in items:
+        path = str(item["path"])
+        types = item.get("types") or ["string"]
+        property_schema: dict[str, object] = {
+            "type": types[0] if len(types) == 1 else types,
+        }
+        if "enum" in item:
+            property_schema["enum"] = item["enum"]
+        properties[path] = property_schema
+        state = item.get("required", "never")
+        if state == "always":
+            always.append(path)
+        elif state == "conditional":
+            conditional.append(path)
+
+    schema: dict[str, object] = {"type": "object", "properties": properties}
+    if always:
+        schema["required"] = always
+    if conditional:
+        schema["anyOf"] = [
+            {"type": "object", "required": conditional},
+            {"type": "object"},
+        ]
+    return schema
 
 
 if __name__ == "__main__":

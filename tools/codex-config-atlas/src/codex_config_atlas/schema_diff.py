@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .json_value import canonical_json_key
+
 
 CATEGORY_LABELS = {
     "breakingLike": "Breaking-like",
@@ -75,7 +77,8 @@ def _is_duplicate_profile_change(
     base_path: str,
 ) -> bool:
     if not any(
-        _change_without_path(candidate) == _change_without_path(change)
+        canonical_json_key(_change_without_path(candidate))
+        == canonical_json_key(_change_without_path(change))
         for candidate in base_changes
     ):
         return False
@@ -83,23 +86,25 @@ def _is_duplicate_profile_change(
     path = change["path"]
     kind = change["kind"]
     if kind == "field_added":
-        return _field_semantics(after.get(path)) == _field_semantics(
-            after.get(base_path)
-        )
+        return canonical_json_key(
+            _field_semantics(after.get(path))
+        ) == canonical_json_key(_field_semantics(after.get(base_path)))
     if kind == "field_removed":
-        return _field_semantics(before.get(path)) == _field_semantics(
-            before.get(base_path)
-        )
+        return canonical_json_key(
+            _field_semantics(before.get(path))
+        ) == canonical_json_key(_field_semantics(before.get(base_path)))
     if kind == "description_changed":
-        profile_descriptions = (
+        profile_descriptions = [
             (before.get(path) or {}).get("description") or "",
             (after.get(path) or {}).get("description") or "",
-        )
-        base_descriptions = (
+        ]
+        base_descriptions = [
             (before.get(base_path) or {}).get("description") or "",
             (after.get(base_path) or {}).get("description") or "",
+        ]
+        return canonical_json_key(profile_descriptions) == canonical_json_key(
+            base_descriptions
         )
-        return profile_descriptions == base_descriptions
     return True
 
 
@@ -145,8 +150,11 @@ def _types(field: dict[str, Any]) -> set[str]:
     return set(field.get("types") or [])
 
 
-def _enum(field: dict[str, Any]) -> set[Any]:
-    return set(field.get("enum") or [])
+def _enum_index(field: dict[str, Any]) -> dict[str, Any]:
+    index: dict[str, Any] = {}
+    for value in field.get("enum") or []:
+        index.setdefault(canonical_json_key(value), value)
+    return index
 
 
 def build_schema_diff(
@@ -214,9 +222,15 @@ def build_schema_diff(
                 }
             )
 
-        left_enum = _enum(left)
-        right_enum = _enum(right)
-        removed_enum = sorted(left_enum - right_enum)
+        left_enum = _enum_index(left)
+        right_enum = _enum_index(right)
+        removed_enum = [
+            left_enum[key]
+            for key in sorted(
+                set(left_enum) - set(right_enum),
+                key=lambda item: item.encode("utf-16-be"),
+            )
+        ]
         if removed_enum:
             changes.append(
                 {
@@ -226,7 +240,13 @@ def build_schema_diff(
                     "values": removed_enum,
                 }
             )
-        added_enum = sorted(right_enum - left_enum)
+        added_enum = [
+            right_enum[key]
+            for key in sorted(
+                set(right_enum) - set(left_enum),
+                key=lambda item: item.encode("utf-16-be"),
+            )
+        ]
         if added_enum:
             changes.append(
                 {
@@ -272,7 +292,9 @@ def build_schema_diff(
             )
 
         if left["hasDefault"] and right["hasDefault"]:
-            if left["default"] != right["default"]:
+            if canonical_json_key(left["default"]) != canonical_json_key(
+                right["default"]
+            ):
                 changes.append(
                     {
                         "kind": "default_changed",
@@ -368,10 +390,16 @@ def render_schema_diff_markdown(payload: dict[str, Any]) -> str:
                 lines.append(f"  - To: `{', '.join(item['to'])}`")
             elif kind == "enum_values_added":
                 lines.append(f"- Enum values added: `{path}`")
-                lines.append(f"  - Values: `{', '.join(map(str, item['values']))}`")
+                values = ", ".join(
+                    canonical_json_key(value) for value in item["values"]
+                )
+                lines.append(f"  - Values: `{values}`")
             elif kind == "enum_values_removed":
                 lines.append(f"- Enum values removed: `{path}`")
-                lines.append(f"  - Values: `{', '.join(map(str, item['values']))}`")
+                values = ", ".join(
+                    canonical_json_key(value) for value in item["values"]
+                )
+                lines.append(f"  - Values: `{values}`")
             elif kind == "description_changed":
                 lines.append(f"- Description changed: `{path}`")
             elif kind == "deprecated_changed":

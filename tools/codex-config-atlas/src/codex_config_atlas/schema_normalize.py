@@ -3,6 +3,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from .json_value import canonical_json_key
+
 
 PLACEHOLDER_KEY = "<name>"
 EXAMPLE_KEY = "example"
@@ -12,11 +14,14 @@ REQUIRED_NEVER = "never"
 
 
 def _unique(values: list[Any]) -> list[Any]:
-    seen: list[Any] = []
+    seen: set[str] = set()
+    unique: list[Any] = []
     for value in values:
-        if value not in seen:
-            seen.append(value)
-    return seen
+        key = canonical_json_key(value)
+        if key not in seen:
+            seen.add(key)
+            unique.append(value)
+    return unique
 
 
 def _json_pointer_escape(segment: str) -> str:

@@ -1,0 +1,187 @@
+{
+  "canonicalValues": [
+    { "value": null, "key": "null" },
+    { "value": false, "key": "false" },
+    { "value": true, "key": "true" },
+    { "value": 1.0, "key": "1" },
+    { "value": 1.5, "key": "1.5" },
+    { "value": "café", "key": "\"café\"" },
+    {
+      "value": ["nested", { "z": 0, "a": false }],
+      "key": "[\"nested\",{\"a\":false,\"z\":0}]"
+    },
+    {
+      "value": { "z": [2, null], "a": { "b": true } },
+      "key": "{\"a\":{\"b\":true},\"z\":[2,null]}"
+    }
+  ],
+  "diffCases": [
+    {
+      "name": "object-array-and-primitive-enum-values",
+      "from": "1.0.0",
+      "to": "1.1.0",
+      "fromFields": [
+        {
+          "path": "choice",
+          "enum": [
+            { "b": 2, "a": [true, null] },
+            ["nested", { "z": 0, "a": false }],
+            null,
+            true,
+            1,
+            "old"
+          ]
+        }
+      ],
+      "toFields": [
+        {
+          "path": "choice",
+          "enum": [
+            { "a": [true, null], "b": 2 },
+            ["nested", { "a": false, "z": 0 }],
+            null,
+            false,
+            2,
+            "new"
+          ]
+        }
+      ],
+      "expected": {
+        "from": "1.0.0",
+        "to": "1.1.0",
+        "summary": {
+          "breakingLike": 1,
+          "review": 0,
+          "behavior": 0,
+          "compatible": 1,
+          "documentation": 0
+        },
+        "changes": [
+          {
+            "kind": "enum_values_removed",
+            "category": "breakingLike",
+            "path": "choice",
+            "values": ["old", 1, true]
+          },
+          {
+            "kind": "enum_values_added",
+            "category": "compatible",
+            "path": "choice",
+            "values": ["new", 2, false]
+          }
+        ]
+      }
+    },
+    {
+      "name": "object-key-order-is-semantic-no-op",
+      "from": "1.0.0",
+      "to": "1.1.0",
+      "fromFields": [
+        { "path": "choice", "enum": [{ "z": 1, "a": [true, null] }] }
+      ],
+      "toFields": [
+        { "path": "choice", "enum": [{ "a": [true, null], "z": 1 }] }
+      ],
+      "expected": {
+        "from": "1.0.0",
+        "to": "1.1.0",
+        "summary": {
+          "breakingLike": 0,
+          "review": 0,
+          "behavior": 0,
+          "compatible": 0,
+          "documentation": 0
+        },
+        "changes": []
+      }
+    },
+    {
+      "name": "required-transition-classification",
+      "from": "1.0.0",
+      "to": "1.1.0",
+      "fromFields": [
+        { "path": "breaking", "required": "never" },
+        { "path": "compatible", "required": "always" },
+        { "path": "review_from", "required": "conditional" },
+        { "path": "review_to", "required": "never" }
+      ],
+      "toFields": [
+        { "path": "breaking", "required": "always" },
+        { "path": "compatible", "required": "never" },
+        { "path": "review_from", "required": "never" },
+        { "path": "review_to", "required": "conditional" }
+      ],
+      "expected": {
+        "from": "1.0.0",
+        "to": "1.1.0",
+        "summary": {
+          "breakingLike": 1,
+          "review": 2,
+          "behavior": 0,
+          "compatible": 1,
+          "documentation": 0
+        },
+        "changes": [
+          {
+            "kind": "required_changed",
+            "category": "breakingLike",
+            "path": "breaking",
+            "from": "never",
+            "to": "always"
+          },
+          {
+            "kind": "required_changed",
+            "category": "compatible",
+            "path": "compatible",
+            "from": "always",
+            "to": "never"
+          },
+          {
+            "kind": "required_changed",
+            "category": "review",
+            "path": "review_from",
+            "from": "conditional",
+            "to": "never"
+          },
+          {
+            "kind": "required_changed",
+            "category": "review",
+            "path": "review_to",
+            "from": "never",
+            "to": "conditional"
+          }
+        ]
+      }
+    },
+    {
+      "name": "conditional-field-addition",
+      "from": "1.0.0",
+      "to": "1.1.0",
+      "fromFields": [],
+      "toFields": [{ "path": "conditional", "required": "conditional" }],
+      "expected": {
+        "from": "1.0.0",
+        "to": "1.1.0",
+        "summary": {
+          "breakingLike": 0,
+          "review": 1,
+          "behavior": 0,
+          "compatible": 0,
+          "documentation": 0
+        },
+        "changes": [
+          {
+            "kind": "field_added",
+            "category": "review",
+            "path": "conditional",
+            "to": {
+              "types": ["string"],
+              "hasDefault": false,
+              "required": "conditional"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
