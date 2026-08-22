@@ -278,6 +278,143 @@ describe("Agents Viewer UI", () => {
     for (const [expected, override] of cases)
       expect(conversationDisplayType({ ...entry, ...override })).toBe(expected);
   });
+  it("characterizes major transcript entries before module extraction", () => {
+    const entries: EntryListItem[] = [
+      { ...entry, timestamp: undefined },
+      {
+        ...entry,
+        id: "assistant",
+        sequence: 2,
+        timestamp: undefined,
+        presentation: "response",
+        role: "assistant",
+        title: "Assistant",
+        primaryPreview: "A complete answer",
+      },
+      {
+        ...entry,
+        id: "request",
+        sequence: 3,
+        timestamp: undefined,
+        kind: "tool",
+        presentation: "technical",
+        role: undefined,
+        toolKind: "requestUserInput",
+        toolStatus: "running",
+        title: "request_user_input",
+        primaryPreview: "",
+        metadata: {
+          requestUserInputQuestions: [
+            {
+              id: "choice",
+              question: "Choose a target",
+              isOther: true,
+              isSecret: false,
+              options: [
+                { label: "Safe", description: "Use the safe target." },
+                { label: "Fast", description: "Use the fast target." },
+              ],
+            },
+          ],
+        },
+      },
+      {
+        ...entry,
+        id: "reasoning",
+        sequence: 4,
+        timestamp: undefined,
+        kind: "reasoning",
+        presentation: "technical",
+        role: undefined,
+        title: "Reasoning",
+        primaryPreview: "Compare the boundaries",
+      },
+      {
+        ...entry,
+        id: "command",
+        sequence: 5,
+        timestamp: undefined,
+        kind: "tool",
+        presentation: "technical",
+        role: undefined,
+        toolKind: "command",
+        toolStatus: "succeeded",
+        title: "exec_command",
+        primaryPreview: '{"cmd":"just agents-viewer-test"}',
+      },
+      {
+        ...entry,
+        id: "plan",
+        sequence: 6,
+        timestamp: undefined,
+        kind: "plan",
+        presentation: "technical",
+        role: undefined,
+        title: "Plan",
+        primaryPreview: "# Plan\n\nShip safely",
+      },
+      {
+        ...entry,
+        id: "warning",
+        sequence: 7,
+        timestamp: undefined,
+        kind: "warning",
+        presentation: "technical",
+        role: undefined,
+        title: "Warning",
+        primaryPreview: "Synthetic warning",
+      },
+      {
+        ...entry,
+        id: "context",
+        sequence: 8,
+        timestamp: undefined,
+        kind: "context",
+        presentation: "internal",
+        role: undefined,
+        title: "Context",
+        primaryPreview: "Synthetic context",
+      },
+    ];
+    const { container } = render(
+      <VirtualTranscript entries={entries} onInspect={() => {}} />,
+    );
+    const signature = Array.from(
+      container.querySelectorAll<HTMLElement>("[data-transcript-entry]"),
+    ).map((element) => ({
+      className: element.className,
+      text: element.textContent?.replace(/\s+/g, " ").trim(),
+    }));
+    expect(signature).toEqual([
+      {
+        className: "message-row message-user",
+        text: "User: Hello world",
+      },
+      {
+        className: "message-row message-assistant",
+        text: "Assistant: A complete answer",
+      },
+      {
+        className:
+          "message-row message-assistant request-user-input-message",
+        text: "Choose a targetSafe — Use the safe target.Fast — Use the fast target.",
+      },
+      {
+        className: "notice-row",
+        text: "Reasoning:Compare the boundaries",
+      },
+      {
+        className: "notice-row",
+        text: "Executing:just agents-viewer-test",
+      },
+      {
+        className: "message-row message-assistant",
+        text: "Assistant: Plan Ship safely",
+      },
+      { className: "notice-row", text: "Warning:Synthetic warning" },
+      { className: "notice-row", text: "Context:Synthetic context" },
+    ]);
+  });
   it("renders session, deep link, inspector raw chunk, search, and SSE-safe states", async () => {
     const user = userEvent.setup();
     render(

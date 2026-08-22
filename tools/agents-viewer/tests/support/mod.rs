@@ -2,6 +2,8 @@ use agents_viewer::index::Database;
 use agents_viewer::index::coordinator::IndexCoordinator;
 use agents_viewer::index::writer::spawn_writer;
 use agents_viewer::server::{AppState, router};
+use std::fs::FileTimes;
+use std::time::{Duration, SystemTime};
 use tempfile::TempDir;
 
 pub struct TestApp {
@@ -15,13 +17,17 @@ impl TestApp {
         let source_home = temp.path().join("codex-home");
         let sessions = source_home.join("sessions/2025/01/02");
         std::fs::create_dir_all(&sessions).unwrap();
+        let fixture =
+            sessions.join("rollout-2025-01-02T03-04-05-11111111-1111-4111-8111-111111111111.jsonl");
         std::fs::write(
-            sessions.join("rollout-2025-01-02T03-04-05-11111111-1111-4111-8111-111111111111.jsonl"),
+            &fixture,
             include_bytes!("../fixtures/rollouts/v0_120.jsonl"),
         )
         .unwrap();
+        let plan =
+            sessions.join("rollout-2024-01-01T00-00-00-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl");
         std::fs::write(
-            sessions.join("rollout-2024-01-01T00-00-00-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl"),
+            &plan,
             concat!(
                 "{\"timestamp\":\"2024-01-01T00:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"cwd\":\"/work/plan\",\"source\":\"cli\"}}\n",
                 "{\"timestamp\":\"2024-01-01T00:00:30Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Plan session grouping\"}]}}\n",
@@ -30,14 +36,26 @@ impl TestApp {
             ),
         )
         .unwrap();
+        let handoff =
+            sessions.join("rollout-2024-01-01T00-02-00-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl");
         std::fs::write(
-            sessions.join("rollout-2024-01-01T00-02-00-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl"),
+            &handoff,
             concat!(
                 "{\"timestamp\":\"2024-01-01T00:02:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"cwd\":\"/work/plan\",\"source\":\"exec\"}}\n",
                 "{\"timestamp\":\"2024-01-01T00:02:30Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"A previous agent produced the plan below to accomplish the user's task. Implement the plan in a fresh context. Treat the plan as the source of user intent, re-read files as needed, and carry the work through implementation and verification.\\n\\n# Group sessions\\nImplement the tree\"}]}}\n",
             ),
         )
         .unwrap();
+        let fixed_times = FileTimes::new()
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_735_689_600));
+        for path in [&fixture, &plan, &handoff] {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_times(fixed_times)
+                .unwrap();
+        }
         let roots = agents_viewer::paths::resolve_source_roots(&source_home).unwrap();
         let cache =
             agents_viewer::paths::resolve_cache_paths(&roots.home, &temp.path().join("cache"))
