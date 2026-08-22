@@ -1,0 +1,87 @@
+name: Set up Nix
+description: Install and configure Nix on a one-use GitHub-hosted Ubuntu runner
+
+inputs:
+  nix_extra_substituters:
+    description: Space- or newline-separated extra substituter URLs
+    required: false
+    default: ""
+  nix_extra_trusted_public_keys:
+    description: Space- or newline-separated extra trusted public keys
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install and configure Nix
+      if: ${{ runner.os == 'Linux' && runner.environment == 'github-hosted' }}
+      shell: bash
+      env:
+        GITHUB_ACCESS_TOKEN: ${{ github.token }}
+        NIX_EXTRA_SUBSTITUTERS: ${{ inputs.nix_extra_substituters }}
+        NIX_EXTRA_TRUSTED_PUBLIC_KEYS: ${{ inputs.nix_extra_trusted_public_keys }}
+      run: |
+        set -euo pipefail
+        [[ "${GITHUB_ACTIONS:-}" == "true" ]] || exit 1
+        [[ "${{ runner.environment }}" == "github-hosted" ]] || exit 1
+        [[ "$(lsb_release -is 2>/dev/null || true)" == "Ubuntu" ]] || exit 1
+
+        sudo apt-get update
+        sudo apt-get install -y curl ca-certificates xz-utils
+        curl -fsSL https://nixos.org/nix/install | sh -s -- --daemon
+
+        echo "/nix/var/nix/profiles/default/bin" >> "$GITHUB_PATH"
+        echo "NIX_REMOTE=daemon" >> "$GITHUB_ENV"
+        echo "TMPDIR=/nix/tmp" >> "$GITHUB_ENV"
+        export NIX_REMOTE=daemon
+        export TMPDIR=/nix/tmp
+        sudo mkdir -p /nix/build /nix/tmp
+        sudo chmod 1777 /nix/tmp
+        . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+
+        normalize_list() {
+          local value="${1:-}"
+          value="${value//$'\n'/ }"
+          value="${value//$'\t'/ }"
+          printf '%s\n' "$value" | awk '{$1=$1; print}'
+        }
+
+        current_user="$(id -un)"
+        experimental="$(normalize_list "${NIX_EXPERIMENTAL_FEATURES:-nix-command flakes}")"
+        jobs="$(normalize_list "${NIX_MAX_JOBS:-auto}")"
+        trusted_users="$(normalize_list "${NIX_TRUSTED_USERS:-root ${current_user}}")"
+        access_tokens="$(normalize_list "${NIX_ACCESS_TOKENS:-}")"
+        [[ -n "$access_tokens" || -z "${GITHUB_ACCESS_TOKEN:-}" ]] \
+          || access_tokens="github.com=${GITHUB_ACCESS_TOKEN}"
+        substituters="$(normalize_list "${NIX_EXTRA_SUBSTITUTERS:-}")"
+        public_keys="$(normalize_list "${NIX_EXTRA_TRUSTED_PUBLIC_KEYS:-}")"
+
+        sudo mkdir -p /etc/nix
+        sudo touch /etc/nix/nix.conf
+        sudo sed -i \
+          -e '/^[[:space:]]*experimental-features[[:space:]]*=/d' \
+          -e '/^[[:space:]]*build-dir[[:space:]]*=/d' \
+          -e '/^[[:space:]]*max-jobs[[:space:]]*=/d' \
+          -e '/^[[:space:]]*trusted-users[[:space:]]*=/d' \
+          -e '/^[[:space:]]*access-tokens[[:space:]]*=/d' \
+          -e '/^[[:space:]]*extra-substituters[[:space:]]*=/d' \
+          -e '/^[[:space:]]*extra-trusted-public-keys[[:space:]]*=/d' \
+          /etc/nix/nix.conf
+        {
+          echo "experimental-features = ${experimental}"
+          echo "build-dir = /nix/build"
+          echo "max-jobs = ${jobs}"
+          echo "trusted-users = ${trusted_users}"
+          [[ -z "$access_tokens" ]] || echo "access-tokens = ${access_tokens}"
+          [[ -z "$substituters" ]] || echo "extra-substituters = ${substituters}"
+          [[ -z "$public_keys" ]] || echo "extra-trusted-public-keys = ${public_keys}"
+        } | sudo tee -a /etc/nix/nix.conf >/dev/null
+        sudo systemctl restart nix-daemon.service
+
+        nix --version
+        nix config show experimental-features
+        nix config show build-dir
+        nix config show substituters
+        nix config show trusted-public-keys
+        nix config show trusted-users

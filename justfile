@@ -31,6 +31,17 @@ _check-agent-rules:
   python3 scripts/check-agent-rules.py --root .
   python3 -m unittest discover -s tests -p 'test_*.py'
 
+# Validate GitHub Actions syntax, official major tags, and verification gates.
+check-workflows:
+  nix develop .#dev --command just _check-workflows
+
+[private]
+_check-workflows:
+  @test "${AGENTS_MISC_SHELL:-}" = "dev" || { echo "error: run 'just check-workflows' to enter nix develop .#dev" >&2; exit 2; }
+  actionlint .github/workflows/*.yml
+  python3 scripts/check-workflows.py --root .
+  python3 -m unittest tests.test_check_workflows
+
 # Seed the independent Agent eval ChatGPT credential vault.
 agent-evals-auth-init *args:
   {{agent_evals_nix}} just -- _agent-evals-auth-init "$@"

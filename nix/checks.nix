@@ -90,10 +90,18 @@ lib.genAttrs supportedSystems (
       touch "$out"
     '';
     github-workflows =
-      pkgs.runCommand "github-workflows-check" { nativeBuildInputs = [ pkgs.actionlint ]; }
+      pkgs.runCommand "github-workflows-check"
+        {
+          nativeBuildInputs = [
+            pkgs.actionlint
+            agentRulesPython
+          ];
+        }
         ''
           cd ${../.}
           actionlint .github/workflows/*.yml
+          python3 scripts/check-workflows.py --root .
+          python3 -m unittest tests.test_check_workflows
           touch "$out"
         '';
   }

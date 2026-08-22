@@ -9,8 +9,28 @@ permissions:
   contents: read
 
 jobs:
+  verify:
+    name: Verify agents viewer
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/setup-nix
+
+      - name: Run Viewer checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          nix build --accept-flake-config --no-link \
+            .#checks.x86_64-linux.agents-viewer-rust \
+            .#checks.x86_64-linux.agents-viewer-web \
+            .#checks.x86_64-linux.agents-viewer-bindings \
+            .#checks.x86_64-linux.github-workflows
+
   build:
     name: Build ${{ matrix.artifact }}
+    needs: verify
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -33,7 +53,7 @@ jobs:
             executable: tools/agents-viewer/target/release/agents-viewer
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v6
         with:
