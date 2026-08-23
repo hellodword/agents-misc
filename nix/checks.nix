@@ -5,6 +5,7 @@
   codexCheckFor,
   codexConfigAtlasFor,
   agentsViewerFor,
+  formattingCheckFor,
 }:
 
 lib.genAttrs supportedSystems (
@@ -22,6 +23,7 @@ lib.genAttrs supportedSystems (
       pkgs.runCommand "codex-patch-contract-check"
         {
           nativeBuildInputs = [
+            pkgs.coreutils
             pkgs.gitMinimal
             pkgs.python3
           ];
@@ -57,6 +59,7 @@ lib.genAttrs supportedSystems (
       '';
   in
   {
+    formatting = formattingCheckFor system;
     agent-rules = pkgs.runCommand "agent-rules-check" { nativeBuildInputs = [ agentRulesPython ]; } ''
       cd ${../.}
       python3 scripts/check-agent-rules.py --root .
@@ -116,5 +119,8 @@ lib.genAttrs supportedSystems (
           python3 -m unittest tests.test_check_workflows
           touch "$out"
         '';
+  }
+  // lib.optionalAttrs pkgs.stdenv.isLinux {
+    agents-viewer-e2e = agentsViewer.checks.e2e;
   }
 )

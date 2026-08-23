@@ -2,16 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import shutil
 import sys
 import tempfile
 import urllib.request
-import uuid
 from pathlib import Path
 from typing import Any
 
+from .atomic_output import replace_directory
 from .build_data import build_data
 from .build_site import build_site
 from .defaults_diff import build_defaults_diff, render_defaults_diff_markdown
@@ -197,33 +196,6 @@ def _write_schema_file(path: Path, schema_bytes: bytes) -> None:
     path.write_bytes(schema_bytes)
 
 
-def _atomic_replace_directory(candidate: Path, target: Path) -> Path | None:
-    backup: Path | None = None
-    if target.exists():
-        backup = target.parent / f".{target.name}-backup-{uuid.uuid4().hex}"
-        os.replace(target, backup)
-
-    try:
-        os.replace(candidate, target)
-    except BaseException as install_error:
-        if backup is not None and backup.exists():
-            try:
-                os.replace(backup, target)
-            except BaseException as restore_error:
-                raise RuntimeError(
-                    f"failed to install candidate and restore registry; recover {backup} to {target}"
-                ) from restore_error
-        raise install_error
-
-    if backup is None:
-        return None
-    try:
-        shutil.rmtree(backup)
-    except OSError:
-        return backup
-    return None
-
-
 def _handle_current(args: argparse.Namespace) -> int:
     if not args.current_version:
         raise ValueError("--current-version is required for the current command")
@@ -284,6 +256,7 @@ def _handle_sync_schema(args: argparse.Namespace) -> int:
     candidate = Path(
         tempfile.mkdtemp(prefix=f".{schemas_dir.name}-sync-", dir=schemas_dir.parent)
     )
+    retained_old: Path | None = None
     try:
         if schemas_dir.exists():
             shutil.copytree(schemas_dir, candidate, dirs_exist_ok=True, symlinks=True)
@@ -329,17 +302,17 @@ def _handle_sync_schema(args: argparse.Namespace) -> int:
         save_manifest(candidate, manifest)
         validate_manifest(candidate, manifest, min_version=args.min_version)
 
-        leftover_backup = _atomic_replace_directory(candidate, schemas_dir)
+        retained_old = replace_directory(candidate, schemas_dir)
     finally:
-        if candidate.exists():
+        if candidate.exists() and candidate != retained_old:
             shutil.rmtree(candidate)
 
     sys.stdout.write(
         f"synced {version} -> {schema_path_for_version(schemas_dir, version)}\n"
     )
-    if leftover_backup is not None:
+    if retained_old is not None:
         print(
-            f"warning: installed registry but could not remove backup {leftover_backup}",
+            f"warning: installed registry but old registry remains at {retained_old}",
             file=sys.stderr,
         )
     return 0

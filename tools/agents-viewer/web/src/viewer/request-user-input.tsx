@@ -193,7 +193,9 @@ export function requestUserInputDetails(
     legacyNotes: typeof legacyNotes === "string" ? legacyNotes : undefined,
   };
 }
-export function recordValue(value: unknown): Record<string, unknown> | undefined {
+export function recordValue(
+  value: unknown,
+): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;

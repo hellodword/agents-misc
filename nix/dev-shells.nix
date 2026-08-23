@@ -51,23 +51,33 @@ lib.genAttrs supportedSystems (
       RUSTY_V8_ARCHIVE = codexPackage.RUSTY_V8_ARCHIVE;
       RUSTY_V8_SRC_BINDING_PATH = codexPackage.RUSTY_V8_SRC_BINDING_PATH;
     };
-    agentsViewerShell = pkgs.mkShell {
-      packages =
-        with pkgs;
-        [
-          cargo
-          clippy
-          just
-          nodejs_24
-          pkg-config
-          rustc
-          rustfmt
-          sqlite
-        ]
-        ++ lib.optionals stdenv.isLinux [ strace ];
+    agentsViewerShell = pkgs.mkShell (
+      {
+        packages =
+          with pkgs;
+          [
+            cargo
+            clippy
+            just
+            nodejs_24
+            pkg-config
+            rustc
+            rustfmt
+            sqlite
+          ]
+          ++ lib.optionals stdenv.isLinux [
+            chromium
+            strace
+          ];
 
-      AGENTS_MISC_SHELL = "agents-viewer";
-    };
+        AGENTS_MISC_SHELL = "agents-viewer";
+        CARGO_TARGET_DIR = "target";
+      }
+      // lib.optionalAttrs pkgs.stdenv.isLinux {
+        PLAYWRIGHT_NIX_BROWSER_PATH = lib.getExe pkgs.chromium;
+        PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
+      }
+    );
     agentEvalsShell = pkgs.mkShell {
       packages = [
         codexPackage

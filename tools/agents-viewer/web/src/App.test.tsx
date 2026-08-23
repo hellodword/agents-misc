@@ -229,19 +229,23 @@ describe("Agents Viewer UI", () => {
   });
   it("classifies every normalized conversation display type", () => {
     const cases: Array<
-      [
-        ReturnType<typeof conversationDisplayType>,
-        Partial<EntryListItem>,
-      ]
+      [ReturnType<typeof conversationDisplayType>, Partial<EntryListItem>]
     > = [
       ["received", { kind: "message", presentation: "response" }],
       ["sent", { kind: "message", presentation: "user" }],
       [
         "requestUserInput",
-        { kind: "tool", presentation: "technical", toolKind: "requestUserInput" },
+        {
+          kind: "tool",
+          presentation: "technical",
+          toolKind: "requestUserInput",
+        },
       ],
       ["reasoning", { kind: "reasoning", presentation: "technical" }],
-      ["exec", { kind: "tool", presentation: "technical", toolKind: "command" }],
+      [
+        "exec",
+        { kind: "tool", presentation: "technical", toolKind: "command" },
+      ],
       ["plan", { kind: "plan", presentation: "technical" }],
       ["patch", { kind: "tool", presentation: "technical", toolKind: "patch" }],
       ["mcp", { kind: "tool", presentation: "technical", toolKind: "mcp" }],
@@ -265,15 +269,15 @@ describe("Agents Viewer UI", () => {
         "viewImage",
         { kind: "tool", presentation: "technical", toolKind: "viewImage" },
       ],
-      ["otherTool", { kind: "tool", presentation: "technical", toolKind: "other" }],
+      [
+        "otherTool",
+        { kind: "tool", presentation: "technical", toolKind: "other" },
+      ],
       ["warning", { kind: "warning", presentation: "technical" }],
       ["error", { kind: "error", presentation: "technical" }],
       ["context", { kind: "context", presentation: "technical" }],
       ["marker", { kind: "marker", presentation: "technical" }],
-      [
-        "technicalMessage",
-        { kind: "message", presentation: "technical" },
-      ],
+      ["technicalMessage", { kind: "message", presentation: "technical" }],
       ["internalMessage", { kind: "message", presentation: "internal" }],
       ["unknown", { kind: "unknown", presentation: "technical" }],
     ];
@@ -397,8 +401,7 @@ describe("Agents Viewer UI", () => {
         text: "Assistant: A complete answer",
       },
       {
-        className:
-          "message-row message-assistant request-user-input-message",
+        className: "message-row message-assistant request-user-input-message",
         text: "Choose a targetSafe — Use the safe target.Fast — Use the fast target.",
       },
       {
@@ -484,9 +487,8 @@ describe("Agents Viewer UI", () => {
     );
     expect(
       JSON.parse(
-        localStorage.getItem(
-          "agents-viewer-conversation-display-types",
-        ) ?? "null",
+        localStorage.getItem("agents-viewer-conversation-display-types") ??
+          "null",
       ),
     ).toEqual([
       "received",
@@ -543,9 +545,7 @@ describe("Agents Viewer UI", () => {
     );
     await screen.findByRole("heading", { name: "Hello session" });
     await user.click(screen.getByRole("button", { name: "Settings" }));
-    expect(
-      screen.getByRole("checkbox", { name: "Reasoning" }),
-    ).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Reasoning" })).toBeChecked();
     expect(
       screen.getByRole("checkbox", { name: "Exec commands" }),
     ).toBeChecked();
@@ -591,22 +591,21 @@ describe("Agents Viewer UI", () => {
     await user.click(screen.getByRole("button", { name: "Apply" }));
     expect(
       JSON.parse(
-        localStorage.getItem(
-          "agents-viewer-conversation-display-types",
-        ) ?? "null",
+        localStorage.getItem("agents-viewer-conversation-display-types") ??
+          "null",
       ),
     ).toEqual(["received", "sent", "requestUserInput", "exec", "plan"]);
   });
   it("temporarily includes a linked entry type without persisting it", async () => {
     const user = userEvent.setup();
     render(
-      <MemoryRouter
-        initialEntries={["/sessions/s1?entry=warning-entry"]}
-      >
+      <MemoryRouter initialEntries={["/sessions/s1?entry=warning-entry"]}>
         <App />
       </MemoryRouter>,
     );
-    expect(await screen.findByText("Linked warning detail")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Linked warning detail"),
+    ).toBeInTheDocument();
     await waitFor(() =>
       expect(
         vi
@@ -630,9 +629,8 @@ describe("Agents Viewer UI", () => {
     await user.click(screen.getByRole("button", { name: "Apply" }));
     expect(
       JSON.parse(
-        localStorage.getItem(
-          "agents-viewer-conversation-display-types",
-        ) ?? "null",
+        localStorage.getItem("agents-viewer-conversation-display-types") ??
+          "null",
       ),
     ).toEqual([
       "received",
@@ -903,7 +901,9 @@ describe("Agents Viewer UI", () => {
       <VirtualTranscript entries={[attached]} onInspect={vi.fn()} />,
     );
 
-    expect(screen.getByRole("list", { name: "Attachments" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("list", { name: "Attachments" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("Images: 2")).toBeInTheDocument();
     expect(screen.getByText("Audio: 1")).toBeInTheDocument();
     expect(screen.getByText("Other: 1")).toBeInTheDocument();
@@ -1504,8 +1504,9 @@ describe("Agents Viewer UI", () => {
         <App />
       </MemoryRouter>,
     );
-    expect(await screen.findByText("Session synchronization queued…"))
-      .toBeInTheDocument();
+    expect(
+      await screen.findByText("Session synchronization queued…"),
+    ).toBeInTheDocument();
     expect(
       controlled.mock.calls.filter(([input]) =>
         String(input).endsWith("/sessions/s1"),

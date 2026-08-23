@@ -4,6 +4,7 @@ use agents_viewer::model::{
     SessionSummary, SourceKind, SseEventType, ToolKind, ToolStatus, typescript_contract,
 };
 use pretty_assertions::assert_eq;
+use std::process::Command;
 
 #[test]
 fn session_summary_round_trips_and_omits_absent_optional_fields() {
@@ -141,4 +142,39 @@ fn generated_contract_is_deterministic_and_machine_independent() {
     assert!(first.contains("export type SourceKind"));
     assert!(first.contains("parentThreadId?: string"));
     assert!(!first.contains("bigint"));
+}
+
+#[test]
+fn exporter_requires_an_explicit_output_path() {
+    let result = Command::new(env!("CARGO_BIN_EXE_export_types"))
+        .arg("--check")
+        .output()
+        .expect("run export_types");
+
+    assert_eq!(result.status.code(), Some(2));
+    let stderr = String::from_utf8(result.stderr).expect("UTF-8 stderr");
+    assert!(
+        stderr.contains("--output <PATH>"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn exporter_rejects_a_mismatched_explicit_target() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let output = temporary.path().join("wrong-api.ts");
+    std::fs::write(&output, "stale contract\n").expect("write stale contract");
+
+    let result = Command::new(env!("CARGO_BIN_EXE_export_types"))
+        .args(["--check", "--output"])
+        .arg(&output)
+        .output()
+        .expect("run export_types");
+
+    assert_eq!(result.status.code(), Some(1));
+    let stderr = String::from_utf8(result.stderr).expect("UTF-8 stderr");
+    assert!(
+        stderr.contains(output.to_string_lossy().as_ref()),
+        "unexpected stderr: {stderr}"
+    );
 }

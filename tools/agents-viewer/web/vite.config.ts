@@ -42,7 +42,7 @@ export default defineConfig({
   },
   server: { proxy: { "/api": "http://127.0.0.1:4747" } },
   test: {
-    include: ["src/**/*.test.{ts,tsx}"],
+    include: ["src/**/*.test.{ts,tsx}", "e2e/browser.test.ts"],
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
     css: true,

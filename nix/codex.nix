@@ -12,6 +12,7 @@ let
   expectedUpstreamFields = [
     "generate_commands"
     "ref"
+    "regression_commands"
     "revision"
     "url"
     "validation_command"
@@ -176,6 +177,7 @@ let
         cd codex-rs
         ${lib.escapeShellArgs upstream.validation_command}
         ${renderCommands targetedTests}
+        ${renderCommands upstream.regression_commands}
         touch "$TMPDIR/behavior-ok"
         touch "$TMPDIR/hooks-rust-ok"
 

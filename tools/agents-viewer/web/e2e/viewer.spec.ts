@@ -381,7 +381,9 @@ test("persists a resized or collapsed sidebar without inspector resets", async (
     .toBeCloseTo(persistedWidth, 0);
 });
 
-test("keeps the desktop inspector within its resize limits", async ({ page }) => {
+test("keeps the desktop inspector within its resize limits", async ({
+  page,
+}) => {
   await page.getByRole("button", { name: "Open inspector" }).last().click();
   const inspector = page.locator("#inspector-panel");
   const handle = page.locator(".inspector-handle");
@@ -504,9 +506,7 @@ test("persists normalized conversation display types", async ({
   await expect(
     page.getByRole("checkbox", { name: "Reasoning" }),
   ).not.toBeChecked();
-  await expect(
-    page.getByRole("checkbox", { name: "Warnings" }),
-  ).toBeChecked();
+  await expect(page.getByRole("checkbox", { name: "Warnings" })).toBeChecked();
 });
 
 test("renders multiple request_user_input questions as responsive poll messages", async ({

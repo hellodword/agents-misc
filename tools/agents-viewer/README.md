@@ -80,6 +80,10 @@ must be changed only through `just agents-viewer-generate`. `web/dist`, Cargo
 are ignored or Nix-produced runtime/build outputs; they are never source
 inputs or commit candidates.
 
+The underlying `export_types` CLI requires exactly one of `--write` or
+`--check` plus an explicit `--output PATH`; it never derives an output from the
+directory where the binary was compiled.
+
 The React/Vite UI presents conversations in a Telegram-like layout. User messages are right-aligned; assistant messages and normalized plans are left-aligned bubbles. Both reuse sanitized GFM Markdown, full-content copying, timestamps, and Inspector actions. Reasoning and commands appear as compact inspectable activity. Each `request_user_input` question appears as its own default-visible incoming poll message with option labels and descriptions; completed polls mark selected answers and place non-empty per-question notes below the selected option. Command results remain in the inspector.
 
 `GET /api/v1/sessions/{sessionId}/entries` accepts a comma-separated `displayTypes` set for cursor-safe exact filtering. Supported values are `received`, `sent`, `requestUserInput`, `reasoning`, `exec`, `plan`, `patch`, `mcp`, `webSearch`, `function`, `dynamic`, `terminal`, `viewImage`, `otherTool`, `warning`, `error`, `context`, `marker`, `technicalMessage`, `internalMessage`, and `unknown`. `plan` is the canonical view of plan-only assistant records; `received` does not return a second tagged copy, while assistant text outside a plan block remains `received`. `displayTypes` and `includeTechnical` are mutually exclusive; omitting `displayTypes` preserves the earlier boolean behavior for compatible callers. The Web client always includes `plan` in its exact filter, including when it canonicalizes older saved preferences.
@@ -95,18 +99,18 @@ The viewer reads only:
 
 The compatibility promise is for Codex CLI rollout records. Source metadata produced inside the Codex ecosystem is also classified as interactive CLI, VS Code, `codex exec`, review, subagent, app-server/integration, or unknown so mixed Codex homes remain understandable. This classification is not a compatibility promise for unrelated agent products.
 
-| Persisted concept                                        | Viewer behavior                                                                                     |
-| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `session_meta`                                           | Stable session ID, source, cwd, parent/fork, version, provider, Git, and paginated-history data     |
-| `turn_context`, `world_state`, `security_risk_score`     | Collapsed technical context, excluded from default search                                          |
-| `event_msg.item_completed`                               | All Codex 0.148 turn-item families, including extension-owned display items                         |
-| other known `event_msg` payloads                         | Messages, reasoning, tool lifecycle, plans, settings, and diagnostics                               |
-| known `response_item` payloads                           | Messages, assistant plan blocks, reasoning summaries, inter-agent messages, tools, and attachments |
-| inter-agent communication and delivery metadata         | One collapsed technical message with merged delivery metadata                                      |
-| compacted history                                        | Ordered technical/context entry with raw provenance                                                 |
-| unknown envelope or payload                              | Browsable raw reference plus diagnostic; the session continues                                      |
-| malformed JSON, invalid UTF-8, incomplete tail           | Partial-session diagnostic while stable records remain available                                    |
-| oversized complete record                                | Bounded metadata/raw reference; the content API refuses an oversized read                           |
+| Persisted concept                                    | Viewer behavior                                                                                    |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `session_meta`                                       | Stable session ID, source, cwd, parent/fork, version, provider, Git, and paginated-history data    |
+| `turn_context`, `world_state`, `security_risk_score` | Collapsed technical context, excluded from default search                                          |
+| `event_msg.item_completed`                           | All Codex 0.148 turn-item families, including extension-owned display items                        |
+| other known `event_msg` payloads                     | Messages, reasoning, tool lifecycle, plans, settings, and diagnostics                              |
+| known `response_item` payloads                       | Messages, assistant plan blocks, reasoning summaries, inter-agent messages, tools, and attachments |
+| inter-agent communication and delivery metadata      | One collapsed technical message with merged delivery metadata                                      |
+| compacted history                                    | Ordered technical/context entry with raw provenance                                                |
+| unknown envelope or payload                          | Browsable raw reference plus diagnostic; the session continues                                     |
+| malformed JSON, invalid UTF-8, incomplete tail       | Partial-session diagnostic while stable records remain available                                   |
+| oversized complete record                            | Bounded metadata/raw reference; the content API refuses an oversized read                          |
 
 For paginated subagent rollouts, records before `subagent_history_start_ordinal` remain available as raw records with the `inherited` status but are not projected into the child's conversation. Ordinal gaps are valid. A non-null `history_base` points at content outside the current rollout, so the viewer marks that session partial instead of pretending the referenced prefix was indexed.
 
@@ -241,19 +245,25 @@ just agents-viewer-e2e            # embedded server plus host-browser Playwright
 just agents-viewer-acceptance-large
 ```
 
-The Playwright fixtures start `target/debug/agents-viewer`, whose Web UI is
-embedded from `web/dist` at Rust compile time. Running the Web package's `e2e`
-script directly does not rebuild either artifact and can silently test an old
-Web bundle. Always use `just agents-viewer-e2e` after frontend changes; it
-installs the locked Web dependencies, builds `web/dist`, recompiles the debug
-binary with `embedded-ui`, and only then starts Playwright. Pass Playwright
-arguments through the same recipe for focused runs:
+The development Playwright fixtures locate `target/debug/agents-viewer` through
+Cargo metadata; the Nix check instead runs the packaged binary supplied through
+`AGENTS_VIEWER_E2E_BINARY`. Running the Web package's `e2e` script directly does
+not rebuild either development artifact and can silently test an old Web
+bundle. Always use `just agents-viewer-e2e` after frontend changes; it installs
+the locked Web dependencies, builds `web/dist`, recompiles the debug binary with
+`embedded-ui`, and only then starts Playwright. Pass Playwright arguments
+through the same recipe for focused runs:
 
 ```bash
 just -- agents-viewer-e2e --grep "preserves the reader position"
 ```
 
-E2E does not download a browser. Set `PLAYWRIGHT_CDP_ENDPOINT`, copy the ignored `web/e2e.config.example.json` to `web/e2e.config.json`, or expose `google-chrome`, `microsoft-edge`, or `chromium` on `PATH`. Browser profiles, screenshots, traces, databases, build output, and other runtime artifacts stay in ignored locations.
+Viewer E2E is provided only on Linux through the named Nix shell and flake
+check. The shell supplies the locked `pkgs.chromium` executable through the
+required absolute `PLAYWRIGHT_NIX_BROWSER_PATH` and disables Playwright browser
+downloads. Tests never search `PATH`, connect to an existing browser, or fall
+back to a host browser. Browser profiles, screenshots, traces, databases, build
+output, and other runtime artifacts stay in ignored or temporary locations.
 
 The Nix package contains one executable with the Web UI embedded:
 
@@ -270,7 +280,7 @@ Common failures:
 - source/data overlap: choose a data directory outside the canonical Codex home.
 - event-size setting mismatch: intentionally rebuild with `just agents-viewer-run --rebuild-index`; changing only `initial_index_days` does not require a rebuild.
 - no FTS5: use the Nix package or another build with bundled SQLite and FTS5.
-- no E2E browser: configure CDP or expose a supported Chromium-family executable; do not install a browser from the test command.
+- no E2E browser: enter `nix develop .#agents-viewer`; E2E is intentionally unavailable from non-Linux shells and without the Nix-provided absolute browser path.
 - stale UI during E2E: use `just agents-viewer-e2e`, not the Web package's `e2e` script directly; the Just recipe rebuilds the compile-time embedded bundle first.
 - UI/API version mismatch: rebuild the embedded binary with `just agents-viewer-build`.
 - generated binding drift: change the Rust DTO, run `just agents-viewer-generate`,

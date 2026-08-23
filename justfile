@@ -245,7 +245,7 @@ agents-viewer-generate:
 [private]
 _agents-viewer-generate:
   @test "${AGENTS_MISC_SHELL:-}" = "agents-viewer" || { echo "error: run 'just agents-viewer-generate' to enter nix develop .#agents-viewer" >&2; exit 2; }
-  cargo run --manifest-path tools/agents-viewer/Cargo.toml --bin export_types -- --write
+  cargo run --manifest-path tools/agents-viewer/Cargo.toml --bin export_types -- --write --output tools/agents-viewer/web/src/generated/api.ts
 
 # Confirm checked-in TypeScript bindings match Rust DTOs.
 agents-viewer-generate-check:
@@ -254,7 +254,7 @@ agents-viewer-generate-check:
 [private]
 _agents-viewer-generate-check:
   @test "${AGENTS_MISC_SHELL:-}" = "agents-viewer" || { echo "error: run 'just agents-viewer-generate-check' to enter nix develop .#agents-viewer" >&2; exit 2; }
-  cargo run --manifest-path tools/agents-viewer/Cargo.toml --bin export_types -- --check
+  cargo run --manifest-path tools/agents-viewer/Cargo.toml --bin export_types -- --check --output tools/agents-viewer/web/src/generated/api.ts
 
 # Run ignored large gates plus Linux syscall read-only validation.
 agents-viewer-acceptance-large:
@@ -273,7 +273,7 @@ agents-viewer-verify:
 [private]
 _agents-viewer-verify:
   @test "${AGENTS_MISC_SHELL:-}" = "agents-viewer" || { echo "error: run 'just agents-viewer-verify' to enter nix develop .#agents-viewer" >&2; exit 2; }
-  cargo run --manifest-path tools/agents-viewer/Cargo.toml --bin export_types -- --check
+  cargo run --manifest-path tools/agents-viewer/Cargo.toml --bin export_types -- --check --output tools/agents-viewer/web/src/generated/api.ts
   cargo fmt --manifest-path tools/agents-viewer/Cargo.toml --all -- --check
   cargo clippy --manifest-path tools/agents-viewer/Cargo.toml --all-targets -- -D warnings
   cargo test --manifest-path tools/agents-viewer/Cargo.toml

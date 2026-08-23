@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -154,37 +156,61 @@ class HistoricalGenerationTests(unittest.TestCase):
             ]
             self.assertEqual(leftovers, [])
 
-    def test_atomic_install_failure_restores_previous_output(self) -> None:
+    def test_atomic_exchange_failure_preserves_previous_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             output = root / "output"
             output.mkdir()
             (output / "value").write_text("before")
             original = tree_digest(output)
-            real_replace = os.replace
-            calls = 0
-
-            def fail_install(source: Path, target: Path) -> None:
-                nonlocal calls
-                calls += 1
-                if calls == 2:
-                    raise OSError("injected output install failure")
-                real_replace(source, target)
-
             def populate(candidate: Path) -> None:
                 (candidate / "value").write_text("after")
 
             with (
                 patch(
-                    "codex_config_atlas.atomic_output.os.replace",
-                    side_effect=fail_install,
+                    "codex_config_atlas.atomic_output.subprocess.run",
+                    return_value=subprocess.CompletedProcess(
+                        args=["mv"], returncode=1, stdout="", stderr="unsupported"
+                    ),
                 ),
-                self.assertRaisesRegex(OSError, "injected output install failure"),
+                self.assertRaisesRegex(RuntimeError, "atomic directory exchange failed"),
             ):
                 build_directory_atomically(output, populate)
 
-            self.assertEqual(calls, 3)
             self.assertEqual(tree_digest(output), original)
+
+    def test_old_output_cleanup_failure_keeps_committed_new_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            output = root / "output"
+            output.mkdir()
+            (output / "value").write_text("before")
+
+            def populate(candidate: Path) -> None:
+                (candidate / "value").write_text("after")
+
+            real_rmtree = shutil.rmtree
+
+            def fail_old_output(path: Path, *args: object, **kwargs: object) -> None:
+                if "-generate-" in Path(path).name:
+                    raise OSError("injected cleanup failure")
+                real_rmtree(path, *args, **kwargs)
+
+            with (
+                patch(
+                    "codex_config_atlas.atomic_output.shutil.rmtree",
+                    side_effect=fail_old_output,
+                ),
+                self.assertWarnsRegex(RuntimeWarning, "old output remains at") as warning,
+            ):
+                retained = build_directory_atomically(output, populate)
+
+            self.assertIsNotNone(retained)
+            assert retained is not None
+            self.assertIn(str(retained), str(warning.warning))
+            self.assertEqual((output / "value").read_text(), "after")
+            self.assertEqual((retained / "value").read_text(), "before")
+            real_rmtree(retained)
 
 
 if __name__ == "__main__":

@@ -8,7 +8,6 @@ from common import (
     add_repo_root_argument,
     apply_patches,
     changed_tree_digest,
-    ensure_clean,
     ensure_pinned_head,
     ensure_real_index_clean,
     json_stdout,
@@ -28,7 +27,6 @@ def main() -> int:
     manifest = load_manifest(args.repo_root)
     src = manifest.worktree
     require_git_worktree(src)
-    ensure_clean(src)
     ensure_real_index_clean(src)
     ensure_pinned_head(src, manifest.upstream)
     with tempfile.TemporaryDirectory(prefix="codex-test-") as temporary:
@@ -62,12 +60,18 @@ def main() -> int:
                     continue
                 seen.add(command)
                 run_upstream(manifest, command, cwd=validation)
+        for command in manifest.upstream.regression_commands:
+            if command in seen:
+                continue
+            seen.add(command)
+            run_upstream(manifest, command, cwd=validation)
     json_stdout(
         {
             "ref": manifest.upstream.ref,
             "revision": manifest.upstream.revision,
             "patches": [patch.file for patch in manifest.patches],
             "generationStable": True,
+            "regressionCommands": len(manifest.upstream.regression_commands),
             "targetedCommands": len(seen),
         }
     )

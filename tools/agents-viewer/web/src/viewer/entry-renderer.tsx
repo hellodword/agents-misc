@@ -244,7 +244,11 @@ export function MessageAttachmentBadges({
   if (imageCount === 0 && audioCount === 0 && otherCount === 0) return null;
 
   return (
-    <div className="message-attachments" role="list" aria-label={t("attachments")}>
+    <div
+      className="message-attachments"
+      role="list"
+      aria-label={t("attachments")}
+    >
       {imageCount > 0 && (
         <span className="message-attachment-badge" role="listitem">
           {t("imageAttachments", { count: imageCount })}
@@ -264,11 +268,12 @@ export function MessageAttachmentBadges({
   );
 }
 
-export function attachmentCount(metadata: Record<string, unknown>, key: string) {
+export function attachmentCount(
+  metadata: Record<string, unknown>,
+  key: string,
+) {
   const value = metadata[key];
-  return typeof value === "number" &&
-    Number.isSafeInteger(value) &&
-    value > 0
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
     ? value
     : 0;
 }

@@ -2,37 +2,43 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import tempfile
-import uuid
 import warnings
 from collections.abc import Callable
 from pathlib import Path
 
 
 def replace_directory(candidate: Path, target: Path) -> Path | None:
-    backup: Path | None = None
-    if target.exists():
-        backup = target.parent / f".{target.name}-backup-{uuid.uuid4().hex}"
-        os.replace(target, backup)
-
-    try:
+    if not target.exists():
         os.replace(candidate, target)
-    except BaseException:
-        if backup is not None and backup.exists():
-            try:
-                os.replace(backup, target)
-            except BaseException as restore_error:
-                raise RuntimeError(
-                    f"failed to install candidate and restore output; recover {backup} to {target}"
-                ) from restore_error
-        raise
-
-    if backup is None:
         return None
+
+    completed = subprocess.run(
+        [
+            "mv",
+            "-T",
+            "--exchange",
+            "--no-copy",
+            "--",
+            str(candidate),
+            str(target),
+        ],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "no diagnostic"
+        raise RuntimeError(
+            f"atomic directory exchange failed for {candidate} and {target}: "
+            f"{detail}; both directories were preserved"
+        )
     try:
-        shutil.rmtree(backup)
+        shutil.rmtree(candidate)
     except OSError:
-        return backup
+        return candidate
     return None
 
 
@@ -45,16 +51,17 @@ def build_directory_atomically(
     candidate = Path(
         tempfile.mkdtemp(prefix=f".{target.name}-generate-", dir=target.parent)
     )
+    retained_old: Path | None = None
     try:
         populate(candidate)
-        backup = replace_directory(candidate, target)
-        if backup is not None:
+        retained_old = replace_directory(candidate, target)
+        if retained_old is not None:
             warnings.warn(
-                f"generated output installed but old backup remains at {backup}",
+                f"generated output installed but old output remains at {retained_old}",
                 RuntimeWarning,
                 stacklevel=2,
             )
-        return backup
+        return retained_old
     finally:
-        if candidate.exists():
+        if candidate.exists() and candidate != retained_old:
             shutil.rmtree(candidate)

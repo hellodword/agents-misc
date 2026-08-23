@@ -29,6 +29,7 @@ UPSTREAM_FIELDS = {
     "revision",
     "worktree",
     "generate_commands",
+    "regression_commands",
     "validation_command",
 }
 SERIES_FIELDS = {"patch"}
@@ -55,6 +56,7 @@ class Upstream:
     revision: str
     worktree: str
     generate_commands: tuple[tuple[str, ...], ...]
+    regression_commands: tuple[tuple[str, ...], ...]
     validation_command: tuple[str, ...]
 
 
@@ -226,6 +228,9 @@ def load_manifest(root: Path = DEFAULT_REPO_ROOT, *, require_patch_files: bool =
         worktree=_path(upstream_data["worktree"], upstream_path, "worktree", prefix=False),
         generate_commands=_commands(
             upstream_data["generate_commands"], upstream_path, "generate_commands"
+        ),
+        regression_commands=_commands(
+            upstream_data["regression_commands"], upstream_path, "regression_commands"
         ),
         validation_command=_command(upstream_data["validation_command"], upstream_path, "validation_command"),
     )
@@ -549,9 +554,38 @@ def apply_patches(src: Path, patches: Sequence[Path], *, check_only: bool) -> No
                 run(["git", "apply", "--check", str(patch)], cwd=clone)
                 run(["git", "apply", str(patch)], cwd=clone)
         return
-    for patch in patches:
-        run(["git", "apply", "--check", str(patch)], cwd=src)
-        run(["git", "apply", str(patch)], cwd=src)
+
+    revision = git_output(src, ["rev-parse", "HEAD"])
+    before_status = run(["git", "status", "--porcelain=v1", "-z"], cwd=src, capture=True).stdout
+    index_path = Path(git_output(src, ["rev-parse", "--git-path", "index"]))
+    if not index_path.is_absolute():
+        index_path = src / index_path
+    before_index = index_path.read_bytes()
+    candidate = Path(tempfile.mkdtemp(prefix=f".{src.name}.apply-candidate-", dir=src.parent))
+    retained_old: Path | None = None
+    try:
+        candidate.rmdir()
+        _clone_base(src, candidate, revision)
+        for patch in patches:
+            run(["git", "apply", "--check", str(patch)], cwd=candidate)
+            run(["git", "apply", str(patch)], cwd=candidate)
+
+        if git_output(src, ["rev-parse", "HEAD"]) != revision:
+            raise PatchError("upstream checkout HEAD changed while applying candidate patches")
+        after_status = run(
+            ["git", "status", "--porcelain=v1", "-z"], cwd=src, capture=True
+        ).stdout
+        if after_status != before_status:
+            raise PatchError("upstream checkout changed while applying candidate patches")
+        if index_path.read_bytes() != before_index:
+            raise PatchError("upstream Git index changed while applying candidate patches")
+
+        retained_old = _replace_directory_atomically(candidate, src)
+        if retained_old is not None:
+            eprint(f"warning: applied patches but old worktree remains at {retained_old}")
+    finally:
+        if candidate.exists() and candidate != retained_old:
+            shutil.rmtree(candidate)
 
 
 def patch_paths(manifest: MaintenanceManifest, *, directory: Path | None = None) -> list[Path]:
@@ -584,26 +618,49 @@ def _validate_candidate(
                 continue
             seen.add(command)
             run_upstream(manifest, command, cwd=validation)
+    for command in manifest.upstream.regression_commands:
+        if command in seen:
+            continue
+        seen.add(command)
+        run_upstream(manifest, command, cwd=validation)
 
 
-def _replace_patch_directory(target: Path, candidate: Path, fault: FaultHook) -> None:
-    backup = target.with_name(f".{target.name}.backup-{os.getpid()}")
-    if backup.exists():
-        raise PatchError(f"stale patch backup blocks refresh: {backup}; recovery: inspect and remove it")
-    moved_old = False
+def _exchange_directories(candidate: Path, target: Path) -> None:
+    completed = run(
+        ["mv", "-T", "--exchange", "--no-copy", "--", str(candidate), str(target)],
+        check=False,
+        capture=True,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "no diagnostic"
+        raise PatchError(
+            f"atomic directory exchange failed for {candidate} and {target}: {detail}; "
+            "both directories were preserved"
+        )
+
+
+def _replace_directory_atomically(candidate: Path, target: Path) -> Path | None:
+    if not target.exists():
+        try:
+            os.replace(candidate, target)
+        except OSError as exc:
+            raise PatchError(
+                f"atomic directory rename failed for {candidate} to {target}: {exc}; "
+                "the candidate was preserved"
+            ) from exc
+        return None
+
+    _exchange_directories(candidate, target)
     try:
-        if target.exists():
-            os.replace(target, backup)
-            moved_old = True
-        fault("replace")
-        os.replace(candidate, target)
-    except Exception:
-        if moved_old and backup.exists() and not target.exists():
-            os.replace(backup, target)
-        raise
-    else:
-        if backup.exists():
-            shutil.rmtree(backup)
+        shutil.rmtree(candidate)
+    except OSError:
+        return candidate
+    return None
+
+
+def _replace_patch_directory(target: Path, candidate: Path, fault: FaultHook) -> Path | None:
+    fault("replace")
+    return _replace_directory_atomically(candidate, target)
 
 
 @contextmanager
@@ -678,6 +735,7 @@ def refresh_patches(
         candidate = Path(
             tempfile.mkdtemp(prefix=f".{manifest.upstream.ref}.candidate-", dir=manifest.patch_dir.parent)
         )
+        retained_old: Path | None = None
         try:
             for patch in manifest.patches:
                 text = _temporary_index_diff(
@@ -695,7 +753,12 @@ def refresh_patches(
                 for patch in manifest.patches
             }
             if not dry_run:
-                _replace_patch_directory(manifest.patch_dir, candidate, fault_hook)
+                retained_old = _replace_patch_directory(manifest.patch_dir, candidate, fault_hook)
+                if retained_old is not None:
+                    eprint(
+                        "warning: refreshed patches but old patch directory remains at "
+                        f"{retained_old}"
+                    )
             return {
                 "ref": manifest.upstream.ref,
                 "revision": manifest.upstream.revision,
@@ -706,7 +769,7 @@ def refresh_patches(
                 "changedPaths": changed,
             }
         finally:
-            if candidate.exists():
+            if candidate.exists() and candidate != retained_old:
                 shutil.rmtree(candidate)
             after_status = run(["git", "status", "--porcelain=v1", "-z"], cwd=src, capture=True).stdout
             after_index = index_path.read_bytes()

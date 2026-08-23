@@ -14,6 +14,7 @@ ref = "rust-v1.0.0"
 revision = "0123456789abcdef0123456789abcdef01234567"
 worktree = ".work/codex/rust-v1.0.0/src"
 generate_commands = [["python3", "-c", "pass"]]
+regression_commands = [["python3", "-c", "pass"]]
 validation_command = ["python3", "-c", "pass"]
 """
 
@@ -47,10 +48,29 @@ class ManifestTests(unittest.TestCase):
     def test_valid_manifest_loads_in_declared_order(self) -> None:
         manifest = load_manifest(self.make_root(), require_patch_files=False)
         self.assertEqual(manifest.upstream.ref, "rust-v1.0.0")
+        self.assertEqual(
+            manifest.upstream.regression_commands,
+            (("python3", "-c", "pass"),),
+        )
         self.assertEqual([patch.file for patch in manifest.patches], ["0001-example.patch"])
 
     def test_unknown_upstream_field_is_rejected(self) -> None:
         self.assert_manifest_error(upstream=UPSTREAM + 'legacy = "no"\n')
+
+    def test_missing_regression_commands_is_rejected(self) -> None:
+        self.assert_manifest_error(
+            upstream=UPSTREAM.replace(
+                'regression_commands = [["python3", "-c", "pass"]]\n', ""
+            )
+        )
+
+    def test_empty_regression_commands_is_rejected(self) -> None:
+        self.assert_manifest_error(
+            upstream=UPSTREAM.replace(
+                'regression_commands = [["python3", "-c", "pass"]]',
+                "regression_commands = []",
+            )
+        )
 
     def test_unknown_patch_field_is_rejected(self) -> None:
         self.assert_manifest_error(series=PATCH + 'legacy = "no"\n')

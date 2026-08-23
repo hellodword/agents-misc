@@ -18,10 +18,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import type { SourceKind } from "@/generated/api";
-import {
-  preferredLanguage,
-  type SupportedLanguage,
-} from "@/lib/i18n";
+import { preferredLanguage, type SupportedLanguage } from "@/lib/i18n";
 import { sourceHelp, sourceLabel } from "@/viewer/format";
 import {
   CONVERSATION_DISPLAY_OPTIONS,

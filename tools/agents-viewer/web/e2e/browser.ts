@@ -1,48 +1,110 @@
-import { constants } from "node:fs";
-import { access, readFile } from "node:fs/promises";
-import { delimiter, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import {
+  accessSync,
+  constants,
+  existsSync,
+  readFileSync,
+  realpathSync,
+  statfsSync,
+  statSync,
+} from "node:fs";
+import { isAbsolute } from "node:path";
 
-export type BrowserTarget =
-  | { cdpEndpoint: string }
-  | { executablePath: string };
+export const NIX_BROWSER_PATH_VARIABLE = "PLAYWRIGHT_NIX_BROWSER_PATH";
 
-const commands = ["google-chrome", "microsoft-edge", "chromium"] as const;
+const CONTAINER_MARKERS = [
+  "/.dockerenv",
+  "/run/.containerenv",
+  "/var/run/.containerenv",
+] as const;
+const ONE_GIB = 1024n * 1024n * 1024n;
 
-export async function resolveBrowserTarget(
-  environment: NodeJS.ProcessEnv = process.env,
-): Promise<BrowserTarget> {
-  if (environment.PLAYWRIGHT_CDP_ENDPOINT)
-    return { cdpEndpoint: environment.PLAYWRIGHT_CDP_ENDPOINT };
-  const configPath = fileURLToPath(
-    new URL("../e2e.config.json", import.meta.url),
-  );
+export type NixBrowserLaunchOptions = {
+  executablePath: string;
+  headless: boolean;
+  args: string[];
+};
+
+function isExecutable(path: string): boolean {
   try {
-    const config = JSON.parse(await readFile(configPath, "utf8")) as {
-      cdpEndpoint?: string | null;
-    };
-    if (config.cdpEndpoint) return { cdpEndpoint: config.cdpEndpoint };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    accessSync(path, constants.X_OK);
+    return statSync(path).isFile();
+  } catch {
+    return false;
   }
-  const suffixes =
-    process.platform === "win32" ? [".exe", ".cmd", ".bat", ""] : [""];
-  for (const command of commands) {
-    for (const directory of (environment.PATH ?? "")
-      .split(delimiter)
-      .filter(Boolean)) {
-      for (const suffix of suffixes) {
-        const executablePath = join(directory, `${command}${suffix}`);
-        try {
-          await access(executablePath, constants.X_OK);
-          return { executablePath };
-        } catch {
-          // Try the next PATH entry without invoking a shell or downloading a browser.
-        }
+}
+
+export function findNixBrowser(
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
+  const configured = environment[NIX_BROWSER_PATH_VARIABLE]?.trim();
+  if (!configured) {
+    throw new Error(
+      `${NIX_BROWSER_PATH_VARIABLE} is unset. Run E2E through the agents-viewer Nix shell; the test does not search PATH, connect to another browser, or download one.`,
+    );
+  }
+  if (!isAbsolute(configured)) {
+    throw new Error(
+      `${NIX_BROWSER_PATH_VARIABLE} must be an absolute executable path supplied by Nix.`,
+    );
+  }
+
+  let resolved: string;
+  try {
+    resolved = realpathSync(configured);
+  } catch {
+    throw new Error(
+      `${NIX_BROWSER_PATH_VARIABLE} does not resolve to an existing path: ${configured}`,
+    );
+  }
+  if (!isExecutable(resolved)) {
+    throw new Error(
+      `${NIX_BROWSER_PATH_VARIABLE} is not an executable file: ${resolved}`,
+    );
+  }
+  return resolved;
+}
+
+export function isContainer(): boolean {
+  if (CONTAINER_MARKERS.some((path) => existsSync(path))) return true;
+  for (const file of ["/proc/1/cgroup", "/proc/self/cgroup"]) {
+    try {
+      if (
+        /(docker|containerd|kubepods|podman|lxc)/i.test(
+          readFileSync(file, "utf8"),
+        )
+      ) {
+        return true;
       }
+    } catch {
+      // Missing cgroup files are normal outside Linux containers.
     }
   }
-  throw new Error(
-    `No E2E browser found. Set PLAYWRIGHT_CDP_ENDPOINT, configure cdpEndpoint in the ignored e2e.config.json, or put one of ${commands.join(", ")} on PATH; browser downloads are disabled.`,
-  );
+  return false;
+}
+
+function sharedMemoryBytes(): bigint | undefined {
+  try {
+    const stats = statfsSync("/dev/shm", { bigint: true });
+    return BigInt(stats.bsize) * BigInt(stats.blocks);
+  } catch {
+    return undefined;
+  }
+}
+
+export function nixBrowserLaunchOptions(
+  environment: NodeJS.ProcessEnv = process.env,
+): NixBrowserLaunchOptions {
+  const args: string[] = [];
+  if (isContainer()) {
+    args.push("--no-sandbox");
+    const bytes = sharedMemoryBytes();
+    if (bytes !== undefined && bytes < ONE_GIB) {
+      args.push("--disable-dev-shm-usage");
+    }
+  }
+  return {
+    executablePath: findNixBrowser(environment),
+    headless: true,
+    args,
+  };
 }

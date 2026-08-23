@@ -119,7 +119,10 @@ test("matches the shared canonical JSON and schema diff golden cases", () => {
       item.name,
     );
   }
-  assert.throws(() => stableValueKey(Number.NaN), /JSON numbers must be finite/);
+  assert.throws(
+    () => stableValueKey(Number.NaN),
+    /JSON numbers must be finite/,
+  );
   assert.throws(() => stableValueKey(undefined), /not JSON-compatible/);
 
   const before = [field("choice")];

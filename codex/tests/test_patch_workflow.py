@@ -9,7 +9,9 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from codex.scripts import common
 from codex.scripts.common import (
     MaintenanceManifest,
     PatchError,
@@ -96,6 +98,7 @@ class PatchWorkflowTests(unittest.TestCase):
                 revision = "{self.revision}"
                 worktree = ".work/codex/rust-v1.0.0/src"
                 generate_commands = [["python3", "-c", {json.dumps(generate)}]]
+                regression_commands = [["python3", "-c", {json.dumps(feature_test)}]]
                 validation_command = ["python3", "-c", {json.dumps(validate)}]
                 """
             ).lstrip()
@@ -172,6 +175,92 @@ class PatchWorkflowTests(unittest.TestCase):
             self.assertEqual((clone / "src" / "feature.txt").read_text(), "edited\n")
             self.assertEqual((clone / "generated" / "schema.txt").read_text(), "schema:edited\n")
 
+    def test_apply_second_patch_failure_preserves_complete_original_tree(self) -> None:
+        refresh_patches(self.manifest, dry_run=False)
+        target = self.base / "apply-second-failure"
+        command(
+            ["git", "clone", "--quiet", "--no-hardlinks", str(self.upstream_repo), str(target)],
+            self.base,
+        )
+        command(["git", "checkout", "--quiet", "--detach", self.revision], target)
+        invalid_patch = self.base / "invalid-second.patch"
+        invalid_patch.write_text("not a patch\n")
+
+        with self.assertRaises(PatchError):
+            apply_patches(
+                target,
+                [patch_paths(self.manifest)[0], invalid_patch],
+                check_only=False,
+            )
+
+        self.assertEqual((target / "src" / "feature.txt").read_text(), "base\n")
+        self.assertEqual((target / "generated" / "schema.txt").read_text(), "schema:base\n")
+        self.assertEqual(command(["git", "status", "--short"], target, capture=True), "")
+
+    def test_apply_exchange_failure_preserves_complete_original_tree(self) -> None:
+        refresh_patches(self.manifest, dry_run=False)
+        target = self.base / "apply-exchange-failure"
+        command(
+            ["git", "clone", "--quiet", "--no-hardlinks", str(self.upstream_repo), str(target)],
+            self.base,
+        )
+        command(["git", "checkout", "--quiet", "--detach", self.revision], target)
+
+        with (
+            patch.object(
+                common,
+                "_exchange_directories",
+                side_effect=InjectedFailure("injected exchange command failure"),
+            ),
+            self.assertRaisesRegex(InjectedFailure, "exchange command failure"),
+        ):
+            apply_patches(target, patch_paths(self.manifest), check_only=False)
+
+        self.assertEqual((target / "src" / "feature.txt").read_text(), "base\n")
+        self.assertEqual((target / "generated" / "schema.txt").read_text(), "schema:base\n")
+        self.assertEqual(command(["git", "status", "--short"], target, capture=True), "")
+
+    def test_apply_exchange_commit_has_only_complete_old_or_new_trees(self) -> None:
+        refresh_patches(self.manifest, dry_run=False)
+        target = self.base / "apply-commit-points"
+        command(
+            ["git", "clone", "--quiet", "--no-hardlinks", str(self.upstream_repo), str(target)],
+            self.base,
+        )
+        command(["git", "checkout", "--quiet", "--detach", self.revision], target)
+        real_exchange = common._exchange_directories
+
+        def inspect_exchange(candidate: Path, installed: Path) -> None:
+            self.assertEqual((installed / "src" / "feature.txt").read_text(), "base\n")
+            self.assertEqual((candidate / "src" / "feature.txt").read_text(), "edited\n")
+            real_exchange(candidate, installed)
+            self.assertEqual((installed / "src" / "feature.txt").read_text(), "edited\n")
+            self.assertEqual((candidate / "src" / "feature.txt").read_text(), "base\n")
+
+        with patch.object(common, "_exchange_directories", side_effect=inspect_exchange):
+            apply_patches(target, patch_paths(self.manifest), check_only=False)
+
+        self.assertEqual((target / "src" / "feature.txt").read_text(), "edited\n")
+        self.assertEqual((target / "generated" / "schema.txt").read_text(), "schema:edited\n")
+
+    def test_apply_cleanup_failure_keeps_new_tree_and_reports_old_path(self) -> None:
+        refresh_patches(self.manifest, dry_run=False)
+        target = self.base / "apply-cleanup-failure"
+        command(
+            ["git", "clone", "--quiet", "--no-hardlinks", str(self.upstream_repo), str(target)],
+            self.base,
+        )
+        command(["git", "checkout", "--quiet", "--detach", self.revision], target)
+
+        with patch.object(common.shutil, "rmtree", side_effect=OSError("injected cleanup failure")):
+            apply_patches(target, patch_paths(self.manifest), check_only=False)
+
+        retained = list(target.parent.glob(f".{target.name}.apply-candidate-*"))
+        self.assertEqual(len(retained), 1)
+        self.assertEqual((target / "src" / "feature.txt").read_text(), "edited\n")
+        self.assertEqual((retained[0] / "src" / "feature.txt").read_text(), "base\n")
+        common.shutil.rmtree(retained[0])
+
     def test_failures_preserve_patch_hashes_worktree_and_index(self) -> None:
         refresh_patches(self.manifest, dry_run=False)
         expected = self.state()
@@ -184,6 +273,55 @@ class PatchWorkflowTests(unittest.TestCase):
                 with self.assertRaises(InjectedFailure):
                     refresh_patches(self.manifest, dry_run=False, fault=fail)
                 self.assertEqual(expected, self.state())
+
+    def test_refresh_exchange_command_failure_preserves_installed_patch_tree(self) -> None:
+        refresh_patches(self.manifest, dry_run=False)
+        expected = self.state()
+        with (
+            patch.object(
+                common,
+                "_exchange_directories",
+                side_effect=InjectedFailure("injected exchange command failure"),
+            ),
+            self.assertRaisesRegex(InjectedFailure, "exchange command failure"),
+        ):
+            refresh_patches(self.manifest, dry_run=False)
+        self.assertEqual(expected, self.state())
+
+    def test_refresh_cleanup_failure_keeps_new_patch_tree_and_old_tree_path(self) -> None:
+        refresh_patches(self.manifest, dry_run=False)
+        previous = file_hashes(self.manifest.patch_dir)
+        (self.manifest.worktree / "src" / "feature.txt").write_text("edited again\n")
+        updated = MaintenanceManifest(
+            root=self.manifest.root,
+            upstream=dataclasses.replace(
+                self.manifest.upstream,
+                regression_commands=(("python3", "-c", "pass"),),
+            ),
+            patches=tuple(
+                dataclasses.replace(
+                    patch_spec,
+                    tests=(("python3", "-c", "pass"),),
+                )
+                for patch_spec in self.manifest.patches
+            ),
+        )
+        real_rmtree = common.shutil.rmtree
+
+        def fail_old_candidate(path: Path, *args: object, **kwargs: object) -> None:
+            if ".candidate-" in Path(path).name:
+                raise OSError("injected cleanup failure")
+            real_rmtree(path, *args, **kwargs)
+
+        with patch.object(common.shutil, "rmtree", side_effect=fail_old_candidate):
+            refresh_patches(updated, dry_run=False)
+
+        current = file_hashes(self.manifest.patch_dir)
+        self.assertNotEqual(current, previous)
+        retained = list(self.manifest.patch_dir.parent.glob(f".{self.manifest.upstream.ref}.candidate-*"))
+        self.assertEqual(len(retained), 1)
+        self.assertEqual(file_hashes(retained[0]), previous)
+        real_rmtree(retained[0])
 
     def test_validation_command_failure_is_atomic(self) -> None:
         refresh_patches(self.manifest, dry_run=False)

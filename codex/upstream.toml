@@ -8,6 +8,12 @@ generate_commands = [
   ["just", "write-app-server-schema"],
   ["just", "write-hooks-schema"],
 ]
+regression_commands = [
+  ["cargo", "test", "-p", "codex-core", "--lib", "request_user_input_sets_"],
+  ["cargo", "test", "-p", "codex-core", "--test", "all", "request_user_input_round_trip_resolves_pending"],
+  ["cargo", "test", "-p", "codex-tui", "auto_resolution_absent_has_no_timer"],
+  ["cargo", "test", "-p", "codex-tui", "auto_resolution_uses_is_blocking_without_auto_resolution_ms"],
+]
 validation_command = [
   "cargo",
   "check",

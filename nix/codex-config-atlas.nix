@@ -34,7 +34,10 @@ let
 
   codexConfigAtlas = pkgs.writeShellApplication {
     name = "codex-config-atlas";
-    runtimeInputs = [ codexConfigAtlasPackage ];
+    runtimeInputs = [
+      codexConfigAtlasPackage
+      pkgs.coreutils
+    ];
 
     text = ''
       exec ${codexConfigAtlasPackage}/bin/codex-config-atlas \
@@ -130,6 +133,7 @@ let
     pkgs.runCommand "check-codex-config-atlas-tests-${codexVersion}"
       {
         nativeBuildInputs = [
+          pkgs.coreutils
           pkgs.nodejs_24
           (pkgs.python3.withPackages (pythonPackages: [
             pythonPackages.packaging

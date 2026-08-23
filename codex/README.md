@@ -9,7 +9,8 @@ tree is never committed.
 Two TOML files are the only maintenance manifests:
 
 - [`upstream.toml`](upstream.toml) pins the repository URL, tag, peeled commit,
-  ignored worktree, generator commands, and cumulative Cargo validation.
+  ignored worktree, generator commands, mandatory regression commands, and
+  cumulative Cargo validation.
 - [`series.toml`](series.toml) defines patch order, intent, behavior, exclusive
   source/generated ownership, and focused tests.
 
@@ -38,14 +39,14 @@ generators. Do not run repository maintenance with host Python or Cargo.
 The following order mirrors `series.toml`. The manifest remains authoritative
 for exact file ownership and commands.
 
-| Order | Patch | Intent and affected behavior | Focused validation |
-| --- | --- | --- | --- |
-| 1 | `0001-provider-network-config.patch` | Make the OpenAI sampling/compact endpoint and compact timeout explicit, validated, and precedence-aware. | Provider config plus compact timeout behavior. |
-| 2 | `0002-failure-hook-contract.patch` | Define stable camelCase `RequestError` and `AbnormalStop` payload/output contracts with typed error categories. | Hook contract and schema tests. |
-| 3 | `0003-failure-hook-integration.patch` | Emit one bounded event for each visible retry, fallback, or stop; serialize request hooks and aggregate abnormal-stop decisions. | Hook engine and core integration tests. |
-| 4 | `0004-terminal-wait.patch` | Match named terminal rules in order and expose checked decision deadlines and completion states. | Config, unified-exec, and terminal-wait behavior. |
-| 5 | `0005-code-mode-wait-control.patch` | Give terminal-wait decisions explicit one-use Code Mode leases across protocol, host, and runtime boundaries. | Code Mode protocol/runtime/host suites. |
-| 6 | `0006-generated-contracts.patch` | Own every generated schema, protobuf binding, TypeScript contract, and resolved Cargo graph changed by patches 1–5. | Re-generation plus config/app-server contract suites. |
+| Order | Patch                                 | Intent and affected behavior                                                                                                     | Focused validation                                    |
+| ----- | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| 1     | `0001-provider-network-config.patch`  | Make the OpenAI sampling/compact endpoint and compact timeout explicit, validated, and precedence-aware.                         | Provider config plus compact timeout behavior.        |
+| 2     | `0002-failure-hook-contract.patch`    | Define stable camelCase `RequestError` and `AbnormalStop` payload/output contracts with typed error categories.                  | Hook contract and schema tests.                       |
+| 3     | `0003-failure-hook-integration.patch` | Emit one bounded event for each visible retry, fallback, or stop; serialize request hooks and aggregate abnormal-stop decisions. | Hook engine and core integration tests.               |
+| 4     | `0004-terminal-wait.patch`            | Match named terminal rules in order and expose checked decision deadlines and completion states.                                 | Config, unified-exec, and terminal-wait behavior.     |
+| 5     | `0005-code-mode-wait-control.patch`   | Give terminal-wait decisions explicit one-use Code Mode leases across protocol, host, and runtime boundaries.                    | Code Mode protocol/runtime/host suites.               |
+| 6     | `0006-generated-contracts.patch`      | Own every generated schema, protobuf binding, TypeScript contract, and resolved Cargo graph changed by patches 1–5.              | Re-generation plus config/app-server contract suites. |
 
 There is deliberately no Plan auto-resolution patch. Plan-mode input remains
 blocking upstream behavior, and no compatibility alias recreates the removed
@@ -93,7 +94,10 @@ just codex-test
 
 `codex-test` checks cumulative application, runs every declared generator
 twice, rejects generated drift, runs the cumulative Cargo validation, and runs
-the focused tests in series order. To run only the cumulative Cargo command:
+the focused and mandatory regression tests in declared order. The regression
+commands protect Plan blocking, Default non-blocking behavior, the pending
+request round trip, and TUI timer policy. To run only the cumulative Cargo
+command:
 
 ```sh
 just codex-build

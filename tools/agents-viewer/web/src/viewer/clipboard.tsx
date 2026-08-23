@@ -68,7 +68,10 @@ export function CopyMessageButton({
   );
 }
 
-export async function fullPrimaryText(entry: EntryListItem, signal?: AbortSignal) {
+export async function fullPrimaryText(
+  entry: EntryListItem,
+  signal?: AbortSignal,
+) {
   if (entry.primaryComplete) return entry.primaryPreview;
   let offset = 0;
   let text = "";

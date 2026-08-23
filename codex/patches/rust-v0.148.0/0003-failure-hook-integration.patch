@@ -1485,10 +1485,29 @@ index 923f436581b36c90556030ebdfc8e1dc30969ab4..3c60c7247e8959303a6a9d5eb5ebdd6e
          })
      }
 diff --git a/codex-rs/hooks/src/engine/dispatcher.rs b/codex-rs/hooks/src/engine/dispatcher.rs
-index 8361de803ad1ddd66e04ac9d3f8cfd7ca4375506..b377fa74f4f109241d2cdfd371215a9f961d17e1 100644
+index 8361de803ad1ddd66e04ac9d3f8cfd7ca4375506..3a19e3b151deb0d22ce74742d043dd2f812bf1fd 100644
 --- a/codex-rs/hooks/src/engine/dispatcher.rs
 +++ b/codex-rs/hooks/src/engine/dispatcher.rs
-@@ -64,7 +64,10 @@ pub(crate) fn select_handlers_for_matcher_inputs(
+@@ -1,4 +1,5 @@
+ use std::path::Path;
++use std::time::Duration;
+ 
+ use futures::StreamExt;
+ use futures::stream::FuturesUnordered;
+@@ -26,6 +27,12 @@ pub(crate) struct ParsedHandler<T> {
+     pub completion_order: usize,
+ }
+ 
++#[derive(Debug)]
++pub(crate) enum BoundedHandlerResult<T> {
++    Completed(ParsedHandler<T>),
++    GroupTimedOut(ConfiguredHandler),
++}
++
+ pub(crate) fn select_handlers(
+     handlers: &[ConfiguredHandler],
+     event_name: HookEventName,
+@@ -64,7 +71,10 @@ pub(crate) fn select_handlers_for_matcher_inputs(
                          .any(|input| matches_matcher(handler.matcher.as_deref(), Some(input)))
                  }
              }
@@ -1500,7 +1519,7 @@ index 8361de803ad1ddd66e04ac9d3f8cfd7ca4375506..b377fa74f4f109241d2cdfd371215a9f
          })
          .cloned()
          .collect()
-@@ -151,6 +154,76 @@ pub(crate) async fn execute_handlers<T: 'static>(
+@@ -151,6 +161,103 @@ pub(crate) async fn execute_handlers<T: 'static>(
      completed.into_iter().map(|(_, parsed)| parsed).collect()
  }
  
@@ -1517,14 +1536,20 @@ index 8361de803ad1ddd66e04ac9d3f8cfd7ca4375506..b377fa74f4f109241d2cdfd371215a9f
 +    cwd: &Path,
 +    turn_id: Option<String>,
 +    max_concurrency: usize,
++    group_timeout: Option<Duration>,
 +    parse: fn(&ConfiguredHandler, HandlerRunResult, Option<String>) -> ParsedHandler<T>,
-+) -> Vec<ParsedHandler<T>> {
++) -> Vec<BoundedHandlerResult<T>> {
 +    assert!(max_concurrency > 0, "handler concurrency must be non-zero");
 +
++    let configured_handlers = handlers.clone();
 +    let mut remaining = handlers.into_iter().enumerate();
 +    let mut pending = FuturesUnordered::new();
-+    let mut completed = Vec::new();
++    let mut completed = std::iter::repeat_with(|| None)
++        .take(configured_handlers.len())
++        .collect::<Vec<_>>();
 +    let mut completion_order = 0;
++    let deadline = group_timeout.map(|duration| tokio::time::Instant::now() + duration);
++    let mut group_timed_out = false;
 +
 +    loop {
 +        while pending.len() < max_concurrency {
@@ -1559,7 +1584,17 @@ index 8361de803ad1ddd66e04ac9d3f8cfd7ca4375506..b377fa74f4f109241d2cdfd371215a9f
 +            });
 +        }
 +
-+        let Some(result) = pending.next().await else {
++        let next = match deadline {
++            Some(deadline) => match tokio::time::timeout_at(deadline, pending.next()).await {
++                Ok(result) => result,
++                Err(_) => {
++                    group_timed_out = true;
++                    break;
++                }
++            },
++            None => pending.next().await,
++        };
++        let Some(result) = next else {
 +            break;
 +        };
 +        let Some((configured_order, mut parsed)) = result else {
@@ -1567,17 +1602,28 @@ index 8361de803ad1ddd66e04ac9d3f8cfd7ca4375506..b377fa74f4f109241d2cdfd371215a9f
 +        };
 +        parsed.completion_order = completion_order;
 +        completion_order += 1;
-+        completed.push((configured_order, parsed));
++        completed[configured_order] = Some(parsed);
 +    }
 +
-+    completed.sort_by_key(|(configured_order, _)| *configured_order);
-+    completed.into_iter().map(|(_, parsed)| parsed).collect()
++    configured_handlers
++        .into_iter()
++        .enumerate()
++        .filter_map(|(configured_order, handler)| {
++            if let Some(parsed) = completed[configured_order].take() {
++                Some(BoundedHandlerResult::Completed(parsed))
++            } else if group_timed_out {
++                Some(BoundedHandlerResult::GroupTimedOut(handler))
++            } else {
++                None
++            }
++        })
++        .collect()
 +}
 +
  pub(crate) fn completed_summary(
      handler: &ConfiguredHandler,
      run_result: &HandlerRunResult,
-@@ -185,6 +258,8 @@ pub(crate) fn scope_for_event(event_name: HookEventName) -> HookScope {
+@@ -185,6 +292,8 @@ pub(crate) fn scope_for_event(event_name: HookEventName) -> HookScope {
          | HookEventName::PostToolUse
          | HookEventName::PreCompact
          | HookEventName::PostCompact
@@ -1586,7 +1632,7 @@ index 8361de803ad1ddd66e04ac9d3f8cfd7ca4375506..b377fa74f4f109241d2cdfd371215a9f
          | HookEventName::UserPromptSubmit
          | HookEventName::SubagentStop
          | HookEventName::Stop => HookScope::Turn,
-@@ -201,6 +276,8 @@ pub(crate) fn hook_event_name_label(event_name: HookEventName) -> &'static str {
+@@ -201,6 +310,8 @@ pub(crate) fn hook_event_name_label(event_name: HookEventName) -> &'static str {
          HookEventName::SessionStart => "SessionStart",
          HookEventName::SessionEnd => "SessionEnd",
          HookEventName::UserPromptSubmit => "UserPromptSubmit",

@@ -26,6 +26,7 @@ jobs:
             .#checks.x86_64-linux.agents-viewer-rust \
             .#checks.x86_64-linux.agents-viewer-web \
             .#checks.x86_64-linux.agents-viewer-bindings \
+            .#checks.x86_64-linux.agents-viewer-e2e \
             .#checks.x86_64-linux.github-workflows
 
   build:

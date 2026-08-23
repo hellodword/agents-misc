@@ -11,24 +11,17 @@ struct Args {
     write: bool,
     #[arg(long, group = "mode")]
     check: bool,
+    #[arg(long, value_name = "PATH", required = true)]
+    output: PathBuf,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let output = output_path();
     if args.write {
-        write_contract(&output)
+        write_contract(&args.output)
     } else {
-        check_contract(&output)
+        check_contract(&args.output)
     }
-}
-
-fn output_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("web")
-        .join("src")
-        .join("generated")
-        .join("api.ts")
 }
 
 fn write_contract(path: &Path) -> Result<()> {

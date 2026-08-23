@@ -114,8 +114,7 @@ export function VirtualTranscript({
       .find((row) => row.end >= element.scrollTop);
     const trueTop =
       element.scrollTop <= TRANSCRIPT_BOTTOM_THRESHOLD && !hasOlder;
-    const trueBottom =
-      remaining <= TRANSCRIPT_BOTTOM_THRESHOLD && !hasNewer;
+    const trueBottom = remaining <= TRANSCRIPT_BOTTOM_THRESHOLD && !hasNewer;
     setAtTop(trueTop);
     setAtBottom(trueBottom);
     onViewportChange?.({
@@ -129,8 +128,7 @@ export function VirtualTranscript({
     if (!element) return false;
     element.scrollTop = element.scrollHeight;
     return (
-      transcriptBottomDistance(element) <=
-      TRANSCRIPT_EXACT_BOTTOM_TOLERANCE
+      transcriptBottomDistance(element) <= TRANSCRIPT_EXACT_BOTTOM_TOLERANCE
     );
   }, []);
 
@@ -317,8 +315,7 @@ export function VirtualTranscript({
     const element = parent.current;
     if (!element) return;
     const remaining = transcriptBottomDistance(element);
-    if (remaining <= TRANSCRIPT_BOTTOM_THRESHOLD)
-      pinToBottom.current = true;
+    if (remaining <= TRANSCRIPT_BOTTOM_THRESHOLD) pinToBottom.current = true;
     reportViewport();
     if (!initialized.current) return;
     if (hasOlder && element.scrollTop <= 160) void requestOlder();

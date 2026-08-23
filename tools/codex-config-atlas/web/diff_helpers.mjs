@@ -170,12 +170,7 @@ export function requiredChangeCategory(before, after) {
   return "compatible";
 }
 
-export function buildSchemaDiff(
-  fromVersion,
-  toVersion,
-  fromFields,
-  toFields,
-) {
+export function buildSchemaDiff(fromVersion, toVersion, fromFields, toFields) {
   const before = new Map(fromFields.map((field) => [field.path, field]));
   const after = new Map(toFields.map((field) => [field.path, field]));
   for (const field of [...before.values(), ...after.values()]) {

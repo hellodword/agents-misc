@@ -85,9 +85,16 @@ describe("extracted Viewer modules", () => {
   });
 
   it("tests clipboard labels and React text extraction directly", () => {
-    expect(copyStateLabel("copied", "copy", "copying", "done", "failed"))
-      .toBe("done");
-    expect(reactNodeText(<span>A<strong>B</strong></span>)).toBe("AB");
+    expect(copyStateLabel("copied", "copy", "copying", "done", "failed")).toBe(
+      "done",
+    );
+    expect(
+      reactNodeText(
+        <span>
+          A<strong>B</strong>
+        </span>,
+      ),
+    ).toBe("AB");
   });
 
   it("tests entry formatting and rendering directly", () => {

@@ -1,4 +1,9 @@
-import type { EntryListItem, SessionSummary, SourceKind, Status } from "@/generated/api";
+import type {
+  EntryListItem,
+  SessionSummary,
+  SourceKind,
+  Status,
+} from "@/generated/api";
 import { ApiClientError } from "@/lib/api";
 import i18n from "@/lib/i18n";
 
@@ -21,7 +26,10 @@ export function localizedTitle(session: SessionSummary) {
     ? `${i18n.t("untitled")} · ${new Date(session.createdAt).toLocaleString()}`
     : session.title;
 }
-export type Translate = (key: string, options?: Record<string, unknown>) => string;
+export type Translate = (
+  key: string,
+  options?: Record<string, unknown>,
+) => string;
 export function sourceLabel(source: SourceKind, t: Translate) {
   return t(
     (
@@ -65,7 +73,11 @@ export function sourceAvatar(source: SourceKind) {
     } as const
   )[source];
 }
-export function friendlySessionTime(value: string, locale: string, t: Translate) {
+export function friendlySessionTime(
+  value: string,
+  locale: string,
+  t: Translate,
+) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
   const now = new Date();

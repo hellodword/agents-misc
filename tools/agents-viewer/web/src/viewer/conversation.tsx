@@ -8,7 +8,13 @@ import type {
   SessionSyncStatus,
 } from "@/generated/api";
 import { api } from "@/lib/api";
-import { Empty, localizedTitle, mergeEntries, message, sourceLabel } from "@/viewer/format";
+import {
+  Empty,
+  localizedTitle,
+  mergeEntries,
+  message,
+  sourceLabel,
+} from "@/viewer/format";
 import {
   canonicalConversationDisplayTypes,
   conversationDisplayType,
@@ -320,8 +326,7 @@ export function Conversation({
           }
           setError("");
         } catch (f) {
-          if (!background && epoch === pageEpoch.current)
-            setError(message(f));
+          if (!background && epoch === pageEpoch.current) setError(message(f));
         } finally {
           if (loadingPages.current.get(key)?.token === token)
             loadingPages.current.delete(key);
@@ -374,9 +379,7 @@ export function Conversation({
         <Empty text={error} />
       ) : !syncReady ? (
         <Empty
-          text={t(
-            syncStatus ? `sync_${syncStatus.state}` : "syncingSession",
-          )}
+          text={t(syncStatus ? `sync_${syncStatus.state}` : "syncingSession")}
         />
       ) : entries.length === 0 ? (
         <Empty text={t("noEntries")} />
@@ -385,9 +388,7 @@ export function Conversation({
           entries={entries}
           around={around}
           hasOlder={Boolean(previousCursor)}
-          hasNewer={
-            Boolean(nextCursor) || pendingTailSequence !== undefined
-          }
+          hasNewer={Boolean(nextCursor) || pendingTailSequence !== undefined}
           newCount={newCount}
           scrollTarget={scrollTarget}
           onInspect={(id) => onInspect(sessionId, id)}

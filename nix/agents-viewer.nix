@@ -71,7 +71,22 @@ let
     cargoTestFlags = [ ];
     doCheck = true;
     postCheck = ''
-      cargo run --offline --bin export_types -- --check
+      cargo run --offline --bin export_types -- \
+        --check --output web/src/generated/api.ts
+
+      clone_root="$TMPDIR/export-types-cross-clone"
+      clone_a="$clone_root/clone-a"
+      clone_b="$clone_root/clone-b"
+      shared_target="$clone_root/shared-target"
+      mkdir -p "$clone_a" "$clone_b"
+      cp -R ${source}/. "$clone_a/"
+      cp -R ${source}/. "$clone_b/"
+      chmod -R u+w "$clone_a" "$clone_b"
+      CARGO_TARGET_DIR="$shared_target" cargo build --offline \
+        --manifest-path "$clone_a/Cargo.toml" --bin export_types
+      "$shared_target/debug/export_types" \
+        --check --output "$clone_b/web/src/generated/api.ts"
+
       touch "$TMPDIR/rust-tests-ok" "$TMPDIR/bindings-ok"
     '';
     installPhase = ''
@@ -108,6 +123,29 @@ let
       platforms = lib.platforms.unix ++ lib.platforms.windows;
     };
   };
+  e2eCheck = pkgs.buildNpmPackage {
+    pname = "check-agents-viewer-e2e";
+    version = "0.1.0";
+    src = source;
+    sourceRoot = "source/web";
+    npmDeps = web.npmDeps;
+    npmDepsHash = "sha256-gY0vgAhxSTb78pBBklbzUIIs9hx1Jwr7tXXvHM7dqbQ=";
+    npmFlags = [ "--ignore-scripts" ];
+    PLAYWRIGHT_NIX_BROWSER_PATH = lib.getExe pkgs.chromium;
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
+    AGENTS_VIEWER_E2E_BINARY = lib.getExe package;
+    buildPhase = ''
+      runHook preBuild
+      npm run e2e
+      runHook postBuild
+    '';
+    installPhase = ''
+      runHook preInstall
+      mkdir -p "$out"
+      touch "$out/e2e-ok"
+      runHook postInstall
+    '';
+  };
 in
 {
   inherit package;
@@ -115,5 +153,6 @@ in
   checks = {
     rust = rustCheck;
     web = webCheck;
-  };
+  }
+  // lib.optionalAttrs pkgs.stdenv.isLinux { e2e = e2eCheck; };
 }

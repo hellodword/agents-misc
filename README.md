@@ -7,14 +7,14 @@ Agent Rules Kit is a small, project-scoped instruction payload for coding agents
 This repository also maintains several independent Codex tools. Each component
 has one authoritative input boundary and one primary verification entrypoint:
 
-| Component | Purpose | Authoritative inputs | Primary maintenance entry |
-| --- | --- | --- | --- |
-| [Agent Rules Kit](AGENTS.md) | Shared agent rules and reusable workflow skills | `AGENTS.md`, `.agents/**` | `just check-agent-rules` |
-| [Codex patches](codex/README.md) | Reproducible patches over one pinned upstream Codex revision | `codex/upstream.toml`, `codex/series.toml`, current patch files | `just codex-test` |
-| [Codex hook helpers](tools/codex-hooks/README.md) | Bounded local forwarding and notification helpers for patched hook events | helper source and the patch-owned hook schemas | `nix build --no-link .#checks.x86_64-linux.codex-hooks` |
-| [Codex Config Atlas](tools/codex-config-atlas/README.md) | Versioned upstream schema registry, CLI, and static comparison site | tracked schema registry and Web source | `nix build --no-link .#checks.x86_64-linux.codex-config-atlas-tests` |
-| [Agents Viewer](tools/agents-viewer/README.md) | Read-only local rollout index, API, and Web reader | rollout fixtures, Rust DTOs, Rust/Web source | `just agents-viewer-verify` |
-| [Agent behavior evals](tests/evals/README.md) | Deterministic corpus validation and optional isolated live Codex diagnostics | eval JSONL, hidden oracles, schemas, and runtime contract | `nix build --no-link .#checks.x86_64-linux.agent-evals` |
+| Component                                                | Purpose                                                                      | Authoritative inputs                                            | Primary maintenance entry                                            |
+| -------------------------------------------------------- | ---------------------------------------------------------------------------- | --------------------------------------------------------------- | -------------------------------------------------------------------- |
+| [Agent Rules Kit](AGENTS.md)                             | Shared agent rules and reusable workflow skills                              | `AGENTS.md`, `.agents/**`                                       | `just check-agent-rules`                                             |
+| [Codex patches](codex/README.md)                         | Reproducible patches over one pinned upstream Codex revision                 | `codex/upstream.toml`, `codex/series.toml`, current patch files | `just codex-test`                                                    |
+| [Codex hook helpers](tools/codex-hooks/README.md)        | Bounded local forwarding and notification helpers for patched hook events    | helper source and the patch-owned hook schemas                  | `nix build --no-link .#checks.x86_64-linux.codex-hooks`              |
+| [Codex Config Atlas](tools/codex-config-atlas/README.md) | Versioned upstream schema registry, CLI, and static comparison site          | tracked schema registry and Web source                          | `nix build --no-link .#checks.x86_64-linux.codex-config-atlas-tests` |
+| [Agents Viewer](tools/agents-viewer/README.md)           | Read-only local rollout index, API, and Web reader                           | rollout fixtures, Rust DTOs, Rust/Web source                    | `just agents-viewer-verify`                                          |
+| [Agent behavior evals](tests/evals/README.md)            | Deterministic corpus validation and optional isolated live Codex diagnostics | eval JSONL, hidden oracles, schemas, and runtime contract       | `nix build --no-link .#checks.x86_64-linux.agent-evals`              |
 
 Generated ownership is explicit. Codex generated contracts live inside the
 sixth patch in `codex/series.toml`; Atlas data and site trees are Nix outputs;

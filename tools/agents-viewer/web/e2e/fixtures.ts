@@ -1,7 +1,17 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import {
+  access,
+  mkdtemp,
+  mkdir,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
@@ -11,7 +21,7 @@ import {
   type BrowserContext,
   type Page,
 } from "@playwright/test";
-import { resolveBrowserTarget } from "./browser";
+import { nixBrowserLaunchOptions } from "./browser";
 
 type Runtime = {
   baseURL: string;
@@ -31,26 +41,76 @@ type Options = {
 const here = dirname(fileURLToPath(import.meta.url));
 const fixturePath = resolve(here, "../../tests/fixtures/rollouts/v0_120.jsonl");
 const viewerRoot = resolve(here, "../..");
+const repositoryRoot = resolve(viewerRoot, "../..");
 const execFileAsync = promisify(execFile);
+
+async function resolveViewerBinary(
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<string> {
+  const configured = environment.AGENTS_VIEWER_E2E_BINARY?.trim();
+  if (configured) {
+    if (!isAbsolute(configured)) {
+      throw new Error(
+        "AGENTS_VIEWER_E2E_BINARY must be an absolute executable path.",
+      );
+    }
+    let binary: string;
+    try {
+      binary = await realpath(configured);
+      const metadata = await stat(binary);
+      await access(binary, constants.X_OK);
+      if (!metadata.isFile()) throw new Error("not a file");
+    } catch {
+      throw new Error(
+        `AGENTS_VIEWER_E2E_BINARY is not an executable file: ${configured}`,
+      );
+    }
+    return binary;
+  }
+
+  const metadata = JSON.parse(
+    (
+      await execFileAsync(
+        "cargo",
+        [
+          "metadata",
+          "--format-version",
+          "1",
+          "--no-deps",
+          "--manifest-path",
+          resolve(viewerRoot, "Cargo.toml"),
+        ],
+        { cwd: repositoryRoot },
+      )
+    ).stdout,
+  ) as { target_directory: string };
+  return resolve(metadata.target_directory, "debug/agents-viewer");
+}
+
+async function stopServer(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise<void>((resolveExit) => {
+    let forceTimer: NodeJS.Timeout | undefined;
+    const finish = () => {
+      if (forceTimer) clearTimeout(forceTimer);
+      resolveExit();
+    };
+    child.once("close", finish);
+    forceTimer = setTimeout(() => child.kill("SIGKILL"), 5_000);
+    if (!child.kill("SIGTERM")) {
+      child.off("close", finish);
+      finish();
+      return;
+    }
+  });
+}
 
 async function startServer(
   sourceHome: string,
   dataDir: string,
   password: string,
 ) {
-  const metadata = JSON.parse(
-    (
-      await execFileAsync("cargo", [
-        "metadata",
-        "--format-version",
-        "1",
-        "--no-deps",
-        "--manifest-path",
-        resolve(viewerRoot, "Cargo.toml"),
-      ])
-    ).stdout,
-  ) as { target_directory: string };
-  const binary = resolve(metadata.target_directory, "debug/agents-viewer");
+  const binary = await resolveViewerBinary();
   const configPath = resolve(sourceHome, "../config.toml");
   await writeFile(
     configPath,
@@ -62,60 +122,57 @@ async function startServer(
   });
   const stderr: Buffer[] = [];
   child.stderr?.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
-  const baseURL = await new Promise<string>((resolveURL, reject) => {
-    const timer = setTimeout(
-      () =>
+  try {
+    const baseURL = await new Promise<string>((resolveURL, reject) => {
+      const timer = setTimeout(
+        () =>
+          reject(
+            new Error(
+              `agents-viewer did not print its URL; stderr: ${Buffer.concat(stderr).toString("utf8")}`,
+            ),
+          ),
+        10_000,
+      );
+      child.once("error", (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      child.once("exit", (code) => {
+        clearTimeout(timer);
         reject(
           new Error(
-            `agents-viewer did not print its URL; stderr: ${Buffer.concat(stderr).toString("utf8")}`,
+            `agents-viewer exited with ${code}; stderr: ${Buffer.concat(stderr).toString("utf8")}`,
           ),
-        ),
-      10_000,
-    );
-    child.once("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
+        );
+      });
+      child.stdout?.once("data", (chunk) => {
+        clearTimeout(timer);
+        const url = String(chunk)
+          .trim()
+          .split(/\s+/)
+          .find((value) => value.startsWith("http://"));
+        url
+          ? resolveURL(url)
+          : reject(new Error(`agents-viewer printed no URL: ${String(chunk)}`));
+      });
     });
-    child.once("exit", (code) => {
-      clearTimeout(timer);
-      reject(
-        new Error(
-          `agents-viewer exited with ${code}; stderr: ${Buffer.concat(stderr).toString("utf8")}`,
-        ),
-      );
-    });
-    child.stdout?.once("data", (chunk) => {
-      clearTimeout(timer);
-      const url = String(chunk)
-        .trim()
-        .split(/\s+/)
-        .find((value) => value.startsWith("http://"));
-      url
-        ? resolveURL(url)
-        : reject(new Error(`agents-viewer printed no URL: ${String(chunk)}`));
-    });
-  });
-  return { child, baseURL };
+    return { child, baseURL };
+  } catch (error) {
+    await stopServer(child);
+    throw error;
+  }
 }
 
 export const test = base.extend<Runtime & Options>({
   password: ["", { option: true }],
   browser: [
     async ({}, use) => {
-      const target = await resolveBrowserTarget();
-      const browser =
-        "cdpEndpoint" in target
-          ? await chromium.connectOverCDP(target.cdpEndpoint)
-          : await chromium.launch({
-              executablePath: target.executablePath,
-              headless: true,
-              args:
-                process.platform === "linux"
-                  ? ["--no-sandbox", "--disable-dev-shm-usage"]
-                  : [],
-            });
-      await use(browser);
-      await browser.close();
+      const browser = await chromium.launch(nixBrowserLaunchOptions());
+      try {
+        await use(browser);
+      } finally {
+        await browser.close();
+      }
     },
     { scope: "worker" },
   ],
@@ -125,8 +182,11 @@ export const test = base.extend<Runtime & Options>({
     await mkdir(resolve(sourceHome, "sessions/2025/01/02"), {
       recursive: true,
     });
-    await use(sourceHome);
-    await rm(root, { recursive: true, force: true });
+    try {
+      await use(sourceHome);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   },
   cacheDir: async ({ sourceHome }, use) => {
     const cacheDir = resolve(sourceHome, "../cache");
@@ -243,9 +303,11 @@ export const test = base.extend<Runtime & Options>({
   ) => {
     const server = await startServer(sourceHome, cacheDir, password);
     Object.assign(server.child, { baseURL: server.baseURL });
-    await use(server.child);
-    server.child.kill("SIGTERM");
-    await new Promise((resolveExit) => server.child.once("exit", resolveExit));
+    try {
+      await use(server.child);
+    } finally {
+      await stopServer(server.child);
+    }
   },
   baseURL: async ({ process: child }, use) => {
     await use((child as ChildProcess & { baseURL: string }).baseURL);
@@ -269,8 +331,11 @@ export const test = base.extend<Runtime & Options>({
         return route.abort("blockedbyclient");
       return route.continue();
     });
-    await use(context);
-    await context.close();
+    try {
+      await use(context);
+    } finally {
+      await context.close();
+    }
   },
   page: async ({ context, baseURL }, use) => {
     const page = await context.newPage();

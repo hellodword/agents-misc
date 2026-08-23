@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -410,21 +411,11 @@ class SyncSchemaTests(unittest.TestCase):
                 _handle_sync_schema(sync_args(schemas))
             self.assertEqual(tree_digest(schemas), original)
 
-    def test_install_failure_restores_original_tree(self) -> None:
+    def test_exchange_failure_preserves_original_tree(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             schemas = Path(temporary_directory) / "schemas"
             seed_registry(schemas)
             original = tree_digest(schemas)
-            real_replace = os.replace
-            calls = 0
-
-            def fail_candidate_install(source: Path, target: Path) -> None:
-                nonlocal calls
-                calls += 1
-                if calls == 2:
-                    raise OSError("injected install failure")
-                real_replace(source, target)
-
             with (
                 patch(
                     "codex_config_atlas.cli._resolve_tag_commit",
@@ -432,14 +423,15 @@ class SyncSchemaTests(unittest.TestCase):
                 ),
                 patch("codex_config_atlas.cli._fetch_schema", return_value=SCHEMA),
                 patch(
-                    "codex_config_atlas.cli.os.replace",
-                    side_effect=fail_candidate_install,
+                    "codex_config_atlas.atomic_output.subprocess.run",
+                    return_value=subprocess.CompletedProcess(
+                        args=["mv"], returncode=1, stdout="", stderr="unsupported"
+                    ),
                 ),
-                self.assertRaisesRegex(OSError, "injected install failure"),
+                self.assertRaisesRegex(RuntimeError, "atomic directory exchange failed"),
             ):
                 _handle_sync_schema(sync_args(schemas))
 
-            self.assertEqual(calls, 3)
             self.assertEqual(tree_digest(schemas), original)
 
 

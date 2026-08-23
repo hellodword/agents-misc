@@ -59,6 +59,15 @@
           inherit lib;
           pkgs = import nixpkgs { inherit system; };
         };
+
+      treefmtProject = import ./nix/formatter.nix {
+        inherit
+          lib
+          nixpkgs
+          supportedSystems
+          treefmt-nix
+          ;
+      };
     in
     {
       packages = import ./nix/packages.nix {
@@ -91,6 +100,7 @@
           agentsViewerFor
           supportedSystems
           ;
+        formattingCheckFor = system: treefmtProject.checks.${system};
       };
 
       devShells = import ./nix/dev-shells.nix {
@@ -102,14 +112,7 @@
           ;
       };
 
-      formatter = import ./nix/formatter.nix {
-        inherit
-          lib
-          nixpkgs
-          supportedSystems
-          treefmt-nix
-          ;
-      };
+      formatter = treefmtProject.formatter;
 
       overlays.default = final: _prev: {
         agents-misc = {

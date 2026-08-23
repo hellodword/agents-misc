@@ -160,10 +160,10 @@ index eb5c727d3179db8a0bec1601aafc52fb56ec1ed9..707780000774016113013a9183262614
  pub mod pre_tool_use;
 diff --git a/codex-rs/hooks/src/events/model_request.rs b/codex-rs/hooks/src/events/model_request.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..9c9ca53dfd30b34a120ead7e9d56738561e849d4
+index 0000000000000000000000000000000000000000..deff5af4b6b8dcc50447129757d65fb224c19fab
 --- /dev/null
 +++ b/codex-rs/hooks/src/events/model_request.rs
-@@ -0,0 +1,721 @@
+@@ -0,0 +1,837 @@
 +use std::path::PathBuf;
 +
 +use codex_protocol::ThreadId;
@@ -424,32 +424,32 @@ index 0000000000000000000000000000000000000000..9c9ca53dfd30b34a120ead7e9d567385
 +        cwd.as_path(),
 +        turn_id.clone(),
 +        max_concurrency,
++        group_timeout,
 +        parse,
 +    );
-+    let results = match group_timeout {
-+        Some(duration) => match tokio::time::timeout(duration, execute).await {
-+            Ok(results) => results,
-+            Err(_) => {
-+                return dispatch_failure(
-+                    matched,
-+                    turn_id,
-+                    format!(
-+                        "{event_name:?} hook group timed out after {} seconds",
-+                        duration.as_secs()
-+                    ),
-+                );
-+            }
-+        },
-+        None => execute.await,
-+    };
++    let results = execute.await;
++
++    let timeout_message = group_timeout.map(|duration| {
++        format!(
++            "{event_name:?} hook group timed out after {} seconds",
++            duration.as_secs_f64()
++        )
++    });
++    let completed = results
++        .iter()
++        .filter_map(|result| match result {
++            dispatcher::BoundedHandlerResult::Completed(completed) => Some(completed),
++            dispatcher::BoundedHandlerResult::GroupTimedOut(_) => None,
++        })
++        .collect::<Vec<_>>();
 +
 +    NotificationHookOutcome {
-+        suppress_turn_error_lifecycle: if results
++        suppress_turn_error_lifecycle: if completed
 +            .iter()
 +            .any(|result| result.data.suppress_turn_error_lifecycle == Some(true))
 +        {
 +            Some(true)
-+        } else if results
++        } else if completed
 +            .iter()
 +            .any(|result| result.data.suppress_turn_error_lifecycle == Some(false))
 +        {
@@ -457,7 +457,19 @@ index 0000000000000000000000000000000000000000..9c9ca53dfd30b34a120ead7e9d567385
 +        } else {
 +            None
 +        },
-+        hook_events: results.into_iter().map(|result| result.completed).collect(),
++        hook_events: results
++            .into_iter()
++            .map(|result| match result {
++                dispatcher::BoundedHandlerResult::Completed(completed) => completed.completed,
++                dispatcher::BoundedHandlerResult::GroupTimedOut(handler) => failed_hook_event(
++                    handler,
++                    turn_id.clone(),
++                    timeout_message
++                        .clone()
++                        .unwrap_or_else(|| "hook group timed out".to_string()),
++                ),
++            })
++            .collect(),
 +    }
 +}
 +
@@ -483,22 +495,36 @@ index 0000000000000000000000000000000000000000..9c9ca53dfd30b34a120ead7e9d567385
 +        hook_events: handlers
 +            .into_iter()
 +            .map(|handler| {
-+                let mut run = dispatcher::running_summary(&handler);
-+                run.status = HookRunStatus::Failed;
-+                run.completed_at = Some(completed_at);
-+                run.duration_ms = Some(0);
-+                run.entries.push(HookOutputEntry {
-+                    kind: HookOutputEntryKind::Error,
-+                    text: message.clone(),
-+                });
-+                HookCompletedEvent {
-+                    turn_id: turn_id.clone(),
-+                    run,
-+                }
++                failed_hook_event_at(handler, turn_id.clone(), message.clone(), completed_at)
 +            })
 +            .collect(),
 +        suppress_turn_error_lifecycle: None,
 +    }
++}
++
++fn failed_hook_event(
++    handler: ConfiguredHandler,
++    turn_id: Option<String>,
++    message: String,
++) -> HookCompletedEvent {
++    failed_hook_event_at(handler, turn_id, message, chrono::Utc::now().timestamp())
++}
++
++fn failed_hook_event_at(
++    handler: ConfiguredHandler,
++    turn_id: Option<String>,
++    message: String,
++    completed_at: i64,
++) -> HookCompletedEvent {
++    let mut run = dispatcher::running_summary(&handler);
++    run.status = HookRunStatus::Failed;
++    run.completed_at = Some(completed_at);
++    run.duration_ms = Some(0);
++    run.entries.push(HookOutputEntry {
++        kind: HookOutputEntryKind::Error,
++        text: message,
++    });
++    HookCompletedEvent { turn_id, run }
 +}
 +
 +fn parse_request_error_completed(
@@ -609,6 +635,7 @@ index 0000000000000000000000000000000000000000..9c9ca53dfd30b34a120ead7e9d567385
 +#[cfg(test)]
 +mod tests {
 +    use std::collections::HashMap;
++    use std::collections::HashSet;
 +    use std::sync::Arc;
 +    use std::sync::Mutex;
 +    use std::sync::atomic::AtomicUsize;
@@ -673,6 +700,23 @@ index 0000000000000000000000000000000000000000..9c9ca53dfd30b34a120ead7e9d567385
 +    impl HookMcpExecutor for PendingMcpExecutor {
 +        fn execute(&self, _call: HookMcpCall) -> BoxFuture<'_, anyhow::Result<String>> {
 +            std::future::pending().boxed()
++        }
++    }
++
++    struct MixedMcpExecutor {
++        outputs: HashMap<String, String>,
++        pending: HashSet<String>,
++    }
++
++    impl HookMcpExecutor for MixedMcpExecutor {
++        fn execute(&self, call: HookMcpCall) -> BoxFuture<'_, anyhow::Result<String>> {
++            async move {
++                if self.pending.contains(&call.tool) {
++                    return std::future::pending().await;
++                }
++                Ok(self.outputs.get(&call.tool).cloned().unwrap_or_default())
++            }
++            .boxed()
 +        }
 +    }
 +
@@ -859,10 +903,22 @@ index 0000000000000000000000000000000000000000..9c9ca53dfd30b34a120ead7e9d567385
 +    }
 +
 +    #[tokio::test]
-+    async fn abnormal_stop_group_timeout_returns_explicit_failures() {
++    async fn abnormal_stop_group_timeout_preserves_completed_opinions_in_config_order() {
 +        assert_eq!(ABNORMAL_STOP_GROUP_TIMEOUT, Duration::from_secs(30));
-+        let mut engine = engine_with_executor(Arc::new(PendingMcpExecutor));
-+        engine.handlers = vec![handler(HookEventName::AbnormalStop, "pending", 0)];
++        let mut engine = engine_with_executor(Arc::new(MixedMcpExecutor {
++            outputs: HashMap::from([
++                ("false".to_string(), r#"{"suppress":false}"#.to_string()),
++                ("no-opinion".to_string(), String::new()),
++                ("true".to_string(), r#"{"suppress":true}"#.to_string()),
++            ]),
++            pending: HashSet::from(["pending".to_string()]),
++        }));
++        engine.handlers = vec![
++            handler(HookEventName::AbnormalStop, "false", 0),
++            handler(HookEventName::AbnormalStop, "pending", 1),
++            handler(HookEventName::AbnormalStop, "no-opinion", 2),
++            handler(HookEventName::AbnormalStop, "true", 3),
++        ];
 +
 +        let outcome = run_notification(
 +            &engine,
@@ -876,13 +932,73 @@ index 0000000000000000000000000000000000000000..9c9ca53dfd30b34a120ead7e9d567385
 +        )
 +        .await;
 +
-+        assert_eq!(outcome.hook_events.len(), 1);
-+        assert_eq!(outcome.hook_events[0].run.status, HookRunStatus::Failed);
++        assert_eq!(outcome.suppress_turn_error_lifecycle, Some(true));
++        assert_eq!(outcome.hook_events.len(), 4);
++        assert_eq!(
++            outcome
++                .hook_events
++                .iter()
++                .map(|event| (event.run.display_order, event.run.status))
++                .collect::<Vec<_>>(),
++            vec![
++                (0, HookRunStatus::Completed),
++                (1, HookRunStatus::Failed),
++                (2, HookRunStatus::Completed),
++                (3, HookRunStatus::Completed),
++            ]
++        );
 +        assert!(
-+            outcome.hook_events[0].run.entries[0]
++            outcome.hook_events[1].run.entries[0]
 +                .text
 +                .contains("timed out")
 +        );
++    }
++
++    #[tokio::test]
++    async fn abnormal_stop_group_timeout_keeps_false_over_goal_default() {
++        let mut engine = engine_with_executor(Arc::new(MixedMcpExecutor {
++            outputs: HashMap::from([("false".to_string(), r#"{"suppress":false}"#.to_string())]),
++            pending: HashSet::from(["pending".to_string()]),
++        }));
++        engine.handlers = vec![
++            handler(HookEventName::AbnormalStop, "false", 0),
++            handler(HookEventName::AbnormalStop, "pending", 1),
++        ];
++
++        let mut outcome = run_notification(
++            &engine,
++            HookEventName::AbnormalStop,
++            "{}".to_string(),
++            cwd(),
++            Some("turn-timeout".to_string()),
++            usize::MAX,
++            Some(Duration::from_millis(10)),
++            parse_abnormal_stop_completed,
++        )
++        .await;
++        if outcome.suppress_turn_error_lifecycle.is_none() {
++            outcome.suppress_turn_error_lifecycle = Some(true);
++        }
++
++        assert_eq!(outcome.suppress_turn_error_lifecycle, Some(false));
++        assert_eq!(outcome.hook_events[0].run.status, HookRunStatus::Completed);
++        assert_eq!(outcome.hook_events[1].run.status, HookRunStatus::Failed);
++    }
++
++    #[tokio::test(start_paused = true)]
++    async fn abnormal_stop_group_timeout_without_opinion_uses_goal_policy_default() {
++        let mut engine = engine_with_executor(Arc::new(PendingMcpExecutor));
++        engine.handlers = vec![handler(HookEventName::AbnormalStop, "pending", 0)];
++
++        let outcome = run_abnormal_stop(
++            &engine,
++            abnormal_stop(true, ModelRequestErrorCategory::Transport),
++        )
++        .await;
++
++        assert_eq!(outcome.suppress_turn_error_lifecycle, Some(true));
++        assert_eq!(outcome.hook_events.len(), 1);
++        assert_eq!(outcome.hook_events[0].run.status, HookRunStatus::Failed);
 +    }
 +}
 diff --git a/codex-rs/hooks/src/schema.rs b/codex-rs/hooks/src/schema.rs
