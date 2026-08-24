@@ -76,6 +76,9 @@ export const resources = {
       selected: "Selected",
       retry: "Retry",
       partial: "Results may be incomplete",
+      hierarchySimplified: "Deep hierarchy simplified for safe display",
+      entrySummaryIncomplete:
+        "Some list details are abbreviated; open the inspector for complete values.",
       conversationNavigation: "Conversation navigation",
       jumpTop: "Go to first message",
       jumpBottom: "Go to latest message",
@@ -254,6 +257,8 @@ export const resources = {
       selected: "已选择",
       retry: "重试",
       partial: "结果可能不完整",
+      hierarchySimplified: "层级过深，已安全简化显示",
+      entrySummaryIncomplete: "部分列表详情已缩略；可打开检查器查看完整值。",
       conversationNavigation: "对话导航",
       jumpTop: "到第一条消息",
       jumpBottom: "到最新消息",

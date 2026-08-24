@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import sys
@@ -10,7 +12,9 @@ import unittest
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 HELPER_ROOT = Path(__file__).resolve().parents[1]
@@ -269,9 +273,7 @@ class NotifyServerTests(unittest.TestCase):
             release.set()
             self.stop_server(server, thread)
 
-    def test_non_loopback_binding_and_stable_webhook_fields_remain_supported(
-        self,
-    ) -> None:
+    def test_non_loopback_binding_remains_supported(self) -> None:
         handler = server_module.make_handler({}, False, max_body_bytes=256)
         server = server_module.BoundedThreadingHTTPServer(("0.0.0.0", 0), handler, 1)
         try:
@@ -279,20 +281,159 @@ class NotifyServerTests(unittest.TestCase):
         finally:
             server.server_close()
 
-        payload = request_error_payload()
-        params = server_module.webhook_params(
-            payload,
-            payload,
-            "title",
-            "message",
-            "warning",
+    def test_enabled_webhook_requires_an_absolute_http_url_before_listen(self) -> None:
+        for url in [None, "", "relative", "ftp://example.invalid/hook"]:
+            webhook = {"enabled": True}
+            if url is not None:
+                webhook["url"] = url
+            with (
+                self.subTest(url=url),
+                self.assertRaisesRegex(ValueError, "webhook.url"),
+            ):
+                server_module.validate_webhook_config({"webhook": webhook})
+
+        args = SimpleNamespace(
+            config=None,
+            host=None,
+            port=None,
+            max_body_bytes=None,
+            max_handler_concurrency=None,
+            verbose=False,
         )
-        self.assertEqual(params["operation"], "sampling")
-        self.assertEqual(params["nextAction"], "retry")
-        self.assertEqual(params["errorCategory"], "transport")
-        self.assertEqual(params["errorMessage"], "connection reset")
-        self.assertNotIn("willRetry", params)
-        self.assertNotIn("requestSubtype", params)
+        with (
+            mock.patch.object(server_module, "parse_args", return_value=args),
+            mock.patch.object(
+                server_module,
+                "load_config",
+                return_value={"webhook": {"enabled": True}},
+            ),
+            mock.patch.object(server_module, "BoundedThreadingHTTPServer") as server,
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertEqual(server_module.main(), 2)
+            server.assert_not_called()
+
+    def test_webhook_posts_exact_json_and_preserves_only_configured_query(self) -> None:
+        captured: dict[str, object] = {}
+
+        class WebhookHandler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                length = int(self.headers["Content-Length"])
+                captured.update(
+                    method=self.command,
+                    path=self.path,
+                    content_type=self.headers.get("Content-Type"),
+                    body=self.rfile.read(length),
+                )
+                self.send_response(204)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                pass
+
+        server, thread = self.start_server(WebhookHandler)
+        url = f"http://127.0.0.1:{server.server_port}/notify?configured=value"
+        try:
+            result = server_module.run_webhook(
+                {"url": url}, "Synthetic title", "Synthetic message", False
+            )
+        finally:
+            self.stop_server(server, thread)
+
+        self.assertEqual(result, {"type": "webhook", "ok": True, "status": 204})
+        self.assertEqual(captured["method"], "POST")
+        self.assertEqual(captured["path"], "/notify?configured=value")
+        self.assertEqual(captured["content_type"], "application/json")
+        self.assertEqual(
+            json.loads(captured["body"]),
+            {
+                "msgtype": "text",
+                "text": {"content": "Synthetic title\nSynthetic message"},
+            },
+        )
+
+    def test_webhook_rejects_redirects_and_oversize_encoded_bodies(self) -> None:
+        requests: list[str] = []
+
+        class RedirectHandler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                requests.append(self.path)
+                self.send_response(302)
+                self.send_header("Location", "/followed")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def do_GET(self) -> None:
+                requests.append(self.path)
+                self.send_response(204)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                pass
+
+        server, thread = self.start_server(RedirectHandler)
+        try:
+            result = server_module.run_webhook(
+                {"url": f"http://127.0.0.1:{server.server_port}/start"},
+                "title",
+                "",
+                False,
+            )
+        finally:
+            self.stop_server(server, thread)
+
+        self.assertEqual(result["status"], 302)
+        self.assertFalse(result["ok"])
+        self.assertEqual(requests, ["/start"])
+
+        with (
+            mock.patch.object(server_module, "MAX_WEBHOOK_BODY_BYTES", 8),
+            mock.patch.object(server_module.urllib.request, "build_opener") as opener,
+        ):
+            result = server_module.run_webhook(
+                {"url": "https://example.invalid/hook"}, "title", "message", False
+            )
+        self.assertEqual(result["error"], "request body too large")
+        opener.assert_not_called()
+
+    def test_webhook_failure_logs_do_not_disclose_url_or_message(self) -> None:
+        class FailureHandler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                self.send_response(500)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                pass
+
+        server, thread = self.start_server(FailureHandler)
+        secret_query = "configured-secret-token"
+        secret_title = "private title"
+        secret_message = "private message"
+        stderr = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(stderr):
+                result = server_module.run_webhook(
+                    {
+                        "url": (
+                            f"http://127.0.0.1:{server.server_port}/hook"
+                            f"?token={secret_query}"
+                        )
+                    },
+                    secret_title,
+                    secret_message,
+                    True,
+                )
+        finally:
+            self.stop_server(server, thread)
+
+        self.assertEqual(result["status"], 500)
+        log_text = stderr.getvalue()
+        self.assertNotIn(secret_query, log_text)
+        self.assertNotIn(secret_title, log_text)
+        self.assertNotIn(secret_message, log_text)
 
     def test_invalid_resource_limits_are_rejected(self) -> None:
         for value in [0, -1, True, "bad"]:

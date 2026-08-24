@@ -3,7 +3,7 @@
 
 Listens on 127.0.0.1:8765 by default. It accepts JSON POSTs from
 codex_hook_forwarder.py and, according to config, runs notify-send or sends a
-GET request to a webhook endpoint such as https://foo.com/notify?... .
+JSON POST request to an explicitly configured webhook endpoint.
 
 Config may be TOML or JSON. By default, the server reads
 ~/.codex/hook-notify-server.toml if present.
@@ -19,7 +19,6 @@ Example TOML:
 
     [webhook]
     enabled = false
-    url = "https://foo.com/notify"
 """
 
 from __future__ import annotations
@@ -48,8 +47,8 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 DEFAULT_EVENTS: list[str] = []
-DEFAULT_WEBHOOK_URL = "https://foo.com/notify"
 MAX_BODY_BYTES = 2 * 1024 * 1024
+MAX_WEBHOOK_BODY_BYTES = 256 * 1024
 DEFAULT_MAX_HANDLER_CONCURRENCY = 8
 MAX_HANDLER_CONCURRENCY = 64
 FORWARDED_MESSAGE_FIELDS = {
@@ -121,6 +120,7 @@ def main() -> int:
             else config.get("max_handler_concurrency", DEFAULT_MAX_HANDLER_CONCURRENCY),
             maximum=MAX_HANDLER_CONCURRENCY,
         )
+        validate_webhook_config(config)
     except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError) as exc:
         print(
             f"codex hook notify server: invalid configuration: {exc}", file=sys.stderr
@@ -299,7 +299,7 @@ def handle_message(
     global_events = list_value(config.get("events"), DEFAULT_EVENTS)
     log(
         True,
-        f"received {event_name or '<unknown>'}: severity={severity} title={title!r}",
+        f"received {event_name or '<unknown>'}: severity={severity}",
     )
     if not event_enabled(event_name, global_events):
         log(
@@ -327,11 +327,7 @@ def handle_message(
     if bool_value(webhook_config.get("enabled"), default=False):
         webhook_events = list_value(webhook_config.get("events"), global_events)
         if event_enabled(event_name, webhook_events):
-            actions.append(
-                run_webhook(
-                    webhook_config, payload, summary, title, message, severity, verbose
-                )
-            )
+            actions.append(run_webhook(webhook_config, title, message, verbose))
         else:
             log(
                 True,
@@ -395,91 +391,87 @@ def run_notify_send(
 
 def run_webhook(
     config: dict[str, Any],
-    payload: dict[str, Any],
-    summary: dict[str, Any],
     title: str,
     message: str,
-    severity: str,
     verbose: bool,
 ) -> dict[str, Any]:
-    base_url = str(config.get("url") or DEFAULT_WEBHOOK_URL)
+    del verbose
+    url = webhook_url(config)
     timeout = float(config.get("timeout_sec") or config.get("timeoutSec") or 5)
-    params = webhook_params(payload, summary, title, message, severity)
-    url = append_query(base_url, params)
+    content = title if not message else f"{title}\n{message}"
+    body = json.dumps(
+        {"msgtype": "text", "text": {"content": content}},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(body) > MAX_WEBHOOK_BODY_BYTES:
+        log(True, "webhook rejected: encoded request body is too large")
+        return {"type": "webhook", "ok": False, "error": "request body too large"}
     request = urllib.request.Request(
-        url, method="GET", headers={"User-Agent": "codex-hook-notify-server/1"}
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "codex-hook-notify-server/1",
+        },
     )
+    opener = urllib.request.build_opener(NoRedirectHandler())
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with opener.open(request, timeout=timeout) as response:
             ok = 200 <= response.status < 300
-            log(True, f"webhook GET {response.status}: {base_url}")
+            log(True, f"webhook POST completed: status={response.status}")
             return {"type": "webhook", "ok": ok, "status": response.status}
     except urllib.error.HTTPError as exc:
-        log(True, f"webhook HTTP {exc.code}: {base_url}")
-        return {"type": "webhook", "ok": False, "status": exc.code, "error": str(exc)}
+        exc.close()
+        log(True, f"webhook POST failed: status={exc.code}")
+        return {
+            "type": "webhook",
+            "ok": False,
+            "status": exc.code,
+            "error": f"HTTP status {exc.code}",
+        }
     except (OSError, ValueError, urllib.error.URLError) as exc:
-        log(True, f"webhook failed: {exc}")
-        return {"type": "webhook", "ok": False, "error": str(exc)}
+        log(True, f"webhook POST failed: {type(exc).__name__}")
+        return {"type": "webhook", "ok": False, "error": "delivery failed"}
 
 
-def webhook_params(
-    payload: dict[str, Any],
-    summary: dict[str, Any],
-    title: str,
-    message: str,
-    severity: str,
-) -> dict[str, str]:
-    params: dict[str, str] = {
-        "event": str(
-            payload.get("hookEventName") or summary.get("hookEventName") or ""
-        ),
-        "severity": severity,
-        "title": title,
-        "message": message,
-    }
-    for key in [
-        "sessionId",
-        "turnId",
-        "agentId",
-        "agentType",
-        "cwd",
-        "model",
-        "permissionMode",
-        "source",
-        "trigger",
-        "toolName",
-        "toolUseId",
-        "toolCommand",
-        "provider",
-        "operation",
-        "endpointPath",
-        "attempt",
-        "nextAction",
-        "goalMode",
-        "approvalPolicy",
-        "sandboxMode",
-        "reason",
-        "stopHookActive",
-    ]:
-        value = summary.get(key)
-        if value is not None:
-            params[key] = str(value)
-    error = summary.get("error")
-    if isinstance(error, dict):
-        if error.get("category") is not None:
-            params["errorCategory"] = str(error["category"])
-        if error.get("message") is not None:
-            params["errorMessage"] = str(error["message"])
-    return params
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        del req, fp, code, msg, headers, newurl
+        return None
 
 
-def append_query(url: str, params: dict[str, str]) -> str:
-    parsed = urllib.parse.urlsplit(url)
-    existing = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
-    query = urllib.parse.urlencode(existing + list(params.items()))
-    return urllib.parse.urlunsplit(
-        (parsed.scheme, parsed.netloc, parsed.path, query, parsed.fragment)
-    )
+def validate_webhook_config(config: dict[str, Any]) -> None:
+    raw = config.get("webhook")
+    if raw is None:
+        return
+    if not isinstance(raw, dict):
+        raise TypeError("webhook must be a table/object")
+    if bool_value(raw.get("enabled"), default=False):
+        webhook_url(raw)
+
+
+def webhook_url(config: dict[str, Any]) -> str:
+    value = config.get("url")
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError("webhook.url is required when webhook is enabled")
+    parsed = urllib.parse.urlsplit(value)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or not parsed.hostname
+    ):
+        raise ValueError("webhook.url must be an absolute HTTP(S) URL")
+    return value
 
 
 def load_config(path_text: str | None) -> dict[str, Any]:

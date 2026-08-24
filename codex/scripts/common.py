@@ -729,8 +729,6 @@ def refresh_patches(
         if empty:
             raise PatchError(f"refresh would produce empty patch file(s): {', '.join(empty)}")
 
-        complete_diff_index = temporary / "complete.index"
-        _temporary_index_diff(working, changed, complete_diff_index)
         manifest.patch_dir.parent.mkdir(parents=True, exist_ok=True)
         candidate = Path(
             tempfile.mkdtemp(prefix=f".{manifest.upstream.ref}.candidate-", dir=manifest.patch_dir.parent)

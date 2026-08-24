@@ -25,7 +25,7 @@ from .registry import (
     parse_version,
     save_manifest,
     schema_path_for_version,
-    schema_url_for_version,
+    schema_url_for_commit,
     sha256_bytes,
     tag_for_version,
     upsert_manifest_entry,
@@ -236,7 +236,7 @@ def _handle_sync_schema(args: argparse.Namespace) -> int:
                 f"resolved commit mismatch for {tag}: {commit_sha} != {expected_commit}"
             )
 
-    url = schema_url_for_version(version)
+    url = schema_url_for_commit(commit_sha)
     schema_bytes = _fetch_schema(
         commit_sha, timeout_seconds=timeout_seconds, max_bytes=max_bytes
     )

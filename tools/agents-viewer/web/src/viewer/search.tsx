@@ -118,11 +118,13 @@ export function SearchPage() {
   const [params, setParams] = useSearchParams();
   const q = params.get("q") ?? "";
   const [hits, setHits] = useState<SearchHit[]>([]);
+  const [partial, setPartial] = useState(false);
   const [error, setError] = useState("");
   const [allTypes, setAllTypes] = useSearchAllTypes();
   useEffect(() => {
     if (!q.trim()) {
       setHits([]);
+      setPartial(false);
       setError("");
       return;
     }
@@ -133,6 +135,7 @@ export function SearchPage() {
           .search(q, { archived: "include", allTypes }, controller.signal)
           .then((page) => {
             setHits(page.data);
+            setPartial(page.partial);
             setError("");
           })
           .catch((f) => {
@@ -172,6 +175,7 @@ export function SearchPage() {
           {error}
         </p>
       )}
+      {partial && <p className="search-feedback muted">{t("partial")}</p>}
       {hits.map((hit) => (
         <Link
           className="search-result"

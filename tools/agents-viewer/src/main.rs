@@ -338,6 +338,7 @@ async fn update_status(
 }
 
 async fn publish_session_committed(state: &AppState, generation: u64, session_id: &str) {
+    state.invalidate_session_groups(generation);
     state
         .sse
         .publish(

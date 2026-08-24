@@ -932,7 +932,7 @@ async fn append_merges_an_explicit_plan_with_the_preceding_assistant_block() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn append_reads_only_the_suffix_plus_two_bounded_fingerprint_windows() {
+async fn append_revalidates_the_complete_prefix_and_parses_only_the_suffix() {
     let temp = TempDir::new().unwrap();
     let source_home = temp.path().join("codex-home");
     let sessions = source_home.join("sessions/2025/01/02");
@@ -969,6 +969,7 @@ async fn append_reads_only_the_suffix_plus_two_bounded_fingerprint_windows() {
     .await
     .unwrap();
 
+    let old_size = std::fs::metadata(&rollout).unwrap().len();
     let appended = b"{\"timestamp\":\"2025-01-02T03:04:09Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"bounded append\",\"phase\":\"final\"}}\n";
     std::fs::OpenOptions::new()
         .append(true)
@@ -1001,9 +1002,17 @@ async fn append_reads_only_the_suffix_plus_two_bounded_fingerprint_windows() {
     .unwrap();
     assert!(outcome.appended);
     assert!(
-        gate.bytes_read() <= appended.len() as u64 + 2 * 64 * 1024,
-        "append read {} bytes for a {} byte suffix",
+        gate.bytes_read() >= old_size + appended.len() as u64,
+        "append must hash the complete {} byte prefix and parse the {} byte suffix, but read {} bytes",
+        old_size,
+        appended.len(),
+        gate.bytes_read()
+    );
+    assert!(
+        gate.bytes_read() <= old_size + appended.len() as u64 + 2 * 64 * 1024,
+        "append read {} bytes for a {} byte prefix and {} byte suffix",
         gate.bytes_read(),
+        old_size,
         appended.len()
     );
 

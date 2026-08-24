@@ -225,13 +225,18 @@ pub(super) async fn entries(
         rows.reverse();
     }
     let mut data = Vec::with_capacity(rows.len());
+    let mut encoded_page_bytes = 2_usize;
     for row in &rows {
         let item = entry_item_from_row(row)?;
-        data.push(item);
-        if serde_json::to_vec(&data)?.len() > MAX_JSON_PAGE_BYTES {
-            data.pop();
+        let encoded_item_bytes = serde_json::to_vec(&item)?.len();
+        let candidate_bytes = encoded_page_bytes
+            .saturating_add(usize::from(!data.is_empty()))
+            .saturating_add(encoded_item_bytes);
+        if !data.is_empty() && candidate_bytes > MAX_JSON_PAGE_BYTES {
             break;
         }
+        encoded_page_bytes = candidate_bytes;
+        data.push(item);
     }
     let previous_cursor = if let Some(first) = data.first()
         && entry_exists(
@@ -398,7 +403,7 @@ pub(super) async fn entry_detail(
         &row.get::<String, _>("metadata_json"),
     )?;
     Ok(Json(TranscriptEntry {
-        item: entry_item_from_row(&row)?,
+        item: complete_entry_item_from_row(&row)?,
         derived_metadata: metadata,
         raw_refs,
     }))

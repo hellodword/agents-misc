@@ -97,11 +97,12 @@ fn parse_rollout_inner<R: BufRead, S: ParseSink>(
         .as_ref()
         .map_or_else(|| Deduper::new(initial_session_id), Deduper::from_seed);
     let mut jsonl = match seed.as_ref() {
-        Some(value) => BoundedJsonlReader::from_position(
+        Some(value) => BoundedJsonlReader::from_position_with_hasher(
             reader,
             context.max_event_bytes,
             value.checkpoint_line.saturating_add(1),
             value.checkpoint_offset,
+            value.stable_hasher.clone(),
         ),
         None => BoundedJsonlReader::new(reader, context.max_event_bytes),
     };

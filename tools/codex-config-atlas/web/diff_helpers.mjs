@@ -53,6 +53,14 @@ const CHANGE_ROW_KEYS = [
   },
 ];
 
+const CATEGORY_SEVERITY = [
+  "breakingLike",
+  "review",
+  "behavior",
+  "compatible",
+  "documentation",
+];
+
 export function stableValueKey(value) {
   if (value === null) {
     return "null";
@@ -135,6 +143,15 @@ export function summarizeChanges(changes) {
   }
 
   return summary;
+}
+
+export function highestChangeCategory(changes) {
+  for (const category of CATEGORY_SEVERITY) {
+    if (changes.some((change) => change.category === category)) {
+      return category;
+    }
+  }
+  throw new Error("change group has no recognized category");
 }
 
 export function requiredState(field) {
@@ -470,11 +487,14 @@ export function renderFieldValue(field, rowKey) {
   }
 }
 
-function changedRows(group) {
-  const kinds = new Set(group.changes.map((change) => change.kind));
+export function changedFieldRows(changes) {
+  const kinds = new Set(changes.map((change) => change.kind));
+  if (kinds.has("field_added") || kinds.has("field_removed")) {
+    return CHANGE_ROW_KEYS.map(({ label, rowKey }) => ({ label, rowKey }));
+  }
   return CHANGE_ROW_KEYS.filter((row) =>
     Array.from(row.kinds).some((kind) => kinds.has(kind)),
-  );
+  ).map(({ label, rowKey }) => ({ label, rowKey }));
 }
 
 function detailLines(prefix, label, value) {
@@ -486,7 +506,7 @@ function detailLines(prefix, label, value) {
 }
 
 function renderChangedGroup(group) {
-  const rows = changedRows(group);
+  const rows = changedFieldRows(group.changes);
   const beforeLines = [`- ${group.path}`];
   const afterLines = [`+ ${group.path}`];
   for (const row of rows) {

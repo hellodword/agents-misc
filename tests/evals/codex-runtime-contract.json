@@ -8,6 +8,13 @@
         { "type": "function", "name": "update_plan" },
         { "type": "function", "name": "view_image" }
       ]
+    },
+    "codex-cli 0.148.0": {
+      "allowed_tools": [
+        { "type": "function", "name": "request_user_input" },
+        { "type": "function", "name": "update_plan" },
+        { "type": "function", "name": "view_image" }
+      ]
     }
   }
 }

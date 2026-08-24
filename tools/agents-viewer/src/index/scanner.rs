@@ -431,7 +431,7 @@ fn parse_source_blocking(
         tail_seed,
     );
     let mut reader = BufReader::new(controlled);
-    let mut summary = match seed {
+    let summary = match seed {
         Some(seed) => crate::rollout::normalize::parse_rollout_from_seed_cancellable(
             &mut reader,
             &context,
@@ -454,10 +454,6 @@ fn parse_source_blocking(
         &opened.canonical_path,
     );
     let changed = after != opened.identity;
-    // Append safety is established with bounded head and old-tail windows before parsing. The
-    // parser's rolling hash covers only bytes read in this invocation; it is retained for cache
-    // compatibility but is no longer re-created by rereading an unbounded prefix.
-    summary.stable_prefix_hash.clear();
     Ok((summary, changed, final_tail_hash))
 }
 
@@ -497,6 +493,14 @@ async fn append_plan(
         return Ok(full_scan_plan());
     }
     let checkpoint_offset = u64::try_from(checkpoint_offset)?;
+    let Some(stored_checkpoint_hash) = source.get::<Option<String>, _>("checkpoint_hash") else {
+        return Ok(full_scan_plan());
+    };
+    if stored_checkpoint_hash.is_empty() {
+        // Releases that did not preserve the full-prefix hash left an empty compatibility value.
+        // Rebuild this source once on its next growth so future appends can be verified strictly.
+        return Ok(full_scan_plan());
+    }
     let Some(stored_tail) = source.get::<Option<String>, _>("tail_hash") else {
         return Ok(full_scan_plan());
     };
@@ -504,6 +508,16 @@ async fn append_plan(
         discovered,
         u64::try_from(old_size)?,
         &stored_tail,
+        lease,
+        shutdown,
+    )?
+    else {
+        return Ok(full_scan_plan());
+    };
+    let Some(stable_hasher) = verify_checkpoint_prefix(
+        discovered,
+        checkpoint_offset,
+        &stored_checkpoint_hash,
         lease,
         shutdown,
     )?
@@ -565,6 +579,7 @@ async fn append_plan(
             recognized_record_count: u64::try_from(recognized_record_count)?,
             checkpoint_offset,
             checkpoint_line,
+            stable_hasher,
         }),
         tail_seed: old_tail[prefix_start..prefix_end].to_vec(),
     })
@@ -763,6 +778,53 @@ fn verify_old_tail(
     Ok(Some(tail))
 }
 
+fn verify_checkpoint_prefix(
+    discovered: &DiscoveredSource,
+    checkpoint_offset: u64,
+    expected_hash: &str,
+    lease: &ScanLease,
+    shutdown: &CancellationToken,
+) -> Result<Option<Sha256>> {
+    let mut opened = open_source_read_only(&discovered.root, &discovered.path)?;
+    if opened.identity.file_key != discovered.source.file_key
+        || opened.identity.size < checkpoint_offset
+    {
+        return Ok(None);
+    }
+    let mut reader = ControlledReader::new(
+        (&mut opened.file).take(checkpoint_offset),
+        lease.clone(),
+        shutdown.clone(),
+    );
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; FINGERPRINT_BYTES];
+    let mut read_total = 0_u64;
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        read_total = read_total.saturating_add(read as u64);
+    }
+    drop(reader);
+    let after = opened_file_identity(
+        &opened.file,
+        &opened
+            .file
+            .metadata()
+            .context("re-stat checkpoint prefix")?,
+        &opened.canonical_path,
+    );
+    if read_total != checkpoint_offset
+        || after != opened.identity
+        || sha256_hasher_hex(&hasher) != expected_hash
+    {
+        return Ok(None);
+    }
+    Ok(Some(hasher))
+}
+
 fn read_controlled_range(
     file: &mut File,
     offset: u64,
@@ -866,6 +928,16 @@ fn system_time_nanos(time: SystemTime) -> i64 {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    output
+}
+
+fn sha256_hasher_hex(hasher: &Sha256) -> String {
+    let digest = hasher.clone().finalize();
     let mut output = String::with_capacity(digest.len() * 2);
     for byte in digest {
         use std::fmt::Write as _;

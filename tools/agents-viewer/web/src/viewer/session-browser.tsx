@@ -1,6 +1,7 @@
 import { useTranslation } from "react-i18next";
 import { Link, useLocation } from "react-router-dom";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
 import type { SessionGroup, SessionTreeNode } from "@/generated/api";
 import {
   Empty,
@@ -13,7 +14,10 @@ import {
 export function SessionSidebar(props: {
   groups: SessionGroup[];
   loading: boolean;
+  hasMore: boolean;
+  loadingMore: boolean;
   error: string;
+  onLoadMore: () => void;
   onNavigate: () => void;
 }) {
   const { t, i18n } = useTranslation();
@@ -37,10 +41,23 @@ export function SessionSidebar(props: {
             node={group.root}
             locationPath={location.pathname}
             language={i18n.language}
+            hierarchyComplete={group.hierarchyComplete}
             onNavigate={props.onNavigate}
           />
         ))}
       </ul>
+      {props.hasMore && (
+        <Button
+          className="session-load-more"
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={props.loadingMore}
+          onClick={props.onLoadMore}
+        >
+          {props.loadingMore ? t("loading") : t("loadMore")}
+        </Button>
+      )}
     </nav>
   );
 }
@@ -49,12 +66,14 @@ export function SessionTreeItem({
   parentTitle,
   locationPath,
   language,
+  hierarchyComplete,
   onNavigate,
 }: {
   node: SessionTreeNode;
   parentTitle?: string;
   locationPath: string;
   language: string;
+  hierarchyComplete?: boolean;
   onNavigate: () => void;
 }) {
   const { t } = useTranslation();
@@ -101,6 +120,11 @@ export function SessionTreeItem({
           <span className="sr-only">{source}</span>
         </span>
       </Link>
+      {hierarchyComplete === false && (
+        <span className="session-hierarchy-notice muted">
+          {t("hierarchySimplified")}
+        </span>
+      )}
       {node.children.length > 0 && (
         <ul className="session-children">
           {node.children.map((child) => (

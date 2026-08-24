@@ -95,6 +95,7 @@
         inherit
           lib
           nixpkgs
+          codexFor
           codexCheckFor
           codexConfigAtlasFor
           agentsViewerFor

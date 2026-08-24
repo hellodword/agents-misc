@@ -9,7 +9,6 @@ use axum::routing::{get, put};
 use chrono::{SecondsFormat, TimeZone as _, Utc};
 use http::StatusCode;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use sqlx::{QueryBuilder, Row as _, Sqlite};
 
 use crate::index::coordinator::CoordinatorError;
@@ -29,7 +28,7 @@ mod events;
 mod query;
 mod raw;
 mod search;
-mod sessions;
+pub(crate) mod sessions;
 #[cfg(test)]
 mod tests;
 
@@ -40,6 +39,8 @@ use raw::*;
 use search::*;
 use sessions::*;
 const MAX_JSON_PAGE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_ENTRY_TITLE_BYTES: usize = 4 * 1024;
+const MAX_ENTRY_METADATA_BYTES: usize = 64 * 1024;
 const DEFAULT_CONTENT_BYTES: usize = 256 * 1024;
 const MAX_CONTENT_BYTES: usize = 1024 * 1024;
 

@@ -46,6 +46,8 @@ export function AppShell() {
     t,
     i18n,
     sessionGroups,
+    sessionNextCursor,
+    loadingMoreSessions,
     status,
     loading,
     error,
@@ -69,6 +71,7 @@ export function AppShell() {
     compactInspector,
     compactNavigation,
     conversationSignals,
+    sessionSyncSignals,
     resyncSequence,
     sidebarPanelRef,
     inspectorPanelRef,
@@ -82,12 +85,16 @@ export function AppShell() {
     openInspector,
     applySettings,
     toggleSidebar,
+    loadMoreSessions,
   } = useViewerController();
   const sidebar = (
     <SessionSidebar
       groups={sessionGroups}
       loading={loading}
       error={error}
+      hasMore={Boolean(sessionNextCursor)}
+      loadingMore={loadingMoreSessions}
+      onLoadMore={() => void loadMoreSessions()}
       onNavigate={() => setNavOpen(false)}
     />
   );
@@ -275,6 +282,7 @@ export function AppShell() {
                   element={
                     <Conversation
                       signals={conversationSignals}
+                      syncSignals={sessionSyncSignals}
                       resyncSequence={resyncSequence}
                       conversationDisplayTypes={conversationDisplayTypes}
                       onForceConversationDisplayType={

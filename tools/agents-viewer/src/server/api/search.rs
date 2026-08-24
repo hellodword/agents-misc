@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashSet;
 
 #[derive(Default)]
 pub(super) struct SearchQuery {
@@ -21,6 +22,15 @@ pub(super) async fn search(
     let q = query
         .q
         .ok_or_else(|| ApiFailure::invalid("q is required"))?;
+    let query_scalars = q.chars().count();
+    if query_scalars == 0 {
+        return Err(ApiFailure::invalid("search query must not be empty"));
+    }
+    if query_scalars > 512 {
+        return Err(ApiFailure::invalid(
+            "search query exceeds 512 Unicode scalars",
+        ));
+    }
     let limit = bounded_limit(query.limit, 50, 200)?;
     let filters = SearchFilters {
         session_id: query.session,
@@ -40,15 +50,39 @@ pub(super) async fn search(
         },
     )
     .await
-    .map_err(|error| ApiFailure::invalid(error.to_string()))?;
+    .map_err(|error| {
+        tracing::error!(%error, "search index request failed");
+        ApiFailure::internal()
+    })?;
+    let mut unique_session_ids = Vec::new();
+    let mut seen_session_ids = HashSet::new();
+    for hit in &result.hits {
+        if seen_session_ids.insert(hit.session_id.clone()) {
+            unique_session_ids.push(hit.session_id.clone());
+        }
+    }
+    let mut sessions = HashMap::<String, SessionSummary>::new();
+    if !unique_session_ids.is_empty() {
+        let mut builder = QueryBuilder::<Sqlite>::new("SELECT * FROM sessions WHERE id IN (");
+        let mut separated = builder.separated(",");
+        for session_id in &unique_session_ids {
+            separated.push_bind(session_id);
+        }
+        separated.push_unseparated(")");
+        for row in builder.build().fetch_all(state.database.pool()).await? {
+            let session = session_from_row(&row)?;
+            sessions.insert(session.id.clone(), session);
+        }
+        for session in sessions.values_mut() {
+            apply_session_freshness(&state, session)?;
+        }
+    }
     let mut hits = Vec::with_capacity(result.hits.len());
     for hit in result.hits {
-        let row = sqlx::query("SELECT * FROM sessions WHERE id=?")
-            .bind(&hit.session_id)
-            .fetch_one(state.database.pool())
-            .await?;
-        let mut session = session_from_row(&row)?;
-        apply_session_freshness(&state, &mut session)?;
+        let session = sessions.get(&hit.session_id).cloned().ok_or_else(|| {
+            tracing::error!(session_id = %hit.session_id, "search hit references a missing session");
+            ApiFailure::internal()
+        })?;
         hits.push(SearchHit {
             session,
             entry_id: hit.entry_id,

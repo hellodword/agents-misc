@@ -110,6 +110,11 @@ export function TranscriptEntryView({
           )}
         </div>
       )}
+      {(!entry.titleComplete || !entry.metadataComplete) && (
+        <p className="entry-completeness muted" role="status">
+          {t("entrySummaryIncomplete")}
+        </p>
+      )}
     </>
   );
 }

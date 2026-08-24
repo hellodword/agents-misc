@@ -76,8 +76,16 @@ timeout_ms = 0
 
 [webhook]
 enabled = false
-url = "https://example.invalid/notify"
+# Required when enabled: an absolute HTTP(S) URL.
+# url = "https://your-reviewed-endpoint.invalid/notify?configured=value"
 ```
+
+An enabled webhook receives a `POST` with `Content-Type: application/json` and
+the fixed message shape
+`{"msgtype":"text","text":{"content":"<title>\n<message>"}}`. If the
+message is empty, `content` is only the title. Query parameters already present
+in the configured URL are preserved; event fields are never added to the URL.
+Redirects are rejected, and encoded webhook bodies are capped at 256 KiB.
 
 Configure the forwarder with `CODEX_HOOK_FORWARDER_*` variables. The important
 controls are event filtering, timeout, preview/body bounds, strict delivery,

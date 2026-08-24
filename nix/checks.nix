@@ -2,6 +2,7 @@
   lib,
   nixpkgs,
   supportedSystems,
+  codexFor,
   codexCheckFor,
   codexConfigAtlasFor,
   agentsViewerFor,
@@ -19,6 +20,7 @@ lib.genAttrs supportedSystems (
     codexConfigAtlas = codexConfigAtlasFor system;
     agentsViewer = agentsViewerFor system;
     codexCheck = codexCheckFor system;
+    codexPackage = codexFor system;
     codexPatchContract =
       pkgs.runCommand "codex-patch-contract-check"
         {
@@ -91,6 +93,7 @@ lib.genAttrs supportedSystems (
         {
           nativeBuildInputs = [
             agentRulesPython
+            codexPackage
             pkgs.ruff
           ];
         }
@@ -101,7 +104,17 @@ lib.genAttrs supportedSystems (
           ruff format --check tools/agent_evals tests/test_agent_evals.py
           ruff check tools/agent_evals tests/test_agent_evals.py
           python3 -m unittest tests.test_agent_evals
-          python3 -m tools.agent_evals preflight --help
+          python3 -m tools.agent_evals preflight \
+            --root ${../.} \
+            --codex-bin ${codexPackage}/bin/codex \
+            --model gpt-5.6-luna \
+            --reasoning-effort high \
+            --judge-model gpt-5.6-luna \
+            --judge-reasoning-effort high \
+            --approval-policy never \
+            --sandbox-mode read-only \
+            --timeout 60 \
+            > "$TMPDIR/preflight.json"
           touch "$out"
         '';
     github-workflows =

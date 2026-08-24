@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use serde_json::Value;
+use sha2::Sha256;
 
 use crate::model::{
     Completeness, DiagnosticSeverity, EntryKind, EntryPresentation, IndexState, MessageRole, Phase,
@@ -91,6 +92,7 @@ pub(crate) struct ParseSeed {
     pub recognized_record_count: u64,
     pub checkpoint_offset: u64,
     pub checkpoint_line: u64,
+    pub stable_hasher: Sha256,
     pub partial: bool,
 }
 

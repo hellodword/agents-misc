@@ -54,10 +54,10 @@ def tag_for_version(version: str) -> str:
     return f"rust-v{version}"
 
 
-def schema_url_for_version(version: str) -> str:
+def schema_url_for_commit(commit_sha: str) -> str:
     return (
-        "https://raw.githubusercontent.com/openai/codex/refs/tags/"
-        f"{tag_for_version(version)}/{SCHEMA_FILE_IN_UPSTREAM}"
+        "https://raw.githubusercontent.com/openai/codex/"
+        f"{commit_sha}/{SCHEMA_FILE_IN_UPSTREAM}"
     )
 
 
@@ -288,12 +288,12 @@ def validate_manifest(
             raise ValueError(f"schema JSON is invalid for {version}") from exc
         if not isinstance(schema, dict):
             raise ValueError(f"schema root must be an object for {version}")
-        expected_url = schema_url_for_version(version)
+        commit_sha = _validate_commit_sha(metadata.get("commitSha"), version)
+        expected_url = schema_url_for_commit(commit_sha)
         if metadata.get("version") != version:
             raise ValueError(f"metadata version mismatch for {version}")
         if metadata.get("tag") != expected_tag:
             raise ValueError(f"metadata tag mismatch for {version}")
-        _validate_commit_sha(metadata.get("commitSha"), version)
         if metadata.get("schemaUrl") != expected_url:
             raise ValueError(f"metadata schemaUrl mismatch for {version}")
         if metadata.get("schemaFile") != SCHEMA_FILE_IN_UPSTREAM:

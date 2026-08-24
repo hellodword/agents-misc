@@ -261,6 +261,7 @@ pub struct SessionGroup {
     pub root: SessionTreeNode,
     pub latest_session_id: String,
     pub updated_at: String,
+    pub hierarchy_complete: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
@@ -312,6 +313,7 @@ pub struct EntryListItem {
     #[ts(optional)]
     pub tool_status: Option<ToolStatus>,
     pub title: String,
+    pub title_complete: bool,
     pub primary_preview: String,
     pub secondary_preview: String,
     #[ts(type = "number")]
@@ -323,6 +325,7 @@ pub struct EntryListItem {
     pub default_collapsed: bool,
     #[ts(type = "Record<string, unknown>")]
     pub metadata: BTreeMap<String, serde_json::Value>,
+    pub metadata_complete: bool,
     #[ts(type = "number")]
     pub raw_ref_count: u64,
 }

@@ -1,6 +1,8 @@
 import {
   buildSchemaDiff,
+  changedFieldRows,
   formatDeveloperDiff,
+  highestChangeCategory,
   renderFieldValue,
   summarizeChanges,
 } from "./diff_helpers.mjs";
@@ -14,39 +16,29 @@ const state = {
 
 const GROUP_SECTIONS = [
   {
+    id: "breakingLike",
+    title: "Breaking-like",
+    chipClass: "chip-breaking-like",
+  },
+  {
     id: "review",
     title: "Needs review",
     chipClass: "chip-review",
   },
   {
-    id: "defaults",
-    title: "Defaults changed",
+    id: "behavior",
+    title: "Behavior",
     chipClass: "chip-behavior",
   },
   {
-    id: "removed",
-    title: "Removed configs",
-    chipClass: "chip-breaking-like",
-  },
-  {
-    id: "added",
-    title: "Added configs",
+    id: "compatible",
+    title: "Compatible",
     chipClass: "chip-compatible",
   },
   {
-    id: "deprecated",
-    title: "Deprecated configs",
+    id: "documentation",
+    title: "Documentation",
     chipClass: "chip-documentation",
-  },
-  {
-    id: "docsOnly",
-    title: "Docs-only changes",
-    chipClass: "chip-documentation",
-  },
-  {
-    id: "other",
-    title: "Other changes",
-    chipClass: "chip",
   },
 ];
 
@@ -186,37 +178,7 @@ function groupChanges(diffPayload, beforePayload, afterPayload) {
 }
 
 function resolveGroupSection(group) {
-  const kinds = new Set(group.changes.map((change) => change.kind));
-
-  if (group.changes.some((change) => change.category === "review")) {
-    return "review";
-  }
-
-  if (
-    kinds.has("default_changed") ||
-    kinds.has("default_added") ||
-    kinds.has("default_removed")
-  ) {
-    return "defaults";
-  }
-
-  if (kinds.has("field_removed")) {
-    return "removed";
-  }
-
-  if (kinds.has("field_added")) {
-    return "added";
-  }
-
-  if (kinds.has("deprecated_changed")) {
-    return "deprecated";
-  }
-
-  if (group.changes.every((change) => change.kind === "description_changed")) {
-    return "docsOnly";
-  }
-
-  return "other";
+  return highestChangeCategory(group.changes);
 }
 
 function partitionGroups(groups) {
@@ -231,7 +193,7 @@ function partitionGroups(groups) {
   })).filter((section) => section.groups.length > 0);
 }
 
-function renderDiffSummary(diffPayload, sections, fromVersion, toVersion) {
+function renderDiffSummary(diffPayload, groups, fromVersion, toVersion) {
   return `
     <div class="summary-grid">
       <div class="stat">
@@ -240,7 +202,7 @@ function renderDiffSummary(diffPayload, sections, fromVersion, toVersion) {
       </div>
       <div class="stat">
         <p class="stat-label">Changed Fields</p>
-        <p class="stat-value">${sections.reduce((sum, section) => sum + section.groups.length, 0)}</p>
+        <p class="stat-value">${groups.length}</p>
       </div>
       <div class="stat">
         <p class="stat-label">Change Events</p>
@@ -248,12 +210,12 @@ function renderDiffSummary(diffPayload, sections, fromVersion, toVersion) {
       </div>
     </div>
     <div class="chip-row">
-      ${sections
+      ${GROUP_SECTIONS.filter((section) => diffPayload.summary[section.id] > 0)
         .map(
           (section) =>
             `<span class="chip ${section.chipClass}">${escapeHtml(
               section.title,
-            )} ${section.groups.length}</span>`,
+            )} ${diffPayload.summary[section.id]}</span>`,
         )
         .join("")}
     </div>
@@ -261,19 +223,7 @@ function renderDiffSummary(diffPayload, sections, fromVersion, toVersion) {
 }
 
 function renderDiffGroup(group) {
-  const rows = [
-    ["Type", "type"],
-    ["Default", "default"],
-    ["Required", "required"],
-    ["Description", "description"],
-  ];
-
-  if (
-    (group.beforeField?.enum && group.beforeField.enum.length) ||
-    (group.afterField?.enum && group.afterField.enum.length)
-  ) {
-    rows.splice(2, 0, ["Enum", "enum"]);
-  }
+  const rows = changedFieldRows(group.changes);
 
   return `
     <article class="change-item field-change-item">
@@ -286,7 +236,7 @@ function renderDiffGroup(group) {
         <div class="field-matrix-header">${escapeHtml(state.selection.toVersion)}</div>
         ${rows
           .map(
-            ([label, rowKey]) => `
+            ({ label, rowKey }) => `
               <div class="field-matrix-label">${escapeHtml(label)}</div>
               <div class="field-matrix-value">${escapeHtml(
                 renderFieldValue(group.beforeField, rowKey),
@@ -323,7 +273,7 @@ function renderDiffContent(fromVersion, toVersion, diffPayload, groups) {
     : '<div class="empty-card">No differences for the selected versions.</div>';
 
   return `
-    ${renderDiffSummary(diffPayload, sections, fromVersion, toVersion)}
+    ${renderDiffSummary(diffPayload, groups, fromVersion, toVersion)}
     <section class="stack">
       ${diffCards}
     </section>

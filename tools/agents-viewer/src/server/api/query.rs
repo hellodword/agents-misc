@@ -76,6 +76,19 @@ pub(super) fn coordinator_failure(error: CoordinatorError, session_id: &str) -> 
 pub(super) fn entry_item_from_row(
     row: &sqlx::sqlite::SqliteRow,
 ) -> Result<EntryListItem, ApiFailure> {
+    entry_item_from_row_with_completeness(row, false)
+}
+
+pub(super) fn complete_entry_item_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<EntryListItem, ApiFailure> {
+    entry_item_from_row_with_completeness(row, true)
+}
+
+fn entry_item_from_row_with_completeness(
+    row: &sqlx::sqlite::SqliteRow,
+    complete: bool,
+) -> Result<EntryListItem, ApiFailure> {
     let kind: EntryKind = decode(row, "kind")?;
     let primary: String = row.get("primary_text");
     let secondary: String = row.get("secondary_text");
@@ -86,6 +99,20 @@ pub(super) fn entry_item_from_row(
     };
     let primary_preview = utf8_prefix(&primary, primary_limit);
     let secondary_preview = utf8_prefix(&secondary, secondary_limit);
+    let full_title = row.get::<String, _>("title");
+    let title = if complete {
+        full_title.clone()
+    } else {
+        utf8_prefix(&full_title, MAX_ENTRY_TITLE_BYTES)
+    };
+    let full_metadata = serde_json::from_str::<BTreeMap<String, serde_json::Value>>(
+        &row.get::<String, _>("metadata_json"),
+    )?;
+    let (metadata, metadata_complete) = if complete {
+        (full_metadata, true)
+    } else {
+        bounded_entry_metadata(full_metadata)?
+    };
     Ok(EntryListItem {
         id: row.get("id"),
         session_id: row.get("session_id"),
@@ -99,7 +126,8 @@ pub(super) fn entry_item_from_row(
         phase: decode_optional(row, "phase")?,
         tool_kind: decode_optional(row, "tool_kind")?,
         tool_status: decode_optional(row, "tool_status")?,
-        title: row.get("title"),
+        title,
+        title_complete: complete || full_title.len() <= MAX_ENTRY_TITLE_BYTES,
         primary_complete: primary_preview.len() == primary.len(),
         secondary_complete: secondary_preview.len() == secondary.len(),
         primary_preview,
@@ -109,10 +137,57 @@ pub(super) fn entry_item_from_row(
         secondary_bytes: u64::try_from(row.get::<i64, _>("secondary_bytes"))
             .map_err(|_| ApiFailure::internal())?,
         default_collapsed: row.get("default_collapsed"),
-        metadata: serde_json::from_str(&row.get::<String, _>("metadata_json"))?,
+        metadata,
+        metadata_complete,
         raw_ref_count: u64::try_from(row.get::<i64, _>("raw_ref_count"))
             .map_err(|_| ApiFailure::internal())?,
     })
+}
+
+fn bounded_entry_metadata(
+    metadata: BTreeMap<String, serde_json::Value>,
+) -> Result<(BTreeMap<String, serde_json::Value>, bool), ApiFailure> {
+    if serde_json::to_vec(&metadata)?.len() <= MAX_ENTRY_METADATA_BYTES {
+        return Ok((metadata, true));
+    }
+    const RENDERER_KEYS: [&str; 6] = [
+        "requestUserInputQuestions",
+        "requestUserInputAnswers",
+        "requestUserInputNotes",
+        "imageAttachmentCount",
+        "audioAttachmentCount",
+        "attachmentCount",
+    ];
+    let mut selected = BTreeMap::new();
+    let mut encoded_members = 0_usize;
+    for key in RENDERER_KEYS
+        .into_iter()
+        .chain(metadata.keys().map(String::as_str))
+    {
+        if selected.contains_key(key)
+            || (RENDERER_KEYS.contains(&key) && !metadata.contains_key(key))
+        {
+            continue;
+        }
+        let Some(value) = metadata.get(key) else {
+            continue;
+        };
+        let member_bytes = serde_json::to_vec(key)?
+            .len()
+            .saturating_add(1)
+            .saturating_add(serde_json::to_vec(value)?.len());
+        let candidate = 2_usize
+            .saturating_add(encoded_members)
+            .saturating_add(usize::from(!selected.is_empty()))
+            .saturating_add(member_bytes);
+        if candidate <= MAX_ENTRY_METADATA_BYTES {
+            selected.insert(key.to_owned(), value.clone());
+            encoded_members = encoded_members
+                .saturating_add(usize::from(encoded_members > 0))
+                .saturating_add(member_bytes);
+        }
+    }
+    Ok((selected, false))
 }
 
 pub(super) fn diagnostic_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Diagnostic, ApiFailure> {
@@ -324,12 +399,6 @@ pub(super) fn utf8_prefix(value: &str, max: usize) -> String {
     }
     value[..end].to_owned()
 }
-pub(super) fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
 pub(super) fn database_family_bytes(path: &std::path::Path) -> u64 {
     ["", "-wal", "-shm"]
         .iter()
@@ -477,5 +546,28 @@ mod tests {
         );
         assert!(query_pairs(Some("bad=%")).is_err());
         assert!(parse_sessions_query(Some("limit=1&limit=2")).is_err());
+    }
+
+    #[test]
+    fn bounded_metadata_prioritizes_renderer_fields_without_truncating_values() {
+        let metadata = BTreeMap::from([
+            (
+                "requestUserInputQuestions".to_owned(),
+                serde_json::json!([{"id": "target", "question": "Choose"}]),
+            ),
+            ("aHuge".to_owned(), serde_json::json!("x".repeat(70 * 1024))),
+            (
+                "zStable".to_owned(),
+                serde_json::json!({"whole": [1, 2, 3]}),
+            ),
+        ]);
+
+        let (bounded, complete) = bounded_entry_metadata(metadata).unwrap();
+
+        assert!(!complete);
+        assert!(bounded.contains_key("requestUserInputQuestions"));
+        assert_eq!(bounded["zStable"], serde_json::json!({"whole": [1, 2, 3]}));
+        assert!(!bounded.contains_key("aHuge"));
+        assert!(serde_json::to_vec(&bounded).unwrap().len() <= MAX_ENTRY_METADATA_BYTES);
     }
 }

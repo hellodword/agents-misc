@@ -5,7 +5,9 @@ import test from "node:test";
 import {
   addedFieldCategory,
   buildSchemaDiff,
+  changedFieldRows,
   formatDeveloperDiff,
+  highestChangeCategory,
   renderFieldValue,
   requiredChangeCategory,
   requiredState,
@@ -100,6 +102,30 @@ test("classifies and renders required states without boolean compatibility", () 
   assert.throws(
     () => requiredState(field("value", { required: false })),
     /invalid required state/,
+  );
+});
+
+test("groups by highest event severity and selects matrix rows by change kind", () => {
+  assert.equal(
+    highestChangeCategory([
+      { category: "documentation" },
+      { category: "compatible" },
+      { category: "breakingLike" },
+      { category: "behavior" },
+    ]),
+    "breakingLike",
+  );
+  assert.deepEqual(
+    changedFieldRows([
+      { kind: "enum_values_removed" },
+      { kind: "deprecated_changed" },
+      { kind: "additional_properties_restricted" },
+    ]),
+    [
+      { label: "Enum", rowKey: "enum" },
+      { label: "Deprecated", rowKey: "deprecated" },
+      { label: "Additional properties", rowKey: "additionalProperties" },
+    ],
   );
 });
 

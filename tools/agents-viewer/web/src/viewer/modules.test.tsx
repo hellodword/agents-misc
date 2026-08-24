@@ -44,6 +44,7 @@ const entry: EntryListItem = {
   presentation: "user",
   role: "user",
   title: "User",
+  titleComplete: true,
   primaryPreview: "Direct entry",
   secondaryPreview: "",
   primaryBytes: 12,
@@ -52,6 +53,7 @@ const entry: EntryListItem = {
   secondaryComplete: true,
   defaultCollapsed: false,
   metadata: {},
+  metadataComplete: true,
   rawRefCount: 0,
 };
 
@@ -173,18 +175,25 @@ describe("extracted Viewer modules", () => {
       root: { session, children: [] },
       latestSessionId: session.id,
       updatedAt: session.updatedAt,
+      hierarchyComplete: false,
     };
     render(
       <MemoryRouter initialEntries={[`/sessions/${session.id}`]}>
         <SessionSidebar
           groups={[group]}
           loading={false}
+          hasMore={false}
+          loadingMore={false}
           error=""
           onNavigate={() => {}}
+          onLoadMore={() => {}}
         />
       </MemoryRouter>,
     );
     expect(screen.getByText("Module session")).toBeInTheDocument();
+    expect(
+      screen.getByText("Deep hierarchy simplified for safe display"),
+    ).toBeInTheDocument();
 
     render(
       <TooltipProvider>

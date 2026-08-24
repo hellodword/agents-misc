@@ -1,4 +1,5 @@
 import { appendFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import AxeBuilder from "@axe-core/playwright";
 import type { Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
@@ -75,6 +76,114 @@ async function cssVariableColor(page: Page, variable: string) {
     return color;
   }, variable);
 }
+
+test("lets the browser reconnect SSE with Last-Event-ID", async ({
+  context,
+  baseURL,
+}) => {
+  let requestCount = 0;
+  let reconnectLastEventId: string | undefined;
+  const eventServer = createServer((request, response) => {
+    requestCount += 1;
+    const lastEventId = request.headers["last-event-id"];
+    if (typeof lastEventId === "string") reconnectLastEventId = lastEventId;
+    response.writeHead(200, {
+      "Access-Control-Allow-Origin": new URL(baseURL).origin,
+      "Cache-Control": "no-cache",
+      "Content-Type": "text/event-stream",
+    });
+    if (requestCount === 1) {
+      setTimeout(
+        () =>
+          response.write(
+            'id: 41\nretry: 50\nevent: heartbeat\ndata: {"generation":41}\n\n',
+          ),
+        50,
+      );
+      setTimeout(() => response.end(), 500);
+      return;
+    }
+    response.write('event: heartbeat\ndata: {"generation":42}\n\n');
+  });
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error) => reject(error);
+    eventServer.once("error", onError);
+    eventServer.listen(0, "127.0.0.1", () => {
+      eventServer.off("error", onError);
+      resolve();
+    });
+  });
+  const address = eventServer.address();
+  if (!address || typeof address === "string")
+    throw new Error("controlled SSE server did not bind a TCP address");
+  const eventUrl = `http://127.0.0.1:${address.port}/events`;
+  await context.route("**/api/v1/events", (route) =>
+    route.continue({ url: eventUrl }),
+  );
+  const reconnectPage = await context.newPage();
+  try {
+    await reconnectPage.goto(`${baseURL}/search`);
+    await expect.poll(() => requestCount).toBeGreaterThanOrEqual(2);
+    expect(reconnectLastEventId).toBe("41");
+  } finally {
+    await reconnectPage.close();
+    eventServer.closeAllConnections();
+    await new Promise<void>((resolve) => eventServer.close(() => resolve()));
+  }
+});
+
+test("loads a second controlled sidebar page", async ({ context, baseURL }) => {
+  const summary = (id: string, title: string) => ({
+    id,
+    source: "cli",
+    title,
+    preview: "Synthetic pagination root",
+    createdAt: "2026-08-23T00:00:00.000000Z",
+    updatedAt: "2026-08-23T00:00:00.000000Z",
+    archived: false,
+    entryCount: 0,
+    diagnosticCount: 0,
+    indexState: "ready",
+    completeness: "complete",
+    freshness: "current",
+  });
+  const group = (id: string, title: string) => {
+    const session = summary(id, title);
+    return {
+      root: { session, children: [] },
+      latestSessionId: id,
+      updatedAt: session.updatedAt,
+      hierarchyComplete: true,
+    };
+  };
+  const firstPage = Array.from({ length: 200 }, (_, index) =>
+    group(`controlled-${index}`, `Controlled root ${index}`),
+  );
+  await context.route("**/api/v1/session-groups**", async (route) => {
+    const url = new URL(route.request().url());
+    const second = url.searchParams.get("cursor") === "page-2";
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        data: second ? [group("controlled-200", "Loaded root 200")] : firstPage,
+        nextCursor: second ? undefined : "page-2",
+        partial: false,
+      }),
+    });
+  });
+  const paginationPage = await context.newPage();
+  try {
+    await paginationPage.goto(`${baseURL}/search`);
+    await expect(
+      paginationPage.getByRole("button", { name: "Load more" }),
+    ).toBeVisible();
+    await paginationPage.getByRole("button", { name: "Load more" }).click();
+    await expect(paginationPage.getByText("Loaded root 200")).toBeVisible();
+  } finally {
+    await paginationPage.close();
+  }
+});
 
 test("indexes an empty cache, searches content, reloads a deep link, and exposes raw chunks", async ({
   page,

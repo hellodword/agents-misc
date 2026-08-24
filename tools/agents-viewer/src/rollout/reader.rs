@@ -65,6 +65,24 @@ impl<R: BufRead> BoundedJsonlReader<R> {
         }
     }
 
+    pub(crate) fn from_position_with_hasher(
+        reader: R,
+        max_event_bytes: usize,
+        next_line_no: u64,
+        next_offset: u64,
+        stable_hasher: Sha256,
+    ) -> Self {
+        Self {
+            reader,
+            max_event_bytes,
+            next_line_no,
+            next_offset,
+            finished: false,
+            stable_hasher,
+            stable_bytes: next_offset,
+        }
+    }
+
     pub fn stable_prefix(&self) -> FileCheckpoint {
         FileCheckpoint {
             offset: self.stable_bytes,

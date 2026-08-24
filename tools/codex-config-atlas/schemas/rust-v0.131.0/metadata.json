@@ -3,7 +3,7 @@
   "fetchedAt": "2026-06-23T11:34:55Z",
   "schemaFile": "codex-rs/core/config.schema.json",
   "schemaSha256": "sha256:18e4fc507cbb67dbb1969e00ed4b781328573fb29185651b2c469371791d95db",
-  "schemaUrl": "https://raw.githubusercontent.com/openai/codex/refs/tags/rust-v0.131.0/codex-rs/core/config.schema.json",
+  "schemaUrl": "https://raw.githubusercontent.com/openai/codex/05eb8678451435cbc8d79c6d8254276289f2bdf1/codex-rs/core/config.schema.json",
   "tag": "rust-v0.131.0",
   "version": "0.131.0"
 }

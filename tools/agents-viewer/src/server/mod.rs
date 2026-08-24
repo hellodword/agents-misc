@@ -30,6 +30,8 @@ pub struct AppState {
     pub sse: sse::SseHub,
     pub coordinator: Option<CoordinatorHandle>,
     requests: Arc<Semaphore>,
+    raw_reads: Arc<Semaphore>,
+    session_groups: api::sessions::SessionGroupCatalog,
 }
 
 impl AppState {
@@ -95,6 +97,8 @@ impl AppState {
             sse: sse::SseHub::new_with_shutdown(shutdown),
             coordinator: None,
             requests: Arc::new(Semaphore::new(64)),
+            raw_reads: Arc::new(Semaphore::new(2)),
+            session_groups: api::sessions::SessionGroupCatalog::new(),
         }
     }
 
@@ -102,6 +106,10 @@ impl AppState {
     pub fn with_coordinator(mut self, coordinator: CoordinatorHandle) -> Self {
         self.coordinator = Some(coordinator);
         self
+    }
+
+    pub fn invalidate_session_groups(&self, generation: u64) {
+        self.session_groups.invalidate(generation);
     }
 }
 

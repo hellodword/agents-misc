@@ -23,7 +23,6 @@ let
 
     dependencies = [
       pkgs.python3Packages.packaging
-      pkgs.python3Packages.rich
       pkgs.python3Packages.tomlkit
     ];
 
@@ -137,7 +136,6 @@ let
           pkgs.nodejs_24
           (pkgs.python3.withPackages (pythonPackages: [
             pythonPackages.packaging
-            pythonPackages.rich
             pythonPackages.tomlkit
           ]))
         ];

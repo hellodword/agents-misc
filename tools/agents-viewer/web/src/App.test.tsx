@@ -45,6 +45,7 @@ const sessionGroups: SessionGroup[] = [
     root: { session, children: [] },
     latestSessionId: "s1",
     updatedAt: session.updatedAt,
+    hierarchyComplete: true,
   },
 ];
 const entry: EntryListItem = {
@@ -56,6 +57,7 @@ const entry: EntryListItem = {
   presentation: "user",
   role: "user",
   title: "User",
+  titleComplete: true,
   primaryPreview: "Hello **world**",
   secondaryPreview: "",
   primaryBytes: 15,
@@ -64,6 +66,7 @@ const entry: EntryListItem = {
   secondaryComplete: true,
   defaultCollapsed: false,
   metadata: {},
+  metadataComplete: true,
   rawRefCount: 1,
 };
 const warningEntry: EntryListItem = {
@@ -92,7 +95,10 @@ const laterLiveEntry: EntryListItem = {
   primaryPreview: "Second live tail entry",
 };
 type EventSourceHarness = {
-  instances: Array<{ emit: (name: string, data: unknown) => void }>;
+  instances: Array<{
+    emit: (name: string, data: unknown) => void;
+    onerror: ((event: Event) => void) | null;
+  }>;
 };
 const eventSources = () => EventSource as unknown as EventSourceHarness;
 const callsFor = (fragment: string) =>
@@ -760,6 +766,7 @@ describe("Agents Viewer UI", () => {
         },
         latestSessionId: "s3",
         updatedAt: handoff.updatedAt,
+        hierarchyComplete: true,
       },
     ];
     const fallback = vi.mocked(fetch);
@@ -1283,6 +1290,7 @@ describe("Agents Viewer UI", () => {
     ).toBeInTheDocument();
     expect(eventSources().instances).toHaveLength(1);
     const stream = eventSources().instances[0];
+    expect(stream.onerror).toBeNull();
     const listBefore = callsFor("/api/v1/session-groups?");
     const statusBefore = callsFor("/api/v1/status");
     stream.emit("heartbeat", { generation: 2 });
@@ -1302,18 +1310,22 @@ describe("Agents Viewer UI", () => {
     expect(await screen.findAllByText("Indexing 5 / 10")).toHaveLength(2);
     expect(callsFor("/api/v1/session-groups?")).toBe(listBefore);
     expect(callsFor("/api/v1/status")).toBe(statusBefore);
-    stream.emit("sessionUpdated", { generation: 3, sessionId: "s1" });
+    const entriesBefore = callsFor("/api/v1/sessions/s1/entries");
+    stream.emit("sessionUpdated", {
+      generation: 3,
+      sessionId: "s1",
+      syncState: "current",
+    });
     stream.emit("sessionUpdated", { generation: 3, sessionId: "s2" });
     stream.emit("sessionUpdated", { generation: 3, sessionId: "s3" });
-    await waitFor(() =>
-      expect(callsFor("/api/v1/session-groups?")).toBe(listBefore + 1),
-    );
-    const entriesBefore = callsFor("/api/v1/sessions/s1/entries");
     stream.emit("entryUpdated", {
       generation: 3,
       sessionId: "s1",
       entryId: "e1",
     });
+    await waitFor(() =>
+      expect(callsFor("/api/v1/session-groups?")).toBe(listBefore + 1),
+    );
     await waitFor(() =>
       expect(callsFor("/api/v1/sessions/s1/entries")).toBe(entriesBefore + 1),
     );
@@ -1532,5 +1544,193 @@ describe("Agents Viewer UI", () => {
         String(input).includes("/sessions/s1/entries/e1"),
       ),
     ).toHaveLength(1);
+  });
+
+  it("loads and merges raw record chunks only when requested", async () => {
+    const fallback = vi.mocked(fetch);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/sessions/s1/raw/r1")) {
+          const second = url.includes("offset=6");
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                summary: {
+                  id: "r1",
+                  sessionId: "s1",
+                  line: 1,
+                  byteOffset: 0,
+                  byteLength: 12,
+                  envelopeType: "event_msg",
+                  parseStatus: "valid",
+                  encoding: "utf8",
+                  oversize: false,
+                },
+                chunk: {
+                  field: "primary",
+                  text: second ? "second" : "first-",
+                  byteOffset: second ? 6 : 0,
+                  totalBytes: 12,
+                  complete: second,
+                  ...(second ? {} : { nextOffset: 6 }),
+                },
+              }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            ),
+          );
+        }
+        return fallback(input, init);
+      }),
+    );
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/sessions/s1"]}>
+        <App />
+      </MemoryRouter>,
+    );
+    await screen.findByRole("heading", { name: "Hello session" });
+    await user.click(
+      screen.getAllByRole("button", { name: "Open inspector" }).at(-1)!,
+    );
+    const inspector = await screen.findByRole("complementary", {
+      name: "Inspector",
+    });
+    await user.click(
+      within(inspector).getByRole("button", { name: /event_msg/ }),
+    );
+    expect(await within(inspector).findByText("first-")).toBeInTheDocument();
+    expect(callsFor("/sessions/s1/raw/r1")).toBe(1);
+    await user.click(
+      within(inspector).getByRole("button", { name: "Load more" }),
+    );
+    expect(
+      await within(inspector).findByText("first-second"),
+    ).toBeInTheDocument();
+    expect(callsFor("/sessions/s1/raw/r1")).toBe(2);
+  });
+
+  it("loads the next sidebar page and retains that depth after live refresh", async () => {
+    const firstPage = Array.from({ length: 200 }, (_, index) => {
+      const rootSession =
+        index === 0
+          ? session
+          : {
+              ...session,
+              id: `root-${index}`,
+              title: `Root ${index}`,
+            };
+      return {
+        root: { session: rootSession, children: [] },
+        latestSessionId: rootSession.id,
+        updatedAt: rootSession.updatedAt,
+        hierarchyComplete: true,
+      } satisfies SessionGroup;
+    });
+    const secondSession = {
+      ...session,
+      id: "root-200",
+      title: "Second page root",
+    };
+    const secondPage: SessionGroup[] = [
+      {
+        root: { session: secondSession, children: [] },
+        latestSessionId: secondSession.id,
+        updatedAt: secondSession.updatedAt,
+        hierarchyComplete: true,
+      },
+    ];
+    const fallback = vi.mocked(fetch);
+    const controlled = vi.fn(
+      (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/session-groups")) {
+          const next = url.includes("cursor=page-2");
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                data: next ? secondPage : firstPage,
+                nextCursor: next ? undefined : "page-2",
+                partial: false,
+              }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            ),
+          );
+        }
+        return fallback(input, init);
+      },
+    );
+    vi.stubGlobal("fetch", controlled);
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/sessions/s1"]}>
+        <App />
+      </MemoryRouter>,
+    );
+    await screen.findByRole("heading", { name: "Hello session" });
+    expect(screen.queryByText("Second page root")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Load more" }));
+    expect(await screen.findByText("Second page root")).toBeInTheDocument();
+    const secondPageCalls = () =>
+      controlled.mock.calls.filter(([input]) =>
+        String(input).includes("cursor=page-2"),
+      ).length;
+    expect(secondPageCalls()).toBe(1);
+
+    eventSources().instances[0].emit("sessionUpdated", {
+      generation: 2,
+      sessionId: "s1",
+    });
+    await waitFor(() => expect(secondPageCalls()).toBe(2));
+    expect(screen.getByText("Second page root")).toBeInTheDocument();
+  });
+
+  it("shows the same partial-search warning on the page and dialog", async () => {
+    const fallback = vi.mocked(fetch);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        if (String(input).includes("/search"))
+          return Promise.resolve(
+            new Response(JSON.stringify({ data: [], partial: true }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            }),
+          );
+        return fallback(input, init);
+      }),
+    );
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/search?q=partial"]}>
+        <App />
+      </MemoryRouter>,
+    );
+    expect(
+      await screen.findByText("Results may be incomplete"),
+    ).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    await user.type(
+      screen.getByRole("combobox", { name: "Search" }),
+      "partial",
+    );
+    await waitFor(() =>
+      expect(screen.getAllByText("Results may be incomplete")).toHaveLength(2),
+    );
+  });
+
+  it("marks list entries whose title or metadata was safely abbreviated", () => {
+    render(
+      <VirtualTranscript
+        entries={[{ ...entry, titleComplete: false, metadataComplete: false }]}
+        onInspect={() => {}}
+      />,
+    );
+    expect(
+      screen.getByText(
+        "Some list details are abbreviated; open the inspector for complete values.",
+      ),
+    ).toBeInTheDocument();
   });
 });

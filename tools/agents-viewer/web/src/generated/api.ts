@@ -50,13 +50,13 @@ export type SessionSyncStatus = { sessionId: string, state: SessionSyncState, ha
 
 export type SessionTreeNode = { session: SessionSummary, children: Array<SessionTreeNode>, };
 
-export type SessionGroup = { root: SessionTreeNode, latestSessionId: string, updatedAt: string, };
+export type SessionGroup = { root: SessionTreeNode, latestSessionId: string, updatedAt: string, hierarchyComplete: boolean, };
 
 export type Diagnostic = { id: number, severity: DiagnosticSeverity, code: string, message: string, firstSeenAt: string, lastSeenAt: string, count: number, };
 
 export type SessionDetail = { summary: SessionSummary, diagnostics: Array<Diagnostic>, };
 
-export type EntryListItem = { id: string, sessionId: string, sequence: number, timestamp?: string, kind: EntryKind, presentation: EntryPresentation, role?: MessageRole, phase?: Phase, toolKind?: ToolKind, toolStatus?: ToolStatus, title: string, primaryPreview: string, secondaryPreview: string, primaryBytes: number, secondaryBytes: number, primaryComplete: boolean, secondaryComplete: boolean, defaultCollapsed: boolean, metadata: Record<string, unknown>, rawRefCount: number, };
+export type EntryListItem = { id: string, sessionId: string, sequence: number, timestamp?: string, kind: EntryKind, presentation: EntryPresentation, role?: MessageRole, phase?: Phase, toolKind?: ToolKind, toolStatus?: ToolStatus, title: string, titleComplete: boolean, primaryPreview: string, secondaryPreview: string, primaryBytes: number, secondaryBytes: number, primaryComplete: boolean, secondaryComplete: boolean, defaultCollapsed: boolean, metadata: Record<string, unknown>, metadataComplete: boolean, rawRefCount: number, };
 
 export type RawRefSummary = { id: string, line: number, byteOffset: number, byteLength: number, envelopeType: string, };
 

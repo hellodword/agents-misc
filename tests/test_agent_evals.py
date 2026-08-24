@@ -418,7 +418,7 @@ class AgentEvalsTests(unittest.TestCase):
         with self.assertRaisesRegex(common.EvalInputError, "must ignore tmp"):
             suite._artifact_base(source, None)
 
-    def test_restricted_catalog_removes_apply_patch_only_for_selected_model(
+    def test_restricted_catalog_removes_apply_patch_and_forces_direct_mode(
         self,
     ) -> None:
         catalog = {
@@ -426,6 +426,7 @@ class AgentEvalsTests(unittest.TestCase):
                 {
                     "slug": "gpt-test",
                     "apply_patch_tool_type": "freeform",
+                    "tool_mode": "code_mode_only",
                     "base_instructions": "built-in",
                     "supported_reasoning_levels": [{"effort": "high"}],
                 },
@@ -439,8 +440,10 @@ class AgentEvalsTests(unittest.TestCase):
         restricted = runtime._restrict_model_catalog(catalog, "gpt-test", "high")
         self.assertEqual(1, len(restricted["models"]))
         self.assertIsNone(restricted["models"][0]["apply_patch_tool_type"])
+        self.assertEqual("direct", restricted["models"][0]["tool_mode"])
         self.assertEqual("built-in", restricted["models"][0]["base_instructions"])
         self.assertEqual("freeform", catalog["models"][0]["apply_patch_tool_type"])
+        self.assertEqual("code_mode_only", catalog["models"][0]["tool_mode"])
 
     def test_restricted_catalog_rejects_unknown_effort(self) -> None:
         catalog = {

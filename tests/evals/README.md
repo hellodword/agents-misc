@@ -88,8 +88,8 @@ Before any authenticated request, the runner:
    values request inheritance. Model, provider, feature, and instruction
    settings are never inherited.
 5. Preserves the selected model's bundled instructions, removes its
-   `apply_patch` capability, and disables execution, shell, web, browser, MCP,
-   plugin, hook, image, memory, and subagent surfaces.
+   `apply_patch` capability, forces direct tool mode, and disables execution,
+   shell, web, browser, MCP, plugin, hook, image, memory, and subagent surfaces.
 6. Uses `codex debug prompt-input` to verify that route turns contain only the
    synthetic AGENTS and skill sources, behavior turns contain no automatic
    skill metadata, and judge turns discover no tested `AGENTS.md` or `.agents`

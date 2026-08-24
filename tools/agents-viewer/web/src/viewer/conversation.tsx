@@ -37,12 +37,14 @@ export function conversationPageTarget(
 export function Conversation({
   onInspect,
   signals,
+  syncSignals,
   resyncSequence,
   conversationDisplayTypes,
   onForceConversationDisplayType,
 }: {
   onInspect: (s: string, e: string) => void;
   signals: Record<string, number>;
+  syncSignals: Record<string, number>;
   resyncSequence: number;
   conversationDisplayTypes: ConversationDisplayType[];
   onForceConversationDisplayType: (
@@ -75,6 +77,7 @@ export function Conversation({
   );
   const pendingTailSequenceRef = useRef<number | undefined>(undefined);
   const handledSignal = useRef(0);
+  const handledSyncSignal = useRef(0);
   const refreshTimer = useRef<number | undefined>(undefined);
   const selectedConversationDisplayTypes = canonicalConversationDisplayTypes(
     conversationDisplayTypes,
@@ -220,7 +223,25 @@ export function Conversation({
 
   useEffect(() => {
     handledSignal.current = Math.max(signals[sessionId] ?? 0, resyncSequence);
+    handledSyncSignal.current = syncSignals[sessionId] ?? 0;
   }, [sessionId]);
+  const syncEventSequence = syncSignals[sessionId] ?? 0;
+  useEffect(() => {
+    if (
+      syncEventSequence === 0 ||
+      syncEventSequence <= handledSyncSignal.current
+    )
+      return;
+    handledSyncSignal.current = syncEventSequence;
+    const controller = new AbortController();
+    void api
+      .syncSession(sessionId, controller.signal)
+      .then(applySyncStatus)
+      .catch((failure) => {
+        if (!(failure instanceof DOMException)) setError(message(failure));
+      });
+    return () => controller.abort();
+  }, [applySyncStatus, sessionId, syncEventSequence]);
   const eventSequence = Math.max(signals[sessionId] ?? 0, resyncSequence);
   useEffect(() => {
     if (eventSequence === 0 || eventSequence <= handledSignal.current) return;

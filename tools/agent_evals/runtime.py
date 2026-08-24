@@ -431,11 +431,12 @@ def _restrict_model_catalog(
             f"supported values: {sorted(supported_efforts)}"
         )
 
-    # The field is optional in Codex's catalog contract. Null removes the
-    # apply_patch capability while preserving the binary's own instructions and
-    # every other model property byte-for-byte.
+    # The fields are optional in Codex's catalog contract. Null removes the
+    # apply_patch capability. Direct mode prevents a model default of code_mode_only
+    # from requiring the intentionally disabled code-mode host.
     restricted_model = dict(selected)
     restricted_model["apply_patch_tool_type"] = None
+    restricted_model["tool_mode"] = "direct"
     return {"models": [restricted_model]}
 
 

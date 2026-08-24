@@ -173,46 +173,25 @@ export function subscribeEvents(
   onEvent: (event: LiveEvent) => void,
   onResync: () => void,
 ) {
-  let closed = false;
-  let source: EventSource | undefined;
-  let attempt = 0;
-  const delays = [1000, 2000, 5000, 10000];
-  const connect = () => {
-    if (closed) return;
-    source = new EventSource("/api/v1/events");
-    for (const name of [
-      "indexProgress",
-      "sessionUpdated",
-      "entryUpdated",
-      "diagnostic",
-      "heartbeat",
-    ] as const) {
-      source.addEventListener(name, (event) => {
-        try {
-          onEvent({
-            type: name,
-            data: JSON.parse((event as MessageEvent).data) as SseEventPayload,
-          });
-        } catch {
-          onResync();
-        }
-      });
-    }
-    source.addEventListener("resync", onResync);
-    source.onopen = () => {
-      attempt = 0;
-    };
-    source.onerror = () => {
-      source?.close();
-      window.setTimeout(
-        connect,
-        delays[Math.min(attempt++, delays.length - 1)],
-      );
-    };
-  };
-  connect();
-  return () => {
-    closed = true;
-    source?.close();
-  };
+  const source = new EventSource("/api/v1/events");
+  for (const name of [
+    "indexProgress",
+    "sessionUpdated",
+    "entryUpdated",
+    "diagnostic",
+    "heartbeat",
+  ] as const) {
+    source.addEventListener(name, (event) => {
+      try {
+        onEvent({
+          type: name,
+          data: JSON.parse((event as MessageEvent).data) as SseEventPayload,
+        });
+      } catch {
+        onResync();
+      }
+    });
+  }
+  source.addEventListener("resync", onResync);
+  return () => source.close();
 }

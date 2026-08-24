@@ -18,7 +18,7 @@ from codex_config_atlas.registry import (
     SCHEMA_FILE_IN_UPSTREAM,
     json_dump,
     json_load,
-    schema_url_for_version,
+    schema_url_for_commit,
     sha256_bytes,
 )
 
@@ -61,7 +61,7 @@ def seed_registry(
             "version": VERSION,
             "tag": TAG,
             "commitSha": commit_sha,
-            "schemaUrl": schema_url_for_version(VERSION),
+            "schemaUrl": schema_url_for_commit(commit_sha),
             "schemaFile": SCHEMA_FILE_IN_UPSTREAM,
             "schemaSha256": sha256_bytes(schema),
             "fetchedAt": "2026-08-19T10:00:00Z",
@@ -253,6 +253,7 @@ class SyncSchemaTests(unittest.TestCase):
 
             metadata = json_load(schemas / TAG / "metadata.json")
             self.assertEqual(metadata["commitSha"], COMMIT_B)
+            self.assertEqual(metadata["schemaUrl"], schema_url_for_commit(COMMIT_B))
             self.assertEqual(metadata["schemaSha256"], sha256_bytes(SCHEMA))
 
     def test_network_failures_leave_installed_tree_unchanged(self) -> None:
@@ -428,7 +429,9 @@ class SyncSchemaTests(unittest.TestCase):
                         args=["mv"], returncode=1, stdout="", stderr="unsupported"
                     ),
                 ),
-                self.assertRaisesRegex(RuntimeError, "atomic directory exchange failed"),
+                self.assertRaisesRegex(
+                    RuntimeError, "atomic directory exchange failed"
+                ),
             ):
                 _handle_sync_schema(sync_args(schemas))
 

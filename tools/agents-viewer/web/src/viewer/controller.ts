@@ -39,6 +39,8 @@ export function shouldOpenSearch(
 export function useViewerController() {
   const { t, i18n } = useTranslation();
   const [sessionGroups, setSessionGroups] = useState<SessionGroup[]>([]);
+  const [sessionNextCursor, setSessionNextCursor] = useState<string>();
+  const [loadingMoreSessions, setLoadingMoreSessions] = useState(false);
   const [status, setStatus] = useState<Status>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -76,10 +78,14 @@ export function useViewerController() {
   const [conversationSignals, setConversationSignals] = useState<
     Record<string, number>
   >({});
+  const [sessionSyncSignals, setSessionSyncSignals] = useState<
+    Record<string, number>
+  >({});
   const [resyncSequence, setResyncSequence] = useState(0);
   const searchReturnFocus = useRef<HTMLElement | null>(null);
   const inspectorReturnFocus = useRef<HTMLElement | null>(null);
   const sessionRequest = useRef(0);
+  const loadedSessionRootCount = useRef(200);
   const loadSessionsRef = useRef<(signal?: AbortSignal) => Promise<void>>(
     async () => {},
   );
@@ -107,17 +113,28 @@ export function useViewerController() {
     async (signal?: AbortSignal) => {
       const request = ++sessionRequest.current;
       try {
-        const page = await api.sessionGroups(
-          {
-            archived,
-            source: source || undefined,
-            cwd: cwd || undefined,
-            limit: 200,
-          },
-          signal,
-        );
+        const target = Math.max(200, loadedSessionRootCount.current);
+        const groups: SessionGroup[] = [];
+        let cursor: string | undefined;
+        do {
+          const page = await api.sessionGroups(
+            {
+              archived,
+              source: source || undefined,
+              cwd: cwd || undefined,
+              cursor,
+              limit: Math.min(200, target - groups.length),
+            },
+            signal,
+          );
+          groups.push(...page.data);
+          cursor = page.nextCursor;
+          if (page.data.length === 0) break;
+        } while (cursor && groups.length < target);
         if (request === sessionRequest.current) {
-          setSessionGroups(page.data);
+          loadedSessionRootCount.current = groups.length;
+          setSessionGroups(groups);
+          setSessionNextCursor(cursor);
           setError("");
         }
       } catch (failure) {
@@ -127,11 +144,49 @@ export function useViewerController() {
         )
           setError(message(failure));
       } finally {
-        if (request === sessionRequest.current) setLoading(false);
+        if (request === sessionRequest.current) {
+          setLoading(false);
+          setLoadingMoreSessions(false);
+        }
       }
     },
     [archived, cwd, source],
   );
+  const loadMoreSessions = useCallback(async () => {
+    if (!sessionNextCursor || loadingMoreSessions) return;
+    const request = ++sessionRequest.current;
+    setLoadingMoreSessions(true);
+    try {
+      const page = await api.sessionGroups({
+        archived,
+        source: source || undefined,
+        cwd: cwd || undefined,
+        cursor: sessionNextCursor,
+        limit: 200,
+      });
+      if (request === sessionRequest.current) {
+        setSessionGroups((current) => {
+          const seen = new Set(current.map((group) => group.root.session.id));
+          const merged = [
+            ...current,
+            ...page.data.filter((group) => !seen.has(group.root.session.id)),
+          ];
+          loadedSessionRootCount.current = merged.length;
+          return merged;
+        });
+        setSessionNextCursor(page.nextCursor);
+        setError("");
+      }
+    } catch (failure) {
+      if (
+        request === sessionRequest.current &&
+        !(failure instanceof DOMException)
+      )
+        setError(message(failure));
+    } finally {
+      if (request === sessionRequest.current) setLoadingMoreSessions(false);
+    }
+  }, [archived, cwd, loadingMoreSessions, sessionNextCursor, source]);
   useEffect(() => {
     loadSessionsRef.current = loadSessions;
   }, [loadSessions]);
@@ -144,6 +199,8 @@ export function useViewerController() {
   }, []);
   useEffect(() => {
     const controller = new AbortController();
+    loadedSessionRootCount.current = 200;
+    setLoading(true);
     void loadSessions(controller.signal);
     return () => controller.abort();
   }, [loadSessions]);
@@ -187,7 +244,7 @@ export function useViewerController() {
             scheduleSessionRefresh();
             if (event.data.sessionId) {
               const sequence = ++liveSequence.current;
-              setConversationSignals((current) => ({
+              setSessionSyncSignals((current) => ({
                 ...current,
                 [event.data.sessionId!]: sequence,
               }));
@@ -362,6 +419,8 @@ export function useViewerController() {
     t,
     i18n,
     sessionGroups,
+    sessionNextCursor,
+    loadingMoreSessions,
     status,
     loading,
     error,
@@ -385,6 +444,7 @@ export function useViewerController() {
     compactInspector,
     compactNavigation,
     conversationSignals,
+    sessionSyncSignals,
     resyncSequence,
     sidebarPanelRef,
     inspectorPanelRef,
@@ -398,5 +458,6 @@ export function useViewerController() {
     openInspector,
     applySettings,
     toggleSidebar,
+    loadMoreSessions,
   };
 }
