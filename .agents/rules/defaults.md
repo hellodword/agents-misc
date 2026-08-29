@@ -5,8 +5,9 @@ Apply this file only to a new, unconstrained repository or subsystem. Existing a
 ## Repository and toolchain
 
 - Name the initial branch `master`.
-- Use a Nix flake plus a thin `justfile` for ordinary projects. Pure Nix projects do not require Just.
-- Use treefmt-nix in every Nix project and expose it through `nix fmt` and flake checks.
+- For an ordinary project, use a Nix flake that exposes one `devShells.<system>.default` plus a small `justfile`. Put the tools needed to build, run, test, format, lint, and otherwise develop the project in that shell, and enter it with `nix develop`.
+- Run Just directly outside the development shell. Give recipes only stable shared project commands, let them enter the default shell or call an explicitly adopted Nix output, and do not add a `dev` alias or recipe-to-recipe orchestration.
+- Add packages, apps, checks, formatter, modules, overlays, or named development shells only when the user requests the interface or applicable project instructions explicitly make Nix a project-wide product interface. Pure Nix products may expose their required outputs and do not require Just.
 - Do not choose or create project licensing, deployment, cloud, or telemetry behavior without a requirement.
 
 ## Full-stack default

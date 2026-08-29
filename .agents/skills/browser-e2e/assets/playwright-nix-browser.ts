@@ -46,7 +46,7 @@ export function findNixBrowser(
   const configured = environment[NIX_BROWSER_PATH_VARIABLE]?.trim();
   if (!configured) {
     throw new Error(
-      `${NIX_BROWSER_PATH_VARIABLE} is unset. Run this test through the project's named Nix development shell; this helper does not search PATH, use a host browser, or download one.`,
+      `${NIX_BROWSER_PATH_VARIABLE} is unset. Run this test through the project's Nix development shell; this helper does not search PATH, use a host browser, or download one.`,
     );
   }
   if (!isAbsolute(configured)) {

@@ -2,7 +2,7 @@
 {"id":"skill-ai-visual-negative","task":"A bug report happens to contain a screenshot."}
 {"id":"skill-atomic-positive","task":"The user asks to commit the verified change."}
 {"id":"skill-atomic-negative","task":"Tests passed, but nobody requested a commit."}
-{"id":"skill-browser-positive","task":"Add and run a durable Playwright regression for browser navigation behavior in a trusted project with a locked Nix flake but no browser executable policy; the user does not request a display-mode override or browser reuse."}
+{"id":"skill-browser-positive","task":"Add and run a durable Playwright regression for browser navigation behavior in a trusted project with a locked Nix flake but no browser executable or separate-shell policy; the user does not request a display-mode override or browser reuse."}
 {"id":"skill-browser-negative","task":"Run an existing Vitest and React Testing Library component test for a button whose behavior does not depend on browser navigation, layout, or native browser APIs."}
 {"id":"skill-compat-positive","task":"Change an existing documented CLI exit code."}
 {"id":"skill-compat-negative","task":"Rename an unexported local variable."}
@@ -16,7 +16,8 @@
 {"id":"skill-environment-negative","task":"The project environment is working and a source assertion fails."}
 {"id":"skill-generated-positive","task":"Add tracked generated API bindings consumed by the build."}
 {"id":"skill-generated-negative","task":"Edit an ordinary handwritten source file."}
-{"id":"skill-nix-positive","task":"Restructure flake checks and the Just validation recipe."}
+{"id":"skill-nix-positive","task":"Add Nix and Just to an existing ordinary Go service so contributors share build, run, test, gofmt, and lint commands. The project has no project-wide Nix product-output contract or shell-isolation requirement, and a dependency-graph command is needed only for this investigation."}
+{"id":"skill-nix-managed-project","task":"The applicable project overlay explicitly makes Nix the project-wide build, packaging, formatting, and validation interface. Add a buildable package, formatter, validation check, one default development shell, and a small Just command surface; no isolated shell is required."}
 {"id":"skill-nix-negative","task":"Fix application copy in a repository that does not use Nix."}
 {"id":"skill-patch-positive","task":"Maintain patches in an existing Nix-backed patch repository against an immutable upstream revision."}
 {"id":"skill-patch-negative","task":"Modify source directly in a normal fork."}

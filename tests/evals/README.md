@@ -47,7 +47,7 @@ model-authored rationale.
 A second behavior turn is defined for:
 
 - all 16 safety scenarios; and
-- the 15 positive skill scenarios whose expected skill set is non-empty.
+- the 16 positive skill scenarios whose expected skill set is non-empty.
 
 The behavior subject sees the task and the sources actually selected by the
 route turn, but no rubric, question, expected answer, or semantic answer ID. It

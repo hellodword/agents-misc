@@ -85,8 +85,8 @@ class AgentEvalsTests(unittest.TestCase):
             for line in path.read_text(encoding="utf-8").splitlines():
                 oracle_validator.validate(json.loads(line))
                 oracle_count += 1
-        self.assertEqual(59, case_count)
-        self.assertEqual(59, oracle_count)
+        self.assertEqual(60, case_count)
+        self.assertEqual(60, oracle_count)
 
     def test_route_model_schema_uses_canonical_payload_identifiers(self) -> None:
         rules, skills = eval_cases._route_output_values(REPO_ROOT)
@@ -113,9 +113,9 @@ class AgentEvalsTests(unittest.TestCase):
 
     def test_behavior_and_baseline_scope_is_intentional(self) -> None:
         cases = eval_cases._load_eval_cases(REPO_ROOT, None, None)
-        self.assertEqual(59, len(cases))
-        self.assertEqual(31, sum(case.behavior is not None for case in cases))
-        self.assertEqual(15, sum(bool(case.baseline_disabled_skills) for case in cases))
+        self.assertEqual(60, len(cases))
+        self.assertEqual(32, sum(case.behavior is not None for case in cases))
+        self.assertEqual(16, sum(bool(case.baseline_disabled_skills) for case in cases))
         self.assertTrue(
             all(case.behavior is None for case in cases if case.corpus == "routing")
         )

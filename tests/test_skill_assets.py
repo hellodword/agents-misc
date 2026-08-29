@@ -26,6 +26,14 @@ NIX_BROWSER_REFERENCE = (
     / "references"
     / "nix-browser.md"
 )
+NIX_LAYOUT_REFERENCE = (
+    REPO_ROOT
+    / ".agents"
+    / "skills"
+    / "nix-workflow"
+    / "references"
+    / "layout.md"
+)
 VISUAL_ASSETS = REPO_ROOT / ".agents" / "skills" / "ai-visual-review" / "assets"
 NIX_GITHUB_ACTIONS_REFERENCE = (
     REPO_ROOT
@@ -50,6 +58,7 @@ class BrowserAssetTests(unittest.TestCase):
         )
         self.assertIn("environment[NIX_BROWSER_PATH_VARIABLE]?.trim()", self.source)
         self.assertIn("must be an absolute executable path supplied by Nix", self.source)
+        self.assertIn("project's Nix development shell", self.source)
         self.assertIn("does not search PATH, use a host browser, or download one", self.source)
         self.assertIn("return statSync(path).isFile()", self.source)
         self.assertNotIn("BROWSER_NAMES", self.source)
@@ -100,7 +109,8 @@ class BrowserAssetTests(unittest.TestCase):
             "package-manager lock",
             "pkgs.lib.getExe pkgs.chromium",
             'PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1"',
-            "nix develop .#e2e",
+            "default = pkgs.mkShell",
+            "nix develop --command npm run e2e",
             "nixBrowserLaunchOptions",
             "focused real-browser smoke flow",
         ):
@@ -108,9 +118,38 @@ class BrowserAssetTests(unittest.TestCase):
                 self.assertIn(token, self.reference)
         self.assertIn("explicit authorization for the unfree dependency", self.reference)
         self.assertIn("report incompatibility instead of falling back", self.reference)
-        self.assertIn("Migrate the previous helper", self.reference)
-        self.assertIn("systemBrowserLaunchOptions", self.reference)
         self.assertIn("nixBrowserLaunchOptions", self.reference)
+        self.assertNotIn("nix develop .#e2e", self.reference)
+
+
+class NixLayoutReferenceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.source = NIX_LAYOUT_REFERENCE.read_text(encoding="utf-8")
+
+    def test_ordinary_project_contract_uses_one_default_shell(self) -> None:
+        ordinary = re.search(
+            r"^## Ordinary project\n(.*?)(?=^## )",
+            self.source,
+            re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(ordinary)
+        assert ordinary is not None
+        self.assertIn("devShells.<system>.default", ordinary.group(1))
+        self.assertIn("enter it with `nix develop`", ordinary.group(1))
+        self.assertIn("project-wide Nix contract", ordinary.group(1))
+
+    def test_just_contract_uses_direct_project_entries(self) -> None:
+        for token in (
+            "nix develop --command go test ./...",
+            "nix build .#default",
+            "nix flake check",
+            "just test",
+            "at most three simple linear command invocations",
+            "invoke Just through `nix develop`",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, self.source)
 
 
 class NixGitHubActionsReferenceTests(unittest.TestCase):
