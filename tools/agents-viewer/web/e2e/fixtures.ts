@@ -43,6 +43,65 @@ const fixturePath = resolve(here, "../../tests/fixtures/rollouts/v0_120.jsonl");
 const viewerRoot = resolve(here, "../..");
 const repositoryRoot = resolve(viewerRoot, "../..");
 const execFileAsync = promisify(execFile);
+const serverReadyTimeoutMs = 20_000;
+
+type ServiceStatus = {
+  phase?: string;
+  progress?: {
+    failedFiles?: number;
+  };
+};
+
+async function waitForServerReady(
+  child: ChildProcess,
+  baseURL: string,
+  password: string,
+  stderr: Buffer[],
+): Promise<void> {
+  const headers = password
+    ? {
+        Authorization: `Basic ${Buffer.from(`agents-viewer:${password}`, "utf8").toString("base64")}`,
+      }
+    : undefined;
+  const deadline = Date.now() + serverReadyTimeoutMs;
+  let lastStatus = "no response";
+
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(
+        `agents-viewer exited before its index was ready; stderr: ${Buffer.concat(stderr).toString("utf8")}`,
+      );
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(`${baseURL}/api/v1/status`, { headers });
+    } catch (error) {
+      lastStatus = error instanceof Error ? error.message : String(error);
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+      continue;
+    }
+
+    if (response.ok) {
+      const status = (await response.json()) as ServiceStatus;
+      lastStatus = JSON.stringify(status);
+      if (status.phase === "ready") return;
+      if (status.phase === "degraded") {
+        throw new Error(
+          `agents-viewer index entered degraded state with ${status.progress?.failedFiles ?? "unknown"} failed files`,
+        );
+      }
+    } else {
+      lastStatus = `HTTP ${response.status}`;
+    }
+
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+  }
+
+  throw new Error(
+    `agents-viewer index was not ready after ${serverReadyTimeoutMs}ms; last status: ${lastStatus}; stderr: ${Buffer.concat(stderr).toString("utf8")}`,
+  );
+}
 
 async function resolveViewerBinary(
   environment: NodeJS.ProcessEnv = process.env,
@@ -156,6 +215,7 @@ async function startServer(
           : reject(new Error(`agents-viewer printed no URL: ${String(chunk)}`));
       });
     });
+    await waitForServerReady(child, baseURL, password, stderr);
     return { child, baseURL };
   } catch (error) {
     await stopServer(child);
