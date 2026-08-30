@@ -131,6 +131,8 @@ let
     npmDeps = web.npmDeps;
     npmDepsHash = "sha256-gY0vgAhxSTb78pBBklbzUIIs9hx1Jwr7tXXvHM7dqbQ=";
     npmFlags = [ "--ignore-scripts" ];
+    # Keep Chromium text layout independent of host font installation.
+    FONTCONFIG_FILE = pkgs.makeFontsConf { fontDirectories = [ ]; };
     PLAYWRIGHT_NIX_BROWSER_PATH = lib.getExe pkgs.chromium;
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
     AGENTS_VIEWER_E2E_BINARY = lib.getExe package;
