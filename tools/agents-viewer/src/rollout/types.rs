@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use serde_json::Value;
 use sha2::Sha256;
@@ -8,7 +8,7 @@ use crate::model::{
     SessionParentRelation, SourceKind, ToolKind, ToolStatus,
 };
 
-pub const PARSER_VERSION: u32 = 7;
+pub const PARSER_VERSION: u32 = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RootKind {
@@ -86,7 +86,6 @@ pub struct NormalizedEntry {
 pub(crate) struct ParseSeed {
     pub session: SessionRecord,
     pub next_sequence: i64,
-    pub occurrences: HashMap<String, u64>,
     pub recent: Vec<(u64, NormalizedEntry)>,
     pub raw_record_count: u64,
     pub recognized_record_count: u64,

@@ -75,6 +75,13 @@ impl TestApp {
         .reconcile()
         .await
         .unwrap();
+        sqlx::query(
+            "UPDATE source_files SET last_synced_at_micros = 1735689600000000 \
+             WHERE snapshot_revision > 0",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
         writer.shutdown().await.unwrap();
         task.wait().await.unwrap();
         let state = AppState::new(

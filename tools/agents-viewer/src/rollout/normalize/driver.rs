@@ -47,7 +47,7 @@ pub fn parse_rollout<R: BufRead, S: ParseSink>(
     context: &ParseContext,
     sink: &mut S,
 ) -> io::Result<ParseSummary> {
-    parse_rollout_inner(reader, context, sink, None, None)
+    parse_rollout_inner(reader, context, sink, None, None, false)
 }
 
 pub(crate) fn parse_rollout_cancellable<R: BufRead, S: ParseSink>(
@@ -56,7 +56,16 @@ pub(crate) fn parse_rollout_cancellable<R: BufRead, S: ParseSink>(
     sink: &mut S,
     shutdown: &CancellationToken,
 ) -> io::Result<ParseSummary> {
-    parse_rollout_inner(reader, context, sink, None, Some(shutdown))
+    parse_rollout_inner(reader, context, sink, None, Some(shutdown), false)
+}
+
+pub(crate) fn parse_catalog_rollout_cancellable<R: BufRead, S: ParseSink>(
+    reader: R,
+    context: &ParseContext,
+    sink: &mut S,
+    shutdown: &CancellationToken,
+) -> io::Result<ParseSummary> {
+    parse_rollout_inner(reader, context, sink, None, Some(shutdown), true)
 }
 
 pub(crate) fn parse_rollout_from_seed_cancellable<R: BufRead, S: ParseSink>(
@@ -66,7 +75,7 @@ pub(crate) fn parse_rollout_from_seed_cancellable<R: BufRead, S: ParseSink>(
     seed: ParseSeed,
     shutdown: &CancellationToken,
 ) -> io::Result<ParseSummary> {
-    parse_rollout_inner(reader, context, sink, Some(seed), Some(shutdown))
+    parse_rollout_inner(reader, context, sink, Some(seed), Some(shutdown), false)
 }
 
 fn parse_rollout_inner<R: BufRead, S: ParseSink>(
@@ -75,6 +84,7 @@ fn parse_rollout_inner<R: BufRead, S: ParseSink>(
     sink: &mut S,
     seed: Option<ParseSeed>,
     shutdown: Option<&CancellationToken>,
+    stop_after_first_user: bool,
 ) -> io::Result<ParseSummary> {
     let initial_session_id = session_id_from_file(context);
     let seed_next_sequence = seed.as_ref().map_or(0, |value| value.next_sequence);
@@ -315,10 +325,12 @@ fn parse_rollout_inner<R: BufRead, S: ParseSink>(
             line.line_no,
             &mut session,
         );
+        let mut found_catalog_message = false;
         match normalized {
             NormalizeResult::None => {}
             NormalizeResult::Entry(candidate) => {
                 let entry = deduper.accept(candidate, line.line_no);
+                found_catalog_message = is_catalog_user_message(&entry);
                 session.observe_entry(&entry);
                 if entry.sequence > seed_next_sequence {
                     new_entry_ids.insert(entry.id.clone());
@@ -328,6 +340,7 @@ fn parse_rollout_inner<R: BufRead, S: ParseSink>(
             NormalizeResult::Entries(candidates) => {
                 for candidate in candidates {
                     let entry = deduper.accept(candidate, line.line_no);
+                    found_catalog_message |= is_catalog_user_message(&entry);
                     session.observe_entry(&entry);
                     if entry.sequence > seed_next_sequence {
                         new_entry_ids.insert(entry.id.clone());
@@ -353,6 +366,9 @@ fn parse_rollout_inner<R: BufRead, S: ParseSink>(
                 );
             }
         }
+        if stop_after_first_user && found_catalog_message {
+            break;
+        }
     }
 
     let new_entry_count = new_entry_ids.len() as u64;
@@ -366,4 +382,9 @@ fn parse_rollout_inner<R: BufRead, S: ParseSink>(
         stable_prefix_bytes: checkpoint.offset,
         stable_prefix_hash: checkpoint.prefix_hash,
     })
+}
+
+fn is_catalog_user_message(entry: &NormalizedEntry) -> bool {
+    entry.presentation == crate::model::EntryPresentation::User
+        && !entry.primary_text.trim().is_empty()
 }

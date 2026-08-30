@@ -9,7 +9,7 @@ impl IndexCoordinator {
         max_event_bytes: usize,
         policy: InitialIndexPolicy,
     ) -> Self {
-        let (commands, command_receiver) = mpsc::channel(DIRECT_SYNC_QUEUE_CAPACITY);
+        let (commands, command_receiver) = mpsc::unbounded_channel();
         Self {
             database,
             writer,
@@ -269,9 +269,15 @@ impl IndexCoordinator {
         let discovery = self
             .discover(generation, now_micros, shutdown.clone())
             .await?;
-        runtime
+        if let Err(error) = runtime
             .apply_full_discovery(discovery, generation, now_micros, foreground_first)
-            .await?;
+            .await
+        {
+            if shutdown.is_cancelled() {
+                return Ok(());
+            }
+            return Err(error);
+        }
         let mut bootstrap_pending = foreground_first;
         runtime.start_available()?;
         runtime.maybe_finalize_cycle(&mut bootstrap_pending).await?;
@@ -294,6 +300,7 @@ impl IndexCoordinator {
         let mut next_recovery_sweep = Instant::now();
         let mut recovery_backoff = 0_usize;
         let mut recovery_requested = false;
+        let mut next_staging_gc = Instant::now();
 
         loop {
             tokio::select! {
@@ -308,8 +315,11 @@ impl IndexCoordinator {
                 }
                 command = command_receiver.recv(), if commands_open && !draining => {
                     match command {
-                        Some(CoordinatorCommand::EnsureSession(session_id)) => {
-                            runtime.ensure_session(&session_id).await?;
+                        Some(CoordinatorCommand::AcquireSession(session_id)) => {
+                            runtime.acquire_session(&session_id).await?;
+                        }
+                        Some(CoordinatorCommand::ReleaseSession(session_id)) => {
+                            runtime.release_session(&session_id).await?;
                         }
                         None => commands_open = false,
                     }
@@ -334,7 +344,7 @@ impl IndexCoordinator {
                     recovery_backoff = 0;
                     next_recovery_sweep = Instant::now();
                 }
-                _ = hot_refresh.tick(), if !draining && runtime.cycle.is_none() => {
+                _ = hot_refresh.tick(), if !draining => {
                     runtime.audit_hot_sessions(self.next_generation()).await?;
                 }
                 _ = scheduler_tick.tick() => {}
@@ -343,6 +353,15 @@ impl IndexCoordinator {
                 runtime.start_available()?;
                 runtime.maybe_finalize_cycle(&mut bootstrap_pending).await?;
                 runtime.flush_relationships_if_idle().await?;
+                if runtime.inflight.is_empty() && Instant::now() >= next_staging_gc {
+                    let removed = runtime.database.cleanup_orphan_staging_batch(500).await?;
+                    next_staging_gc = Instant::now()
+                        + if removed == 0 {
+                            Duration::from_secs(5)
+                        } else {
+                            Duration::from_millis(250)
+                        };
+                }
                 if recovery_requested
                     && runtime.cycle.is_none()
                     && Instant::now() >= next_recovery_sweep
@@ -415,10 +434,10 @@ impl CoordinatorHandle {
         assert!(injected.is_err(), "fault injection must poison the lock");
     }
 
-    pub fn ensure_session(
+    pub fn acquire_live_sync(
         &self,
         session_id: &str,
-    ) -> std::result::Result<SessionSyncStatus, CoordinatorError> {
+    ) -> std::result::Result<(SessionSyncStatus, LiveSyncLease), CoordinatorError> {
         let mut shared = self
             .shared
             .write()
@@ -426,44 +445,39 @@ impl CoordinatorHandle {
                 context: "queueing direct session synchronization",
             })?;
         let has_snapshot = shared.snapshots.contains(session_id);
-        if let Some(state) = shared.sync_states.get(session_id).copied() {
-            return Ok(SessionSyncStatus {
+        let freshness = shared.freshness.get(session_id).copied();
+        if freshness == Some(SessionFreshness::SourceMissing) {
+            return Err(CoordinatorError::SourceMissing);
+        }
+        if !shared.catalog.contains_key(session_id) {
+            return Err(CoordinatorError::SessionNotFound);
+        }
+        let state = shared
+            .sync_states
+            .get(session_id)
+            .copied()
+            .unwrap_or(SessionSyncState::Queued);
+        shared.sync_states.insert(session_id.to_owned(), state);
+        if let Err(error) = self
+            .commands
+            .send(CoordinatorCommand::AcquireSession(session_id.to_owned()))
+        {
+            shared.sync_states.remove(session_id);
+            return Err(CoordinatorError::QueueUnavailable {
+                reason: error.to_string(),
+            });
+        }
+        Ok((
+            SessionSyncStatus {
                 session_id: session_id.to_owned(),
                 state,
                 has_snapshot,
-            });
-        }
-        let freshness = shared.freshness.get(session_id).copied();
-        let state = match freshness {
-            Some(SessionFreshness::SourceMissing) => SessionSyncState::SourceMissing,
-            _ if shared.catalog.contains_key(session_id) => SessionSyncState::Queued,
-            None => {
-                if shared.catalog_ready {
-                    SessionSyncState::NotFound
-                } else {
-                    SessionSyncState::Checking
-                }
-            }
-            Some(SessionFreshness::Current) => SessionSyncState::Current,
-            Some(SessionFreshness::Checking | SessionFreshness::Stale) => SessionSyncState::Queued,
-        };
-        if matches!(state, SessionSyncState::Queued | SessionSyncState::Checking) {
-            shared.sync_states.insert(session_id.to_owned(), state);
-            if let Err(error) = self
-                .commands
-                .try_send(CoordinatorCommand::EnsureSession(session_id.to_owned()))
-            {
-                shared.sync_states.remove(session_id);
-                return Err(CoordinatorError::QueueUnavailable {
-                    reason: error.to_string(),
-                });
-            }
-        }
-        Ok(SessionSyncStatus {
-            session_id: session_id.to_owned(),
-            state,
-            has_snapshot,
-        })
+            },
+            LiveSyncLease {
+                session_id: session_id.to_owned(),
+                commands: self.commands.clone(),
+            },
+        ))
     }
 
     pub fn freshness(
@@ -480,5 +494,20 @@ impl CoordinatorHandle {
             .get(session_id)
             .copied()
             .unwrap_or(SessionFreshness::Checking))
+    }
+
+    pub fn sync_state(
+        &self,
+        session_id: &str,
+    ) -> std::result::Result<Option<SessionSyncState>, CoordinatorError> {
+        Ok(self
+            .shared
+            .read()
+            .map_err(|_| CoordinatorError::LockPoisoned {
+                context: "reading live synchronization state",
+            })?
+            .sync_states
+            .get(session_id)
+            .copied())
     }
 }

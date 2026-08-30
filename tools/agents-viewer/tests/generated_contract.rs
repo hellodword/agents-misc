@@ -1,7 +1,8 @@
 use agents_viewer::model::{
-    Completeness, ContentField, DiagnosticSeverity, EntryKind, IndexState, MessageRole, Phase,
-    RawEncoding, RawParseStatus, ServicePhase, SessionFreshness, SessionParentRelation,
-    SessionSummary, SourceKind, SseEventType, ToolKind, ToolStatus, typescript_contract,
+    Completeness, ContentField, ContentFreshness, ContentStatus, DiagnosticSeverity, EntryKind,
+    IndexState, LiveSyncState, MessageRole, Phase, RawEncoding, RawParseStatus, ServicePhase,
+    SessionFreshness, SessionParentRelation, SessionSummary, SourceKind, SourceLocation,
+    SourceRootKind, SseEventType, ToolKind, ToolStatus, typescript_contract,
 };
 use pretty_assertions::assert_eq;
 use std::process::Command;
@@ -11,6 +12,20 @@ fn session_summary_round_trips_and_omits_absent_optional_fields() {
     let summary = SessionSummary {
         id: "s_fixture".into(),
         source: SourceKind::AppServer,
+        source_location: SourceLocation {
+            root_kind: SourceRootKind::Active,
+            relative_path: "2026/01/02/s_fixture.jsonl".into(),
+        },
+        first_user_message: None,
+        content_status: ContentStatus {
+            freshness: ContentFreshness::Current,
+            live_state: LiveSyncState::Inactive,
+            has_snapshot: true,
+            snapshot_revision: 1,
+            synced_through_bytes: 100,
+            observed_bytes: 100,
+            last_synced_at: None,
+        },
         parent_thread_id: None,
         parent_relation: None,
         cwd: Some("/synthetic/workspace".into()),
@@ -56,6 +71,7 @@ fn fixed_enums_use_contract_json_values() {
         SourceKind::Review => "review",
         SourceKind::Subagent => "subagent",
         SourceKind::AppServer => "appServer",
+        SourceKind::GuardianReview => "guardianReview",
         SourceKind::Unknown => "unknown",
         SessionParentRelation::Parent => "parent",
         SessionParentRelation::Fork => "fork",
@@ -122,9 +138,10 @@ fn fixed_enums_use_contract_json_values() {
         RawParseStatus::Oversize => "oversize",
         RawParseStatus::IncompleteTail => "incompleteTail",
         RawParseStatus::Unknown => "unknown",
-        SseEventType::IndexProgress => "indexProgress",
-        SseEventType::SessionUpdated => "sessionUpdated",
-        SseEventType::EntryUpdated => "entryUpdated",
+        SseEventType::CatalogProgress => "catalogProgress",
+        SseEventType::CatalogUpdated => "catalogUpdated",
+        SseEventType::SnapshotUpdated => "snapshotUpdated",
+        SseEventType::LiveSyncStateChanged => "liveSyncStateChanged",
         SseEventType::Diagnostic => "diagnostic",
         SseEventType::Resync => "resync",
         SseEventType::Heartbeat => "heartbeat",

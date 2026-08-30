@@ -1,11 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::convert::Infallible;
 use std::io::{Read as _, Seek as _, SeekFrom};
 
 use axum::Json;
 use axum::Router;
 use axum::extract::{Path, Query, RawQuery, State};
-use axum::response::{IntoResponse, Response};
-use axum::routing::{get, put};
+use axum::response::sse::Event;
+use axum::response::{IntoResponse, Response, Sse};
+use axum::routing::{get, post};
 use chrono::{SecondsFormat, TimeZone as _, Utc};
 use http::StatusCode;
 use serde::Deserialize;
@@ -14,10 +16,11 @@ use sqlx::{QueryBuilder, Row as _, Sqlite};
 use crate::index::coordinator::CoordinatorError;
 use crate::index::search::{ArchiveFilter, SearchFilters, SearchRequest, search as search_index};
 use crate::model::{
-    ApiPage, ContentChunk, ContentField, Diagnostic, EntryKind, EntryListItem, GitMetadata,
-    RawEncoding, RawRecord, RawRecordSummary, RawRefSummary, SearchHit, SessionDetail,
-    SessionFreshness, SessionGroup, SessionSummary, SessionSyncState, SessionSyncStatus,
-    SessionTreeNode, SourceKind, TranscriptEntry,
+    ApiPage, ContentChunk, ContentField, ContentFreshness, ContentStatus, Diagnostic, EntryKind,
+    EntryListItem, FirstUserMessage, GitMetadata, LiveSyncState, RawEncoding, RawRecord,
+    RawRecordSummary, RawRefSummary, SearchHit, SessionDetail, SessionFreshness, SessionGroup,
+    SessionSummary, SessionSyncState, SessionTreeNode, SourceKind, SourceLocation, SourceRootKind,
+    TranscriptEntry,
 };
 use crate::permissions::open_source_read_only;
 
@@ -50,7 +53,7 @@ pub fn router() -> Router<AppState> {
         .route("/sessions", get(sessions))
         .route("/session-groups", get(session_groups))
         .route("/sessions/{session_id}", get(session_detail))
-        .route("/sessions/{session_id}/sync", put(sync_session))
+        .route("/sessions/{session_id}/live-sync", post(live_sync_session))
         .route("/sessions/{session_id}/entries", get(entries))
         .route(
             "/sessions/{session_id}/entries/{entry_id}",
@@ -72,13 +75,6 @@ pub async fn unknown_api() -> ApiFailure {
 
 async fn status(State(state): State<AppState>) -> Json<crate::model::Status> {
     let mut status = state.status.read().await.clone();
-    status.initial_index_cutoff = match status.initial_index_days {
-        days if days > 0 => chrono::Utc::now()
-            .checked_sub_signed(chrono::Duration::days(days))
-            .map(|time| time.to_rfc3339_opts(SecondsFormat::Micros, true)),
-        -1 => None,
-        _ => Some(chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true)),
-    };
     status.database_bytes = database_family_bytes(&state.cache.database);
     Json(status)
 }

@@ -156,7 +156,7 @@ fn validate_request(config: &SecurityConfig, request: &Request) -> Result<(), Ap
         return Err(ApiFailure::invalid("request bodies are not accepted"));
     }
     let session_sync =
-        request.method() == Method::PUT && is_session_sync_path(request.uri().path());
+        request.method() == Method::POST && is_session_sync_path(request.uri().path());
     if request.method() != Method::GET && request.method() != Method::HEAD && !session_sync {
         return Err(ApiFailure::new(
             StatusCode::METHOD_NOT_ALLOWED,
@@ -169,7 +169,7 @@ fn validate_request(config: &SecurityConfig, request: &Request) -> Result<(), Ap
 
 fn is_session_sync_path(path: &str) -> bool {
     path.strip_prefix("/api/v1/sessions/")
-        .and_then(|path| path.strip_suffix("/sync"))
+        .and_then(|path| path.strip_suffix("/live-sync"))
         .is_some_and(|session_id| !session_id.is_empty() && !session_id.contains('/'))
 }
 

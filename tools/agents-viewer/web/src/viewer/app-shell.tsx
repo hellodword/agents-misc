@@ -25,10 +25,8 @@ import { Conversation } from "@/viewer/conversation";
 import { useViewerController } from "@/viewer/controller";
 import {
   Empty,
-  formatBytes,
   indexPercent,
   indexStatusLabel,
-  indexWindowLabel,
 } from "@/viewer/format";
 import { Inspector } from "@/viewer/inspector";
 import {
@@ -71,7 +69,7 @@ export function AppShell() {
     compactInspector,
     compactNavigation,
     conversationSignals,
-    sessionSyncSignals,
+    liveStateSignals,
     resyncSequence,
     sidebarPanelRef,
     inspectorPanelRef,
@@ -159,12 +157,10 @@ export function AppShell() {
                     </span>
                   </TooltipTrigger>
                   <TooltipContent>
-                    {indexWindowLabel(status, t)} ·{" "}
-                    {t("indexCutoff", {
-                      cutoff: status.initialIndexCutoff
-                        ? new Date(status.initialIndexCutoff).toLocaleString()
-                        : t("none"),
-                      bytes: formatBytes(status.progress.excludedBytes),
+                    {t("catalogCoverage", {
+                      processed: status.progress.processedFiles,
+                      total: status.progress.totalFiles,
+                      failed: status.progress.failedFiles,
                     })}
                   </TooltipContent>
                 </Tooltip>
@@ -282,7 +278,7 @@ export function AppShell() {
                   element={
                     <Conversation
                       signals={conversationSignals}
-                      syncSignals={sessionSyncSignals}
+                      liveStateSignals={liveStateSignals}
                       resyncSequence={resyncSequence}
                       conversationDisplayTypes={conversationDisplayTypes}
                       onForceConversationDisplayType={

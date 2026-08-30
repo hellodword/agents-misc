@@ -1,10 +1,9 @@
 use super::*;
 
 pub const MAX_PARSER_TASKS: usize = 2;
-pub const DIRECT_SYNC_QUEUE_CAPACITY: usize = 128;
-pub const FULL_SWEEP_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+pub const FULL_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 pub const BACKGROUND_IDLE_DELAY: Duration = Duration::from_secs(30);
-pub const HOT_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+pub const HOT_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 
 pub(super) const SCHEDULER_TICK: Duration = Duration::from_millis(100);
 pub(super) const FULL_SWEEP_BACKOFF: [Duration; 4] = [
@@ -24,14 +23,27 @@ pub struct IndexCoordinator {
     pub(super) generation: Arc<AtomicU64>,
     pub(super) io_gate: IoGate,
     pub(super) shared: Arc<RwLock<SharedState>>,
-    pub(super) commands: mpsc::Sender<CoordinatorCommand>,
-    pub(super) command_receiver: Arc<Mutex<Option<mpsc::Receiver<CoordinatorCommand>>>>,
+    pub(super) commands: mpsc::UnboundedSender<CoordinatorCommand>,
+    pub(super) command_receiver: Arc<Mutex<Option<mpsc::UnboundedReceiver<CoordinatorCommand>>>>,
 }
 
 #[derive(Clone)]
 pub struct CoordinatorHandle {
     pub(super) shared: Arc<RwLock<SharedState>>,
-    pub(super) commands: mpsc::Sender<CoordinatorCommand>,
+    pub(super) commands: mpsc::UnboundedSender<CoordinatorCommand>,
+}
+
+pub struct LiveSyncLease {
+    pub(super) session_id: String,
+    pub(super) commands: mpsc::UnboundedSender<CoordinatorCommand>,
+}
+
+impl Drop for LiveSyncLease {
+    fn drop(&mut self) {
+        let _ = self
+            .commands
+            .send(CoordinatorCommand::ReleaseSession(self.session_id.clone()));
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -41,6 +53,12 @@ pub enum CoordinatorError {
 
     #[error("direct synchronization queue is unavailable: {reason}")]
     QueueUnavailable { reason: String },
+
+    #[error("session does not exist")]
+    SessionNotFound,
+
+    #[error("session source is unavailable")]
+    SourceMissing,
 }
 
 impl CoordinatorError {
@@ -60,7 +78,8 @@ pub(super) struct SharedState {
 }
 
 pub(super) enum CoordinatorCommand {
-    EnsureSession(String),
+    AcquireSession(String),
+    ReleaseSession(String),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -90,6 +109,10 @@ pub enum IndexUpdate {
         generation: u64,
         progress: IndexProgress,
     },
+    CatalogCommitted {
+        generation: u64,
+        session_id: String,
+    },
     SessionCommitted {
         generation: u64,
         session_id: String,
@@ -98,6 +121,10 @@ pub enum IndexUpdate {
         generation: u64,
         session_id: String,
         state: SessionSyncState,
+    },
+    SessionStateCleared {
+        generation: u64,
+        session_id: String,
     },
     Completed {
         report: ReconcileReport,
@@ -184,6 +211,7 @@ impl Ord for WorkItem {
 pub(super) struct InflightWork {
     pub(super) work: WorkItem,
     pub(super) lease: ScanLease,
+    pub(super) cancel: CancellationToken,
 }
 
 pub(super) struct WorkCompletion {
@@ -205,6 +233,11 @@ pub(super) struct StoredSource {
     pub(super) file_key: String,
     pub(super) size_bytes: u64,
     pub(super) mtime_ns: i64,
+    pub(super) snapshot_file_key: Option<String>,
+    pub(super) snapshot_size_bytes: Option<u64>,
+    pub(super) snapshot_mtime_ns: Option<i64>,
+    pub(super) snapshot_revision: u64,
+    pub(super) catalog_complete: bool,
     pub(super) scan_state: String,
     pub(super) session_id: Option<String>,
 }
@@ -214,7 +247,6 @@ pub(super) struct RuntimeScheduler {
     pub(super) writer: WriterHandle,
     pub(super) roots: SourceRoots,
     pub(super) max_event_bytes: usize,
-    pub(super) policy: InitialIndexPolicy,
     pub(super) gate: IoGate,
     pub(super) shared: Arc<RwLock<SharedState>>,
     pub(super) updates: Option<mpsc::Sender<IndexUpdate>>,
@@ -224,6 +256,7 @@ pub(super) struct RuntimeScheduler {
     pub(super) inflight: HashMap<String, InflightWork>,
     pub(super) deferred: HashMap<String, WorkItem>,
     pub(super) hot_sessions: HashSet<String>,
+    pub(super) lease_counts: HashMap<String, usize>,
     pub(super) completion_sender: mpsc::Sender<WorkCompletion>,
     pub(super) last_high_activity: Instant,
     pub(super) background_hold: Option<ScanLease>,

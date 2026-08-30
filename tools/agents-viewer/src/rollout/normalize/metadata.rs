@@ -21,6 +21,14 @@ pub(super) fn emit_diagnostic<S: ParseSink>(
 }
 
 pub(super) fn source_kind(payload: &Value) -> SourceKind {
+    if payload
+        .get("thread_source")
+        .or_else(|| payload.get("threadSource"))
+        .and_then(Value::as_str)
+        == Some("guardian_review")
+    {
+        return SourceKind::GuardianReview;
+    }
     let originator = payload
         .get("originator")
         .and_then(Value::as_str)
@@ -33,6 +41,7 @@ pub(super) fn source_kind(payload: &Value) -> SourceKind {
             "vscode" | "vs_code" => SourceKind::Vscode,
             "exec" => SourceKind::Exec,
             "mcp" | "appserver" | "app-server" | "app_server" => SourceKind::AppServer,
+            "guardian_review" => SourceKind::GuardianReview,
             _ => source_from_originator(&originator),
         };
     }
@@ -180,6 +189,14 @@ pub(super) fn add_tool_capability_metadata(entry: &mut NormalizedEntry, payload:
     }
 }
 
+pub(super) fn add_agent_message_delivery_metadata(entry: &mut NormalizedEntry, payload: &Value) {
+    if let Some(delivery) = payload.get("delivery").filter(|value| !value.is_null()) {
+        entry
+            .metadata
+            .insert("agentMessageDelivery".into(), delivery.clone());
+    }
+}
+
 pub(super) fn add_response_item_metadata(entry: &mut NormalizedEntry, payload: &Value) {
     add_tool_capability_metadata(entry, payload);
 
@@ -219,6 +236,43 @@ pub(super) fn add_response_item_metadata(entry: &mut NormalizedEntry, payload: &
         entry
             .metadata
             .insert("createTime".into(), create_time.clone());
+    }
+
+    if let Some(kinds) = metadata
+        .get("content_item_kinds")
+        .or_else(|| metadata.get("contentItemKinds"))
+        .and_then(Value::as_array)
+    {
+        let kinds = kinds
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|kind| !kind.is_empty())
+            .map(|kind| Value::String(kind.into()))
+            .collect::<Vec<_>>();
+        if !kinds.is_empty() {
+            entry
+                .metadata
+                .insert("contentItemKinds".into(), Value::Array(kinds));
+        }
+    }
+    if let Some(cell_id) = metadata
+        .get("cell_id")
+        .or_else(|| metadata.get("cellId"))
+        .and_then(Value::as_str)
+        .filter(|cell_id| !cell_id.is_empty())
+    {
+        entry
+            .metadata
+            .insert("cellId".into(), Value::String(cell_id.into()));
+    }
+    if let Some(complete) = metadata
+        .get("tool_calls_complete")
+        .or_else(|| metadata.get("toolCallsComplete"))
+        .and_then(Value::as_bool)
+    {
+        entry
+            .metadata
+            .insert("toolCallsComplete".into(), Value::Bool(complete));
     }
 
     let Some(executed_calls) = metadata

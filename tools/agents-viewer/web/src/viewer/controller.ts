@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate } from "react-router-dom";
 import { usePanelRef } from "@/components/ui/resizable";
-import type { SessionGroup, Status } from "@/generated/api";
+import type { SessionGroup, SessionSyncState, Status } from "@/generated/api";
 import { api, subscribeEvents } from "@/lib/api";
 import { setLanguage } from "@/lib/i18n";
 import { message } from "@/viewer/format";
@@ -78,8 +78,8 @@ export function useViewerController() {
   const [conversationSignals, setConversationSignals] = useState<
     Record<string, number>
   >({});
-  const [sessionSyncSignals, setSessionSyncSignals] = useState<
-    Record<string, number>
+  const [liveStateSignals, setLiveStateSignals] = useState<
+    Record<string, { sequence: number; state?: SessionSyncState }>
   >({});
   const [resyncSequence, setResyncSequence] = useState(0);
   const searchReturnFocus = useRef<HTMLElement | null>(null);
@@ -224,7 +224,7 @@ export function useViewerController() {
       subscribeEvents(
         (event) => {
           if (
-            event.type === "indexProgress" &&
+            event.type === "catalogProgress" &&
             event.data.phase &&
             event.data.progress
           ) {
@@ -240,23 +240,32 @@ export function useViewerController() {
             );
             return;
           }
-          if (event.type === "sessionUpdated") {
+          if (event.type === "catalogUpdated") {
             scheduleSessionRefresh();
-            if (event.data.sessionId) {
-              const sequence = ++liveSequence.current;
-              setSessionSyncSignals((current) => ({
-                ...current,
-                [event.data.sessionId!]: sequence,
-              }));
-            }
             return;
           }
-          if (event.type === "entryUpdated" && event.data.sessionId) {
+          if (event.type === "snapshotUpdated" && event.data.sessionId) {
             const sequence = ++liveSequence.current;
             setConversationSignals((current) => ({
               ...current,
               [event.data.sessionId!]: sequence,
             }));
+            scheduleSessionRefresh();
+            return;
+          }
+          if (
+            event.type === "liveSyncStateChanged" &&
+            event.data.sessionId
+          ) {
+            const sequence = ++liveSequence.current;
+            setLiveStateSignals((current) => ({
+              ...current,
+              [event.data.sessionId!]: {
+                sequence,
+                state: event.data.syncState,
+              },
+            }));
+            scheduleSessionRefresh();
           }
         },
         () => {
@@ -444,7 +453,7 @@ export function useViewerController() {
     compactInspector,
     compactNavigation,
     conversationSignals,
-    sessionSyncSignals,
+    liveStateSignals,
     resyncSequence,
     sidebarPanelRef,
     inspectorPanelRef,

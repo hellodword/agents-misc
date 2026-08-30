@@ -167,6 +167,58 @@ button {
   margin: 0;
   max-width: 1200px;
 }
+.conversation-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.conversation-title-row h1 {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.conversation-title-row button {
+  flex: 0 0 auto;
+}
+.conversation-source-path {
+  max-width: 1200px;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--muted);
+  font:
+    11px/1.4 ui-monospace,
+    SFMono-Regular,
+    monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conversation-live-error {
+  margin-top: 6px;
+  color: var(--danger);
+  font-size: 12px;
+}
+.catalog-only-empty {
+  width: min(100% - 32px, 720px);
+  margin: 40px auto;
+  padding: 24px;
+  border: 1px dashed var(--border);
+  border-radius: calc(var(--radius) + 2px);
+  background: color-mix(in srgb, var(--panel) 80%, transparent);
+  text-align: center;
+}
+.catalog-only-empty > p {
+  margin: 0;
+}
+.catalog-only-empty blockquote {
+  max-height: 12rem;
+  margin: 18px 0;
+  padding: 12px 14px;
+  overflow: auto;
+  border-inline-start: 3px solid var(--border);
+  color: var(--fg);
+  text-align: start;
+  white-space: pre-wrap;
+}
 .transcript {
   flex: 1;
   overflow: auto;
@@ -259,6 +311,13 @@ mark {
   .conversation-head {
     padding: 10px 12px;
   }
+  .conversation-title-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .conversation-title-row button {
+    align-self: flex-start;
+  }
   .mobile-only {
     display: inline-flex;
   }
@@ -292,7 +351,7 @@ mark {
   --card-foreground: var(--fg);
   --popover: var(--bg);
   --popover-foreground: var(--fg);
-  --primary: var(--accent);
+  --primary: #2563eb;
   --primary-foreground: #fff;
   --secondary: var(--soft);
   --secondary-foreground: var(--fg);

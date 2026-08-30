@@ -12,7 +12,4 @@ pub struct Cli {
     /// Configuration file; missing files are created with documented defaults.
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
-    /// Atomically rebuild the current source's index using the configured bootstrap window.
-    #[arg(long)]
-    pub rebuild_index: bool,
 }

@@ -63,7 +63,9 @@ pub(super) async fn search(
     }
     let mut sessions = HashMap::<String, SessionSummary>::new();
     if !unique_session_ids.is_empty() {
-        let mut builder = QueryBuilder::<Sqlite>::new("SELECT * FROM sessions WHERE id IN (");
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            "SELECT s.*, sf.root_kind, sf.relative_path, sf.size_bytes AS observed_bytes, sf.snapshot_size_bytes, sf.snapshot_revision, sf.last_synced_at_micros FROM sessions s JOIN source_files sf ON sf.id = s.source_file_id WHERE s.id IN (",
+        );
         let mut separated = builder.separated(",");
         for session_id in &unique_session_ids {
             separated.push_bind(session_id);
@@ -85,6 +87,7 @@ pub(super) async fn search(
         })?;
         hits.push(SearchHit {
             session,
+            origin: hit.origin,
             entry_id: hit.entry_id,
             kind: hit.kind,
             snippet: hit.snippet,

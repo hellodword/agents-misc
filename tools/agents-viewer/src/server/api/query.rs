@@ -17,9 +17,70 @@ pub(super) fn session_from_row(
 ) -> Result<SessionSummary, ApiFailure> {
     let branch: Option<String> = row.get("git_branch");
     let commit: Option<String> = row.get("git_commit");
+    let root_kind = row.try_get::<String, _>("root_kind").unwrap_or_else(|_| {
+        if row.get::<bool, _>("archived") {
+            "archived"
+        } else {
+            "active"
+        }
+        .into()
+    });
+    let observed_bytes = row
+        .try_get::<i64, _>("observed_bytes")
+        .or_else(|_| row.try_get::<i64, _>("size_bytes"))
+        .unwrap_or_default();
+    let snapshot_bytes = row
+        .try_get::<Option<i64>, _>("snapshot_size_bytes")
+        .unwrap_or(None)
+        .unwrap_or_default();
+    let snapshot_revision = row
+        .try_get::<i64, _>("snapshot_revision")
+        .unwrap_or_default();
+    let first_text = row
+        .try_get::<Option<String>, _>("first_user_message")
+        .unwrap_or(None);
+    let first_at = row
+        .try_get::<Option<i64>, _>("first_user_message_at_micros")
+        .unwrap_or(None);
+    let last_synced = row
+        .try_get::<Option<i64>, _>("last_synced_at_micros")
+        .unwrap_or(None);
+    let relative_path = row
+        .try_get::<String, _>("relative_path")
+        .unwrap_or_default();
+    let has_snapshot = snapshot_revision > 0;
+    let initial_content_freshness = if !has_snapshot {
+        ContentFreshness::NeverSynced
+    } else if snapshot_bytes == observed_bytes {
+        ContentFreshness::Current
+    } else {
+        ContentFreshness::Stale
+    };
     Ok(SessionSummary {
         id: row.get("id"),
         source: decode(row, "source_kind")?,
+        source_location: SourceLocation {
+            root_kind: if root_kind == "archived" {
+                SourceRootKind::Archived
+            } else {
+                SourceRootKind::Active
+            },
+            relative_path,
+        },
+        first_user_message: first_text.map(|text| FirstUserMessage {
+            preview: row.get("preview"),
+            text,
+            timestamp: first_at.map(format_time),
+        }),
+        content_status: ContentStatus {
+            freshness: initial_content_freshness,
+            live_state: LiveSyncState::Inactive,
+            has_snapshot,
+            snapshot_revision: u64::try_from(snapshot_revision).unwrap_or_default(),
+            synced_through_bytes: u64::try_from(snapshot_bytes).unwrap_or_default(),
+            observed_bytes: u64::try_from(observed_bytes).unwrap_or_default(),
+            last_synced_at: last_synced.map(format_time),
+        },
         parent_thread_id: row.get("parent_thread_id"),
         parent_relation: decode_optional(row, "parent_relation")?,
         cwd: row.get("cwd"),
@@ -59,6 +120,29 @@ pub(super) fn apply_session_freshness(
         session.freshness = coordinator
             .freshness(&session.id)
             .map_err(|error| coordinator_failure(error, &session.id))?;
+        session.content_status.freshness = match session.freshness {
+            SessionFreshness::Checking if session.content_status.has_snapshot => {
+                ContentFreshness::Stale
+            }
+            SessionFreshness::Checking => ContentFreshness::NeverSynced,
+            SessionFreshness::Current => ContentFreshness::Current,
+            SessionFreshness::Stale => ContentFreshness::Stale,
+            SessionFreshness::SourceMissing => ContentFreshness::SourceMissing,
+        };
+        session.content_status.live_state = match coordinator
+            .sync_state(&session.id)
+            .map_err(|error| coordinator_failure(error, &session.id))?
+        {
+            Some(SessionSyncState::Checking | SessionSyncState::Queued) => LiveSyncState::Starting,
+            Some(SessionSyncState::Indexing) => LiveSyncState::CatchingUp,
+            Some(SessionSyncState::Current) => LiveSyncState::Following,
+            Some(
+                SessionSyncState::Failed
+                | SessionSyncState::SourceMissing
+                | SessionSyncState::NotFound,
+            ) => LiveSyncState::Failed,
+            None => LiveSyncState::Inactive,
+        };
     }
     Ok(())
 }

@@ -3,11 +3,13 @@ use std::io::{BufReader, BufWriter, Cursor, Write as _};
 use agents_viewer::index::Database;
 use agents_viewer::index::control::{IoGate, WorkPriority};
 use agents_viewer::index::coordinator::{IndexCoordinator, IndexUpdate};
-use agents_viewer::index::scanner::{discover_sources, scan_source, scan_source_with_lease};
+use agents_viewer::index::scanner::{
+    discover_sources, refresh_catalog_source, scan_source, scan_source_with_lease,
+};
 use agents_viewer::index::search::{ArchiveFilter, SearchFilters};
 use agents_viewer::index::search::{SearchRequest, search};
 use agents_viewer::index::writer::{ScanMode, SourceFileRecord, spawn_writer};
-use agents_viewer::model::{EntryKind, SearchField, SourceKind};
+use agents_viewer::model::{EntryKind, SearchField, SearchOrigin, SourceKind};
 use agents_viewer::rollout::{CollectingSink, ParseContext, ParserOutput, RootKind, parse_rollout};
 use sha2::Digest as _;
 use tempfile::TempDir;
@@ -279,7 +281,7 @@ async fn corrupt_database_is_preserved_and_rebuilt() {
 }
 
 #[tokio::test]
-async fn incompatible_schema_and_stale_staging_recover_safely() {
+async fn incompatible_schema_and_batched_staging_recovery_are_safe() {
     let temp = TempDir::new().unwrap();
     let cache = temp.path().join("cache");
     agents_viewer::permissions::prepare_cache_directory(&cache).unwrap();
@@ -295,6 +297,15 @@ async fn incompatible_schema_and_stale_staging_recover_safely() {
     let reopened = Database::open_or_recover(&path, "future-source")
         .await
         .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM staged_sessions")
+            .fetch_one(reopened.pool())
+            .await
+            .unwrap(),
+        1,
+        "database open does not perform an unbounded staging delete"
+    );
+    assert_eq!(reopened.cleanup_orphan_staging_batch(1).await.unwrap(), 1);
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM staged_sessions")
             .fetch_one(reopened.pool())
@@ -336,8 +347,171 @@ async fn incompatible_schema_and_stale_staging_recover_safely() {
     recovered.close().await;
 }
 
+#[tokio::test]
+async fn unchanged_catalog_without_a_user_message_does_no_source_or_database_work() {
+    let temp = TempDir::new().unwrap();
+    let source_home = temp.path().join("codex-home");
+    let sessions = source_home.join("sessions/2025/01/02");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let session_id = "11111111-1111-4111-8111-111111111111";
+    let rollout = sessions.join(format!("rollout-2025-01-02T03-04-05-{session_id}.jsonl"));
+    std::fs::write(
+        &rollout,
+        format!(
+            "{{\"timestamp\":\"2025-01-02T03:04:05Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"/catalog-only\"}}}}\n"
+        ),
+    )
+    .unwrap();
+    let roots = agents_viewer::paths::resolve_source_roots(&source_home).unwrap();
+    let cache = temp.path().join("cache");
+    agents_viewer::permissions::prepare_cache_directory(&cache).unwrap();
+    let database = Database::open_or_recover(&cache.join("index.sqlite3"), "catalog-source")
+        .await
+        .unwrap();
+    let first = discover_sources(
+        &roots,
+        1024 * 1024,
+        1,
+        chrono::Utc::now().timestamp_micros(),
+        agents_viewer::index::InitialIndexPolicy::all(),
+    )
+    .sources
+    .into_iter()
+    .next()
+    .unwrap();
+    let first_gate = IoGate::new();
+    let first_outcome = refresh_catalog_source(
+        database.clone(),
+        first,
+        1024 * 1024,
+        chrono::Utc::now().timestamp_micros(),
+        CancellationToken::new(),
+        first_gate.register(WorkPriority::Recent).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(first_outcome.changed);
+    assert!(first_gate.bytes_read() > 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT first_user_message FROM sessions WHERE id = ?",
+        )
+        .bind(session_id)
+        .fetch_one(database.pool())
+        .await
+        .unwrap(),
+        None
+    );
+
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .fetch_all(database.pool())
+        .await
+        .unwrap();
+    let wal = cache.join("index.sqlite3-wal");
+    let wal_bytes = std::fs::metadata(&wal).map_or(0, |metadata| metadata.len());
+    let unchanged = discover_sources(
+        &roots,
+        1024 * 1024,
+        2,
+        chrono::Utc::now().timestamp_micros(),
+        agents_viewer::index::InitialIndexPolicy::all(),
+    )
+    .sources
+    .into_iter()
+    .next()
+    .unwrap();
+    let unchanged_gate = IoGate::new();
+    let unchanged_outcome = refresh_catalog_source(
+        database.clone(),
+        unchanged,
+        1024 * 1024,
+        chrono::Utc::now().timestamp_micros(),
+        CancellationToken::new(),
+        unchanged_gate.register(WorkPriority::Recent).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(!unchanged_outcome.changed);
+    assert_eq!(unchanged_gate.bytes_read(), 0);
+    assert_eq!(
+        std::fs::metadata(&wal).map_or(0, |metadata| metadata.len()),
+        wal_bytes
+    );
+
+    sqlx::query(
+        "UPDATE source_files SET snapshot_file_key = file_key, \
+            snapshot_size_bytes = size_bytes, snapshot_mtime_ns = mtime_ns, \
+            snapshot_revision = 7, last_synced_at_micros = 1, scan_state = 'ready'",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    let replacement_id = "22222222-2222-4222-8222-222222222222";
+    std::fs::write(
+        &rollout,
+        format!(
+            "{{\"timestamp\":\"2025-01-02T03:04:05Z\",\"type\":\"session_meta\",\"payload\":{{\"id\":\"{replacement_id}\",\"cwd\":\"/replacement\"}}}}\n\
+             {{\"timestamp\":\"2025-01-02T03:04:06Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"Replacement session\"}}}}\n"
+        ),
+    )
+    .unwrap();
+    let replacement = discover_sources(
+        &roots,
+        1024 * 1024,
+        3,
+        chrono::Utc::now().timestamp_micros(),
+        agents_viewer::index::InitialIndexPolicy::all(),
+    )
+    .sources
+    .into_iter()
+    .next()
+    .unwrap();
+    let replacement_gate = IoGate::new();
+    let replacement_outcome = refresh_catalog_source(
+        database.clone(),
+        replacement,
+        1024 * 1024,
+        chrono::Utc::now().timestamp_micros(),
+        CancellationToken::new(),
+        replacement_gate.register(WorkPriority::Recent).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(replacement_outcome.changed);
+    assert!(!replacement_outcome.has_snapshot);
+    assert_eq!(replacement_outcome.source.session_id, replacement_id);
+    assert_eq!(
+        sqlx::query_as::<_, (String, i64, Option<String>)>(
+            "SELECT session_id, snapshot_revision, snapshot_file_key FROM source_files",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap(),
+        (replacement_id.into(), 0, None)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sessions WHERE id = ?")
+            .bind(session_id)
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT first_user_message FROM sessions WHERE id = ?",
+        )
+        .bind(replacement_id)
+        .fetch_one(database.pool())
+        .await
+        .unwrap(),
+        Some("Replacement session".into())
+    );
+    database.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn cancelled_scan_defers_staging_cleanup_until_reopen() {
+async fn cancelled_scan_preserves_snapshot_state_and_reclaims_staging_in_batches() {
     let temp = TempDir::new().unwrap();
     let source_home = temp.path().join("codex-home");
     let sessions = source_home.join("sessions/2026/07/30");
@@ -422,6 +596,24 @@ async fn cancelled_scan_defers_staging_cleanup_until_reopen() {
     let reopened = Database::open_or_recover(&database_path, "cancelled-source")
         .await
         .unwrap();
+    assert!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM staged_raw_records")
+            .fetch_one(reopened.pool())
+            .await
+            .unwrap()
+            > 500
+    );
+    let first_removed = reopened.cleanup_orphan_staging_batch(500).await.unwrap();
+    assert!(first_removed > 0);
+    assert!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM staged_raw_records")
+            .fetch_one(reopened.pool())
+            .await
+            .unwrap()
+            > 0,
+        "the first bounded pass must not sweep the entire interrupted scan"
+    );
+    while reopened.cleanup_orphan_staging_batch(500).await.unwrap() > 0 {}
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM staged_raw_records")
             .fetch_one(reopened.pool())
@@ -517,6 +709,14 @@ async fn search_covers_titles_literals_filters_and_short_query_caps() {
         .execute(database.pool())
         .await
         .unwrap();
+    sqlx::query("INSERT INTO source_files(id, root_kind, relative_path, file_key, size_bytes, mtime_ns) VALUES (2, 'active', 'catalog.jsonl', 'catalog-key', 1, 1)")
+        .execute(database.pool())
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO sessions(id, source_file_id, source_kind, title, preview, first_user_message, created_at_micros, updated_at_micros, archived, entry_count, index_state, completeness) VALUES ('catalog-session', 2, 'cli', 'xy-only-title', 'hello', 'hello catalog', 1, 1, 0, 0, 'pending', 'partial')")
+        .execute(database.pool())
+        .await
+        .unwrap();
     let mut transaction = database.pool().begin().await.unwrap();
     for sequence in 0_i64..=10_001 {
         let primary = if sequence == 0 { "unrelated" } else { "zz" };
@@ -567,6 +767,19 @@ async fn search_covers_titles_literals_filters_and_short_query_caps() {
     .unwrap();
     assert!(two.partial);
     assert_eq!(two.hits.len(), 5);
+    let catalog_short = search(
+        &database,
+        &SearchRequest {
+            query: "xy".into(),
+            limit: 5,
+            filters: SearchFilters::default(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(catalog_short.hits.len(), 1);
+    assert_eq!(catalog_short.hits[0].field, SearchField::SessionTitle);
+    assert_eq!(catalog_short.hits[0].origin, SearchOrigin::Catalog);
     let literal = search(
         &database,
         &SearchRequest {
@@ -780,17 +993,35 @@ async fn coordinator_prefers_active_duplicate_skips_unchanged_and_reconciles_app
                 .await
         }
     });
-    let update = tokio::time::timeout(std::time::Duration::from_secs(2), background_updates.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(matches!(
-        update,
-        IndexUpdate::Completed {
-            foreground: false,
-            ..
+    let mut background_events = Vec::new();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while let Some(update) = background_updates.recv().await {
+            let completed = matches!(
+                update,
+                IndexUpdate::Completed {
+                    foreground: false,
+                    ..
+                }
+            );
+            background_events.push(update);
+            if completed {
+                break;
+            }
         }
-    ));
+    })
+    .await
+    .unwrap();
+    assert!(
+        background_events
+            .iter()
+            .all(|update| !matches!(update, IndexUpdate::CatalogCommitted { .. })),
+        "an unchanged startup catalog must not publish a false update"
+    );
+    assert!(
+        background_events
+            .iter()
+            .all(|update| !matches!(update, IndexUpdate::SessionCommitted { .. }))
+    );
     assert!(background_updates.try_recv().is_err());
     background_shutdown.cancel();
     drop(watch_sender);
@@ -841,6 +1072,17 @@ async fn coordinator_prefers_active_duplicate_skips_unchanged_and_reconciles_app
         .await
         .unwrap(),
         1
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT sf.root_kind, sf.relative_path FROM sessions s \
+             JOIN source_files sf ON sf.id = s.source_file_id \
+             WHERE s.id = '11111111-1111-4111-8111-111111111111'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap(),
+        ("archived".into(), file_name.into())
     );
 
     writer.shutdown().await.unwrap();
@@ -932,14 +1174,26 @@ async fn append_merges_an_explicit_plan_with_the_preceding_assistant_block() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn append_revalidates_the_complete_prefix_and_parses_only_the_suffix() {
+async fn append_validates_bounded_windows_and_parses_only_the_suffix() {
     let temp = TempDir::new().unwrap();
     let source_home = temp.path().join("codex-home");
     let sessions = source_home.join("sessions/2025/01/02");
     std::fs::create_dir_all(&sessions).unwrap();
     let rollout =
         sessions.join("rollout-2025-01-02T03-04-05-11111111-1111-4111-8111-111111111111.jsonl");
-    std::fs::write(&rollout, include_bytes!("fixtures/rollouts/v0_120.jsonl")).unwrap();
+    let mut initial = BufWriter::new(std::fs::File::create(&rollout).unwrap());
+    initial
+        .write_all(include_bytes!("fixtures/rollouts/v0_120.jsonl"))
+        .unwrap();
+    for index in 0..2_000 {
+        writeln!(
+            initial,
+            "{{\"timestamp\":\"2025-01-02T03:04:08Z\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"agent_message\",\"message\":\"large bounded prefix {index:04}\",\"phase\":\"final\"}}}}"
+        )
+        .unwrap();
+    }
+    initial.flush().unwrap();
+    drop(initial);
     let roots = agents_viewer::paths::resolve_source_roots(&source_home).unwrap();
     let cache = temp.path().join("cache");
     agents_viewer::permissions::prepare_cache_directory(&cache).unwrap();
@@ -1002,18 +1256,22 @@ async fn append_revalidates_the_complete_prefix_and_parses_only_the_suffix() {
     .unwrap();
     assert!(outcome.appended);
     assert!(
-        gate.bytes_read() >= old_size + appended.len() as u64,
-        "append must hash the complete {} byte prefix and parse the {} byte suffix, but read {} bytes",
-        old_size,
-        appended.len(),
+        gate.bytes_read() >= 2 * 64 * 1024 + appended.len() as u64,
+        "append must validate both bounded fingerprint windows and parse the suffix, but read {} bytes",
         gate.bytes_read()
     );
     assert!(
-        gate.bytes_read() <= old_size + appended.len() as u64 + 2 * 64 * 1024,
+        gate.bytes_read() <= 2 * 64 * 1024 + appended.len() as u64 + 4 * 1024,
         "append read {} bytes for a {} byte prefix and {} byte suffix",
         gate.bytes_read(),
         old_size,
         appended.len()
+    );
+    assert!(
+        gate.bytes_read() < old_size,
+        "append reread the {} byte committed prefix instead of bounded windows ({} bytes read)",
+        old_size,
+        gate.bytes_read()
     );
 
     sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")

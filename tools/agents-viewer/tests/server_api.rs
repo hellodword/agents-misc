@@ -18,7 +18,7 @@ async fn status_sessions_entries_content_raw_and_search_follow_contract() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["cache-control"], "no-store");
     let status = support::json(response).await;
-    assert_eq!(status["initialIndexDays"], -1);
+    assert!(status.get("initialIndexDays").is_none());
     assert!(status.get("initialIndexCutoff").is_none());
     assert_eq!(status["progress"]["excludedFiles"], 0);
     assert_eq!(status["progress"]["excludedBytes"], 0);
@@ -537,7 +537,7 @@ async fn sse_ring_replays_recent_events_and_marks_expired_ids_for_resync() {
     let hub = SseHub::new();
     for generation in 0..=SSE_RING_CAPACITY as u64 {
         hub.publish(
-            SseEventType::IndexProgress,
+            SseEventType::CatalogProgress,
             SseEventPayload {
                 generation,
                 phase: None,
@@ -546,6 +546,7 @@ async fn sse_ring_replays_recent_events_and_marks_expired_ids_for_resync() {
                 progress: None,
                 diagnostic: None,
                 sync_state: None,
+                snapshot_revision: None,
             },
         )
         .await;
@@ -792,7 +793,7 @@ async fn missing_source_retains_cached_session_and_handoff_snapshot() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn direct_session_sync_indexes_a_deferred_uuid_without_blocking_the_request() {
+async fn page_scoped_live_sync_follows_a_cataloged_session_until_disconnect() {
     use std::io::Write as _;
 
     use agents_viewer::index::Database;
@@ -857,7 +858,7 @@ async fn direct_session_sync_indexes_a_deferred_uuid_without_blocking_the_reques
     .await
     .unwrap();
 
-    let response = app
+    let removed_sync = app
         .clone()
         .oneshot(
             http::Request::builder()
@@ -869,10 +870,27 @@ async fn direct_session_sync_indexes_a_deferred_uuid_without_blocking_the_reques
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let status = support::json(response).await;
-    assert_eq!(status["state"], "queued");
-    assert_eq!(status["hasSnapshot"], false);
+    assert_eq!(removed_sync.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+    let live_sync = app
+        .clone()
+        .oneshot(
+            http::Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1/sessions/{session_id}/live-sync"))
+                .header("host", "127.0.0.1:4747")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(live_sync.status(), StatusCode::OK);
+    assert!(
+        live_sync.headers()[http::header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/event-stream")
+    );
 
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
@@ -895,6 +913,7 @@ async fn direct_session_sync_indexes_a_deferred_uuid_without_blocking_the_reques
     let detail = support::json(detail).await;
     assert_eq!(detail["summary"]["freshness"], "current");
     assert_eq!(detail["summary"]["entryCount"], 0);
+    assert_eq!(detail["summary"]["contentStatus"]["liveState"], "following");
 
     let mut append = std::fs::OpenOptions::new()
         .append(true)
@@ -908,22 +927,6 @@ async fn direct_session_sync_indexes_a_deferred_uuid_without_blocking_the_reques
     append.flush().unwrap();
     drop(append);
 
-    let response = app
-        .clone()
-        .oneshot(
-            http::Request::builder()
-                .method("PUT")
-                .uri(format!("/api/v1/sessions/{session_id}/sync"))
-                .header("host", "127.0.0.1:4747")
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let status = support::json(response).await;
-    assert_eq!(status["state"], "queued");
-    assert_eq!(status["hasSnapshot"], true);
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             if matches!(
@@ -941,14 +944,16 @@ async fn direct_session_sync_indexes_a_deferred_uuid_without_blocking_the_reques
         .oneshot(support::request(&format!("/api/v1/sessions/{session_id}")))
         .await
         .unwrap();
-    assert_eq!(support::json(detail).await["summary"]["entryCount"], 1);
+    let detail = support::json(detail).await;
+    assert_eq!(detail["summary"]["entryCount"], 1);
+    assert_eq!(detail["summary"]["contentStatus"]["liveState"], "following");
 
     let unknown = app
         .clone()
         .oneshot(
             http::Request::builder()
-                .method("PUT")
-                .uri("/api/v1/sessions/019f5a6f-512b-7ae2-bbe9-884d39f6f501/sync")
+                .method("POST")
+                .uri("/api/v1/sessions/019f5a6f-512b-7ae2-bbe9-884d39f6f501/live-sync")
                 .header("host", "127.0.0.1:4747")
                 .body(axum::body::Body::empty())
                 .unwrap(),
@@ -956,19 +961,42 @@ async fn direct_session_sync_indexes_a_deferred_uuid_without_blocking_the_reques
         .await
         .unwrap();
     assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
-    let unsafe_unknown = app
+    let uncached_label = app
+        .clone()
         .oneshot(
             http::Request::builder()
-                .method("PUT")
-                .uri("/api/v1/sessions/not-a-cached-uuid/sync")
+                .method("POST")
+                .uri("/api/v1/sessions/not-a-cached-uuid/live-sync")
                 .header("host", "127.0.0.1:4747")
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(unsafe_unknown.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(uncached_label.status(), StatusCode::NOT_FOUND);
 
+    drop(live_sync);
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if matches!(
+                updates.recv().await,
+                Some(IndexUpdate::SessionStateCleared { session_id: released, .. }) if released == session_id
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let detail = app
+        .clone()
+        .oneshot(support::request(&format!("/api/v1/sessions/{session_id}")))
+        .await
+        .unwrap();
+    assert_eq!(
+        support::json(detail).await["summary"]["contentStatus"]["liveState"],
+        "inactive"
+    );
     shutdown.cancel();
     coordinator_task.await.unwrap().unwrap();
     writer.shutdown().await.unwrap();

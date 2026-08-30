@@ -55,7 +55,9 @@ impl SessionGroupCatalog {
                 return Ok(Arc::clone(&snapshot.groups));
             }
 
-            let sessions = sqlx::query("SELECT * FROM sessions")
+            let sessions = sqlx::query(
+                "SELECT s.*, sf.root_kind, sf.relative_path, sf.size_bytes AS observed_bytes, sf.snapshot_size_bytes, sf.snapshot_revision, sf.last_synced_at_micros FROM sessions s JOIN source_files sf ON sf.id = s.source_file_id",
+            )
                 .fetch_all(database.pool())
                 .await?
                 .iter()
@@ -109,7 +111,9 @@ pub(super) async fn sessions(
     let previous = decoded
         .as_ref()
         .is_some_and(|(_, _, direction)| direction == "previous");
-    let mut builder = QueryBuilder::<Sqlite>::new("SELECT * FROM sessions s WHERE 1=1");
+    let mut builder = QueryBuilder::<Sqlite>::new(
+        "SELECT s.*, sf.root_kind, sf.relative_path, sf.size_bytes AS observed_bytes, sf.snapshot_size_bytes, sf.snapshot_revision, sf.last_synced_at_micros FROM sessions s JOIN source_files sf ON sf.id = s.source_file_id WHERE 1=1",
+    );
     push_session_filters(&mut builder, &query, archived)?;
     if let Some((sort, id, _)) = &decoded {
         if previous {
@@ -588,7 +592,9 @@ pub(super) async fn session_detail(
     Path(session_id): Path<String>,
 ) -> Result<Json<SessionDetail>, ApiFailure> {
     validate_id(&session_id)?;
-    let row = sqlx::query("SELECT * FROM sessions WHERE id = ?")
+    let row = sqlx::query(
+        "SELECT s.*, sf.root_kind, sf.relative_path, sf.size_bytes AS observed_bytes, sf.snapshot_size_bytes, sf.snapshot_revision, sf.last_synced_at_micros FROM sessions s JOIN source_files sf ON sf.id = s.source_file_id WHERE s.id = ?",
+    )
         .bind(&session_id)
         .fetch_optional(state.database.pool())
         .await?
@@ -609,41 +615,51 @@ pub(super) async fn session_detail(
     }))
 }
 
-pub(super) async fn sync_session(
+pub(super) async fn live_sync_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Response, ApiFailure> {
     validate_id(&session_id)?;
-    let has_snapshot =
-        sqlx::query_scalar::<_, i64>("SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?)")
-            .bind(&session_id)
-            .fetch_one(state.database.pool())
-            .await?
-            != 0;
-    if !has_snapshot && uuid::Uuid::parse_str(&session_id).is_err() {
-        return Err(ApiFailure::invalid(
-            "an uncached session identifier must be a UUID",
-        ));
-    }
+    let connection = Arc::clone(&state.live_sync_connections)
+        .try_acquire_owned()
+        .map_err(|_| ApiFailure::service_unavailable("live sync connection limit reached"))?;
     let coordinator = state
         .coordinator
         .as_ref()
         .ok_or_else(|| ApiFailure::service_unavailable("session synchronization is unavailable"))?;
-    let status = coordinator
-        .ensure_session(&session_id)
-        .map_err(|error| coordinator_failure(error, &session_id))?;
-    if status.state == SessionSyncState::NotFound {
-        return Err(ApiFailure::not_found("session source does not exist"));
-    }
-    let response_status = if matches!(
-        status.state,
-        SessionSyncState::Checking | SessionSyncState::Queued | SessionSyncState::Indexing
-    ) {
-        StatusCode::ACCEPTED
-    } else {
-        StatusCode::OK
-    };
-    Ok((response_status, Json::<SessionSyncStatus>(status)).into_response())
+    let (status, lease) =
+        coordinator
+            .acquire_live_sync(&session_id)
+            .map_err(|error| match error {
+                CoordinatorError::SessionNotFound => {
+                    ApiFailure::not_found("session source does not exist")
+                }
+                CoordinatorError::SourceMissing => ApiFailure::new(
+                    StatusCode::CONFLICT,
+                    "source_missing",
+                    "session source is unavailable",
+                ),
+                error => coordinator_failure(error, &session_id),
+            })?;
+    let interval = tokio::time::interval(std::time::Duration::from_secs(15));
+    let events = futures::stream::unfold(
+        (Some(status), lease, connection, interval),
+        |(status, lease, connection, mut interval)| async move {
+            interval.tick().await;
+            let event = match status {
+                Some(status) => Event::default()
+                    .event("leaseAccepted")
+                    .json_data(status)
+                    .expect("live sync status is serializable"),
+                None => Event::default().comment("live-sync"),
+            };
+            Some((
+                Ok::<Event, Infallible>(event),
+                (None, lease, connection, interval),
+            ))
+        },
+    );
+    Ok(Sse::new(events).into_response())
 }
 
 #[cfg(test)]
@@ -651,12 +667,29 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    use crate::model::{Completeness, IndexState, SessionParentRelation};
+    use crate::model::{
+        Completeness, ContentFreshness, ContentStatus, IndexState, LiveSyncState,
+        SessionParentRelation, SourceLocation, SourceRootKind,
+    };
 
     fn session(id: String, parent_thread_id: Option<String>) -> SessionSummary {
         SessionSummary {
             id: id.clone(),
             source: SourceKind::Cli,
+            source_location: SourceLocation {
+                root_kind: SourceRootKind::Active,
+                relative_path: format!("{id}.jsonl"),
+            },
+            first_user_message: None,
+            content_status: ContentStatus {
+                freshness: ContentFreshness::Current,
+                live_state: LiveSyncState::Inactive,
+                has_snapshot: true,
+                snapshot_revision: 1,
+                synced_through_bytes: 0,
+                observed_bytes: 0,
+                last_synced_at: None,
+            },
             parent_thread_id,
             parent_relation: Some(SessionParentRelation::Parent),
             cwd: None,

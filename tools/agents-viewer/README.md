@@ -39,7 +39,7 @@ Rollout input is treated as an append-oriented, partially open log rather than a
 - extracts line-delimited `<proposed_plan>` blocks only from assistant messages, leaving non-plan assistant text as an ordinary message;
 - resumes from a verified stable prefix when a live rollout is appended.
 
-Codex 0.148 persists internal model input in more than one role. System/developer control material covers permissions, collaboration and plan modes, multi-agent behavior, model/personality changes, skills, plugins, apps, tools, environment and Git state, realtime sessions, budgets, extensions, and hooks. User-role contextual material includes AGENTS instructions, environment snapshots, loaded skills, external and internal model context, shell/interruption/subagent notifications, recommended plugins, hook prompts, and legacy warnings. None of these non-assistant roles are eligible for plan extraction, even when their protocol instructions contain a complete `<proposed_plan>` example. The distinct `turn_context`, `world_state`, and `security_risk_score` envelopes remain Context entries, while inter-agent traffic remains Technical rather than being reclassified as an assistant plan.
+Codex 0.151 persists internal model input in more than one role. System/developer control material covers permissions, collaboration and plan modes, multi-agent behavior, model/personality changes, skills, plugins, apps, tools, environment and Git state, realtime sessions, budgets, extensions, and hooks. User-role contextual material includes AGENTS instructions, environment snapshots, loaded skills, external and internal model context, shell/interruption/subagent notifications, recommended plugins, hook prompts, and legacy warnings. None of these non-assistant roles are eligible for plan extraction, even when their protocol instructions contain a complete `<proposed_plan>` example. The distinct `turn_context`, `world_state`, and `security_risk_score` envelopes remain Context entries, while inter-agent traffic remains Technical rather than being reclassified as an assistant plan.
 
 Plan tags follow Codex's line parser: each tag must be alone on its line apart from whitespace, CRLF is accepted, an unterminated block closes at the end of the message, and the last recognized block supplies the plan body. Inline lookalikes remain ordinary assistant text. The normalized plan body is deduplicated with adjacent plan presentation and durable `Plan` items; the durable item wins while every contributing raw reference remains inspectable. A plan-only assistant record therefore produces one `plan` entry instead of a duplicate received message.
 
@@ -51,23 +51,19 @@ Codex 0.147 conversation sections and their manual ordering are state-backed met
 
 SQLite contains normalized sessions, entries, raw-record metadata, diagnostics, and search indexes. It is derived entirely from rollout JSONL and is not user-authored state. This allows the indexer to use atomic staging, append reconciliation, FTS5, and cursor-based APIs without writing beside the source files.
 
-The database is initialized from the single baseline in `schema.sql`. This project is still in early development: schema changes replace that baseline directly and do not add upgrade migrations or schema-version history. A cache with a different schema signature is rebuilt from rollout JSONL by the existing recovery path.
+The database is initialized from the single baseline in `schema.sql`. This project is still in early development: schema changes replace that baseline directly and do not add upgrade migrations or schema-version history. The current baseline is intentionally a clean break from earlier Viewer caches; rollout JSONL remains the source of truth.
 
-Parser-triggered reindexing and interrupted-source recovery keep the last atomically committed session snapshots readable. Foreground status covers metadata discovery and the rolling high-priority window; older history continues at low priority after the service is ready. Each source commit immediately emits the existing `sessionUpdated` and `entryUpdated` events, so an open conversation can refresh before the remaining sources finish. A rollout that disappears is retained as a readable cached snapshot with `sourceMissing` freshness instead of being cascade-deleted.
+Catalog records and conversation snapshots have separate checkpoints. Interrupted content work never replaces the last atomically committed snapshot. Its hidden staging rows are detached after the worker stops and reclaimed in bounded background batches, so neither shutdown nor the next startup performs an unbounded delete. A rollout that disappears retains its last readable snapshot with `sourceMissing` freshness instead of being cascade-deleted.
 
 ### Synchronization policy
 
-Startup performs one metadata-only catalog sweep over both rollout roots. It opens files read-only to obtain identity, size, and modification time, but does not read JSONL content. Ordinary watcher events inspect only the affected paths, forward close-write notifications, and flush a continuously changing batch within one second. A watcher overflow or degraded event remains pending until a coalesced recovery sweep can run with backoff instead of being discarded while foreground work is active.
+Startup performs one automatic catalog sweep over both rollout roots. For a new or replaced rollout it parses only far enough to obtain the stable session ID, source-relative path, session metadata, and first real non-empty user message. It never hydrates full conversation content automatically. An unchanged rollout causes no JSONL read and no SQLite write. After a first user message is known, an append needs only a bounded 64 KiB prefix guard and observation update; it does not parse the appended conversation.
 
-The same full safety sweep runs every six hours. Between full sweeps, the runtime checks hot catalog entries every 30 seconds by exact path and compares only file identity, size, and modification time. Hot entries are bounded by the current catalog and include rollouts classified as recent at startup plus sessions subsequently touched by the watcher or a direct synchronization request. An unchanged targeted or full sweep performs no JSONL reads and no SQLite writes.
+Watcher events refresh only the affected catalog records. A coalesced safety sweep runs every 60 seconds and retries isolated read races without dropping the previous catalog or mistaking the source for a deletion. One failing rollout does not stop the coordinator. This makes reopening proportional to catalog changes instead of to the total transcript history.
 
-Work is ordered first by priority, then by rollout filesystem modification time, then by session creation time, with stable ID/path tie-breakers:
+Full content has one explicit owner: the open conversation page. Pressing **Start live sync** opens `POST /api/v1/sessions/{sessionId}/live-sync` as an SSE response. While that response remains open, the session receives interactive priority, its source is checked every second, and complete appended records are committed continuously. Leaving the route, refreshing the page, pressing **Stop**, or losing the connection releases the lease and cancels content work that no other page still owns. Multiple pages use reference-counted leases.
 
-1. a direct `PUT /api/v1/sessions/{sessionId}/sync`, issued automatically before the Web route loads a conversation;
-2. rollouts modified inside the rolling `initial_index_days` window;
-3. all older history, unless the window is `0`.
-
-At most two source reads run concurrently. A direct request rechecks source metadata even for a cached `current` session, keeps the existing snapshot readable during that check, and parks lower-priority readers at a maximum 64 KiB read boundary when parsing is required. Older-history work starts only after 30 seconds without high-priority work, uses one scanner, and is capped at 8 MiB/s. SQLite remains a single writer with separate direct, recent, and background queues; priority can therefore change between bounded transactions without concurrent writers. Append validation reads at most the first 64 KiB and the old 64 KiB tail, then parses only the stable incomplete suffix plus newly appended bytes. Routine reconciliation does not vacuum the database.
+The existing snapshot is returned immediately while a lease catches up. A first snapshot or replacement is built in hidden staging and becomes visible in one transaction; an append resumes from the committed checkpoint after bounded first/tail validation and parses only the stable incomplete suffix plus new bytes. At most two source parsers run concurrently. SQLite remains a single writer with separate interactive, recent, and background queues, and routine reconciliation does not vacuum the database.
 
 ### API and Web UI
 
@@ -86,6 +82,8 @@ directory where the binary was compiled.
 
 The React/Vite UI presents conversations in a Telegram-like layout. User messages are right-aligned; assistant messages and normalized plans are left-aligned bubbles. Both reuse sanitized GFM Markdown, full-content copying, timestamps, and Inspector actions. Reasoning and commands appear as compact inspectable activity. Each `request_user_input` question appears as its own default-visible incoming poll message with option labels and descriptions; completed polls mark selected answers and place non-empty per-question notes below the selected option. Command results remain in the inspector.
 
+The sidebar is available as soon as cataloging finds sessions. A catalog-only conversation shows its first real user message and source-root-relative path without triggering a content scan. The conversation header distinguishes never-synchronized, stale, current, source-missing, and live-following states and exposes the explicit Start/Stop control. Global search can find catalog titles and first user messages before a content snapshot exists; hydrated entries extend the same search without duplicating the catalog hit.
+
 `GET /api/v1/sessions/{sessionId}/entries` accepts a comma-separated `displayTypes` set for cursor-safe exact filtering. Supported values are `received`, `sent`, `requestUserInput`, `reasoning`, `exec`, `plan`, `patch`, `mcp`, `webSearch`, `function`, `dynamic`, `terminal`, `viewImage`, `otherTool`, `warning`, `error`, `context`, `marker`, `technicalMessage`, `internalMessage`, and `unknown`. `plan` is the canonical view of plan-only assistant records; `received` does not return a second tagged copy, while assistant text outside a plan block remains `received`. `displayTypes` and `includeTechnical` are mutually exclusive; omitting `displayTypes` preserves the earlier boolean behavior for compatible callers. The Web client always includes `plan` in its exact filter, including when it canonicalizes older saved preferences.
 
 The sidebar uses parent/child trees rather than a flat list. All indexed `parentThreadId` relationships share the same layout, filters match whole trees, pagination never splits a tree, and the newest session in the newest group is the default route. Plan-implementation children use the localized title “Implement · parent title”.
@@ -103,9 +101,10 @@ The compatibility promise is for Codex CLI rollout records. Source metadata prod
 | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
 | `session_meta`                                       | Stable session ID, source, cwd, parent/fork, version, provider, Git, and paginated-history data    |
 | `turn_context`, `world_state`, `security_risk_score` | Collapsed technical context, excluded from default search                                          |
-| `event_msg.item_completed`                           | All Codex 0.148 turn-item families, including extension-owned display items                        |
+| `event_msg.item_completed`                           | Codex turn-item families through 0.151, including standalone function output and extension items   |
 | other known `event_msg` payloads                     | Messages, reasoning, tool lifecycle, plans, settings, and diagnostics                              |
 | known `response_item` payloads                       | Messages, assistant plan blocks, reasoning summaries, inter-agent messages, tools, and attachments |
+| `realtime_item`                                      | Session lifecycle markers plus normalized user/assistant transcript segments                       |
 | inter-agent communication and delivery metadata      | One collapsed technical message with merged delivery metadata                                      |
 | compacted history                                    | Ordered technical/context entry with raw provenance                                                |
 | unknown envelope or payload                          | Browsable raw reference plus diagnostic; the session continues                                     |
@@ -120,25 +119,29 @@ Codex 0.147 MCP read-only hints and image-generation transparency hints are reta
 
 Codex 0.148 security-risk snapshots remain collapsed and excluded from search. Response-item harness authorship, fractional message creation times, and structured image-generation failures are retained as normalized metadata without rendering opaque image results.
 
+Codex 0.149 asynchronous agent delivery metadata and compaction checkpoints are retained without exposing injected delivery context. Codex 0.150 realtime transcript segments are normalized into ordinary user/assistant messages, while realtime lifecycle and promotion records remain collapsed markers. Interrupted collaboration activity remains explicit.
+
+Codex 0.151 standalone `FunctionCallOutput` records preserve namespace, name, structured output, and source item identity even when no preceding call record exists. `guardian_review` is classified as a first-class session source.
+
 Message image and audio attachments are represented only by localized count badges. The transcript does not render attachment URLs, data URIs, ciphertext, or media players; copying a message copies its text only.
 
-Fixtures cover Codex 0.120, the 0.144 legacy baseline, the 0.145 turn-item and subagent-history boundary, the 0.146 command-attribution and timing additions, the 0.147 additive response and tool metadata, the 0.148 history metadata, security scores, and image failures, line-level plan extraction and deduplication, malformed input, source classification, parent/fork metadata, incremental indexing, and plan handoff grouping.
+Fixtures cover Codex 0.120 and every persisted compatibility boundary from 0.144 through 0.151, including realtime items, asynchronous delivery, standalone function outputs, guardian review, line-level plan extraction and deduplication, malformed input, source classification, parent/fork metadata, incremental indexing, and plan handoff grouping.
 
 ## Following upstream Codex
 
-The declared compatibility baseline is OpenAI Codex tag [`rust-v0.148.0`](https://github.com/openai/codex/tree/rust-v0.148.0). The important boundary is the persisted rollout, not the shape of an internal crate API.
+The declared compatibility baseline is OpenAI Codex tag [`rust-v0.151.0`](https://github.com/openai/codex/tree/rust-v0.151.0). The important boundary is the persisted rollout, not the shape of an internal crate API.
 
 Upstream references for the baseline are:
 
-- [`codex-rs/history/src/lib.rs`](https://github.com/openai/codex/blob/rust-v0.148.0/codex-rs/history/src/lib.rs) for rollout envelopes, response-item harness metadata, compaction payloads, and rollout lines;
-- [`codex-rs/protocol/src/protocol.rs`](https://github.com/openai/codex/blob/rust-v0.148.0/codex-rs/protocol/src/protocol.rs) for session metadata, events, and inter-agent communication;
-- [`codex-rs/protocol/src/items.rs`](https://github.com/openai/codex/blob/rust-v0.148.0/codex-rs/protocol/src/items.rs) for durable `TurnItem` families;
-- [`codex-rs/protocol/src/models.rs`](https://github.com/openai/codex/blob/rust-v0.148.0/codex-rs/protocol/src/models.rs) for response items and structured attachment content;
-- [`codex-rs/protocol/src/security_risk.rs`](https://github.com/openai/codex/blob/rust-v0.148.0/codex-rs/protocol/src/security_risk.rs) for durable security-risk snapshots;
-- [`codex-rs/utils/stream-parser/src/proposed_plan.rs`](https://github.com/openai/codex/blob/rust-v0.148.0/codex-rs/utils/stream-parser/src/proposed_plan.rs) for line-level plan extraction semantics;
-- [`codex-rs/rollout/src/recorder.rs`](https://github.com/openai/codex/blob/rust-v0.148.0/codex-rs/rollout/src/recorder.rs) for `RolloutRecorder`, ordinals, and resume behavior;
-- [`codex-rs/state/src/runtime.rs`](https://github.com/openai/codex/blob/rust-v0.148.0/codex-rs/state/src/runtime.rs) for the state boundary that the viewer must not open;
-- [`codex-rs/file-watcher/src/lib.rs`](https://github.com/openai/codex/blob/rust-v0.148.0/codex-rs/file-watcher/src/lib.rs) for comparison with the viewer's narrower rollout-root watcher.
+- [`codex-rs/history/src/lib.rs`](https://github.com/openai/codex/blob/rust-v0.151.0/codex-rs/history/src/lib.rs) for rollout envelopes, response-item harness metadata, compaction payloads, and rollout lines;
+- [`codex-rs/protocol/src/protocol.rs`](https://github.com/openai/codex/blob/rust-v0.151.0/codex-rs/protocol/src/protocol.rs) for session metadata, events, realtime items, and inter-agent communication;
+- [`codex-rs/protocol/src/items.rs`](https://github.com/openai/codex/blob/rust-v0.151.0/codex-rs/protocol/src/items.rs) for durable `TurnItem` families;
+- [`codex-rs/protocol/src/models.rs`](https://github.com/openai/codex/blob/rust-v0.151.0/codex-rs/protocol/src/models.rs) for response items, standalone function outputs, and structured attachment content;
+- [`codex-rs/protocol/src/security_risk.rs`](https://github.com/openai/codex/blob/rust-v0.151.0/codex-rs/protocol/src/security_risk.rs) for durable security-risk snapshots;
+- [`codex-rs/utils/stream-parser/src/proposed_plan.rs`](https://github.com/openai/codex/blob/rust-v0.151.0/codex-rs/utils/stream-parser/src/proposed_plan.rs) for line-level plan extraction semantics;
+- [`codex-rs/rollout/src/recorder.rs`](https://github.com/openai/codex/blob/rust-v0.151.0/codex-rs/rollout/src/recorder.rs) for `RolloutRecorder`, ordinals, and resume behavior;
+- [`codex-rs/state/src/runtime.rs`](https://github.com/openai/codex/blob/rust-v0.151.0/codex-rs/state/src/runtime.rs) for the state boundary that the viewer must not open;
+- [`codex-rs/file-watcher/src/lib.rs`](https://github.com/openai/codex/blob/rust-v0.151.0/codex-rs/file-watcher/src/lib.rs) for comparison with the viewer's narrower rollout-root watcher.
 
 Advancing the baseline is an evidence-driven maintenance task:
 
@@ -166,13 +169,12 @@ Run the packaged application through the root Just menu:
 just agents-viewer-run
 ```
 
-On first start it creates `~/.agents-viewer/config.toml` and a generated `schema.json`, indexes the configured rollout window, and prints its URL once. The viewer never opens a browser. A large bootstrap, explicit rebuild, parser reindex, or interrupted-source recovery reports progress; routine watcher and reconciliation scans remain silent unless they fail.
+On first start it creates `~/.agents-viewer/config.toml` and a generated `schema.json`, builds the lightweight session catalog, and prints its URL once. The viewer never opens a browser. Full transcript content is not synchronized until Start live sync is pressed on a conversation page.
 
 ```text
 agents-viewer [OPTIONS]
 
 --config PATH           configuration file; a missing file is created with defaults
---rebuild-index         atomically rebuild this source's viewer cache
 -h, --help              print help
 -V, --version           print version
 ```
@@ -183,14 +185,13 @@ Application settings live in TOML:
 #:schema ./schema.json
 source_dir = "~/.codex"
 data_dir = "~/.agents-viewer"
-initial_index_days = 7
 listen = "127.0.0.1:4747"
 password = ""
 max_event_bytes = "32MiB"
 log_level = "warn"
 ```
 
-`initial_index_days` is a rolling high-priority window based on rollout modification time. `7` synchronizes the preceding seven days first and then fills all older history at low priority; `-1` treats all history as high priority; `0` disables old-history backfill while still synchronizing new watcher events and directly opened sessions. The cutoff moves with the clock, and changing this window does not rebuild the cache. Changing `max_event_bytes` for a populated cache still requires `just agents-viewer-run --rebuild-index` so existing and future records use one bound.
+The former `initial_index_days` setting is obsolete. If it remains in an existing TOML file, the loader prints a warning and ignores only that exact key; all other unknown keys remain errors. Changing `max_event_bytes` invalidates content checkpoints automatically. Catalog data stays available and the next explicit live-sync lease rebuilds the affected snapshot with the new bound.
 
 A non-empty `password` enables HTTP Basic authentication for the page, assets, API, raw content, and event stream. The username is always `agents-viewer`. Browsers control how long credentials remain cached; direct clients can use `curl --user agents-viewer URL` and enter the password at the prompt.
 
@@ -207,11 +208,13 @@ The cache layout is source-scoped:
     index.sqlite3.incompatible-*
 ```
 
-Only one process may hold a source/cache lock. To reset a disposable cache, stop the viewer, delete only that source namespace, and restart. Rollout files are never part of reset. Corrupt or incompatible cache families are preserved before a replacement is built.
+Only one process may hold a source/cache lock. The current schema does not migrate older Viewer caches. To reset a disposable cache, stop the viewer, verify the exact source namespace, delete only that namespace, and restart. Rollout files are never part of reset. Corrupt or incompatible cache families are preserved before a replacement is built.
 
 ## UI controls
 
-The top bar contains navigation, global search, and Settings. Settings stages session filters, normalized conversation-display types, language, theme, and the optional search shortcut, then applies them together. Received replies, sent messages, `request_user_input`, plans, reasoning, and exec commands are selected by default; the first four are required, while every other normalized message, tool, diagnostic, context, lifecycle, and unknown type remains available as an individual choice. Display choices are remembered in the browser, older preferences are canonicalized to restore required plans, and Reset restores the six defaults. The desktop session sidebar can be resized or collapsed; both its width and collapsed state are remembered. Entry-level Inspect actions open the inspector as a desktop panel or a responsive sheet. The desktop inspector stays between 300 and 600 pixels and cannot be collapsed by dragging; responsive layouts continue to use a sheet. Search defaults to user and assistant messages; “Search all activity types” also includes plans, reasoning, commands, results, context, and other technical entries, and that choice is remembered separately.
+The top bar contains navigation, global search, and Settings. Settings stages session filters, normalized conversation-display types, language, theme, and the optional search shortcut, then applies them together. Received replies, sent messages, `request_user_input`, plans, reasoning, and exec commands are selected by default; the first four are required, while every other normalized message, tool, diagnostic, context, lifecycle, and unknown type remains available as an individual choice. Display choices are remembered in the browser, older preferences are canonicalized to restore required plans, and Reset restores the six defaults. The desktop session sidebar can be resized or collapsed; both its width and collapsed state are remembered. Entry-level Inspect actions open the inspector as a desktop panel or a responsive sheet. The desktop inspector stays between 300 and 600 pixels and cannot be collapsed by dragging; responsive layouts continue to use a sheet. Search defaults to catalog and hydrated user/assistant messages; “Search all activity types” also includes plans, reasoning, commands, results, context, and other hydrated technical entries, and that choice is remembered separately.
+
+Start live sync is intentionally per conversation page and is never remembered as a global preference. Stop releases it immediately. Route changes and page teardown abort the streaming request, so browsing a different session cannot leave a hidden content synchronizer running.
 
 Conversation navigation opens at the latest page and follows appended entries while the viewport remains at the true bottom. Floating controls jump to the first or latest message without downloading the full transcript.
 
@@ -278,7 +281,7 @@ Common failures:
 - `already locked`: use the running instance's printed URL or stop that process.
 - unsafe config/cache permissions: restrict them to the current account.
 - source/data overlap: choose a data directory outside the canonical Codex home.
-- event-size setting mismatch: intentionally rebuild with `just agents-viewer-run --rebuild-index`; changing only `initial_index_days` does not require a rebuild.
+- stale content after changing `max_event_bytes`: open the conversation and start live sync; its snapshot rebuilds automatically.
 - no FTS5: use the Nix package or another build with bundled SQLite and FTS5.
 - no E2E browser: enter `nix develop .#agents-viewer`; E2E is intentionally unavailable from non-Linux shells and without the Nix-provided absolute browser path.
 - stale UI during E2E: use `just agents-viewer-e2e`, not the Web package's `e2e` script directly; the Just recipe rebuilds the compile-time embedded bundle first.

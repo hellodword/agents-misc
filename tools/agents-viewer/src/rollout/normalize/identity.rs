@@ -37,6 +37,7 @@ pub(super) fn is_known_envelope(kind: &str) -> bool {
             | "inter_agent_communication_metadata"
             | "event_msg"
             | "response_item"
+            | "realtime_item"
             | "compacted"
     )
 }

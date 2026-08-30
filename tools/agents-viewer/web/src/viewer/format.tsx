@@ -40,6 +40,7 @@ export function sourceLabel(source: SourceKind, t: Translate) {
         review: "sourceReview",
         subagent: "sourceSubagent",
         appServer: "sourceAppServer",
+        guardianReview: "sourceGuardianReview",
         unknown: "sourceUnknown",
       } as const
     )[source],
@@ -55,6 +56,7 @@ export function sourceHelp(source: SourceKind, t: Translate) {
         review: "sourceReviewHelp",
         subagent: "sourceSubagentHelp",
         appServer: "sourceAppServerHelp",
+        guardianReview: "sourceGuardianReviewHelp",
         unknown: "sourceUnknownHelp",
       } as const
     )[source],
@@ -69,6 +71,7 @@ export function sourceAvatar(source: SourceKind) {
       review: "R",
       subagent: "S",
       appServer: "A",
+      guardianReview: "G",
       unknown: "?",
     } as const
   )[source];
@@ -126,16 +129,6 @@ export function indexPercent(status: Status) {
   if (status.progress.totalFiles > 0)
     return (status.progress.processedFiles / status.progress.totalFiles) * 100;
   return 100;
-}
-export function indexWindowLabel(
-  status: Status,
-  t: (key: string, options?: Record<string, unknown>) => string,
-) {
-  return status.initialIndexDays === -1
-    ? t("allHistory")
-    : status.initialIndexDays === 0
-      ? t("newOnly")
-      : t("dayWindow", { count: status.initialIndexDays });
 }
 export function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;

@@ -80,23 +80,45 @@ fn rolling_window_defers_old_history_but_zero_disables_backfill() {
 }
 
 #[test]
-fn repeated_direct_sync_is_singleflight_before_the_scheduler_receives_it() {
-    let (commands, mut receiver) = mpsc::channel(1);
+fn every_live_sync_lease_is_reliably_acquired_and_released() {
+    let (commands, mut receiver) = mpsc::unbounded_channel();
+    let mut shared = SharedState::default();
+    shared
+        .catalog
+        .insert("session".into(), Arc::new(source("session", 1, 1)));
+    shared
+        .freshness
+        .insert("session".into(), SessionFreshness::Current);
+    shared.snapshots.insert("session".into());
     let handle = CoordinatorHandle {
-        shared: Arc::new(RwLock::new(SharedState::default())),
+        shared: Arc::new(RwLock::new(shared)),
         commands,
     };
 
-    let first = handle.ensure_session("session").unwrap();
-    let repeated = handle.ensure_session("session").unwrap();
+    let (first_status, first) = handle.acquire_live_sync("session").unwrap();
+    let (second_status, second) = handle.acquire_live_sync("session").unwrap();
 
-    assert_eq!(first.state, SessionSyncState::Checking);
-    assert_eq!(repeated.state, SessionSyncState::Checking);
+    assert_eq!(first_status.state, SessionSyncState::Queued);
+    assert!(first_status.has_snapshot);
+    assert_eq!(second_status, first_status);
     assert!(matches!(
         receiver.try_recv(),
-        Ok(CoordinatorCommand::EnsureSession(session_id)) if session_id == "session"
+        Ok(CoordinatorCommand::AcquireSession(session_id)) if session_id == "session"
     ));
-    assert!(receiver.try_recv().is_err());
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(CoordinatorCommand::AcquireSession(session_id)) if session_id == "session"
+    ));
+    drop(first);
+    drop(second);
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(CoordinatorCommand::ReleaseSession(session_id)) if session_id == "session"
+    ));
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(CoordinatorCommand::ReleaseSession(session_id)) if session_id == "session"
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -127,8 +149,14 @@ async fn hot_audit_requeues_a_completed_session_without_a_watcher_event() {
         InitialIndexPolicy::all(),
     );
     let (completion_sender, mut completion_receiver) = mpsc::channel(8);
+    let (update_sender, mut update_receiver) = mpsc::channel(32);
     let shutdown = CancellationToken::new();
-    let mut runtime = RuntimeScheduler::new(&coordinator, None, shutdown, completion_sender);
+    let mut runtime = RuntimeScheduler::new(
+        &coordinator,
+        Some(update_sender),
+        shutdown,
+        completion_sender,
+    );
     let now_micros = chrono::Utc::now().timestamp_micros();
     let discovery = coordinator
         .discover(1, now_micros, CancellationToken::new())
@@ -138,6 +166,7 @@ async fn hot_audit_requeues_a_completed_session_without_a_watcher_event() {
         .apply_full_discovery(discovery, 1, now_micros, false)
         .await
         .unwrap();
+    runtime.acquire_session(session_id).await.unwrap();
     runtime.start_available().unwrap();
     let completion = tokio::time::timeout(Duration::from_secs(2), completion_receiver.recv())
         .await
@@ -150,6 +179,7 @@ async fn hot_audit_requeues_a_completed_session_without_a_watcher_event() {
         .await
         .unwrap();
     assert!(runtime.hot_sessions.contains(session_id));
+    while update_receiver.try_recv().is_ok() {}
 
     let before = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM entries")
         .fetch_one(database.pool())
@@ -161,6 +191,10 @@ async fn hot_audit_requeues_a_completed_session_without_a_watcher_event() {
     assert!(runtime.queue.is_empty());
     assert!(runtime.inflight.is_empty());
     assert!(completion_receiver.try_recv().is_err());
+    assert!(
+        update_receiver.try_recv().is_err(),
+        "an unchanged hot audit must not publish a catalog update"
+    );
 
     let mut append = std::fs::OpenOptions::new()
         .append(true)
@@ -184,9 +218,18 @@ async fn hot_audit_requeues_a_completed_session_without_a_watcher_event() {
         InflightWork {
             work: background,
             lease: runtime.gate.register(WorkPriority::Background).unwrap(),
+            cancel: CancellationToken::new(),
         },
     );
     runtime.audit_hot_sessions(3).await.unwrap();
+    let mut catalog_updated = false;
+    while let Ok(update) = update_receiver.try_recv() {
+        catalog_updated |= matches!(update, IndexUpdate::CatalogCommitted { .. });
+    }
+    assert!(
+        catalog_updated,
+        "a changed hot source must update the catalog"
+    );
     assert!(runtime.inflight.contains_key("background-inflight"));
     assert!(runtime.inflight.contains_key(session_id));
     let completion = tokio::time::timeout(Duration::from_secs(2), completion_receiver.recv())

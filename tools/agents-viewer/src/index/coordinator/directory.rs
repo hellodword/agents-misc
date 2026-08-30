@@ -80,13 +80,22 @@ pub(super) fn metadata_matches(stored: &StoredSource, source: &DiscoveredSource)
     stored.file_key == source.source.file_key
         && stored.size_bytes == source.source.size_bytes
         && stored.mtime_ns == source.source.mtime_ns
-        && matches!(stored.scan_state.as_str(), "ready" | "source_missing")
         && stored.session_id.as_deref() == Some(source.session_id.as_str())
+        && (stored.catalog_complete || snapshot_matches(stored, source))
+}
+
+pub(super) fn snapshot_matches(stored: &StoredSource, source: &DiscoveredSource) -> bool {
+    stored.snapshot_revision > 0
+        && stored.snapshot_file_key.as_deref() == Some(source.source.file_key.as_str())
+        && stored.snapshot_size_bytes == Some(source.source.size_bytes)
+        && stored.snapshot_mtime_ns == Some(source.source.mtime_ns)
 }
 
 pub(super) async fn load_stored_sources(database: &Database) -> Result<Vec<StoredSource>> {
     let rows = sqlx::query(
-        "SELECT root_kind, relative_path, file_key, size_bytes, mtime_ns, scan_state, session_id \
+        "SELECT root_kind, relative_path, file_key, size_bytes, mtime_ns, snapshot_file_key, \
+            snapshot_size_bytes, snapshot_mtime_ns, snapshot_revision, catalog_complete, \
+            scan_state, session_id \
          FROM source_files",
     )
     .fetch_all(database.pool())
@@ -99,7 +108,9 @@ pub(super) async fn load_stored_source(
     source: &DiscoveredSource,
 ) -> Result<Option<StoredSource>> {
     let row = sqlx::query(
-        "SELECT root_kind, relative_path, file_key, size_bytes, mtime_ns, scan_state, session_id \
+        "SELECT root_kind, relative_path, file_key, size_bytes, mtime_ns, snapshot_file_key, \
+            snapshot_size_bytes, snapshot_mtime_ns, snapshot_revision, catalog_complete, \
+            scan_state, session_id \
          FROM source_files WHERE root_kind = ? AND relative_path = ?",
     )
     .bind(root_kind_value(source.source.root_kind))
@@ -121,6 +132,14 @@ pub(super) fn stored_source_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<St
         file_key: row.get("file_key"),
         size_bytes: u64::try_from(row.get::<i64, _>("size_bytes"))?,
         mtime_ns: row.get("mtime_ns"),
+        snapshot_file_key: row.get("snapshot_file_key"),
+        snapshot_size_bytes: row
+            .get::<Option<i64>, _>("snapshot_size_bytes")
+            .map(u64::try_from)
+            .transpose()?,
+        snapshot_mtime_ns: row.get("snapshot_mtime_ns"),
+        snapshot_revision: u64::try_from(row.get::<i64, _>("snapshot_revision"))?,
+        catalog_complete: row.get::<i64, _>("catalog_complete") != 0,
         scan_state: row.get("scan_state"),
         session_id: row.get("session_id"),
     })

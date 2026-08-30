@@ -94,6 +94,7 @@ impl SseHub {
                     progress: None,
                     diagnostic: None,
                     sync_state: None,
+                    snapshot_revision: None,
                 },
             });
         }
@@ -121,6 +122,7 @@ impl SseHub {
                                     progress: None,
                                     diagnostic: None,
                                     sync_state: None,
+                                    snapshot_revision: None,
                                 },
                             },
                             Err(broadcast::error::RecvError::Closed) => return None,
@@ -160,9 +162,10 @@ impl SseHub {
 
 fn event_name(event: SseEventType) -> &'static str {
     match event {
-        SseEventType::IndexProgress => "indexProgress",
-        SseEventType::SessionUpdated => "sessionUpdated",
-        SseEventType::EntryUpdated => "entryUpdated",
+        SseEventType::CatalogProgress => "catalogProgress",
+        SseEventType::CatalogUpdated => "catalogUpdated",
+        SseEventType::SnapshotUpdated => "snapshotUpdated",
+        SseEventType::LiveSyncStateChanged => "liveSyncStateChanged",
         SseEventType::Diagnostic => "diagnostic",
         SseEventType::Resync => "resync",
         SseEventType::Heartbeat => "heartbeat",

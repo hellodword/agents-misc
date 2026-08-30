@@ -9,12 +9,12 @@ use sha2::{Digest, Sha256};
 use sqlx::Row as _;
 use tokio_util::sync::CancellationToken;
 
-use crate::model::DiagnosticSeverity;
+use crate::model::{DiagnosticSeverity, EntryPresentation};
 use crate::paths::SourceRoots;
 use crate::permissions::{open_source_read_only, opened_file_identity};
 use crate::rollout::{
-    EntryOrigin, NormalizedEntry, ParseContext, ParseSeed, ParseSink as _, ParserDiagnostic,
-    ParserOutput, RootKind, SessionRecord,
+    CollectingSink, EntryOrigin, NormalizedEntry, ParseContext, ParseSeed, ParseSink as _,
+    ParserDiagnostic, ParserOutput, RootKind, SessionRecord,
 };
 
 use super::control::{IoGate, ScanLease, WorkPriority};
@@ -54,6 +54,13 @@ pub struct ScanOutcome {
     pub session_id: String,
     pub changed_during_scan: bool,
     pub appended: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct CatalogOutcome {
+    pub source: DiscoveredSource,
+    pub has_snapshot: bool,
+    pub changed: bool,
 }
 
 struct ScanPlan {
@@ -229,6 +236,327 @@ pub async fn scan_source(
     .await
 }
 
+pub async fn refresh_catalog_source(
+    database: Database,
+    mut discovered: DiscoveredSource,
+    max_event_bytes: usize,
+    now_micros: i64,
+    shutdown: CancellationToken,
+    lease: ScanLease,
+) -> Result<CatalogOutcome> {
+    if shutdown.is_cancelled() {
+        bail!("catalog scan cancelled");
+    }
+    let root_kind = root_kind_value(discovered.source.root_kind);
+    let stored = sqlx::query(
+        "SELECT sf.id, sf.file_key, sf.size_bytes, sf.mtime_ns, sf.catalog_checkpoint_offset, \
+            sf.catalog_complete, sf.catalog_head_hash, sf.session_id, sf.snapshot_revision \
+         FROM source_files sf WHERE sf.root_kind = ? AND sf.relative_path = ?",
+    )
+    .bind(root_kind)
+    .bind(&discovered.source.relative_path)
+    .fetch_optional(database.pool())
+    .await?;
+    if let Some(stored) = stored.as_ref() {
+        let catalog_complete = stored.get::<i64, _>("catalog_complete") != 0;
+        let old_size = u64::try_from(stored.get::<i64, _>("size_bytes"))?;
+        let checkpoint = u64::try_from(stored.get::<i64, _>("catalog_checkpoint_offset"))?;
+        let append_candidate = catalog_complete
+            && stored.get::<String, _>("file_key") == discovered.source.file_key
+            && discovered.source.size_bytes >= old_size
+            && discovered.source.size_bytes != old_size;
+        let unchanged = stored.get::<String, _>("file_key") == discovered.source.file_key
+            && discovered.source.size_bytes == old_size
+            && stored.get::<i64, _>("mtime_ns") == discovered.source.mtime_ns;
+        let guarded_append = if append_candidate {
+            let guard_len =
+                FINGERPRINT_BYTES.min(usize::try_from(checkpoint).unwrap_or(usize::MAX));
+            match stored.get::<Option<String>, _>("catalog_head_hash") {
+                Some(expected) => {
+                    let mut opened = open_source_read_only(&discovered.root, &discovered.path)?;
+                    let bytes =
+                        read_controlled_range(&mut opened.file, 0, guard_len, &lease, &shutdown)?;
+                    sha256_hex(&bytes) == expected
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
+        if unchanged {
+            let session_id = stored
+                .get::<Option<String>, _>("session_id")
+                .unwrap_or_else(|| discovered.session_id.clone());
+            discovered.session_id.clone_from(&session_id);
+            let revision = u64::try_from(stored.get::<i64, _>("snapshot_revision"))?;
+            return Ok(CatalogOutcome {
+                source: discovered,
+                has_snapshot: revision > 0,
+                changed: false,
+            });
+        }
+        if guarded_append {
+            let session_id = stored
+                .get::<Option<String>, _>("session_id")
+                .unwrap_or_else(|| discovered.session_id.clone());
+            discovered.session_id.clone_from(&session_id);
+            let revision = u64::try_from(stored.get::<i64, _>("snapshot_revision"))?;
+            update_catalog_observation(&database, &discovered, &session_id).await?;
+            return Ok(CatalogOutcome {
+                source: discovered,
+                has_snapshot: revision > 0,
+                changed: true,
+            });
+        }
+    }
+
+    let parse_source = discovered.clone();
+    let parse_shutdown = shutdown.clone();
+    let parse_lease = lease.clone();
+    let parsed = tokio::task::spawn_blocking(move || {
+        parse_catalog_blocking(
+            parse_source,
+            max_event_bytes,
+            now_micros,
+            parse_shutdown,
+            parse_lease,
+        )
+    })
+    .await
+    .context("catalog parser task panicked")??;
+    let first = parsed
+        .entries
+        .iter()
+        .find(|entry| {
+            entry.presentation == EntryPresentation::User && !entry.primary_text.trim().is_empty()
+        })
+        .cloned();
+    discovered.session_id.clone_from(&parsed.summary.session.id);
+    let guard_len = FINGERPRINT_BYTES
+        .min(usize::try_from(parsed.summary.stable_prefix_bytes).unwrap_or(usize::MAX));
+    let guard_hash = {
+        let mut opened = open_source_read_only(&discovered.root, &discovered.path)?;
+        let bytes = read_controlled_range(&mut opened.file, 0, guard_len, &lease, &shutdown)?;
+        sha256_hex(&bytes)
+    };
+    let revision = upsert_catalog(
+        &database,
+        &discovered,
+        &parsed.summary,
+        first.as_ref(),
+        &guard_hash,
+    )
+    .await?;
+    Ok(CatalogOutcome {
+        source: discovered,
+        has_snapshot: revision > 0,
+        changed: true,
+    })
+}
+
+fn parse_catalog_blocking(
+    discovered: DiscoveredSource,
+    max_event_bytes: usize,
+    now_micros: i64,
+    shutdown: CancellationToken,
+    lease: ScanLease,
+) -> Result<crate::rollout::ParsedRollout> {
+    let opened = open_source_read_only(&discovered.root, &discovered.path)?;
+    if opened.identity.file_key != discovered.source.file_key {
+        bail!("source changed before catalog parsing began");
+    }
+    let context = ParseContext {
+        root_kind: discovered.source.root_kind,
+        relative_path: discovered.source.relative_path,
+        file_name: discovered
+            .path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| anyhow!("source filename is not valid Unicode"))?
+            .to_owned(),
+        modified_at_micros: system_time_micros(opened.identity.modified.unwrap_or(UNIX_EPOCH)),
+        now_micros,
+        max_event_bytes,
+    };
+    let controlled = ControlledReader::new(opened.file, lease, shutdown.clone());
+    let mut sink = CollectingSink::default();
+    let summary = crate::rollout::normalize::parse_catalog_rollout_cancellable(
+        BufReader::new(controlled),
+        &context,
+        &mut sink,
+        &shutdown,
+    )?;
+    Ok(sink.finish(summary))
+}
+
+async fn update_catalog_observation(
+    database: &Database,
+    discovered: &DiscoveredSource,
+    session_id: &str,
+) -> Result<()> {
+    let size = i64::try_from(discovered.source.size_bytes)?;
+    let mut transaction = database.pool().begin().await?;
+    sqlx::query(
+        "UPDATE source_files SET file_key = ?, size_bytes = ?, mtime_ns = ?, \
+            seen_generation = ?, catalog_error = NULL, \
+            scan_state = CASE WHEN scan_state = 'source_missing' \
+                THEN CASE WHEN snapshot_revision > 0 THEN 'ready' ELSE 'catalog' END \
+                ELSE scan_state END \
+         WHERE root_kind = ? AND relative_path = ?",
+    )
+    .bind(&discovered.source.file_key)
+    .bind(size)
+    .bind(discovered.source.mtime_ns)
+    .bind(i64::try_from(discovered.source.generation)?)
+    .bind(root_kind_value(discovered.source.root_kind))
+    .bind(&discovered.source.relative_path)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE sessions SET updated_at_micros = MAX(updated_at_micros, ?), archived = ? \
+         WHERE id = ?",
+    )
+    .bind(discovered.source.mtime_ns / 1_000)
+    .bind(discovered.source.root_kind == RootKind::Archived)
+    .bind(session_id)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+async fn upsert_catalog(
+    database: &Database,
+    discovered: &DiscoveredSource,
+    summary: &crate::rollout::ParseSummary,
+    first: Option<&NormalizedEntry>,
+    catalog_head_hash: &str,
+) -> Result<u64> {
+    let session = &summary.session;
+    let mut transaction = database.pool().begin().await?;
+    let row = sqlx::query(
+        "INSERT INTO source_files( \
+            root_kind, relative_path, file_key, size_bytes, mtime_ns, catalog_checkpoint_offset, \
+            catalog_checkpoint_line, catalog_head_hash, catalog_complete, session_id, scan_state, \
+            seen_generation \
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'catalog', ?) \
+         ON CONFLICT(root_kind, relative_path) DO UPDATE SET \
+            file_key = excluded.file_key, size_bytes = excluded.size_bytes, \
+            mtime_ns = excluded.mtime_ns, catalog_checkpoint_offset = excluded.catalog_checkpoint_offset, \
+            catalog_checkpoint_line = excluded.catalog_checkpoint_line, \
+            catalog_head_hash = excluded.catalog_head_hash, catalog_complete = excluded.catalog_complete, \
+            catalog_error = NULL, \
+            checkpoint_offset = CASE WHEN source_files.session_id IS NOT excluded.session_id \
+                THEN 0 ELSE source_files.checkpoint_offset END, \
+            checkpoint_line = CASE WHEN source_files.session_id IS NOT excluded.session_id \
+                THEN 0 ELSE source_files.checkpoint_line END, \
+            checkpoint_hash = CASE WHEN source_files.session_id IS NOT excluded.session_id \
+                THEN NULL ELSE source_files.checkpoint_hash END, \
+            snapshot_file_key = CASE WHEN source_files.session_id IS NOT excluded.session_id \
+                THEN NULL ELSE source_files.snapshot_file_key END, \
+            snapshot_size_bytes = CASE WHEN source_files.session_id IS NOT excluded.session_id \
+                THEN NULL ELSE source_files.snapshot_size_bytes END, \
+            snapshot_mtime_ns = CASE WHEN source_files.session_id IS NOT excluded.session_id \
+                THEN NULL ELSE source_files.snapshot_mtime_ns END, \
+            snapshot_head_hash = CASE WHEN source_files.session_id IS NOT excluded.session_id \
+                THEN NULL ELSE source_files.snapshot_head_hash END, \
+            snapshot_tail_hash = CASE WHEN source_files.session_id IS NOT excluded.session_id \
+                THEN NULL ELSE source_files.snapshot_tail_hash END, \
+            snapshot_revision = CASE WHEN source_files.session_id IS NOT excluded.session_id \
+                THEN 0 ELSE source_files.snapshot_revision END, \
+            last_synced_at_micros = CASE WHEN source_files.session_id IS NOT excluded.session_id \
+                THEN NULL ELSE source_files.last_synced_at_micros END, \
+            scan_state = CASE WHEN source_files.scan_state = 'indexing' THEN source_files.scan_state \
+                WHEN source_files.session_id IS NOT excluded.session_id THEN 'catalog' \
+                WHEN source_files.snapshot_revision > 0 THEN 'ready' ELSE 'catalog' END, \
+            session_id = excluded.session_id, \
+            seen_generation = excluded.seen_generation \
+         RETURNING id, snapshot_revision",
+    )
+    .bind(root_kind_value(discovered.source.root_kind))
+    .bind(&discovered.source.relative_path)
+    .bind(&discovered.source.file_key)
+    .bind(i64::try_from(discovered.source.size_bytes)?)
+    .bind(discovered.source.mtime_ns)
+    .bind(i64::try_from(summary.stable_prefix_bytes)?)
+    .bind(i64::try_from(summary.raw_record_count)?)
+    .bind(catalog_head_hash)
+    .bind(first.is_some())
+    .bind(&session.id)
+    .bind(i64::try_from(discovered.source.generation)?)
+    .fetch_one(&mut *transaction)
+    .await?;
+    let source_file_id = row.get::<i64, _>("id");
+    let revision = u64::try_from(row.get::<i64, _>("snapshot_revision"))?;
+    sqlx::query("DELETE FROM sessions WHERE source_file_id = ? AND id <> ?")
+        .bind(source_file_id)
+        .bind(&session.id)
+        .execute(&mut *transaction)
+        .await?;
+    let source_kind = enum_string(&session.source)?;
+    let parent_relation = session
+        .parent_relation
+        .as_ref()
+        .map(enum_string)
+        .transpose()?;
+    let updated_at = session
+        .updated_at_micros
+        .max(discovered.source.mtime_ns / 1_000);
+    sqlx::query(
+        "INSERT INTO sessions( \
+            id, source_file_id, source_kind, parent_thread_id, parent_relation, cwd, title, preview, \
+            first_user_message, first_user_message_at_micros, created_at_micros, updated_at_micros, \
+            archived, cli_version, provider, history_line, git_branch, git_commit, entry_count, \
+            index_state, completeness, diagnostic_count \
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending', 'partial', 0) \
+         ON CONFLICT(id) DO UPDATE SET \
+            source_file_id = excluded.source_file_id, source_kind = excluded.source_kind, \
+            parent_thread_id = excluded.parent_thread_id, parent_relation = excluded.parent_relation, \
+            cwd = excluded.cwd, title = excluded.title, preview = excluded.preview, \
+            first_user_message = COALESCE(excluded.first_user_message, sessions.first_user_message), \
+            first_user_message_at_micros = COALESCE(excluded.first_user_message_at_micros, sessions.first_user_message_at_micros), \
+            created_at_micros = excluded.created_at_micros, updated_at_micros = excluded.updated_at_micros, \
+            archived = excluded.archived, cli_version = excluded.cli_version, provider = excluded.provider, \
+            history_line = excluded.history_line, git_branch = excluded.git_branch, git_commit = excluded.git_commit",
+    )
+    .bind(&session.id)
+    .bind(source_file_id)
+    .bind(source_kind)
+    .bind(&session.parent_thread_id)
+    .bind(parent_relation)
+    .bind(&session.cwd)
+    .bind(&session.title)
+    .bind(&session.preview)
+    .bind(first.map(|entry| entry.primary_text.as_str()))
+    .bind(first.and_then(|entry| entry.timestamp_micros))
+    .bind(session.created_at_micros)
+    .bind(updated_at)
+    .bind(discovered.source.root_kind == RootKind::Archived)
+    .bind(&session.cli_version)
+    .bind(&session.provider)
+    .bind(session.history_line.and_then(|value| i64::try_from(value).ok()))
+    .bind(&session.git_branch)
+    .bind(&session.git_commit)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(revision)
+}
+
+fn enum_string<T: serde::Serialize>(value: &T) -> Result<String> {
+    serde_json::to_value(value)?
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("enum did not serialize to a string"))
+}
+
+const fn root_kind_value(root_kind: RootKind) -> &'static str {
+    match root_kind {
+        RootKind::Active => "active",
+        RootKind::Archived => "archived",
+    }
+}
+
 pub async fn scan_source_with_lease(
     database: Database,
     writer: WriterHandle,
@@ -306,8 +634,8 @@ pub async fn scan_source_with_lease(
             })
         }
         Ok(_) => {
-            // A cancelled process is about to close this database. Deleting a large staged
-            // scan here can exceed the shutdown deadline; startup already clears all staging.
+            // Staged rows stay hidden. The coordinator releases the source token after this
+            // worker stops, then the bounded background collector reclaims those rows.
             bail!("index scan cancelled")
         }
         Err(error) => {
@@ -468,8 +796,8 @@ async fn append_plan(
         RootKind::Archived => "archived",
     };
     let Some(source) = sqlx::query(
-        "SELECT id, file_key, size_bytes, head_hash, tail_hash, checkpoint_offset, checkpoint_line, \
-            checkpoint_hash, session_id, scan_state \
+        "SELECT id, snapshot_file_key, snapshot_size_bytes, snapshot_head_hash, \
+            snapshot_tail_hash, checkpoint_offset, checkpoint_line, session_id, snapshot_revision \
          FROM source_files WHERE root_kind = ? AND relative_path = ?",
     )
     .bind(root_kind)
@@ -479,45 +807,33 @@ async fn append_plan(
     else {
         return Ok(full_scan_plan());
     };
-    let old_size = source.get::<i64, _>("size_bytes");
+    let old_size = source.get::<Option<i64>, _>("snapshot_size_bytes");
     let checkpoint_offset = source.get::<i64, _>("checkpoint_offset");
-    let head_matches = old_size < FINGERPRINT_BYTES as i64
-        || source.get::<Option<String>, _>("head_hash") == discovered.source.head_hash;
-    let append_candidate = source.get::<String, _>("file_key") == discovered.source.file_key
-        && source.get::<String, _>("scan_state") == "ready"
-        && old_size >= 0
-        && discovered.source.size_bytes > u64::try_from(old_size).unwrap_or(u64::MAX)
+    let head_matches = old_size.is_some_and(|size| size < FINGERPRINT_BYTES as i64)
+        || source.get::<Option<String>, _>("snapshot_head_hash") == discovered.source.head_hash;
+    let append_candidate = source
+        .get::<Option<String>, _>("snapshot_file_key")
+        .as_deref()
+        == Some(discovered.source.file_key.as_str())
+        && source.get::<i64, _>("snapshot_revision") > 0
+        && old_size.is_some_and(|size| size >= 0)
+        && discovered.source.size_bytes
+            > old_size
+                .and_then(|size| u64::try_from(size).ok())
+                .unwrap_or(u64::MAX)
         && head_matches
         && checkpoint_offset >= 0;
     if !append_candidate {
         return Ok(full_scan_plan());
     }
     let checkpoint_offset = u64::try_from(checkpoint_offset)?;
-    let Some(stored_checkpoint_hash) = source.get::<Option<String>, _>("checkpoint_hash") else {
-        return Ok(full_scan_plan());
-    };
-    if stored_checkpoint_hash.is_empty() {
-        // Releases that did not preserve the full-prefix hash left an empty compatibility value.
-        // Rebuild this source once on its next growth so future appends can be verified strictly.
-        return Ok(full_scan_plan());
-    }
-    let Some(stored_tail) = source.get::<Option<String>, _>("tail_hash") else {
+    let Some(stored_tail) = source.get::<Option<String>, _>("snapshot_tail_hash") else {
         return Ok(full_scan_plan());
     };
     let Some(old_tail) = verify_old_tail(
         discovered,
-        u64::try_from(old_size)?,
+        u64::try_from(old_size.expect("append candidate has snapshot size"))?,
         &stored_tail,
-        lease,
-        shutdown,
-    )?
-    else {
-        return Ok(full_scan_plan());
-    };
-    let Some(stable_hasher) = verify_checkpoint_prefix(
-        discovered,
-        checkpoint_offset,
-        &stored_checkpoint_hash,
         lease,
         shutdown,
     )?
@@ -536,20 +852,6 @@ async fn append_plan(
     .fetch_one(database.pool())
     .await?
     .unwrap_or_default();
-    let mut occurrences = HashMap::new();
-    for row in sqlx::query(
-        "SELECT id_basis, COUNT(*) AS occurrence_count FROM entries \
-         WHERE session_id = ? GROUP BY id_basis",
-    )
-    .bind(&session_id)
-    .fetch_all(database.pool())
-    .await?
-    {
-        occurrences.insert(
-            row.get::<String, _>("id_basis"),
-            u64::try_from(row.get::<i64, _>("occurrence_count"))?,
-        );
-    }
     let recent = load_recent_entries(database, &session_id).await?;
     let recognized_record_count = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM raw_records WHERE source_file_id = ? AND parse_status = 'valid'",
@@ -558,7 +860,7 @@ async fn append_plan(
     .fetch_one(database.pool())
     .await?;
     let checkpoint_line = u64::try_from(source.get::<i64, _>("checkpoint_line"))?;
-    let old_size = u64::try_from(old_size)?;
+    let old_size = u64::try_from(old_size.expect("append candidate has snapshot size"))?;
     let old_tail_start = old_size.saturating_sub(old_tail.len() as u64);
     let prefix_end = checkpoint_offset
         .saturating_sub(old_tail_start)
@@ -573,13 +875,12 @@ async fn append_plan(
             ),
             session,
             next_sequence,
-            occurrences,
             recent,
             raw_record_count: checkpoint_line,
             recognized_record_count: u64::try_from(recognized_record_count)?,
             checkpoint_offset,
             checkpoint_line,
-            stable_hasher,
+            stable_hasher: Sha256::new(),
         }),
         tail_seed: old_tail[prefix_start..prefix_end].to_vec(),
     })
@@ -778,53 +1079,6 @@ fn verify_old_tail(
     Ok(Some(tail))
 }
 
-fn verify_checkpoint_prefix(
-    discovered: &DiscoveredSource,
-    checkpoint_offset: u64,
-    expected_hash: &str,
-    lease: &ScanLease,
-    shutdown: &CancellationToken,
-) -> Result<Option<Sha256>> {
-    let mut opened = open_source_read_only(&discovered.root, &discovered.path)?;
-    if opened.identity.file_key != discovered.source.file_key
-        || opened.identity.size < checkpoint_offset
-    {
-        return Ok(None);
-    }
-    let mut reader = ControlledReader::new(
-        (&mut opened.file).take(checkpoint_offset),
-        lease.clone(),
-        shutdown.clone(),
-    );
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; FINGERPRINT_BYTES];
-    let mut read_total = 0_u64;
-    loop {
-        let read = reader.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-        read_total = read_total.saturating_add(read as u64);
-    }
-    drop(reader);
-    let after = opened_file_identity(
-        &opened.file,
-        &opened
-            .file
-            .metadata()
-            .context("re-stat checkpoint prefix")?,
-        &opened.canonical_path,
-    );
-    if read_total != checkpoint_offset
-        || after != opened.identity
-        || sha256_hasher_hex(&hasher) != expected_hash
-    {
-        return Ok(None);
-    }
-    Ok(Some(hasher))
-}
-
 fn read_controlled_range(
     file: &mut File,
     offset: u64,
@@ -928,16 +1182,6 @@ fn system_time_nanos(time: SystemTime) -> i64 {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
-    let mut output = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
-    }
-    output
-}
-
-fn sha256_hasher_hex(hasher: &Sha256) -> String {
-    let digest = hasher.clone().finalize();
     let mut output = String::with_capacity(digest.len() * 2);
     for byte in digest {
         use std::fmt::Write as _;

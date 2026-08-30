@@ -7,7 +7,7 @@ use sqlx::{QueryBuilder, Row as _, Sqlite};
 use std::collections::HashSet;
 use unicode_segmentation::UnicodeSegmentation as _;
 
-use crate::model::{EntryKind, MatchRange, SearchField, SourceKind};
+use crate::model::{EntryKind, MatchRange, SearchField, SearchOrigin, SourceKind};
 
 use super::Database;
 
@@ -66,6 +66,7 @@ pub struct SearchRow {
     pub field: SearchField,
     pub rank: f64,
     pub timestamp_micros: Option<i64>,
+    pub origin: SearchOrigin,
 }
 
 pub async fn search(database: &Database, request: &SearchRequest) -> Result<SearchResult> {
@@ -79,11 +80,103 @@ pub async fn search(database: &Database, request: &SearchRequest) -> Result<Sear
     if request.limit == 0 || request.limit > 200 {
         bail!("search limit must be between 1 and 200");
     }
-    if scalar_count >= 3 {
+    let mut result = if scalar_count >= 3 {
         search_fts(database, request).await
     } else {
         search_short(database, request, scalar_count).await
+    }?;
+    let catalog = search_catalog(database, request, scalar_count >= 3).await?;
+    let mut seen = result
+        .hits
+        .iter()
+        .map(|hit| hit.entry_id.clone())
+        .collect::<HashSet<_>>();
+    result.hits.extend(
+        catalog
+            .into_iter()
+            .filter(|hit| seen.insert(hit.entry_id.clone())),
+    );
+    result.hits.sort_by(|left, right| {
+        right
+            .rank
+            .total_cmp(&left.rank)
+            .then_with(|| right.timestamp_micros.cmp(&left.timestamp_micros))
+            .then_with(|| left.entry_id.cmp(&right.entry_id))
+    });
+    result.hits.truncate(request.limit);
+    Ok(result)
+}
+
+async fn search_catalog(
+    database: &Database,
+    request: &SearchRequest,
+    use_fts: bool,
+) -> Result<Vec<SearchRow>> {
+    if !request.filters.kinds.is_empty() && !request.filters.kinds.contains(&EntryKind::Message) {
+        return Ok(Vec::new());
     }
+    let mut builder = if use_fts {
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            "SELECT 'catalog:' || s.id AS id, s.id AS session_id, 'message' AS kind, \
+                'User' AS title, s.first_user_message AS primary_text, '' AS secondary_text, \
+                s.first_user_message_at_micros AS timestamp_micros, s.title AS session_title, \
+                -bm25(sessions_fts) AS rank, 'catalog' AS search_origin \
+             FROM sessions_fts JOIN sessions s ON s.rowid = sessions_fts.rowid \
+             JOIN source_files sf ON sf.id = s.source_file_id \
+             WHERE sf.snapshot_revision = 0 AND sessions_fts MATCH ",
+        );
+        builder.push_bind(fts_literal(&request.query));
+        builder
+    } else {
+        let mut builder = QueryBuilder::<Sqlite>::new(
+            "SELECT 'catalog:' || s.id AS id, s.id AS session_id, 'message' AS kind, \
+                'User' AS title, s.first_user_message AS primary_text, '' AS secondary_text, \
+                s.first_user_message_at_micros AS timestamp_micros, s.title AS session_title, \
+                0.0 AS rank, 'catalog' AS search_origin \
+             FROM sessions s JOIN source_files sf ON sf.id = s.source_file_id \
+             WHERE sf.snapshot_revision = 0 AND s.first_user_message IS NOT NULL \
+                AND (instr(lower(s.first_user_message), lower(",
+        );
+        builder
+            .push_bind(&request.query)
+            .push(")) > 0 OR instr(lower(s.title), lower(")
+            .push_bind(&request.query)
+            .push(")) > 0)");
+        builder
+    };
+    push_catalog_filters(&mut builder, &request.filters)?;
+    builder.push(" ORDER BY rank DESC, timestamp_micros DESC, id LIMIT ");
+    builder.push_bind(i64::try_from(request.limit)?);
+    Ok(builder
+        .build()
+        .fetch_all(database.pool())
+        .await?
+        .iter()
+        .filter_map(|row| row_to_hit(row, &request.query).ok())
+        .collect())
+}
+
+fn push_catalog_filters(builder: &mut QueryBuilder<Sqlite>, filters: &SearchFilters) -> Result<()> {
+    if let Some(session_id) = &filters.session_id {
+        builder.push(" AND s.id = ").push_bind(session_id);
+    }
+    push_enum_filter(builder, "s.source_kind", &filters.sources)?;
+    if let Some(from) = filters.from_micros {
+        builder
+            .push(" AND s.first_user_message_at_micros >= ")
+            .push_bind(from);
+    }
+    if let Some(to) = filters.to_micros {
+        builder
+            .push(" AND s.first_user_message_at_micros <= ")
+            .push_bind(to);
+    }
+    match filters.archived {
+        ArchiveFilter::Exclude => builder.push(" AND s.archived = 0"),
+        ArchiveFilter::Only => builder.push(" AND s.archived = 1"),
+        ArchiveFilter::Include => builder,
+    };
+    Ok(())
 }
 
 async fn search_fts(database: &Database, request: &SearchRequest) -> Result<SearchResult> {
@@ -296,6 +389,10 @@ fn row_to_hit(row: &sqlx::sqlite::SqliteRow, query: &str) -> Result<SearchRow> {
         field,
         rank: row.get("rank"),
         timestamp_micros: row.get("timestamp_micros"),
+        origin: match row.try_get::<String, _>("search_origin").as_deref() {
+            Ok("catalog") => SearchOrigin::Catalog,
+            _ => SearchOrigin::Snapshot,
+        },
     })
 }
 

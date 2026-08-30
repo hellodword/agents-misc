@@ -77,6 +77,7 @@ pub(super) fn normalize_envelope(
             add_response_item_envelope_metadata(&mut result, &envelope.harness_metadata);
             result
         }
+        "realtime_item" => normalize_realtime_item(&envelope.payload, timestamp_micros, raw_id),
         "compacted" => NormalizeResult::Entry(simple_entry(
             EntryKind::Marker,
             "Conversation compacted",
@@ -105,4 +106,124 @@ pub(super) fn normalize_envelope(
             "unknown_envelope",
         ),
     }
+}
+
+fn normalize_realtime_item(
+    payload: &Value,
+    timestamp_micros: Option<i64>,
+    raw_id: &str,
+) -> NormalizeResult {
+    let kind = payload
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let mut entry = match kind {
+        "transcript_segment" => {
+            let role = match payload.get("role").and_then(Value::as_str) {
+                Some("user") => MessageRole::User,
+                Some("assistant") => MessageRole::Assistant,
+                _ => {
+                    return NormalizeResult::Unknown(
+                        simple_entry(
+                            EntryKind::Unknown,
+                            "Realtime transcript",
+                            String::new(),
+                            timestamp_micros,
+                            raw_id,
+                            EntryOrigin::Derived,
+                            false,
+                            true,
+                        ),
+                        "unknown_realtime_role",
+                    );
+                }
+            };
+            message_entry(
+                role,
+                None,
+                string_field(payload, &["text"]),
+                timestamp_micros,
+                raw_id,
+                EntryOrigin::ResponseItem,
+            )
+        }
+        "realtime_session_started" => simple_entry(
+            EntryKind::Marker,
+            "Realtime session started",
+            String::new(),
+            timestamp_micros,
+            raw_id,
+            EntryOrigin::Derived,
+            false,
+            true,
+        ),
+        "bem_item_promoted" => {
+            let mut entry = simple_entry(
+                EntryKind::Marker,
+                "Realtime item promoted",
+                String::new(),
+                timestamp_micros,
+                raw_id,
+                EntryOrigin::Derived,
+                false,
+                true,
+            );
+            for (source, target) in [("turn_id", "turnId"), ("item_id", "promotedItemId")] {
+                if let Some(value) = string_option(payload, source) {
+                    entry.metadata.insert(target.into(), Value::String(value));
+                }
+            }
+            if let Some(presentation) = payload.get("presentation") {
+                entry
+                    .metadata
+                    .insert("realtimePresentation".into(), presentation.clone());
+            }
+            entry
+        }
+        "realtime_session_closed" => {
+            let mut entry = simple_entry(
+                EntryKind::Marker,
+                "Realtime session closed",
+                String::new(),
+                timestamp_micros,
+                raw_id,
+                EntryOrigin::Derived,
+                false,
+                true,
+            );
+            if let Some(outcome) = string_option(payload, "outcome") {
+                entry
+                    .metadata
+                    .insert("realtimeOutcome".into(), Value::String(outcome));
+            }
+            entry
+        }
+        _ => {
+            return NormalizeResult::Unknown(
+                simple_entry(
+                    EntryKind::Unknown,
+                    if kind.is_empty() {
+                        "Unknown realtime item"
+                    } else {
+                        kind
+                    },
+                    String::new(),
+                    timestamp_micros,
+                    raw_id,
+                    EntryOrigin::Derived,
+                    false,
+                    true,
+                ),
+                "unknown_realtime_item",
+            );
+        }
+    };
+    add_source_item_id(&mut entry, payload);
+    if let Some(realtime_session_id) = string_option(payload, "realtime_session_id") {
+        entry.metadata.insert(
+            "realtimeSessionId".into(),
+            Value::String(realtime_session_id),
+        );
+    }
+    NormalizeResult::Entry(entry)
 }

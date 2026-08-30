@@ -8,7 +8,6 @@ import type {
   SessionDetail,
   SessionGroup,
   SessionSummary,
-  SessionSyncStatus,
   SseEventPayload,
   SseEventType,
   Status,
@@ -49,22 +48,38 @@ async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
   return body as T;
 }
 
-async function put<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const response = await fetch(path, {
-    method: "PUT",
-    signal,
-    headers: { accept: "application/json" },
-  });
-  const body = (await response.json()) as T | ApiErrorEnvelope;
+async function liveSync(
+  id: string,
+  signal: AbortSignal,
+  onAccepted: () => void,
+): Promise<void> {
+  const response = await fetch(
+    `/api/v1/sessions/${encodeURIComponent(id)}/live-sync`,
+    {
+      method: "POST",
+      signal,
+      headers: { accept: "text/event-stream" },
+    },
+  );
   if (!response.ok) {
-    const failure = body as ApiErrorEnvelope;
+    const failure = (await response.json()) as ApiErrorEnvelope;
     throw new ApiClientError(
       response.status,
       failure.error.code,
       failure.error.message,
     );
   }
-  return body as T;
+  onAccepted();
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("live sync response has no body");
+  try {
+    while (!(await reader.read()).done) {
+      // Reading the stream owns the server-side lease. Snapshot notifications
+      // arrive on the application's shared SSE connection.
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 const query = (
@@ -103,11 +118,7 @@ export const api = {
     get<Page<SessionGroup>>(`/api/v1/session-groups${query(options)}`, signal),
   session: (id: string, signal?: AbortSignal) =>
     get<SessionDetail>(`/api/v1/sessions/${encodeURIComponent(id)}`, signal),
-  syncSession: (id: string, signal?: AbortSignal) =>
-    put<SessionSyncStatus>(
-      `/api/v1/sessions/${encodeURIComponent(id)}/sync`,
-      signal,
-    ),
+  liveSync,
   entries: (
     id: string,
     options: {
@@ -175,9 +186,10 @@ export function subscribeEvents(
 ) {
   const source = new EventSource("/api/v1/events");
   for (const name of [
-    "indexProgress",
-    "sessionUpdated",
-    "entryUpdated",
+    "catalogProgress",
+    "catalogUpdated",
+    "snapshotUpdated",
+    "liveSyncStateChanged",
     "diagnostic",
     "heartbeat",
   ] as const) {

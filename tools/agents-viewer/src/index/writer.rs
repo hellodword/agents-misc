@@ -738,9 +738,21 @@ async fn finish_scan(
     .await?;
 
     if mode == ScanMode::Full {
-        sqlx::query("DELETE FROM sessions WHERE source_file_id = ? OR id = ?")
+        sqlx::query("DELETE FROM sessions WHERE source_file_id = ? AND id <> ?")
             .bind(source_file_id)
             .bind(&session.id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("DELETE FROM entries WHERE session_id = ?")
+            .bind(&session.id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("DELETE FROM raw_records WHERE source_file_id = ?")
+            .bind(source_file_id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("DELETE FROM diagnostics WHERE source_file_id = ?")
+            .bind(source_file_id)
             .execute(&mut *transaction)
             .await?;
     }
@@ -758,7 +770,8 @@ async fn finish_scan(
             git_branch, git_commit, entry_count, index_state, completeness, diagnostic_count \
          FROM staged_sessions WHERE scan_token = ? \
          ON CONFLICT(id) DO UPDATE SET \
-            source_kind = excluded.source_kind, parent_thread_id = excluded.parent_thread_id, \
+            source_file_id = excluded.source_file_id, source_kind = excluded.source_kind, \
+            parent_thread_id = excluded.parent_thread_id, \
             parent_relation = excluded.parent_relation, proposed_plan_hash = excluded.proposed_plan_hash, \
             proposed_plan_at_micros = excluded.proposed_plan_at_micros, \
             handoff_plan_hash = excluded.handoff_plan_hash, handoff_at_micros = excluded.handoff_at_micros, \
@@ -842,7 +855,10 @@ async fn finish_scan(
     sqlx::query(
         "UPDATE source_files SET session_id = ?, checkpoint_offset = ?, checkpoint_line = ?, \
             checkpoint_hash = ?, tail_hash = COALESCE(?, tail_hash), \
-            scan_state = 'ready', scan_token = NULL, last_error = NULL \
+            snapshot_file_key = file_key, snapshot_size_bytes = size_bytes, \
+            snapshot_mtime_ns = mtime_ns, snapshot_head_hash = head_hash, \
+            snapshot_tail_hash = COALESCE(?, tail_hash), snapshot_revision = snapshot_revision + 1, \
+            last_synced_at_micros = ?, scan_state = 'ready', scan_token = NULL, last_error = NULL \
          WHERE id = ?",
     )
     .bind(&session.id)
@@ -854,6 +870,8 @@ async fn finish_scan(
     )?)
     .bind(&summary.stable_prefix_hash)
     .bind(final_tail_hash)
+    .bind(final_tail_hash)
+    .bind(chrono::Utc::now().timestamp_micros())
     .bind(source_file_id)
     .execute(&mut *transaction)
     .await?;

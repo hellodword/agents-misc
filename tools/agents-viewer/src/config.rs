@@ -27,9 +27,6 @@ source_dir = "~/.codex"
 # Viewer-owned configuration, index, and lock root.
 data_dir = "~/.agents-viewer"
 
-# Rolling high-priority window: 7 = seven days, -1 = all history, 0 = new/direct only.
-initial_index_days = 7
-
 # HTTP must bind to an IPv4 or IPv6 loopback address. Port 0 selects a free port.
 listen = "127.0.0.1:4747"
 
@@ -76,8 +73,6 @@ pub struct FileConfig {
     pub source_dir: String,
     /// Viewer-owned configuration, index, and lock root.
     pub data_dir: String,
-    /// Rolling high-priority window: 7 = seven days, -1 = all history, 0 = new/direct only.
-    pub initial_index_days: i64,
     /// IPv4 or IPv6 loopback listen address. Port 0 selects a free port.
     pub listen: String,
     /// HTTP Basic Auth password. Empty disables authentication.
@@ -93,7 +88,6 @@ impl Default for FileConfig {
         Self {
             source_dir: "~/.codex".into(),
             data_dir: "~/.agents-viewer".into(),
-            initial_index_days: 7,
             listen: "127.0.0.1:4747".into(),
             password: String::new(),
             max_event_bytes: "32MiB".into(),
@@ -109,8 +103,6 @@ pub struct Config {
     pub cache: CachePaths,
     pub listen: SocketAddr,
     pub password: String,
-    pub rebuild_index: bool,
-    pub initial_index_days: i64,
     pub max_event_bytes: usize,
     pub log_level: LogLevel,
 }
@@ -136,17 +128,27 @@ impl Config {
             path: config_path.clone(),
             source,
         })?;
-        let file = toml::from_str::<FileConfig>(&contents).map_err(|error| {
+        let mut raw = toml::from_str::<toml::Value>(&contents).map_err(|error| {
             ViewerError::InvalidArgument(format!(
                 "invalid configuration {}: {error}",
                 config_path.display()
             ))
         })?;
-        if file.initial_index_days < -1 {
-            return Err(ViewerError::InvalidArgument(
-                "initial_index_days must be -1 or a non-negative integer".into(),
-            ));
+        if raw
+            .as_table_mut()
+            .and_then(|table| table.remove("initial_index_days"))
+            .is_some()
+        {
+            eprintln!(
+                "agents-viewer: initial_index_days is obsolete and is ignored; full content is synchronized only on explicit request"
+            );
         }
+        let file = raw.try_into::<FileConfig>().map_err(|error| {
+            ViewerError::InvalidArgument(format!(
+                "invalid configuration {}: {error}",
+                config_path.display()
+            ))
+        })?;
         let listen = parse_listen(&file.listen).map_err(ViewerError::InvalidArgument)?;
         let max_event_bytes =
             parse_event_bytes(&file.max_event_bytes).map_err(ViewerError::InvalidArgument)?;
@@ -166,8 +168,6 @@ impl Config {
             cache,
             listen,
             password: file.password,
-            rebuild_index: cli.rebuild_index,
-            initial_index_days: file.initial_index_days,
             max_event_bytes,
             log_level: file.log_level,
         })
@@ -376,7 +376,6 @@ mod tests {
         for field in [
             "source_dir",
             "data_dir",
-            "initial_index_days",
             "listen",
             "password",
             "max_event_bytes",

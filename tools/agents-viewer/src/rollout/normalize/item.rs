@@ -21,6 +21,7 @@ pub(super) fn normalize_item_completed(
             }
             add_execution_attribution_metadata(entry, item);
             add_tool_capability_metadata(entry, item);
+            add_agent_message_delivery_metadata(entry, item);
             add_event_timing_metadata(entry, payload);
             if let Some(turn_id) = string_option(payload, "turn_id") {
                 entry
@@ -43,6 +44,17 @@ pub(super) fn normalize_item_completed(
             add_attachment_metadata(&mut entry, item);
             entry
         }
+        "FunctionCallOutput" | "function_call_output" => tool_entry(
+            ToolKind::Function,
+            &qualified_tool_name(item, "Function output"),
+            String::new(),
+            output_text(item.get("output")),
+            None,
+            Some(ToolStatus::Succeeded),
+            timestamp_micros,
+            raw_id,
+            EntryOrigin::ItemCompleted,
+        ),
         "HookPrompt" | "hook_prompt" => simple_entry(
             EntryKind::Context,
             "Hook prompt",
@@ -456,10 +468,12 @@ pub(super) fn normalize_response_item(
         }
         "function_call" | "custom_tool_call" | "tool_search_call" => {
             let name = string_field(payload, &["name", "execution"]);
+            let title =
+                qualified_tool_name(payload, if name.is_empty() { "Tool call" } else { &name });
             let primary = string_field(payload, &["arguments", "input"]);
             let mut entry = tool_entry(
                 tool_kind_from_name(&name),
-                if name.is_empty() { "Tool call" } else { &name },
+                &title,
                 primary.clone(),
                 String::new(),
                 call_id(payload),
@@ -485,9 +499,10 @@ pub(super) fn normalize_response_item(
             .filter(|text| !text.is_empty())
             .collect::<Vec<_>>()
             .join("\n");
+            let title = qualified_tool_name(payload, "Tool output");
             let mut entry = tool_entry(
                 ToolKind::Function,
-                "Tool output",
+                &title,
                 String::new(),
                 secondary.clone(),
                 call_id(payload),
@@ -583,5 +598,16 @@ pub(super) fn normalize_response_item(
             ),
             "unknown_response_item",
         ),
+    }
+}
+
+fn qualified_tool_name(payload: &Value, fallback: &str) -> String {
+    let name = string_option(payload, "name").unwrap_or_default();
+    let namespace = string_option(payload, "namespace").unwrap_or_default();
+    match (namespace.is_empty(), name.is_empty()) {
+        (false, false) => format!("{namespace}::{name}"),
+        (true, false) => name,
+        (false, true) => namespace,
+        (true, true) => fallback.into(),
     }
 }

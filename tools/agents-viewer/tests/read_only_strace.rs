@@ -42,7 +42,7 @@ fn viewer_never_mutates_the_source_tree() {
         .unwrap();
     writeln!(
         config_file,
-        "source_dir = {:?}\ndata_dir = {:?}\ninitial_index_days = -1\nlisten = \"127.0.0.1:0\"\nmax_event_bytes = \"32MiB\"\nlog_level = \"warn\"",
+        "source_dir = {:?}\ndata_dir = {:?}\nlisten = \"127.0.0.1:0\"\nmax_event_bytes = \"32MiB\"\nlog_level = \"warn\"",
         source.to_string_lossy(),
         data.to_string_lossy(),
     )

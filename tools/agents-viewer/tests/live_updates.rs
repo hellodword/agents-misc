@@ -63,6 +63,7 @@ async fn appended_complete_line_reaches_sqlite_within_two_seconds() {
         1024 * 1024,
         agents_viewer::index::InitialIndexPolicy::all(),
     );
+    let coordinator_handle = coordinator.handle();
     let (sender, receiver) = mpsc::channel(8);
     let watcher = start_watcher(&roots, sender).unwrap();
     let (update_sender, mut updates) = mpsc::channel(16);
@@ -84,6 +85,30 @@ async fn appended_complete_line_reaches_sqlite_within_two_seconds() {
     })
     .await
     .expect("initial runtime synchronization completes");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM entries")
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+        0,
+        "automatic cataloging must not hydrate conversation content"
+    );
+    let (_status, live_sync) = coordinator_handle
+        .acquire_live_sync("11111111-1111-4111-8111-111111111111")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if matches!(
+                updates.recv().await,
+                Some(IndexUpdate::SessionCommitted { session_id, .. })
+                    if session_id == "11111111-1111-4111-8111-111111111111"
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("page-scoped live synchronization builds the initial snapshot");
     let before = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM entries")
         .fetch_one(database.pool())
         .await
@@ -120,6 +145,7 @@ async fn appended_complete_line_reaches_sqlite_within_two_seconds() {
     assert_eq!(after, before + 1);
     assert!(started.elapsed() < Duration::from_secs(2));
 
+    drop(live_sync);
     shutdown.cancel();
     watcher.shutdown().await;
     coordinator_task.await.unwrap().unwrap();

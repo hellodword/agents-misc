@@ -12,13 +12,25 @@ CREATE TABLE source_files (
     mtime_ns INTEGER NOT NULL,
     head_hash TEXT,
     tail_hash TEXT,
+    snapshot_file_key TEXT,
+    snapshot_size_bytes INTEGER,
+    snapshot_mtime_ns INTEGER,
+    snapshot_head_hash TEXT,
+    snapshot_tail_hash TEXT,
     checkpoint_offset INTEGER NOT NULL DEFAULT 0,
     checkpoint_line INTEGER NOT NULL DEFAULT 0,
     checkpoint_hash TEXT,
+    catalog_checkpoint_offset INTEGER NOT NULL DEFAULT 0,
+    catalog_checkpoint_line INTEGER NOT NULL DEFAULT 0,
+    catalog_head_hash TEXT,
+    catalog_complete INTEGER NOT NULL DEFAULT 0 CHECK (catalog_complete IN (0, 1)),
+    catalog_error TEXT,
     session_id TEXT,
     scan_state TEXT NOT NULL DEFAULT 'pending',
     scan_token TEXT,
     last_error TEXT,
+    snapshot_revision INTEGER NOT NULL DEFAULT 0,
+    last_synced_at_micros INTEGER,
     seen_generation INTEGER NOT NULL DEFAULT 0,
     UNIQUE (root_kind, relative_path)
 );
@@ -36,6 +48,8 @@ CREATE TABLE sessions (
     cwd TEXT,
     title TEXT NOT NULL,
     preview TEXT NOT NULL,
+    first_user_message TEXT,
+    first_user_message_at_micros INTEGER,
     created_at_micros INTEGER NOT NULL,
     updated_at_micros INTEGER NOT NULL,
     archived INTEGER NOT NULL CHECK (archived IN (0, 1)),
@@ -56,6 +70,38 @@ CREATE INDEX sessions_archived_idx ON sessions(archived);
 CREATE INDEX sessions_parent_thread_id_idx ON sessions(parent_thread_id);
 CREATE INDEX sessions_proposed_plan_idx ON sessions(proposed_plan_hash, cwd, proposed_plan_at_micros)
     WHERE proposed_plan_hash IS NOT NULL;
+
+CREATE VIRTUAL TABLE sessions_fts USING fts5(
+    title,
+    first_user_message,
+    content = 'sessions',
+    content_rowid = 'rowid',
+    tokenize = 'trigram'
+);
+
+CREATE TRIGGER sessions_fts_insert AFTER INSERT ON sessions
+WHEN new.first_user_message IS NOT NULL
+BEGIN
+    INSERT INTO sessions_fts(rowid, title, first_user_message)
+    VALUES (new.rowid, new.title, new.first_user_message);
+END;
+
+CREATE TRIGGER sessions_fts_delete AFTER DELETE ON sessions
+WHEN old.first_user_message IS NOT NULL
+BEGIN
+    INSERT INTO sessions_fts(sessions_fts, rowid, title, first_user_message)
+    VALUES ('delete', old.rowid, old.title, old.first_user_message);
+END;
+
+CREATE TRIGGER sessions_fts_update AFTER UPDATE OF title, first_user_message ON sessions
+BEGIN
+    INSERT INTO sessions_fts(sessions_fts, rowid, title, first_user_message)
+    SELECT 'delete', old.rowid, old.title, old.first_user_message
+    WHERE old.first_user_message IS NOT NULL;
+    INSERT INTO sessions_fts(rowid, title, first_user_message)
+    SELECT new.rowid, new.title, new.first_user_message
+    WHERE new.first_user_message IS NOT NULL;
+END;
 
 CREATE TABLE entries (
     rowid INTEGER PRIMARY KEY,

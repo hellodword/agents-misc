@@ -24,6 +24,18 @@ import { SettingsControl } from "@/viewer/settings";
 const session: SessionSummary = {
   id: "module-session",
   source: "cli",
+  sourceLocation: {
+    rootKind: "active",
+    relativePath: "2026/08/22/module-session.jsonl",
+  },
+  contentStatus: {
+    freshness: "current",
+    liveState: "inactive",
+    hasSnapshot: true,
+    snapshotRevision: 1,
+    syncedThroughBytes: 100,
+    observedBytes: 100,
+  },
   title: "Module session",
   preview: "Direct module test",
   createdAt: "2026-08-22T00:00:00Z",

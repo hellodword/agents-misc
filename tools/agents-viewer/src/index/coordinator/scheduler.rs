@@ -12,7 +12,6 @@ impl RuntimeScheduler {
             writer: coordinator.writer.clone(),
             roots: coordinator.roots.clone(),
             max_event_bytes: coordinator.max_event_bytes,
-            policy: coordinator.policy,
             gate: coordinator.io_gate.clone(),
             shared: Arc::clone(&coordinator.shared),
             updates,
@@ -22,6 +21,7 @@ impl RuntimeScheduler {
             inflight: HashMap::new(),
             deferred: HashMap::new(),
             hot_sessions: HashSet::new(),
+            lease_counts: HashMap::new(),
             completion_sender,
             last_high_activity: Instant::now(),
             background_hold: None,
@@ -32,25 +32,116 @@ impl RuntimeScheduler {
 
     pub(super) async fn apply_full_discovery(
         &mut self,
-        discovery: Discovery,
+        mut discovery: Discovery,
         generation: u64,
         now_micros: i64,
         foreground: bool,
     ) -> Result<()> {
+        let mut progress = IndexProgress {
+            total_files: discovery.sources.len() as u64,
+            processed_files: 0,
+            total_bytes: discovery.total_bytes,
+            processed_bytes: 0,
+            failed_files: 0,
+            excluded_files: 0,
+            excluded_bytes: 0,
+        };
+        if foreground {
+            send_update(
+                self.updates.as_ref(),
+                IndexUpdate::Progress {
+                    generation,
+                    progress: progress.clone(),
+                },
+            )
+            .await;
+        }
+        let database = self.database.clone();
+        let max_event_bytes = self.max_event_bytes;
+        let gate = self.gate.clone();
+        let shutdown = self.shutdown.clone();
+        let discovered_sources = std::mem::take(&mut discovery.sources);
+        let all_discovered_keys = discovered_sources
+            .iter()
+            .map(source_key)
+            .collect::<HashSet<_>>();
+        let mut scans = stream::iter(discovered_sources.into_iter().map(|source| {
+            let database = database.clone();
+            let shutdown = shutdown.clone();
+            let lease = gate.register(WorkPriority::Recent);
+            let bytes = source.source.size_bytes;
+            let fallback = source.clone();
+            async move {
+                let result = match lease {
+                    Ok(lease) => {
+                        refresh_catalog_source(
+                            database,
+                            source,
+                            max_event_bytes,
+                            now_micros,
+                            shutdown,
+                            lease,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error.into()),
+                };
+                (bytes, fallback, result)
+            }
+        }))
+        .buffer_unordered(MAX_PARSER_TASKS);
+        let mut catalog_outcomes = Vec::new();
+        let mut failed_sources = Vec::new();
+        let mut failures = Vec::new();
+        while let Some((bytes, source, result)) = scans.next().await {
+            progress.processed_files = progress.processed_files.saturating_add(1);
+            progress.processed_bytes = progress.processed_bytes.saturating_add(bytes);
+            match result {
+                Ok(outcome) => {
+                    catalog_outcomes.push(outcome);
+                }
+                Err(error) if !self.shutdown.is_cancelled() => {
+                    progress.failed_files = progress.failed_files.saturating_add(1);
+                    failures.push(format!("{error:#}"));
+                    failed_sources.push(source);
+                }
+                Err(_) => anyhow::bail!("catalog discovery cancelled"),
+            }
+            if foreground {
+                send_update(
+                    self.updates.as_ref(),
+                    IndexUpdate::Progress {
+                        generation,
+                        progress: progress.clone(),
+                    },
+                )
+                .await;
+            }
+        }
+        discovery.sources = catalog_outcomes
+            .iter()
+            .map(|outcome| outcome.source.clone())
+            .collect();
         let stored = load_stored_sources(&self.database).await?;
         let stored_by_key = stored
             .iter()
             .cloned()
             .map(|source| (stored_key(source.root_kind, &source.relative_path), source))
             .collect::<HashMap<_, _>>();
+        for mut source in failed_sources {
+            let Some(session_id) = stored_by_key
+                .get(&source_key(&source))
+                .and_then(|stored| stored.session_id.clone())
+            else {
+                continue;
+            };
+            source.session_id = session_id;
+            discovery.sources.push(source);
+        }
         let snapshots = stored
             .iter()
+            .filter(|source| source.snapshot_revision > 0)
             .filter_map(|source| source.session_id.clone())
-            .collect::<HashSet<_>>();
-        let discovered_keys = discovery
-            .sources
-            .iter()
-            .map(source_key)
             .collect::<HashSet<_>>();
         let discovered_ids = discovery
             .sources
@@ -58,32 +149,31 @@ impl RuntimeScheduler {
             .map(|source| source.session_id.clone())
             .collect::<HashSet<_>>();
         let mut missing = Vec::new();
+        let mut catalog_updates = catalog_outcomes
+            .iter()
+            .filter(|outcome| outcome.changed)
+            .map(|outcome| outcome.source.session_id.clone())
+            .collect::<HashSet<_>>();
         if discovery.issues.is_empty() {
             for source in &stored {
-                if !discovered_keys.contains(&stored_key(source.root_kind, &source.relative_path))
+                if !all_discovered_keys
+                    .contains(&stored_key(source.root_kind, &source.relative_path))
                     && source.scan_state != "source_missing"
                 {
                     missing.push((source.root_kind, source.relative_path.clone()));
+                    if let Some(session_id) = &source.session_id {
+                        catalog_updates.insert(session_id.clone());
+                    }
                 }
             }
         }
         let mut present = Vec::new();
         let mut freshness = HashMap::new();
         let mut catalog = HashMap::new();
-        let mut pending_sessions = HashSet::new();
-        let mut progress = IndexProgress {
-            total_files: 0,
-            processed_files: 0,
-            total_bytes: 0,
-            processed_bytes: 0,
-            failed_files: 0,
-            excluded_files: 0,
-            excluded_bytes: 0,
-        };
         for source in &discovery.sources {
             let source = Arc::new(source.clone());
             let stored_source = stored_by_key.get(&source_key(&source));
-            let current = stored_source.is_some_and(|stored| metadata_matches(stored, &source));
+            let current = stored_source.is_some_and(|stored| snapshot_matches(stored, &source));
             let has_snapshot = snapshots.contains(&source.session_id);
             let session_freshness = if current {
                 SessionFreshness::Current
@@ -95,58 +185,17 @@ impl RuntimeScheduler {
             freshness.insert(source.session_id.clone(), session_freshness);
             catalog.insert(source.session_id.clone(), Arc::clone(&source));
             if let Some(stored) = stored_source
-                && current
                 && stored.scan_state == "source_missing"
             {
                 present.push((stored.root_kind, stored.relative_path.clone()));
-            }
-            match automatic_priority(self.policy, &source, now_micros) {
-                Some(WorkPriority::Recent) => {
-                    self.hot_sessions.insert(source.session_id.clone());
-                    progress.total_files = progress.total_files.saturating_add(1);
-                    progress.total_bytes = progress
-                        .total_bytes
-                        .saturating_add(source.source.size_bytes);
-                    if current {
-                        progress.processed_files = progress.processed_files.saturating_add(1);
-                        progress.processed_bytes = progress
-                            .processed_bytes
-                            .saturating_add(source.source.size_bytes);
-                    } else {
-                        pending_sessions.insert(source.session_id.clone());
-                        self.enqueue(WorkItem::new(
-                            Arc::clone(&source),
-                            WorkPriority::Recent,
-                            Some(generation),
-                        ))?;
-                    }
-                }
-                Some(WorkPriority::Background) => {
-                    progress.excluded_files = progress.excluded_files.saturating_add(1);
-                    progress.excluded_bytes = progress
-                        .excluded_bytes
-                        .saturating_add(source.source.size_bytes);
-                    if !current {
-                        self.enqueue(WorkItem::new(
-                            Arc::clone(&source),
-                            WorkPriority::Background,
-                            None,
-                        ))?;
-                    }
-                }
-                Some(WorkPriority::Interactive) => unreachable!(),
-                None => {
-                    progress.excluded_files = progress.excluded_files.saturating_add(1);
-                    progress.excluded_bytes = progress
-                        .excluded_bytes
-                        .saturating_add(source.source.size_bytes);
-                }
+                catalog_updates.insert(source.session_id.clone());
             }
         }
         for source in &stored {
             if let Some(session_id) = &source.session_id
                 && !discovered_ids.contains(session_id)
-                && !discovered_keys.contains(&stored_key(source.root_kind, &source.relative_path))
+                && !all_discovered_keys
+                    .contains(&stored_key(source.root_kind, &source.relative_path))
             {
                 freshness.insert(session_id.clone(), SessionFreshness::SourceMissing);
             }
@@ -165,31 +214,37 @@ impl RuntimeScheduler {
                 self.queued.contains_key(session_id) || self.inflight.contains_key(session_id)
             });
         }
-        let report = ReconcileReport {
-            generation,
-            discovered_files: discovery.sources.len() as u64,
-            discovered_bytes: discovery.total_bytes,
-            removed_files: missing.len() as u64,
-            discovery_issues: discovery.issues.len() as u64,
-            excluded_files: progress.excluded_files,
-            excluded_bytes: progress.excluded_bytes,
-            reconcile_again: !discovery.issues.is_empty(),
-            ..ReconcileReport::default()
-        };
-        if foreground {
+        let mut catalog_updates = catalog_updates.into_iter().collect::<Vec<_>>();
+        catalog_updates.sort();
+        for session_id in catalog_updates {
             send_update(
                 self.updates.as_ref(),
-                IndexUpdate::Progress {
+                IndexUpdate::CatalogCommitted {
                     generation,
-                    progress: progress.clone(),
+                    session_id,
                 },
             )
             .await;
         }
+        let report = ReconcileReport {
+            generation,
+            discovered_files: progress.total_files,
+            discovered_bytes: discovery.total_bytes,
+            indexed_files: catalog_outcomes
+                .iter()
+                .filter(|outcome| outcome.changed)
+                .count() as u64,
+            failed_files: progress.failed_files,
+            removed_files: missing.len() as u64,
+            discovery_issues: discovery.issues.len() as u64,
+            reconcile_again: !discovery.issues.is_empty() || !failures.is_empty(),
+            failures,
+            ..ReconcileReport::default()
+        };
         self.cycle = Some(ActiveCycle {
             report,
             progress,
-            pending_sessions,
+            pending_sessions: HashSet::new(),
             foreground,
         });
         Ok(())
@@ -306,12 +361,18 @@ impl RuntimeScheduler {
             InflightWork {
                 work: work.clone(),
                 lease: lease.clone(),
+                cancel: self.shutdown.child_token(),
             },
         );
         self.set_sync_state(&session_id, SessionSyncState::Indexing)?;
         let database = self.database.clone();
         let writer = self.writer.clone();
-        let shutdown = self.shutdown.clone();
+        let shutdown = self
+            .inflight
+            .get(&session_id)
+            .expect("inserted inflight work")
+            .cancel
+            .clone();
         let completion_sender = self.completion_sender.clone();
         let max_event_bytes = self.max_event_bytes;
         tokio::spawn(async move {

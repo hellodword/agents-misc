@@ -16,7 +16,8 @@ struct TrackedEntry {
 pub struct Deduper {
     session_id: String,
     next_sequence: i64,
-    occurrences: HashMap<String, u64>,
+    occurrence_line: Option<u64>,
+    line_occurrences: HashMap<String, u64>,
     recent: VecDeque<TrackedEntry>,
     active_tools: HashMap<String, TrackedEntry>,
 }
@@ -26,7 +27,8 @@ impl Deduper {
         Self {
             session_id,
             next_sequence: 0,
-            occurrences: HashMap::new(),
+            occurrence_line: None,
+            line_occurrences: HashMap::new(),
             recent: VecDeque::with_capacity(16),
             active_tools: HashMap::new(),
         }
@@ -36,7 +38,8 @@ impl Deduper {
         let mut deduper = Self {
             session_id: seed.session.id.clone(),
             next_sequence: seed.next_sequence,
-            occurrences: seed.occurrences.clone(),
+            occurrence_line: None,
+            line_occurrences: HashMap::new(),
             recent: VecDeque::with_capacity(16),
             active_tools: HashMap::new(),
         };
@@ -125,7 +128,7 @@ impl Deduper {
         self.next_sequence = self.next_sequence.saturating_add(1);
         candidate.sequence = self.next_sequence;
         candidate.session_id.clone_from(&self.session_id);
-        candidate.id = self.entry_id(&mut candidate);
+        candidate.id = self.entry_id(&mut candidate, line_no);
         let tracked = TrackedEntry {
             line_no,
             entry: candidate.clone(),
@@ -158,34 +161,50 @@ impl Deduper {
             if !line_close && !time_close {
                 return false;
             }
-            existing.primary_text == candidate.primary_text
-                || (candidate.kind == crate::model::EntryKind::Plan
-                    && existing.primary_text.trim() == candidate.primary_text.trim())
-                || is_streaming_prefix(&existing.primary_text, &candidate.primary_text)
+            if existing.primary_text.is_empty() && candidate.primary_text.is_empty() {
+                !existing.secondary_text.is_empty()
+                    && existing.secondary_text == candidate.secondary_text
+            } else {
+                existing.primary_text == candidate.primary_text
+                    || (candidate.kind == crate::model::EntryKind::Plan
+                        && existing.primary_text.trim() == candidate.primary_text.trim())
+                    || is_streaming_prefix(&existing.primary_text, &candidate.primary_text)
+            }
         })
     }
 
-    fn entry_id(&mut self, entry: &mut NormalizedEntry) -> String {
+    fn entry_id(&mut self, entry: &mut NormalizedEntry, line_no: u64) -> String {
         let body = if entry.call_id.is_some() || entry.secondary_text.is_empty() {
             entry.primary_text.clone()
         } else {
             format!("{}\0{}", entry.primary_text, entry.secondary_text)
         };
-        self.entry_id_with_body(entry, &body)
+        self.entry_id_with_body(entry, &body, line_no)
     }
 
-    fn entry_id_with_body(&mut self, entry: &mut NormalizedEntry, body: &str) -> String {
+    fn entry_id_with_body(
+        &mut self,
+        entry: &mut NormalizedEntry,
+        body: &str,
+        line_no: u64,
+    ) -> String {
+        if self.occurrence_line != Some(line_no) {
+            self.occurrence_line = Some(line_no);
+            self.line_occurrences.clear();
+        }
         let body_hash = sha256(body.as_bytes());
+        let raw_anchor = entry.raw_refs.first().map_or("", String::as_str);
         let base = format!(
-            "{}\0{}\0{}\0{}\0{}",
+            "{}\0{}\0{}\0{}\0{}\0{}",
             self.session_id,
+            raw_anchor,
             canonical_kind(entry),
             entry.timestamp_micros.unwrap_or_default(),
             entry.call_id.as_deref().unwrap_or_default(),
             body_hash
         );
         entry.id_basis.clone_from(&base);
-        let occurrence = self.occurrences.entry(base.clone()).or_insert(0);
+        let occurrence = self.line_occurrences.entry(base.clone()).or_insert(0);
         let input = format!("{base}\0{occurrence}");
         *occurrence = occurrence.saturating_add(1);
         let digest = Sha256::digest(input.as_bytes());

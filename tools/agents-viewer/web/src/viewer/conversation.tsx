@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Radio, Square } from "lucide-react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import type {
   EntryListItem,
+  LiveSyncState,
   SessionSummary,
-  SessionSyncStatus,
+  SessionSyncState,
 } from "@/generated/api";
 import { api } from "@/lib/api";
 import {
@@ -34,17 +37,41 @@ export function conversationPageTarget(
   const id = around ?? (!viewport.atBottom ? viewport.anchorId : undefined);
   return id ? { kind: "around", id } : { kind: "bottom" };
 }
+
+export function liveStateFromSyncState(
+  state: SessionSyncState | undefined,
+): LiveSyncState {
+  switch (state) {
+    case "checking":
+    case "queued":
+      return "starting";
+    case "indexing":
+      return "catchingUp";
+    case "current":
+      return "following";
+    case "failed":
+    case "sourceMissing":
+    case "notFound":
+      return "failed";
+    default:
+      return "inactive";
+  }
+}
+
 export function Conversation({
   onInspect,
   signals,
-  syncSignals,
+  liveStateSignals,
   resyncSequence,
   conversationDisplayTypes,
   onForceConversationDisplayType,
 }: {
   onInspect: (s: string, e: string) => void;
   signals: Record<string, number>;
-  syncSignals: Record<string, number>;
+  liveStateSignals: Record<
+    string,
+    { sequence: number; state?: SessionSyncState }
+  >;
   resyncSequence: number;
   conversationDisplayTypes: ConversationDisplayType[];
   onForceConversationDisplayType: (
@@ -56,8 +83,10 @@ export function Conversation({
   const [params] = useSearchParams();
   const around = params.get("entry") ?? undefined;
   const [session, setSession] = useState<SessionSummary>();
-  const [syncStatus, setSyncStatus] = useState<SessionSyncStatus>();
-  const [syncReady, setSyncReady] = useState(false);
+  const [liveConnection, setLiveConnection] = useState<
+    "inactive" | "starting" | "active" | "failed"
+  >("inactive");
+  const [liveError, setLiveError] = useState("");
   const [entries, setEntries] = useState<EntryListItem[]>([]);
   const [previousCursor, setPreviousCursor] = useState<string>();
   const [nextCursor, setNextCursor] = useState<string>();
@@ -77,8 +106,9 @@ export function Conversation({
   );
   const pendingTailSequenceRef = useRef<number | undefined>(undefined);
   const handledSignal = useRef(0);
-  const handledSyncSignal = useRef(0);
+  const handledLiveStateSignal = useRef(0);
   const refreshTimer = useRef<number | undefined>(undefined);
+  const liveController = useRef<AbortController | undefined>(undefined);
   const selectedConversationDisplayTypes = canonicalConversationDisplayTypes(
     conversationDisplayTypes,
   );
@@ -91,29 +121,18 @@ export function Conversation({
   const serializedConversationDisplayTypes =
     effectiveConversationDisplayTypes.join(",");
 
-  const applySyncStatus = useCallback((status: SessionSyncStatus) => {
-    setSyncStatus(status);
-    setSyncReady(
-      status.hasSnapshot ||
-        status.state === "current" ||
-        status.state === "sourceMissing",
-    );
-  }, []);
-
   useEffect(() => {
-    const controller = new AbortController();
+    liveController.current?.abort();
+    liveController.current = undefined;
     setSession(undefined);
-    setSyncStatus(undefined);
-    setSyncReady(false);
+    setLiveConnection("inactive");
+    setLiveError("");
     setError("");
-    api
-      .syncSession(sessionId, controller.signal)
-      .then(applySyncStatus)
-      .catch((failure) => {
-        if (!(failure instanceof DOMException)) setError(message(failure));
-      });
-    return () => controller.abort();
-  }, [applySyncStatus, sessionId]);
+    return () => {
+      liveController.current?.abort();
+      liveController.current = undefined;
+    };
+  }, [sessionId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -128,10 +147,6 @@ export function Conversation({
     pendingTailSequenceRef.current = undefined;
     setPendingTailSequence(undefined);
     viewport.current = { atBottom: !around };
-    if (!syncReady) {
-      setVisibilityReady(false);
-      return () => controller.abort();
-    }
     if (!around) {
       setVisibilityReady(true);
       return () => controller.abort();
@@ -160,7 +175,6 @@ export function Conversation({
     onForceConversationDisplayType,
     serializedSelectedConversationDisplayTypes,
     sessionId,
-    syncReady,
   ]);
 
   const replacePage = useCallback(
@@ -223,39 +237,36 @@ export function Conversation({
 
   useEffect(() => {
     handledSignal.current = Math.max(signals[sessionId] ?? 0, resyncSequence);
-    handledSyncSignal.current = syncSignals[sessionId] ?? 0;
+    handledLiveStateSignal.current =
+      liveStateSignals[sessionId]?.sequence ?? 0;
   }, [sessionId]);
-  const syncEventSequence = syncSignals[sessionId] ?? 0;
+  const liveStateEvent = liveStateSignals[sessionId];
+  const liveStateEventSequence = liveStateEvent?.sequence ?? 0;
   useEffect(() => {
     if (
-      syncEventSequence === 0 ||
-      syncEventSequence <= handledSyncSignal.current
+      liveStateEventSequence === 0 ||
+      liveStateEventSequence <= handledLiveStateSignal.current
     )
       return;
-    handledSyncSignal.current = syncEventSequence;
-    const controller = new AbortController();
-    void api
-      .syncSession(sessionId, controller.signal)
-      .then(applySyncStatus)
-      .catch((failure) => {
-        if (!(failure instanceof DOMException)) setError(message(failure));
-      });
-    return () => controller.abort();
-  }, [applySyncStatus, sessionId, syncEventSequence]);
+    handledLiveStateSignal.current = liveStateEventSequence;
+    setSession((current) => {
+      if (!current) return current;
+      const sourceMissing = liveStateEvent?.state === "sourceMissing";
+      return {
+        ...current,
+        ...(sourceMissing ? { freshness: "sourceMissing" as const } : {}),
+        contentStatus: {
+          ...current.contentStatus,
+          ...(sourceMissing ? { freshness: "sourceMissing" as const } : {}),
+          liveState: liveStateFromSyncState(liveStateEvent?.state),
+        },
+      };
+    });
+  }, [liveStateEvent, liveStateEventSequence]);
   const eventSequence = Math.max(signals[sessionId] ?? 0, resyncSequence);
   useEffect(() => {
     if (eventSequence === 0 || eventSequence <= handledSignal.current) return;
     handledSignal.current = eventSequence;
-    if (!syncReady) {
-      const controller = new AbortController();
-      void api
-        .syncSession(sessionId, controller.signal)
-        .then(applySyncStatus)
-        .catch((failure) => {
-          if (!(failure instanceof DOMException)) setError(message(failure));
-        });
-      return () => controller.abort();
-    }
     if (refreshTimer.current !== undefined)
       window.clearTimeout(refreshTimer.current);
     refreshTimer.current = window.setTimeout(() => {
@@ -276,14 +287,48 @@ export function Conversation({
         refreshTimer.current = undefined;
       }
     };
-  }, [
-    applySyncStatus,
-    eventSequence,
-    replacePage,
-    resyncSequence,
-    sessionId,
-    syncReady,
-  ]);
+  }, [eventSequence, replacePage, resyncSequence]);
+
+  const stopLiveSync = useCallback(() => {
+    const controller = liveController.current;
+    liveController.current = undefined;
+    controller?.abort();
+    setLiveConnection("inactive");
+    setLiveError("");
+  }, []);
+
+  const startLiveSync = useCallback(() => {
+    if (liveController.current) return;
+    const controller = new AbortController();
+    liveController.current = controller;
+    setLiveConnection("starting");
+    setLiveError("");
+    void api
+      .liveSync(sessionId, controller.signal, () => {
+        if (liveController.current === controller)
+          setLiveConnection("active");
+      })
+      .then(() => {
+        if (
+          liveController.current === controller &&
+          !controller.signal.aborted
+        ) {
+          liveController.current = undefined;
+          setLiveConnection("failed");
+          setLiveError(t("liveSyncEnded"));
+        }
+      })
+      .catch((failure) => {
+        if (
+          liveController.current === controller &&
+          !controller.signal.aborted
+        ) {
+          liveController.current = undefined;
+          setLiveConnection("failed");
+          setLiveError(message(failure));
+        }
+      });
+  }, [sessionId, t]);
 
   const loadOlder = useCallback(() => {
     const cursor = previousCursor;
@@ -374,36 +419,77 @@ export function Conversation({
     viewport.current = next;
     if (next.atBottom) setNewCount(0);
   }, []);
+  const ownsLiveSync =
+    liveConnection === "starting" || liveConnection === "active";
   return (
     <>
       {session && (
         <div className="conversation-head">
-          <h1>{localizedTitle(session)}</h1>
+          <div className="conversation-title-row">
+            <h1>{localizedTitle(session)}</h1>
+            <Button
+              type="button"
+              size="sm"
+              variant={ownsLiveSync ? "default" : "outline"}
+              aria-pressed={ownsLiveSync}
+              disabled={
+                session.contentStatus.freshness === "sourceMissing" &&
+                !ownsLiveSync
+              }
+              onClick={ownsLiveSync ? stopLiveSync : startLiveSync}
+            >
+              {ownsLiveSync ? <Square size={14} /> : <Radio size={15} />}
+              {t(ownsLiveSync ? "stopLiveSync" : "startLiveSync")}
+            </Button>
+          </div>
           {session.cwd && (
             <div className="conversation-cwd" title={session.cwd}>
               {session.cwd}
             </div>
           )}
+          <div
+            className="conversation-source-path"
+            title={session.sourceLocation.relativePath}
+          >
+            {t(`root_${session.sourceLocation.rootKind}`)} ·{" "}
+            {session.sourceLocation.relativePath}
+          </div>
           <div className="muted">
             {sourceLabel(session.source, t)} ·{" "}
             {t("entryCount", { count: session.entryCount })} ·{" "}
             {session.completeness}
-            {session.freshness !== "current" && (
+            {session.contentStatus.freshness !== "current" && (
               <Badge variant="outline" className="session-freshness">
-                {t(`freshness_${session.freshness}`)}
+                {t(`content_${session.contentStatus.freshness}`)}
+              </Badge>
+            )}
+            {session.contentStatus.liveState !== "inactive" && (
+              <Badge variant="outline" className="session-freshness">
+                {t(`live_${session.contentStatus.liveState}`)}
               </Badge>
             )}
           </div>
+          {liveError && (
+            <div className="conversation-live-error" role="alert">
+              {liveError}
+            </div>
+          )}
         </div>
       )}
       {error ? (
         <Empty text={error} />
-      ) : !syncReady ? (
-        <Empty
-          text={t(syncStatus ? `sync_${syncStatus.state}` : "syncingSession")}
-        />
       ) : entries.length === 0 ? (
-        <Empty text={t("noEntries")} />
+        session && !session.contentStatus.hasSnapshot ? (
+          <div className="catalog-only-empty" role="status">
+            <p>{t("snapshotNotLoaded")}</p>
+            {session.firstUserMessage && (
+              <blockquote>{session.firstUserMessage.text}</blockquote>
+            )}
+            <p className="muted">{t("startLiveSyncHelp")}</p>
+          </div>
+        ) : (
+          <Empty text={t("noEntries")} />
+        )
       ) : (
         <VirtualTranscript
           entries={entries}

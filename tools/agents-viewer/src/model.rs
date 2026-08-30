@@ -21,6 +21,7 @@ contract_enum!(SourceKind {
     Review,
     Subagent,
     AppServer,
+    GuardianReview,
     Unknown,
 });
 contract_enum!(SessionParentRelation {
@@ -110,6 +111,7 @@ contract_enum!(SearchField {
     Primary,
     Secondary,
 });
+contract_enum!(SearchOrigin { Catalog, Snapshot });
 contract_enum!(RawEncoding { Utf8, Binary });
 contract_enum!(RawParseStatus {
     Valid,
@@ -121,9 +123,10 @@ contract_enum!(RawParseStatus {
     Unknown,
 });
 contract_enum!(SseEventType {
-    IndexProgress,
-    SessionUpdated,
-    EntryUpdated,
+    CatalogProgress,
+    CatalogUpdated,
+    SnapshotUpdated,
+    LiveSyncStateChanged,
     Diagnostic,
     Resync,
     Heartbeat,
@@ -139,9 +142,61 @@ contract_enum!(SessionSyncState {
     Queued,
     Indexing,
     Current,
+    Failed,
     SourceMissing,
     NotFound,
 });
+contract_enum!(SourceRootKind { Active, Archived });
+contract_enum!(ContentFreshness {
+    NeverSynced,
+    Current,
+    Stale,
+    SourceMissing
+});
+contract_enum!(LiveSyncState {
+    Inactive,
+    Starting,
+    CatchingUp,
+    Following,
+    Failed
+});
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct SourceLocation {
+    pub root_kind: SourceRootKind,
+    pub relative_path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct FirstUserMessage {
+    pub text: String,
+    pub preview: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub timestamp: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct ContentStatus {
+    pub freshness: ContentFreshness,
+    pub live_state: LiveSyncState,
+    pub has_snapshot: bool,
+    #[ts(type = "number")]
+    pub snapshot_revision: u64,
+    #[ts(type = "number")]
+    pub synced_through_bytes: u64,
+    #[ts(type = "number")]
+    pub observed_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_synced_at: Option<String>,
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -168,13 +223,6 @@ pub struct IndexProgress {
 #[ts(rename_all = "camelCase")]
 pub struct Status {
     pub app_version: String,
-    pub source_home: String,
-    pub cache_dir: String,
-    #[ts(type = "number")]
-    pub initial_index_days: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub initial_index_cutoff: Option<String>,
     #[ts(type = "number")]
     pub generation: u64,
     pub phase: ServicePhase,
@@ -205,6 +253,11 @@ pub struct GitMetadata {
 pub struct SessionSummary {
     pub id: String,
     pub source: SourceKind,
+    pub source_location: SourceLocation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub first_user_message: Option<FirstUserMessage>,
+    pub content_status: ContentStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub parent_thread_id: Option<String>,
@@ -409,6 +462,7 @@ pub struct MatchRange {
 #[ts(rename_all = "camelCase")]
 pub struct SearchHit {
     pub session: SessionSummary,
+    pub origin: SearchOrigin,
     pub entry_id: String,
     pub kind: EntryKind,
     pub snippet: String,
@@ -475,6 +529,9 @@ pub struct SseEventPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub sync_state: Option<SessionSyncState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub snapshot_revision: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, TS)]
@@ -504,11 +561,18 @@ pub fn typescript_contract() -> String {
         DiagnosticSeverity::decl(),
         ContentField::decl(),
         SearchField::decl(),
+        SearchOrigin::decl(),
         RawEncoding::decl(),
         RawParseStatus::decl(),
         SseEventType::decl(),
         SessionFreshness::decl(),
         SessionSyncState::decl(),
+        SourceRootKind::decl(),
+        ContentFreshness::decl(),
+        LiveSyncState::decl(),
+        SourceLocation::decl(),
+        FirstUserMessage::decl(),
+        ContentStatus::decl(),
         IndexProgress::decl(),
         Status::decl(),
         GitMetadata::decl(),

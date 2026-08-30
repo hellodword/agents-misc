@@ -18,6 +18,9 @@ const V145_SUBAGENT: &[u8] = include_bytes!("fixtures/rollouts/v0_145_subagent.j
 const V146: &[u8] = include_bytes!("fixtures/rollouts/v0_146.jsonl");
 const V147: &[u8] = include_bytes!("fixtures/rollouts/v0_147.jsonl");
 const V148: &[u8] = include_bytes!("fixtures/rollouts/v0_148.jsonl");
+const V149: &[u8] = include_bytes!("fixtures/rollouts/v0_149.jsonl");
+const V150: &[u8] = include_bytes!("fixtures/rollouts/v0_150.jsonl");
+const V151: &[u8] = include_bytes!("fixtures/rollouts/v0_151.jsonl");
 const PLANS: &[u8] = include_bytes!("fixtures/rollouts/plans.jsonl");
 const PLAN_MODE_FINAL_ANSWER: &[u8] =
     include_bytes!("fixtures/rollouts/plan_mode_final_answer.jsonl");
@@ -521,6 +524,131 @@ fn parses_v148_history_metadata_security_scores_and_image_failures() {
             .secondary_text
             .contains("image-result-must-not-render")
     );
+}
+
+#[test]
+fn parses_v149_async_agent_delivery_and_compaction_checkpoint() {
+    let parsed = parse(
+        V149,
+        "rollout-2026-08-20T10-00-00-14914914-9149-4149-8149-149149149149.jsonl",
+        1024 * 1024,
+    );
+
+    assert_eq!(
+        parsed.summary.session.cli_version.as_deref(),
+        Some("0.149.0")
+    );
+    assert_eq!(parsed.summary.recognized_record_count, 4);
+    assert!(parsed.diagnostics.is_empty());
+    let agent = parsed
+        .entries
+        .iter()
+        .find(|entry| entry.metadata.get("sourceItemId") == Some(&serde_json::json!("agent-149")))
+        .expect("0.149 agent message");
+    assert_eq!(agent.metadata["agentMessageDelivery"], "async");
+    assert!(
+        parsed
+            .entries
+            .iter()
+            .any(|entry| entry.title == "Conversation compacted")
+    );
+}
+
+#[test]
+fn parses_v150_realtime_items_and_interrupted_collaboration() {
+    let parsed = parse(
+        V150,
+        "rollout-2026-08-21T10-00-00-15015015-0150-4150-8150-150150150150.jsonl",
+        1024 * 1024,
+    );
+
+    assert_eq!(
+        parsed.summary.session.cli_version.as_deref(),
+        Some("0.150.0")
+    );
+    assert_eq!(parsed.summary.recognized_record_count, 7);
+    assert!(parsed.diagnostics.is_empty());
+    assert_eq!(
+        parsed.summary.session.title,
+        "Inspect the synthetic realtime transcript"
+    );
+
+    let user = parsed
+        .entries
+        .iter()
+        .find(|entry| {
+            entry.metadata.get("sourceItemId") == Some(&serde_json::json!("realtime-user-150"))
+        })
+        .expect("realtime user transcript");
+    assert_eq!(user.presentation, EntryPresentation::User);
+    assert_eq!(user.metadata["realtimeSessionId"], "realtime-session-150");
+
+    let collaboration = parsed
+        .entries
+        .iter()
+        .find(|entry| entry.metadata.get("sourceItemId") == Some(&serde_json::json!("collab-150")))
+        .expect("0.150 collaboration item");
+    assert_eq!(collaboration.tool_status, Some(ToolStatus::Interrupted));
+}
+
+#[test]
+fn parses_v151_standalone_function_outputs_and_guardian_review_source() {
+    let parsed = parse(
+        V151,
+        "rollout-2026-08-22T10-00-00-15115115-1151-4151-8151-151151151151.jsonl",
+        1024 * 1024,
+    );
+
+    assert_eq!(
+        parsed.summary.session.cli_version.as_deref(),
+        Some("0.151.0")
+    );
+    assert_eq!(parsed.summary.session.source, SourceKind::GuardianReview);
+    assert_eq!(
+        parsed.summary.session.parent_relation,
+        Some(SessionParentRelation::Fork)
+    );
+    assert_eq!(parsed.summary.recognized_record_count, 6);
+    assert!(parsed.diagnostics.is_empty());
+
+    let item_output = parsed
+        .entries
+        .iter()
+        .find(|entry| {
+            entry.metadata.get("sourceItemId") == Some(&serde_json::json!("function-output-151"))
+        })
+        .expect("0.151 durable function output");
+    assert_eq!(item_output.title, "functions::exec");
+    assert_eq!(
+        item_output.secondary_text,
+        "Synthetic structured function output"
+    );
+    assert_eq!(item_output.call_id, None);
+
+    let response_output = parsed
+        .entries
+        .iter()
+        .find(|entry| {
+            entry.metadata.get("sourceItemId") == Some(&serde_json::json!("response-output-151"))
+        })
+        .expect("0.151 response function output");
+    assert_eq!(response_output.title, "functions::wait");
+    assert_eq!(response_output.call_id, None);
+    assert_eq!(
+        response_output.metadata["contentItemKinds"],
+        serde_json::json!(["function_call_output"])
+    );
+    assert_eq!(response_output.metadata["cellId"], "cell-151");
+    assert_eq!(response_output.metadata["toolCallsComplete"], true);
+
+    let rendered = parsed
+        .entries
+        .iter()
+        .flat_map(|entry| [&entry.primary_text, &entry.secondary_text])
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!rendered.contains("must-not-render"));
 }
 
 #[test]

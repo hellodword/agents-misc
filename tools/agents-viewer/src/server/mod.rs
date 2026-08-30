@@ -21,6 +21,8 @@ use crate::index::{Database, InitialIndexPolicy};
 use crate::model::{ApiError, ApiErrorEnvelope, IndexProgress, ServicePhase, Status};
 use crate::paths::{CachePaths, SourceRoots};
 
+const LIVE_SYNC_CONNECTION_LIMIT: usize = 32;
+
 #[derive(Clone)]
 pub struct AppState {
     pub database: Database,
@@ -30,6 +32,7 @@ pub struct AppState {
     pub sse: sse::SseHub,
     pub coordinator: Option<CoordinatorHandle>,
     requests: Arc<Semaphore>,
+    live_sync_connections: Arc<Semaphore>,
     raw_reads: Arc<Semaphore>,
     session_groups: api::sessions::SessionGroupCatalog,
 }
@@ -57,22 +60,14 @@ impl AppState {
         database: Database,
         roots: SourceRoots,
         cache: CachePaths,
-        policy: InitialIndexPolicy,
+        _policy: InitialIndexPolicy,
         shutdown: CancellationToken,
         bootstrap_required: bool,
     ) -> Self {
-        let initial_index_cutoff = policy.cutoff_micros.and_then(|cutoff| {
-            chrono::DateTime::<chrono::Utc>::from_timestamp_micros(cutoff)
-                .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
-        });
         Self {
             database,
             status: Arc::new(RwLock::new(Status {
                 app_version: env!("CARGO_PKG_VERSION").into(),
-                source_home: roots.home.to_string_lossy().into_owned(),
-                cache_dir: cache.namespace.to_string_lossy().into_owned(),
-                initial_index_days: policy.days,
-                initial_index_cutoff,
                 generation: 0,
                 phase: if bootstrap_required {
                     ServicePhase::Starting
@@ -97,6 +92,7 @@ impl AppState {
             sse: sse::SseHub::new_with_shutdown(shutdown),
             coordinator: None,
             requests: Arc::new(Semaphore::new(64)),
+            live_sync_connections: Arc::new(Semaphore::new(LIVE_SYNC_CONNECTION_LIMIT)),
             raw_reads: Arc::new(Semaphore::new(2)),
             session_groups: api::sessions::SessionGroupCatalog::new(),
         }
@@ -140,7 +136,7 @@ async fn limit_requests(
     let _permit = Arc::clone(&semaphore)
         .try_acquire_owned()
         .map_err(|_| ApiFailure::service_unavailable("HTTP concurrency limit reached"))?;
-    if request.uri().path().ends_with("/events") {
+    if request.uri().path().ends_with("/events") || request.uri().path().ends_with("/live-sync") {
         Ok(next.run(request).await)
     } else {
         tokio::time::timeout(std::time::Duration::from_secs(30), next.run(request))

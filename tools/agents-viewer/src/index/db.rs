@@ -205,13 +205,24 @@ impl Database {
         }
         if parser_changed {
             sqlx::query(
-                "UPDATE source_files SET scan_state = 'pending', checkpoint_offset = 0, \
-                    checkpoint_line = 0, checkpoint_hash = NULL",
+                "UPDATE source_files SET \
+                    scan_state = CASE WHEN snapshot_revision > 0 THEN 'ready' ELSE 'pending' END, \
+                    checkpoint_offset = 0, checkpoint_line = 0, checkpoint_hash = NULL, \
+                    snapshot_file_key = NULL, catalog_checkpoint_offset = 0, \
+                    catalog_complete = 0, catalog_head_hash = NULL, catalog_error = NULL, \
+                    scan_token = NULL",
             )
             .execute(&mut *transaction)
             .await?;
         }
-        cleanup_staging(&mut transaction).await?;
+        sqlx::query(
+            "UPDATE source_files SET \
+                scan_state = CASE WHEN snapshot_revision > 0 THEN 'ready' ELSE 'pending' END, \
+                scan_token = NULL \
+             WHERE scan_state = 'indexing'",
+        )
+        .execute(&mut *transaction)
+        .await?;
         transaction.commit().await?;
 
         Ok(Self { pool })
@@ -259,46 +270,84 @@ impl Database {
         Ok(())
     }
 
+    pub async fn cleanup_orphan_staging_batch(&self, limit: u32) -> Result<u64> {
+        if limit == 0 {
+            return Ok(0);
+        }
+        let mut transaction = self.pool.begin().await?;
+        let mut removed = 0_u64;
+        for statement in [
+            "DELETE FROM staged_entry_raw_refs WHERE rowid IN (\
+                SELECT candidate.rowid FROM staged_entry_raw_refs AS candidate \
+                WHERE NOT EXISTS (SELECT 1 FROM source_files AS source \
+                    WHERE source.scan_token = candidate.scan_token) LIMIT ?)",
+            "DELETE FROM staged_diagnostics WHERE rowid IN (\
+                SELECT candidate.rowid FROM staged_diagnostics AS candidate \
+                WHERE NOT EXISTS (SELECT 1 FROM source_files AS source \
+                    WHERE source.scan_token = candidate.scan_token) LIMIT ?)",
+            "DELETE FROM staged_entries WHERE rowid IN (\
+                SELECT candidate.rowid FROM staged_entries AS candidate \
+                WHERE NOT EXISTS (SELECT 1 FROM source_files AS source \
+                    WHERE source.scan_token = candidate.scan_token) LIMIT ?)",
+            "DELETE FROM staged_raw_records WHERE rowid IN (\
+                SELECT candidate.rowid FROM staged_raw_records AS candidate \
+                WHERE NOT EXISTS (SELECT 1 FROM source_files AS source \
+                    WHERE source.scan_token = candidate.scan_token) LIMIT ?)",
+            "DELETE FROM staged_sessions WHERE rowid IN (\
+                SELECT candidate.rowid FROM staged_sessions AS candidate \
+                WHERE NOT EXISTS (SELECT 1 FROM source_files AS source \
+                    WHERE source.scan_token = candidate.scan_token) LIMIT ?)",
+        ] {
+            removed = removed.saturating_add(
+                sqlx::query(statement)
+                    .bind(i64::from(limit))
+                    .execute(&mut *transaction)
+                    .await?
+                    .rows_affected(),
+            );
+        }
+        transaction.commit().await?;
+        Ok(removed)
+    }
+
+    pub async fn abandon_scan(&self, root_kind: &str, relative_path: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE source_files SET \
+                scan_state = CASE WHEN snapshot_revision > 0 THEN 'ready' ELSE 'catalog' END, \
+                scan_token = NULL \
+             WHERE root_kind = ? AND relative_path = ? AND scan_state = 'indexing'",
+        )
+        .bind(root_kind)
+        .bind(relative_path)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn resolve_index_policy(
         &self,
-        requested_days: i64,
+        _requested_days: i64,
         requested_max_event_bytes: usize,
-        now_micros: i64,
+        _now_micros: i64,
     ) -> Result<InitialIndexPolicy> {
         let mut transaction = self.pool.begin().await?;
-        let stored_days = meta_value(&mut transaction, "initial_index_days").await?;
-        let stored_cutoff = meta_value(&mut transaction, "initial_index_cutoff_micros").await?;
         let stored_max_bytes = meta_value(&mut transaction, "max_event_bytes").await?;
-        let indexed_files = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM source_files")
-            .fetch_one(&mut *transaction)
-            .await?;
-
-        let policy = InitialIndexPolicy::new(requested_days, now_micros)?;
-        let policy_days = policy.days.to_string();
-        if stored_days.as_deref() != Some(policy_days.as_str()) {
-            upsert_meta(&mut transaction, "initial_index_days", &policy_days).await?;
-        }
-        // Older builds persisted a one-time cutoff. Rolling windows derive it from the current
-        // clock, so remove the obsolete marker once without rebuilding the disposable cache.
-        if stored_cutoff.is_some() {
-            sqlx::query("DELETE FROM app_meta WHERE key = 'initial_index_cutoff_micros'")
-                .execute(&mut *transaction)
-                .await?;
-        }
 
         if let Some(stored) = stored_max_bytes {
             let stored = stored
                 .parse::<usize>()
                 .context("invalid stored max_event_bytes")?;
             if stored != requested_max_event_bytes {
-                bail!(
-                    "max_event_bytes changed from {stored} to {requested_max_event_bytes}; run agents-viewer --rebuild-index to apply it consistently"
-                );
+                upsert_meta(
+                    &mut transaction,
+                    "max_event_bytes",
+                    &requested_max_event_bytes.to_string(),
+                )
+                .await?;
+                sqlx::query("UPDATE source_files SET snapshot_file_key = NULL")
+                    .execute(&mut *transaction)
+                    .await?;
             }
-        } else if indexed_files != 0 {
-            bail!(
-                "existing index predates max_event_bytes metadata; run agents-viewer --rebuild-index to apply the configured limit"
-            );
         } else {
             set_meta(
                 &mut transaction,
@@ -308,7 +357,7 @@ impl Database {
             .await?;
         }
         transaction.commit().await?;
-        Ok(policy)
+        Ok(InitialIndexPolicy::all())
     }
 }
 
@@ -405,27 +454,15 @@ fn schema_signature() -> String {
     format!("{:x}", Sha256::digest(SCHEMA_SQL.as_bytes()))
 }
 
-async fn cleanup_staging(transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>) -> Result<()> {
-    for statement in [
-        "DELETE FROM staged_entry_raw_refs",
-        "DELETE FROM staged_diagnostics",
-        "DELETE FROM staged_entries",
-        "DELETE FROM staged_raw_records",
-        "DELETE FROM staged_sessions",
-    ] {
-        sqlx::query(statement).execute(&mut **transaction).await?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
+    use sqlx::Row as _;
     use tempfile::TempDir;
 
     use super::*;
 
     #[tokio::test]
-    async fn index_window_rolls_and_can_change_without_rebuild() {
+    async fn content_bound_change_invalidates_snapshots_without_manual_rebuild() {
         let temp = TempDir::new_in(".").unwrap();
         let cache = temp.path().join("cache");
         crate::permissions::prepare_cache_directory(&cache).unwrap();
@@ -436,28 +473,49 @@ mod tests {
             .resolve_index_policy(7, 32 * 1024 * 1024, 9 * MICROS_PER_DAY)
             .await
             .unwrap();
-        assert_eq!(first.cutoff_micros, Some(2 * MICROS_PER_DAY));
-        let later = database
-            .resolve_index_policy(7, 32 * 1024 * 1024, 99 * MICROS_PER_DAY)
-            .await
-            .unwrap();
-        assert_eq!(later.days, first.days);
-        assert_eq!(later.cutoff_micros, Some(92 * MICROS_PER_DAY));
-        let zero = database
+        assert_eq!(first, InitialIndexPolicy::all());
+        sqlx::query(
+            "INSERT INTO source_files( \
+                root_kind, relative_path, file_key, size_bytes, mtime_ns, snapshot_file_key, \
+                snapshot_size_bytes, snapshot_mtime_ns, snapshot_revision \
+             ) VALUES ('active', 'rollout.jsonl', 'file', 1, 1, 'file', 1, 1, 1)",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let unchanged = database
             .resolve_index_policy(0, 32 * 1024 * 1024, 99 * MICROS_PER_DAY)
             .await
             .unwrap();
-        assert_eq!(zero.days, 0);
-        let error = database
+        assert_eq!(unchanged, InitialIndexPolicy::all());
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT snapshot_file_key FROM source_files WHERE relative_path = 'rollout.jsonl'",
+            )
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+            Some("file".into())
+        );
+        let changed = database
             .resolve_index_policy(0, 16 * 1024 * 1024, 99 * MICROS_PER_DAY)
             .await
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("--rebuild-index"));
+            .unwrap();
+        assert_eq!(changed, InitialIndexPolicy::all());
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT snapshot_file_key FROM source_files WHERE relative_path = 'rollout.jsonl'",
+            )
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+            None
+        );
         database.close().await;
     }
 
     #[tokio::test]
-    async fn parser_version_change_resets_all_source_checkpoints_for_reindex() {
+    async fn parser_version_change_keeps_committed_snapshot_until_explicit_reindex() {
         let temp = TempDir::new().unwrap();
         let cache = temp.path().join("cache");
         crate::permissions::prepare_cache_directory(&cache).unwrap();
@@ -466,9 +524,14 @@ mod tests {
         sqlx::query(
             "INSERT INTO source_files( \
                 id, root_kind, relative_path, file_key, size_bytes, mtime_ns, \
-                checkpoint_offset, checkpoint_line, checkpoint_hash, scan_state \
+                checkpoint_offset, checkpoint_line, checkpoint_hash, scan_state, \
+                snapshot_file_key, snapshot_size_bytes, snapshot_mtime_ns, \
+                snapshot_head_hash, snapshot_tail_hash, snapshot_revision, \
+                last_synced_at_micros, catalog_checkpoint_offset, catalog_complete, \
+                catalog_head_hash \
              ) VALUES (1, 'active', 'fixture.jsonl', 'fixture-key', 100, 200, 90, 7, \
-                'checkpoint-hash', 'ready')",
+                'checkpoint-hash', 'ready', 'fixture-key', 90, 150, 'snapshot-head', \
+                'snapshot-tail', 3, 123, 80, 1, 'catalog-head')",
         )
         .execute(database.pool())
         .await
@@ -481,15 +544,40 @@ mod tests {
         database.close().await;
 
         let reopened = Database::open_or_recover(&path, "source").await.unwrap();
-        assert!(reopened.bootstrap_required().await.unwrap());
-        let state = sqlx::query_as::<_, (String, i64, i64, Option<String>)>(
-            "SELECT scan_state, checkpoint_offset, checkpoint_line, checkpoint_hash \
+        assert!(!reopened.bootstrap_required().await.unwrap());
+        let state = sqlx::query(
+            "SELECT scan_state, checkpoint_offset, checkpoint_line, checkpoint_hash, \
+                snapshot_file_key, snapshot_size_bytes, snapshot_mtime_ns, snapshot_head_hash, \
+                snapshot_tail_hash, snapshot_revision, last_synced_at_micros, \
+                catalog_checkpoint_offset, catalog_complete, catalog_head_hash \
              FROM source_files WHERE id = 1",
         )
         .fetch_one(reopened.pool())
         .await
         .unwrap();
-        assert_eq!(state, ("pending".into(), 0, 0, None));
+        assert_eq!(state.get::<String, _>("scan_state"), "ready");
+        assert_eq!(state.get::<i64, _>("checkpoint_offset"), 0);
+        assert_eq!(state.get::<i64, _>("checkpoint_line"), 0);
+        assert_eq!(state.get::<Option<String>, _>("checkpoint_hash"), None);
+        assert_eq!(state.get::<Option<String>, _>("snapshot_file_key"), None);
+        assert_eq!(state.get::<Option<i64>, _>("snapshot_size_bytes"), Some(90));
+        assert_eq!(state.get::<Option<i64>, _>("snapshot_mtime_ns"), Some(150));
+        assert_eq!(
+            state.get::<Option<String>, _>("snapshot_head_hash"),
+            Some("snapshot-head".into())
+        );
+        assert_eq!(
+            state.get::<Option<String>, _>("snapshot_tail_hash"),
+            Some("snapshot-tail".into())
+        );
+        assert_eq!(state.get::<i64, _>("snapshot_revision"), 3);
+        assert_eq!(
+            state.get::<Option<i64>, _>("last_synced_at_micros"),
+            Some(123)
+        );
+        assert_eq!(state.get::<i64, _>("catalog_checkpoint_offset"), 0);
+        assert_eq!(state.get::<i64, _>("catalog_complete"), 0);
+        assert_eq!(state.get::<Option<String>, _>("catalog_head_hash"), None);
         assert_eq!(
             sqlx::query_scalar::<_, String>(
                 "SELECT value FROM app_meta WHERE key = 'parser_version'",

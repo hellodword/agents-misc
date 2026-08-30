@@ -44,6 +44,9 @@ const ROLLOUTS: &[(&str, &[u8])] = &[
     ("v0.146", include_bytes!("fixtures/rollouts/v0_146.jsonl")),
     ("v0.147", include_bytes!("fixtures/rollouts/v0_147.jsonl")),
     ("v0.148", include_bytes!("fixtures/rollouts/v0_148.jsonl")),
+    ("v0.149", include_bytes!("fixtures/rollouts/v0_149.jsonl")),
+    ("v0.150", include_bytes!("fixtures/rollouts/v0_150.jsonl")),
+    ("v0.151", include_bytes!("fixtures/rollouts/v0_151.jsonl")),
 ];
 
 #[test]
@@ -135,10 +138,10 @@ async fn sqlite_and_http_contracts_are_byte_stable() {
 async fn sse_payload_json_and_replay_order_are_byte_stable() {
     let hub = SseHub::new();
     for (event, generation, session_id, entry_id) in [
-        (SseEventType::IndexProgress, 7, None, None),
-        (SseEventType::SessionUpdated, 8, Some("session-a"), None),
+        (SseEventType::CatalogProgress, 7, None, None),
+        (SseEventType::CatalogUpdated, 8, Some("session-a"), None),
         (
-            SseEventType::EntryUpdated,
+            SseEventType::SnapshotUpdated,
             9,
             Some("session-a"),
             Some("entry-b"),
@@ -154,6 +157,7 @@ async fn sse_payload_json_and_replay_order_are_byte_stable() {
                 progress: None,
                 diagnostic: None,
                 sync_state: None,
+                snapshot_revision: None,
             },
         )
         .await;

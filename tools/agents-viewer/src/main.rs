@@ -6,10 +6,9 @@ use std::time::{Duration, Instant};
 
 use agents_viewer::cli::Cli;
 use agents_viewer::config::{Config, LogLevel};
+use agents_viewer::index::Database;
 use agents_viewer::index::coordinator::{IndexCoordinator, IndexUpdate, ReconcileReport};
-use agents_viewer::index::recovery::replace_database_atomically;
 use agents_viewer::index::writer::spawn_writer;
-use agents_viewer::index::{Database, InitialIndexPolicy};
 use agents_viewer::model::{
     IndexProgress, ServicePhase, SessionSyncState, SseEventPayload, SseEventType,
 };
@@ -59,26 +58,13 @@ async fn run(config: Config) -> Result<()> {
     });
     let fingerprint = config.roots.home.to_string_lossy().into_owned();
     let now_micros = chrono::Utc::now().timestamp_micros();
-    let (database, policy, bootstrap_required) = if config.rebuild_index {
-        match rebuild_database(&config, &fingerprint, now_micros, shutdown.clone()).await {
-            Ok((database, policy)) => (database, policy, false),
-            Err(_) if shutdown.is_cancelled() => return Ok(()),
-            Err(error) => return Err(error),
-        }
-    } else {
-        let opened =
-            Database::open_or_recover_with_disposition(&config.cache.database, &fingerprint)
-                .await?;
-        let database = opened.database;
-        let policy = database
-            .resolve_index_policy(
-                config.initial_index_days,
-                config.max_event_bytes,
-                now_micros,
-            )
-            .await?;
-        (database, policy, opened.bootstrap_required)
-    };
+    let opened =
+        Database::open_or_recover_with_disposition(&config.cache.database, &fingerprint).await?;
+    let database = opened.database;
+    let policy = database
+        .resolve_index_policy(-1, config.max_event_bytes, now_micros)
+        .await?;
+    let bootstrap_required = opened.bootstrap_required;
 
     let (watch_sender, watch_receiver) = mpsc::channel(1_024);
     let watcher = start_watcher(&config.roots, watch_sender)?;
@@ -185,64 +171,6 @@ async fn drain_http_server(
     Ok(())
 }
 
-async fn rebuild_database(
-    config: &Config,
-    fingerprint: &str,
-    now_micros: i64,
-    shutdown: CancellationToken,
-) -> Result<(Database, InitialIndexPolicy)> {
-    let new_path = config.cache.namespace.join("index.sqlite3.new");
-    remove_database_family(&new_path)?;
-    let rebuilt = Database::open_or_recover(&new_path, fingerprint).await?;
-    let policy = rebuilt
-        .resolve_index_policy(
-            config.initial_index_days,
-            config.max_event_bytes,
-            now_micros,
-        )
-        .await?;
-    let (writer, task) = spawn_writer(rebuilt.clone());
-    let coordinator = IndexCoordinator::new(
-        rebuilt.clone(),
-        writer.clone(),
-        config.roots.clone(),
-        config.max_event_bytes,
-        policy,
-    );
-    let (update_sender, update_receiver) = mpsc::channel(64);
-    let terminal_task = tokio::spawn(update_terminal_only(update_receiver, shutdown.clone()));
-    let reconcile = coordinator
-        .reconcile_with_updates(&shutdown, Some(&update_sender))
-        .await
-        .context("rebuild index");
-    drop(update_sender);
-    let _ = terminal_task.await;
-    writer.shutdown().await?;
-    task.wait().await?;
-    let report = match reconcile {
-        Ok(report) => report,
-        Err(error) => {
-            rebuilt.close().await;
-            return Err(error);
-        }
-    };
-    if !report_is_healthy(&report) {
-        rebuilt.close().await;
-        anyhow::bail!(
-            "rebuild index completed with {} failed files and {} discovery issues",
-            report.failed_files,
-            report.discovery_issues
-        );
-    }
-    rebuilt.mark_bootstrap_complete().await?;
-    rebuilt.optimize().await?;
-    rebuilt.close().await;
-    let database = replace_database_atomically(&config.cache.database, &new_path, fingerprint)
-        .await
-        .context("activate rebuilt index")?;
-    Ok((database, policy))
-}
-
 async fn update_status(
     state: AppState,
     mut updates: mpsc::Receiver<IndexUpdate>,
@@ -300,10 +228,16 @@ async fn update_status(
                         }
                     }
                     IndexUpdate::SessionCommitted { generation, session_id } => {
-                        publish_session_committed(&state, generation, &session_id).await;
+                        publish_snapshot_committed(&state, generation, &session_id).await;
+                    }
+                    IndexUpdate::CatalogCommitted { generation, session_id } => {
+                        publish_catalog_committed(&state, generation, &session_id).await;
                     }
                     IndexUpdate::SessionState { generation, session_id, state: sync_state } => {
                         publish_session_state(&state, generation, &session_id, sync_state).await;
+                    }
+                    IndexUpdate::SessionStateCleared { generation, session_id } => {
+                        publish_session_state_cleared(&state, generation, &session_id).await;
                     }
                     IndexUpdate::Completed { report, foreground } => {
                         let phase = if report.failed_files == 0
@@ -337,12 +271,12 @@ async fn update_status(
     }
 }
 
-async fn publish_session_committed(state: &AppState, generation: u64, session_id: &str) {
+async fn publish_catalog_committed(state: &AppState, generation: u64, session_id: &str) {
     state.invalidate_session_groups(generation);
     state
         .sse
         .publish(
-            SseEventType::SessionUpdated,
+            SseEventType::CatalogUpdated,
             SseEventPayload {
                 generation,
                 phase: None,
@@ -350,10 +284,24 @@ async fn publish_session_committed(state: &AppState, generation: u64, session_id
                 entry_id: None,
                 progress: None,
                 diagnostic: None,
-                sync_state: Some(SessionSyncState::Current),
+                sync_state: None,
+                snapshot_revision: None,
             },
         )
         .await;
+}
+
+async fn publish_snapshot_committed(state: &AppState, generation: u64, session_id: &str) {
+    state.invalidate_session_groups(generation);
+    let snapshot_revision = sqlx::query_scalar::<_, i64>(
+        "SELECT snapshot_revision FROM source_files WHERE session_id = ?",
+    )
+    .bind(session_id)
+    .fetch_optional(state.database.pool())
+    .await
+    .ok()
+    .flatten()
+    .and_then(|value| u64::try_from(value).ok());
     let entry_id = sqlx::query_scalar::<_, String>(
         "SELECT id FROM entries WHERE session_id = ? ORDER BY sequence DESC LIMIT 1",
     )
@@ -365,7 +313,7 @@ async fn publish_session_committed(state: &AppState, generation: u64, session_id
     state
         .sse
         .publish(
-            SseEventType::EntryUpdated,
+            SseEventType::SnapshotUpdated,
             SseEventPayload {
                 generation,
                 phase: None,
@@ -374,6 +322,7 @@ async fn publish_session_committed(state: &AppState, generation: u64, session_id
                 progress: None,
                 diagnostic: None,
                 sync_state: None,
+                snapshot_revision,
             },
         )
         .await;
@@ -388,7 +337,7 @@ async fn publish_session_state(
     state
         .sse
         .publish(
-            SseEventType::SessionUpdated,
+            SseEventType::LiveSyncStateChanged,
             SseEventPayload {
                 generation,
                 phase: None,
@@ -397,6 +346,26 @@ async fn publish_session_state(
                 progress: None,
                 diagnostic: None,
                 sync_state: Some(sync_state),
+                snapshot_revision: None,
+            },
+        )
+        .await;
+}
+
+async fn publish_session_state_cleared(state: &AppState, generation: u64, session_id: &str) {
+    state
+        .sse
+        .publish(
+            SseEventType::LiveSyncStateChanged,
+            SseEventPayload {
+                generation,
+                phase: None,
+                session_id: Some(session_id.to_owned()),
+                entry_id: None,
+                progress: None,
+                diagnostic: None,
+                sync_state: None,
+                snapshot_revision: None,
             },
         )
         .await;
@@ -411,7 +380,7 @@ async fn publish_progress(
     state
         .sse
         .publish(
-            SseEventType::IndexProgress,
+            SseEventType::CatalogProgress,
             SseEventPayload {
                 generation,
                 phase: Some(phase),
@@ -420,33 +389,10 @@ async fn publish_progress(
                 progress: Some(progress),
                 diagnostic: None,
                 sync_state: None,
+                snapshot_revision: None,
             },
         )
         .await;
-}
-
-async fn update_terminal_only(
-    mut updates: mpsc::Receiver<IndexUpdate>,
-    shutdown: CancellationToken,
-) {
-    let mut terminal = TerminalProgress::new();
-    loop {
-        tokio::select! {
-            () = shutdown.cancelled() => { terminal.finish(); return; }
-            update = updates.recv() => match update {
-                Some(IndexUpdate::Discovering { .. }) => terminal.render(ServicePhase::Discovering, &IndexProgress { total_files: 0, processed_files: 0, total_bytes: 0, processed_bytes: 0, failed_files: 0, excluded_files: 0, excluded_bytes: 0 }, false),
-                Some(IndexUpdate::Progress { progress, .. }) => terminal.render(ServicePhase::Indexing, &progress, false),
-                Some(IndexUpdate::SessionCommitted { .. }) => {}
-                Some(IndexUpdate::SessionState { .. }) => {}
-                Some(IndexUpdate::Completed { report, .. }) => {
-                    let phase = if report.failed_files == 0 && report.discovery_issues == 0 && !report.reconcile_again { ServicePhase::Ready } else { ServicePhase::Degraded };
-                    let progress = report_progress(&report);
-                    terminal.render(phase, &progress, true);
-                }
-                None => { terminal.finish(); return; }
-            }
-        }
-    }
 }
 
 fn report_progress(report: &ReconcileReport) -> IndexProgress {
@@ -465,10 +411,6 @@ fn report_progress(report: &ReconcileReport) -> IndexProgress {
         excluded_files: report.excluded_files,
         excluded_bytes: report.excluded_bytes,
     }
-}
-
-fn report_is_healthy(report: &ReconcileReport) -> bool {
-    report.failed_files == 0 && report.discovery_issues == 0 && !report.reconcile_again
 }
 
 struct TerminalProgress {
@@ -541,7 +483,7 @@ async fn heartbeat(state: AppState, shutdown: CancellationToken) {
             () = shutdown.cancelled() => return,
             _ = interval.tick() => {
                 let generation = state.status.read().await.generation;
-                state.sse.publish(SseEventType::Heartbeat, SseEventPayload { generation, phase: None, session_id: None, entry_id: None, progress: None, diagnostic: None, sync_state: None }).await;
+                state.sse.publish(SseEventType::Heartbeat, SseEventPayload { generation, phase: None, session_id: None, entry_id: None, progress: None, diagnostic: None, sync_state: None, snapshot_revision: None }).await;
             }
         }
     }
@@ -562,17 +504,6 @@ async fn wait_for_signal() -> Result<()> {
     tokio::signal::ctrl_c()
         .await
         .context("install Ctrl-C handler")
-}
-
-fn remove_database_family(path: &std::path::Path) -> Result<()> {
-    for suffix in ["", "-wal", "-shm"] {
-        let member = std::path::PathBuf::from(format!("{}{}", path.display(), suffix));
-        if member.exists() {
-            std::fs::remove_file(&member)
-                .with_context(|| format!("remove stale rebuild file {}", member.display()))?;
-        }
-    }
-    Ok(())
 }
 
 fn init_tracing(level: LogLevel) {

@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
   chromium,
+  expect,
   test as base,
   type Browser,
   type BrowserContext,
@@ -173,7 +174,7 @@ async function startServer(
   const configPath = resolve(sourceHome, "../config.toml");
   await writeFile(
     configPath,
-    `source_dir = ${JSON.stringify(sourceHome)}\ndata_dir = ${JSON.stringify(dataDir)}\ninitial_index_days = -1\nlisten = "127.0.0.1:0"\npassword = ${JSON.stringify(password)}\nmax_event_bytes = "32MiB"\nlog_level = "warn"\n`,
+    `source_dir = ${JSON.stringify(sourceHome)}\ndata_dir = ${JSON.stringify(dataDir)}\nlisten = "127.0.0.1:0"\npassword = ${JSON.stringify(password)}\nmax_event_bytes = "32MiB"\nlog_level = "warn"\n`,
     { mode: 0o600 },
   );
   const child = spawn(binary, ["--config", configPath], {
@@ -400,8 +401,17 @@ export const test = base.extend<Runtime & Options>({
   page: async ({ context, baseURL }, use) => {
     const page = await context.newPage();
     await page.goto(baseURL);
+    const start = page.getByRole("button", { name: "Start live sync" });
+    await expect(start).toBeVisible();
+    await start.click();
+    await expect(
+      page.getByRole("button", { name: "Stop live sync" }),
+    ).toBeVisible();
+    await expect(page.getByText("Pagination message 109").first()).toBeVisible({
+      timeout: 8_000,
+    });
     await use(page);
   },
 });
 
-export { expect } from "@playwright/test";
+export { expect };

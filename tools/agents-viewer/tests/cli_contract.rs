@@ -13,7 +13,7 @@ fn help_and_version_have_stable_output() {
         .assert()
         .success()
         .stdout(predicate::str::contains("--config"))
-        .stdout(predicate::str::contains("--rebuild-index"));
+        .stdout(predicate::str::contains("--rebuild-index").not());
     cargo_bin_cmd!("agents-viewer")
         .arg("--version")
         .assert()
@@ -236,7 +236,7 @@ fn write_config(path: &std::path::Path, source: &std::path::Path, data: &std::pa
     let mut file = options.open(path).unwrap();
     writeln!(
         file,
-        "source_dir = {:?}\ndata_dir = {:?}\ninitial_index_days = -1\nlisten = \"127.0.0.1:0\"\nmax_event_bytes = \"32MiB\"\nlog_level = \"warn\"",
+        "source_dir = {:?}\ndata_dir = {:?}\nlisten = \"127.0.0.1:0\"\nmax_event_bytes = \"32MiB\"\nlog_level = \"warn\"",
         source.to_string_lossy(),
         data.to_string_lossy(),
     )

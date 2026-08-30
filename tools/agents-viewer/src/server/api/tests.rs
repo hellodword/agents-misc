@@ -39,8 +39,8 @@ async fn poisoned_catalog_returns_internal_error_and_router_stays_alive() {
         .clone()
         .oneshot(
             Request::builder()
-                .method("PUT")
-                .uri("/api/v1/sessions/019f5a6f-512b-7ae2-bbe9-884d39f6f599/sync")
+                .method("POST")
+                .uri("/api/v1/sessions/019f5a6f-512b-7ae2-bbe9-884d39f6f599/live-sync")
                 .header("host", "127.0.0.1:4747")
                 .body(Body::empty())
                 .unwrap(),

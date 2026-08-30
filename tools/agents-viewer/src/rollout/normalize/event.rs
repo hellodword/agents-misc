@@ -23,13 +23,19 @@ pub(super) fn normalize_event(
             add_attachment_metadata(&mut entry, payload);
             NormalizeResult::Entry(entry)
         }
-        "agent_message" => NormalizeResult::Entries(assistant_message_entries(
-            phase_field(payload),
-            string_field(payload, &["message"]),
-            timestamp_micros,
-            raw_id,
-            EntryOrigin::EventPresentation,
-        )),
+        "agent_message" => {
+            let mut entries = assistant_message_entries(
+                phase_field(payload),
+                string_field(payload, &["message"]),
+                timestamp_micros,
+                raw_id,
+                EntryOrigin::EventPresentation,
+            );
+            entries
+                .iter_mut()
+                .for_each(|entry| add_agent_message_delivery_metadata(entry, payload));
+            NormalizeResult::Entries(entries)
+        }
         "agent_reasoning" => NormalizeResult::Entry(reasoning_entry(
             string_field(payload, &["text", "message"]),
             timestamp_micros,

@@ -29,6 +29,23 @@ import type {
 const session: SessionSummary = {
   id: "s1",
   source: "cli",
+  sourceLocation: {
+    rootKind: "active",
+    relativePath: "2026/07/01/s1.jsonl",
+  },
+  firstUserMessage: {
+    text: "Hello **world**",
+    preview: "Hello **world**",
+    timestamp: "2026-07-01T00:10:00Z",
+  },
+  contentStatus: {
+    freshness: "current",
+    liveState: "inactive",
+    hasSnapshot: true,
+    snapshotRevision: 1,
+    syncedThroughBytes: 100,
+    observedBytes: 100,
+  },
   title: "Hello session",
   preview: "Preview",
   createdAt: "2026-07-01T00:00:00.000000Z",
@@ -118,9 +135,7 @@ beforeEach(() => {
     vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
       let body: unknown;
-      if (url.endsWith("/sessions/s1/sync"))
-        body = { sessionId: "s1", state: "current", hasSnapshot: true };
-      else if (url.includes("/sessions/s1/entries/e1/content")) {
+      if (url.includes("/sessions/s1/entries/e1/content")) {
         const secondary = url.includes("field=secondary");
         body = {
           field: secondary ? "secondary" : "primary",
@@ -201,10 +216,6 @@ beforeEach(() => {
       else
         body = {
           appVersion: "0.1.0",
-          sourceHome: "/source",
-          cacheDir: "/cache",
-          initialIndexDays: 7,
-          initialIndexCutoff: "2026-01-01T00:00:00Z",
           generation: 1,
           phase: "ready",
           progress: {
@@ -1294,7 +1305,7 @@ describe("Agents Viewer UI", () => {
     const listBefore = callsFor("/api/v1/session-groups?");
     const statusBefore = callsFor("/api/v1/status");
     stream.emit("heartbeat", { generation: 2 });
-    stream.emit("indexProgress", {
+    stream.emit("catalogProgress", {
       generation: 2,
       phase: "indexing",
       progress: {
@@ -1311,17 +1322,17 @@ describe("Agents Viewer UI", () => {
     expect(callsFor("/api/v1/session-groups?")).toBe(listBefore);
     expect(callsFor("/api/v1/status")).toBe(statusBefore);
     const entriesBefore = callsFor("/api/v1/sessions/s1/entries");
-    stream.emit("sessionUpdated", {
+    stream.emit("catalogUpdated", {
       generation: 3,
       sessionId: "s1",
-      syncState: "current",
     });
-    stream.emit("sessionUpdated", { generation: 3, sessionId: "s2" });
-    stream.emit("sessionUpdated", { generation: 3, sessionId: "s3" });
-    stream.emit("entryUpdated", {
+    stream.emit("catalogUpdated", { generation: 3, sessionId: "s2" });
+    stream.emit("catalogUpdated", { generation: 3, sessionId: "s3" });
+    stream.emit("snapshotUpdated", {
       generation: 3,
       sessionId: "s1",
       entryId: "e1",
+      snapshotRevision: 2,
     });
     await waitFor(() =>
       expect(callsFor("/api/v1/session-groups?")).toBe(listBefore + 1),
@@ -1373,10 +1384,11 @@ describe("Agents Viewer UI", () => {
     const readerPosition = transcript.scrollTop;
     const stream = eventSources().instances[0];
 
-    stream.emit("entryUpdated", {
+    stream.emit("snapshotUpdated", {
       generation: 2,
       sessionId: "s1",
       entryId: liveEntry.id,
+      snapshotRevision: 2,
     });
     await waitFor(() =>
       expect(
@@ -1389,10 +1401,11 @@ describe("Agents Viewer UI", () => {
       await screen.findByRole("button", { name: "Go to 1 new items" }),
     ).toBeInTheDocument();
 
-    stream.emit("entryUpdated", {
+    stream.emit("snapshotUpdated", {
       generation: 3,
       sessionId: "s1",
       entryId: laterLiveEntry.id,
+      snapshotRevision: 3,
     });
     expect(
       await screen.findByRole("button", { name: "Go to 2 new items" }),
@@ -1490,60 +1503,73 @@ describe("Agents Viewer UI", () => {
     );
   });
 
-  it("waits for direct synchronization before loading an uncached deep link", async () => {
+  it("starts content synchronization only after an explicit page-scoped action", async () => {
     const fallback = vi.mocked(fetch);
-    let synchronized = false;
+    const uncached = {
+      ...session,
+      entryCount: 0,
+      contentStatus: {
+        ...session.contentStatus,
+        freshness: "neverSynced" as const,
+        hasSnapshot: false,
+        snapshotRevision: 0,
+        syncedThroughBytes: 0,
+      },
+    };
+    let leaseSignal: AbortSignal | undefined;
     const controlled = vi.fn(
       (input: string | URL | Request, init?: RequestInit) => {
         const url = String(input);
-        if (url.endsWith("/sessions/s1/sync"))
+        if (url.endsWith("/sessions/s1/live-sync")) {
+          leaseSignal = init?.signal ?? undefined;
           return Promise.resolve(
-            new Response(
-              JSON.stringify({
-                sessionId: "s1",
-                state: synchronized ? "current" : "queued",
-                hasSnapshot: synchronized,
-              }),
-              { status: synchronized ? 200 : 202 },
-            ),
+            new Response(new ReadableStream(), {
+              status: 200,
+              headers: { "content-type": "text/event-stream" },
+            }),
+          );
+        }
+        if (url.endsWith("/sessions/s1"))
+          return Promise.resolve(
+            new Response(JSON.stringify({ summary: uncached, diagnostics: [] }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            }),
+          );
+        if (url.includes("/sessions/s1/entries"))
+          return Promise.resolve(
+            new Response(JSON.stringify({ data: [], partial: false }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            }),
           );
         return fallback(input, init);
       },
     );
     vi.stubGlobal("fetch", controlled);
-    render(
-      <MemoryRouter initialEntries={["/sessions/s1?entry=e1"]}>
+    const user = userEvent.setup();
+    const view = render(
+      <MemoryRouter initialEntries={["/sessions/s1"]}>
         <App />
       </MemoryRouter>,
     );
     expect(
-      await screen.findByText("Session synchronization queued…"),
+      await screen.findByText("Conversation content has not been synchronized yet."),
     ).toBeInTheDocument();
+    expect(screen.getByText("Hello **world**")).toBeInTheDocument();
     expect(
       controlled.mock.calls.filter(([input]) =>
-        String(input).endsWith("/sessions/s1"),
+        String(input).endsWith("/sessions/s1/live-sync"),
       ),
     ).toHaveLength(0);
+    await user.click(screen.getByRole("button", { name: "Start live sync" }));
+    await waitFor(() => expect(leaseSignal).toBeDefined());
+    expect(leaseSignal?.aborted).toBe(false);
     expect(
-      controlled.mock.calls.filter(([input]) =>
-        String(input).includes("/sessions/s1/entries/e1"),
-      ),
-    ).toHaveLength(0);
-
-    synchronized = true;
-    eventSources().instances[0].emit("sessionUpdated", {
-      generation: 2,
-      sessionId: "s1",
-      syncState: "current",
-    });
-    expect(
-      await screen.findByRole("heading", { name: "Hello session" }),
+      screen.getByRole("button", { name: "Stop live sync" }),
     ).toBeInTheDocument();
-    expect(
-      controlled.mock.calls.filter(([input]) =>
-        String(input).includes("/sessions/s1/entries/e1"),
-      ),
-    ).toHaveLength(1);
+    view.unmount();
+    expect(leaseSignal?.aborted).toBe(true);
   });
 
   it("loads and merges raw record chunks only when requested", async () => {
@@ -1678,7 +1704,7 @@ describe("Agents Viewer UI", () => {
       ).length;
     expect(secondPageCalls()).toBe(1);
 
-    eventSources().instances[0].emit("sessionUpdated", {
+    eventSources().instances[0].emit("catalogUpdated", {
       generation: 2,
       sessionId: "s1",
     });

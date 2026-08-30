@@ -20,7 +20,7 @@ use super::control::{IoGate, ScanLease, WorkPriority};
 use super::relationships::reconcile_plan_handoffs;
 use super::scanner::{
     DiscoveredSource, Discovery, discover_source_path, discover_sources_cancellable,
-    scan_source_with_lease, source_precedes,
+    refresh_catalog_source, scan_source_with_lease, source_precedes,
 };
 use super::writer::WriterHandle;
 use super::{Database, InitialIndexPolicy};
@@ -39,7 +39,7 @@ use types::{
     SCHEDULER_TICK, SharedState, SourceFingerprint, StoredSource, WorkCompletion, WorkItem,
 };
 pub use types::{
-    BACKGROUND_IDLE_DELAY, CoordinatorError, CoordinatorHandle, DIRECT_SYNC_QUEUE_CAPACITY,
-    FULL_SWEEP_INTERVAL, HOT_REFRESH_INTERVAL, IndexCoordinator, IndexUpdate, MAX_PARSER_TASKS,
+    BACKGROUND_IDLE_DELAY, CoordinatorError, CoordinatorHandle, FULL_SWEEP_INTERVAL,
+    HOT_REFRESH_INTERVAL, IndexCoordinator, IndexUpdate, LiveSyncLease, MAX_PARSER_TASKS,
     ReconcileReport,
 };

@@ -146,6 +146,17 @@ test("loads a second controlled sidebar page", async ({ context, baseURL }) => {
     indexState: "ready",
     completeness: "complete",
     freshness: "current",
+    sourceLocation: {
+      rootKind: "active",
+      relativePath: `${id}.jsonl`,
+    },
+    contentStatus: {
+      hasSnapshot: false,
+      freshness: "neverSynced",
+      liveState: "inactive",
+      snapshotRevision: 0,
+      observedBytes: 0,
+    },
   });
   const group = (id: string, title: string) => {
     const session = summary(id, title);
@@ -200,20 +211,32 @@ test("indexes an empty cache, searches content, reloads a deep link, and exposes
   await expect(planParent).toBeVisible();
   await expect(planChild).toBeVisible();
   await expect(planParent).toContainText("Plan session grouping");
-  await expect(planChild).toContainText("Implement · Plan session grouping");
-  await expect(
-    planParent
-      .locator("xpath=../ul")
-      .locator('a[href="/sessions/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"]'),
-  ).toBeVisible();
+  await expect(planChild).toContainText(
+    "A previous agent produced the plan below",
+  );
+  const childCatalogResponse = await page.request.get(
+    `${baseURL}/api/v1/sessions/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb`,
+  );
+  const childCatalog = (await childCatalogResponse.json()) as {
+    summary: {
+      contentStatus: { hasSnapshot: boolean };
+      firstUserMessage?: { text: string };
+    };
+  };
+  expect(childCatalog.summary.contentStatus.hasSnapshot).toBe(false);
+  expect(childCatalog.summary.firstUserMessage?.text).toContain(
+    "A previous agent produced the plan below",
+  );
   await page.getByRole("button", { name: "Settings" }).click();
   await page.getByLabel("Source").selectOption("exec");
   await page.getByRole("button", { name: "Apply" }).click();
-  await expect(planParent).toBeVisible();
+  await expect(planParent).toHaveCount(0);
   await expect(planChild).toBeVisible();
   await page.getByRole("button", { name: "Settings" }).click();
   await page.getByRole("button", { name: "Reset" }).click();
   await page.getByRole("button", { name: "Apply" }).click();
+  await expect(planParent).toBeVisible();
+  await expect(planChild).toBeVisible();
   await expect(page.getByText("Pagination message 109").first()).toBeVisible();
   await expectTranscriptAtBottom(page);
   await page.getByRole("button", { name: "Go to first message" }).click();
@@ -318,6 +341,40 @@ test("indexes an empty cache, searches content, reloads a deep link, and exposes
     .getByRole("button", { name: "Close inspector" })
     .click();
   await expect(page.locator("#entry-inspector")).toHaveCount(0);
+});
+
+test("owns full synchronization only while its conversation route is open", async ({
+  context,
+  baseURL,
+}) => {
+  const sessionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const leasePage = await context.newPage();
+  const liveState = async () => {
+    const response = await leasePage.request.get(
+      `${baseURL}/api/v1/sessions/${sessionId}`,
+    );
+    return (await response.json()).summary.contentStatus.liveState as string;
+  };
+  try {
+    await leasePage.goto(`${baseURL}/sessions/${sessionId}`);
+    await expect(
+      leasePage.getByText("Conversation content has not been synchronized yet."),
+    ).toBeVisible();
+    await expect.poll(liveState).toBe("inactive");
+    await leasePage.getByRole("button", { name: "Start live sync" }).click();
+    await expect(
+      leasePage.getByRole("button", { name: "Stop live sync" }),
+    ).toBeVisible();
+    await expect(leasePage.getByText("Group sessions").first()).toBeVisible({
+      timeout: 8_000,
+    });
+    await expect.poll(liveState).toBe("following");
+
+    await leasePage.goto(`${baseURL}/search`);
+    await expect.poll(liveState).toBe("inactive");
+  } finally {
+    await leasePage.close();
+  }
 });
 
 test("highlights and copies inline and fenced message code", async ({

@@ -34,6 +34,7 @@ mod session;
 mod tests;
 
 use content::*;
+pub(crate) use driver::parse_catalog_rollout_cancellable;
 pub use driver::{CollectingSink, ParseSink, parse_rollout};
 pub(crate) use driver::{parse_rollout_cancellable, parse_rollout_from_seed_cancellable};
 use envelope::*;
@@ -42,11 +43,12 @@ use identity::*;
 use item::*;
 use message::*;
 use metadata::{
-    add_event_timing_metadata, add_execution_attribution_metadata,
-    add_image_generation_failure_metadata, add_response_item_envelope_metadata,
-    add_response_item_metadata, add_source_item_id, add_tool_capability_metadata, call_id,
-    emit_diagnostic, item_id, parse_timestamp, payload_session_id, phase_field, role_field,
-    session_id_from_file, source_item_id, source_kind, source_parent, status_field, string_option,
+    add_agent_message_delivery_metadata, add_event_timing_metadata,
+    add_execution_attribution_metadata, add_image_generation_failure_metadata,
+    add_response_item_envelope_metadata, add_response_item_metadata, add_source_item_id,
+    add_tool_capability_metadata, call_id, emit_diagnostic, item_id, parse_timestamp,
+    payload_session_id, phase_field, role_field, session_id_from_file, source_item_id, source_kind,
+    source_parent, status_field, string_option,
 };
 pub(crate) use metadata::{session_id_from_filename, timestamp_from_filename};
 use session::*;

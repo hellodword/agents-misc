@@ -37,6 +37,7 @@ export const sourceValues: SourceKind[] = [
   "review",
   "subagent",
   "appServer",
+  "guardianReview",
   "unknown",
 ];
 
