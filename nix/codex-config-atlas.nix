@@ -88,7 +88,9 @@ let
           --data ${codexConfigAtlasData} \
           --out "$TMPDIR/site"
 
-        mv "$TMPDIR/site" "$out"
+        # Nix may mount the build directory separately, and the generated site
+        # inherits read-only directory modes from its store inputs.
+        cp -R "$TMPDIR/site" "$out"
       '';
 
   checkConfigAtlasRegistry =

@@ -22,7 +22,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          nix build --accept-flake-config --no-link \
+          # Keep Playwright from competing with Rust release and type-export builds.
+          nix build --accept-flake-config --no-link --max-jobs 1 \
             .#checks.x86_64-linux.agents-viewer-rust \
             .#checks.x86_64-linux.agents-viewer-web \
             .#checks.x86_64-linux.agents-viewer-bindings \
