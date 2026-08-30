@@ -43,7 +43,7 @@ const fixturePath = resolve(here, "../../tests/fixtures/rollouts/v0_120.jsonl");
 const viewerRoot = resolve(here, "../..");
 const repositoryRoot = resolve(viewerRoot, "../..");
 const execFileAsync = promisify(execFile);
-const serverReadyTimeoutMs = 20_000;
+const serverReadyTimeoutMs = 60_000;
 
 type ServiceStatus = {
   phase?: string;
