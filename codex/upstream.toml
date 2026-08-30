@@ -1,7 +1,7 @@
 url = "https://github.com/openai/codex"
-ref = "rust-v0.148.0"
-revision = "3ba0f711642a888aec92a611a3f3b2211157ff89"
-worktree = ".work/codex/rust-v0.148.0/src"
+ref = "rust-v0.151.0"
+revision = "78c290807ce710180111df227df3b7a4fe845452"
+worktree = ".work/codex/rust-v0.151.0/src"
 generate_commands = [
   ["bash", "codex-rs/config/scripts/generate-proto.sh"],
   ["just", "write-config-schema"],

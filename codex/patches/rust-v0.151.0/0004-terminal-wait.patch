@@ -1,8 +1,8 @@
 diff --git a/codex-rs/config/src/lib.rs b/codex-rs/config/src/lib.rs
-index bbe0e17accfc359461dcfd848c5a691c08d6ee08..89babe8ce95a5cf26a3b8d351ab7403937d42039 100644
+index fc5e05a687dc33ef54f52b6a2b78bf74178dcac5..f0ebf2c0a04adb240c7a6d307e045983edb5e069 100644
 --- a/codex-rs/config/src/lib.rs
 +++ b/codex-rs/config/src/lib.rs
-@@ -28,6 +28,7 @@ mod shell_environment_policy;
+@@ -32,6 +32,7 @@ mod shell_environment_policy;
  mod skills_config;
  mod state;
  mod strict_config;
@@ -363,18 +363,18 @@ index 0000000000000000000000000000000000000000..0e01a0db830528b82c35ae69810a7b97
 +    }
 +}
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index 2361fea0cdc4fb581b091ef9ef60fed9a513ffb9..697e5e3763b61801c0893ae5057ff74aee4350eb 100644
+index 96da2f76f87d4c3164e4b0fe8f1ed718a294acca..b10b95aa83220fc8fb4b63be424fc659490e29ce 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
-@@ -33,6 +33,7 @@ use codex_config::loader::load_config_layers_state;
- use codex_config::loader::project_trust_key;
+@@ -36,6 +36,7 @@ use codex_config::loader::project_trust_key;
+ use codex_config::permissions_toml::PermissionProfileToml;
  use codex_config::permissions_toml::PermissionsToml;
  use codex_config::sandbox_mode_requirement_for_permission_profile;
 +use codex_config::terminal_wait::TerminalWaitToml;
  use codex_config::types::ApprovalsReviewer;
  use codex_config::types::AuthCredentialsStoreMode;
  use codex_config::types::AuthKeyringBackendKind;
-@@ -987,6 +988,9 @@ pub struct Config {
+@@ -1032,6 +1033,9 @@ pub struct Config {
      /// Default: `300000` (5 minutes).
      pub background_terminal_max_timeout: u64,
  
@@ -384,19 +384,19 @@ index 2361fea0cdc4fb581b091ef9ef60fed9a513ffb9..697e5e3763b61801c0893ae5057ff74a
      /// Compatibility-only settings retained for legacy `ghost_snapshot`
      /// config loading.
      pub ghost_snapshot: GhostSnapshotConfig,
-@@ -4124,6 +4128,7 @@ impl Config {
+@@ -4277,6 +4281,7 @@ impl Config {
+             tool_registry,
              code_mode,
-             use_experimental_unified_exec_tool,
              background_terminal_max_timeout,
 +            terminal_wait: cfg.terminal_wait,
              ghost_snapshot,
              multi_agent_v2,
              token_budget,
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index dfd6ca1bb9a94c7823c469dc56714ff861da5dde..f204637229c873d07fec2d1988cf7b6da3a508b1 100644
+index c5082fda9144bbbe481b1cb7bdbec0d465dff0f5..4f40f2cf65c64a67734d396303570931ebbbc726 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
-@@ -1225,8 +1225,9 @@ impl Session {
+@@ -1355,8 +1355,9 @@ impl Session {
                  // published after SessionConfigured so MCP events follow it.
                  mcp_runtime,
                  mcp_handler_cache: Default::default(),
@@ -408,10 +408,10 @@ index dfd6ca1bb9a94c7823c469dc56714ff861da5dde..f204637229c873d07fec2d1988cf7b6d
                  elicitations: crate::elicitation::ElicitationService::new(),
                  shell_zsh_path: config.zsh_path.clone(),
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 9a90659060b5ba942e3e3c00acad0428686c2203..2b98e3c06fd5be32d3905b5483aa5683db7a808f 100644
+index b334571814925f5875525f7115398a7454fbb60f..f51d1d6d21e9dcdd4bfa5aab0cb93d8358769559 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -5856,8 +5856,9 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+@@ -6278,8 +6278,9 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
      let services = SessionServices {
          mcp_runtime,
          mcp_handler_cache: Default::default(),
@@ -422,7 +422,7 @@ index 9a90659060b5ba942e3e3c00acad0428686c2203..2b98e3c06fd5be32d3905b5483aa5683
          ),
          elicitations: crate::elicitation::ElicitationService::new(),
          shell_zsh_path: None,
-@@ -8053,8 +8054,9 @@ where
+@@ -8557,8 +8558,9 @@ where
      let services = SessionServices {
          mcp_runtime,
          mcp_handler_cache: Default::default(),
@@ -434,18 +434,18 @@ index 9a90659060b5ba942e3e3c00acad0428686c2203..2b98e3c06fd5be32d3905b5483aa5683
          elicitations: crate::elicitation::ElicitationService::new(),
          shell_zsh_path: None,
 diff --git a/codex-rs/core/src/tools/context.rs b/codex-rs/core/src/tools/context.rs
-index 70d77c429818494c12157b4392d9d345c166fb3e..d560bb803781d2054eebb37a41d26ddb142ca96e 100644
+index 378f94705827ad0b07c4d0cad76ee533b45b6409..6cad32a4cb633e08908b4c4dfe3b3c722ccecefa 100644
 --- a/codex-rs/core/src/tools/context.rs
 +++ b/codex-rs/core/src/tools/context.rs
-@@ -7,6 +7,7 @@ use crate::tools::TELEMETRY_PREVIEW_MAX_BYTES;
- use crate::tools::TELEMETRY_PREVIEW_MAX_LINES;
- use crate::tools::TELEMETRY_PREVIEW_TRUNCATION_NOTICE;
+@@ -4,6 +4,7 @@ use crate::session::session::Session;
+ use crate::session::step_context::StepContext;
+ use crate::session::turn_context::TurnContext;
  use crate::turn_diff_tracker::TurnDiffTracker;
 +use crate::unified_exec::TerminalWaitToolState;
  use crate::unified_exec::format_output_omission_marker;
  use crate::unified_exec::resolve_max_tokens;
- use codex_protocol::mcp::CallToolResult;
-@@ -325,6 +326,14 @@ pub struct ExecCommandToolOutput {
+ use codex_protocol::ResponseItemId;
+@@ -352,6 +353,14 @@ pub struct ExecCommandToolOutput {
      /// Bytes omitted by the output collection cap before model-facing truncation.
      pub output_omitted_bytes: Option<NonZeroUsize>,
      pub hook_command: Option<String>,
@@ -460,7 +460,7 @@ index 70d77c429818494c12157b4392d9d345c166fb3e..d560bb803781d2054eebb37a41d26ddb
  }
  
  impl ToolOutput for ExecCommandToolOutput {
-@@ -383,15 +392,41 @@ impl ToolOutput for ExecCommandToolOutput {
+@@ -418,15 +427,41 @@ impl ToolOutput for ExecCommandToolOutput {
              session_id: Option<i32>,
              #[serde(skip_serializing_if = "Option::is_none")]
              original_token_count: Option<usize>,
@@ -502,7 +502,7 @@ index 70d77c429818494c12157b4392d9d345c166fb3e..d560bb803781d2054eebb37a41d26ddb
              output: match self.max_output_tokens {
                  Some(max_tokens) => self.truncated_output(max_tokens),
                  None => String::from_utf8_lossy(&self.raw_output).to_string(),
-@@ -461,6 +496,24 @@ impl ExecCommandToolOutput {
+@@ -504,6 +539,24 @@ impl ExecCommandToolOutput {
              sections.push(format!("Original token count: {original_token_count}"));
          }
  
@@ -525,21 +525,29 @@ index 70d77c429818494c12157b4392d9d345c166fb3e..d560bb803781d2054eebb37a41d26ddb
 +        }
 +
          sections.push("Output:".to_string());
-         sections.push(self.truncated_output(self.model_output_max_tokens()));
- 
+         sections.join("\n")
+     }
 diff --git a/codex-rs/core/src/tools/context_tests.rs b/codex-rs/core/src/tools/context_tests.rs
-index 511705ffe6948de9cab43079892a7920b6de7be2..002292cd5fc4616eb74822b6b5fd2aacbf29eda3 100644
+index 3011b2ef511a62171d9c6726be4a0ef7eea7b9d0..3b4ff91e9490ae3588122c1245cdbf1abac2c1ef 100644
 --- a/codex-rs/core/src/tools/context_tests.rs
 +++ b/codex-rs/core/src/tools/context_tests.rs
-@@ -440,6 +440,7 @@ fn exec_command_tool_output_formats_truncated_response() {
+@@ -409,6 +409,7 @@ fn exec_command_tool_output_formats_truncated_response() {
          original_token_count: Some(10),
          output_omitted_bytes: None,
          hook_command: None,
 +        terminal_wait: None,
-     }
-     .to_response_item("call-42", &payload);
+     };
+     assert_eq!(
+         output.log_output(),
+@@ -466,6 +467,7 @@ fn exec_command_tool_output_reserves_metadata_budget_and_preserves_policy_units(
+             original_token_count: Some(123),
+             output_omitted_bytes: None,
+             hook_command: None,
++            terminal_wait: None,
+         }
+         .to_response_item("call-42", &payload);
  
-@@ -467,6 +468,87 @@ fn exec_command_tool_output_formats_truncated_response() {
+@@ -486,6 +488,87 @@ fn exec_command_tool_output_reserves_metadata_budget_and_preserves_policy_units(
      }
  }
  
@@ -627,19 +635,19 @@ index 511705ffe6948de9cab43079892a7920b6de7be2..002292cd5fc4616eb74822b6b5fd2aac
  #[test]
  fn exec_command_tool_output_preserves_omission_metadata_when_truncated() {
      let payload = ToolPayload::Function {
-@@ -491,6 +573,7 @@ fn exec_command_tool_output_preserves_omission_metadata_when_truncated() {
+@@ -510,6 +593,7 @@ fn exec_command_tool_output_preserves_omission_metadata_when_truncated() {
          original_token_count: Some(42_000),
          output_omitted_bytes: NonZeroUsize::new(/*n*/ 123_456),
          hook_command: None,
 +        terminal_wait: None,
-     }
-     .to_response_item("call-omitted", &payload);
- 
+     };
+     let expected_header = "Chunk ID: abc123\nWall time: 1.2500 seconds\nProcess exited with code 0\nOriginal token count: 42000\nOutput:\n";
+     assert_eq!(
 diff --git a/codex-rs/core/src/tools/handlers/mod.rs b/codex-rs/core/src/tools/handlers/mod.rs
-index 69af0c8152a338569126c91565ffbfeec1a034aa..43bc12dd62a1131e5640d4ff8b3223f5261f7a86 100644
+index 1217131be27d9b7364743bfd691bfe8a0fe98fc4..6f16f3d5464fd1189649aba57b8121a11cf8d70a 100644
 --- a/codex-rs/core/src/tools/handlers/mod.rs
 +++ b/codex-rs/core/src/tools/handlers/mod.rs
-@@ -75,6 +75,7 @@ pub use test_sync::TestSyncHandler;
+@@ -74,6 +74,7 @@ pub use test_sync::TestSyncHandler;
  pub(crate) use tool_search::ToolSearchHandlerCache;
  pub use unified_exec::ExecCommandHandler;
  pub(crate) use unified_exec::ExecCommandHandlerOptions;
@@ -647,27 +655,8 @@ index 69af0c8152a338569126c91565ffbfeec1a034aa..43bc12dd62a1131e5640d4ff8b3223f5
  pub use unified_exec::WriteStdinHandler;
  pub use view_image::ViewImageHandler;
  pub(crate) use wait_for_environment::WaitForEnvironmentHandler;
-diff --git a/codex-rs/core/src/tools/handlers/shell/shell_command.rs b/codex-rs/core/src/tools/handlers/shell/shell_command.rs
-index 04d3011c3e6aa0ed1ddfa74b82721213bd123a97..e812077e8f6595ae13cf4819ca69aabc8ced84e7 100644
---- a/codex-rs/core/src/tools/handlers/shell/shell_command.rs
-+++ b/codex-rs/core/src/tools/handlers/shell/shell_command.rs
-@@ -194,6 +194,14 @@ impl ShellCommandHandler {
-             )));
-         };
- 
-+        session
-+            .services
-+            .unified_exec_manager
-+            .ensure_terminal_available()
-+            .map_err(|err| {
-+                FunctionCallError::RespondToModel(format!("shell_command failed: {err}"))
-+            })?;
-+
-         let Some(turn_environment) = step_context.environments.primary().cloned() else {
-             return Err(FunctionCallError::RespondToModel(
-                 "shell is unavailable in this session".to_string(),
 diff --git a/codex-rs/core/src/tools/handlers/shell_spec.rs b/codex-rs/core/src/tools/handlers/shell_spec.rs
-index a07b741639881d26b69add9a4473c2e6e4cb9968..ac48802a3de9034e8a8b670a6fae50e347d1ac78 100644
+index ff207e393eb1380cb85597dcd0463e6dfc6f0788..99d75580e4fdf246d1225a05b133f3ce26f63a94 100644
 --- a/codex-rs/core/src/tools/handlers/shell_spec.rs
 +++ b/codex-rs/core/src/tools/handlers/shell_spec.rs
 @@ -154,6 +154,32 @@ pub fn create_write_stdin_tool() -> ToolSpec {
@@ -700,10 +689,10 @@ index a07b741639881d26b69add9a4473c2e6e4cb9968..ac48802a3de9034e8a8b670a6fae50e3
 +    })
 +}
 +
- pub fn create_shell_command_tool(options: CommandToolOptions) -> ToolSpec {
-     let mut properties = BTreeMap::from([
+ pub fn create_request_permissions_tool(description: String) -> ToolSpec {
+     let properties = BTreeMap::from([
          (
-@@ -285,6 +311,23 @@ fn unified_exec_output_schema() -> Value {
+@@ -215,6 +241,23 @@ fn unified_exec_output_schema() -> Value {
                  "type": "number",
                  "description": "Approximate token count before output truncation."
              },
@@ -728,7 +717,7 @@ index a07b741639881d26b69add9a4473c2e6e4cb9968..ac48802a3de9034e8a8b670a6fae50e3
                  "type": "string",
                  "description": "Command output text, possibly truncated."
 diff --git a/codex-rs/core/src/tools/handlers/shell_spec_tests.rs b/codex-rs/core/src/tools/handlers/shell_spec_tests.rs
-index 044a6112f78597674fa1a1f67a6d4ac40e666113..32fc34f517f22f0e756bfabd04be354731bb5819 100644
+index 9aeb67f53634838a457bebf869b5393109c0420c..8cf90fcf9d8b67036438ad4f45824f39b89f6b1c 100644
 --- a/codex-rs/core/src/tools/handlers/shell_spec_tests.rs
 +++ b/codex-rs/core/src/tools/handlers/shell_spec_tests.rs
 @@ -163,6 +163,34 @@ fn write_stdin_tool_matches_expected_spec() {
@@ -767,7 +756,7 @@ index 044a6112f78597674fa1a1f67a6d4ac40e666113..32fc34f517f22f0e756bfabd04be3547
  fn request_permissions_tool_includes_full_permission_schema() {
      let tool =
 diff --git a/codex-rs/core/src/tools/handlers/unified_exec.rs b/codex-rs/core/src/tools/handlers/unified_exec.rs
-index f6a5bfa5423af952bca4b1f8788fd25760882ad7..5c555a16394756f065b286cdafa7250f498a3d64 100644
+index 9f9f8a8cf1ea9fbd01f01813e9dcf1ccca6ab1e1..2e57ef10c003738736d8c38fa06d94a8a3dc419d 100644
 --- a/codex-rs/core/src/tools/handlers/unified_exec.rs
 +++ b/codex-rs/core/src/tools/handlers/unified_exec.rs
 @@ -18,10 +18,12 @@ use std::sync::Arc;
@@ -784,10 +773,10 @@ index f6a5bfa5423af952bca4b1f8788fd25760882ad7..5c555a16394756f065b286cdafa7250f
  
  #[derive(Debug, Deserialize)]
 diff --git a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
-index f7a24e86d4e9373c63e65cd9c1534d41cc31a5f1..e6376d6db040946ae7dade0bb71ce3f051014ba9 100644
+index f27542a808a275774819bf9bd7a6c939558030eb..1def67af66748a9e84a63a1659051067cecc29af 100644
 --- a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
 +++ b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
-@@ -4,6 +4,7 @@ use std::sync::Arc;
+@@ -7,6 +7,7 @@ use crate::exec_policy::prompt_is_rejected_by_policy;
  use crate::function_tool::FunctionCallError;
  use crate::maybe_emit_implicit_skill_invocation;
  use crate::tools::context::ExecCommandToolOutput;
@@ -795,7 +784,7 @@ index f7a24e86d4e9373c63e65cd9c1534d41cc31a5f1..e6376d6db040946ae7dade0bb71ce3f0
  use crate::tools::context::ToolInvocation;
  use crate::tools::context::ToolPayload;
  use crate::tools::context::boxed_tool_output;
-@@ -115,6 +116,7 @@ impl ExecCommandHandler {
+@@ -145,6 +146,7 @@ impl ExecCommandHandler {
              tracker,
              call_id,
              payload,
@@ -803,7 +792,7 @@ index f7a24e86d4e9373c63e65cd9c1534d41cc31a5f1..e6376d6db040946ae7dade0bb71ce3f0
              ..
          } = invocation;
  
-@@ -128,8 +130,16 @@ impl ExecCommandHandler {
+@@ -158,12 +160,20 @@ impl ExecCommandHandler {
          };
  
          let manager: &UnifiedExecProcessManager = &session.services.unified_exec_manager;
@@ -814,14 +803,18 @@ index f7a24e86d4e9373c63e65cd9c1534d41cc31a5f1..e6376d6db040946ae7dade0bb71ce3f0
 +            } => (Some(cell_id), Some(runtime_tool_call_id)),
 +            ToolCallSource::Direct | ToolCallSource::DirectPlaintextMessage => (None, None),
 +        };
-         let context =
--            UnifiedExecContext::new(session.clone(), step_context.clone(), call_id.clone());
-+            UnifiedExecContext::new(session.clone(), step_context.clone(), call_id.clone())
-+                .with_code_mode_source(code_mode_cell_id, code_mode_tool_call_id);
+         let context = UnifiedExecContext::new(
+             session.clone(),
+             step_context.clone(),
+             cancellation_token,
+             call_id.clone(),
+-        );
++        )
++        .with_code_mode_source(code_mode_cell_id, code_mode_tool_call_id);
          let environment_args: ExecCommandEnvironmentArgs = parse_arguments(&arguments)?;
          let Some(turn_environment) = resolve_tool_environment(
              &step_context.environments,
-@@ -342,6 +352,7 @@ impl ExecCommandHandler {
+@@ -384,6 +394,7 @@ impl ExecCommandHandler {
                  original_token_count: None,
                  output_omitted_bytes: None,
                  hook_command: None,
@@ -829,7 +822,7 @@ index f7a24e86d4e9373c63e65cd9c1534d41cc31a5f1..e6376d6db040946ae7dade0bb71ce3f0
              }));
          }
  
-@@ -396,6 +407,7 @@ impl ExecCommandHandler {
+@@ -440,6 +451,7 @@ impl ExecCommandHandler {
                      original_token_count: Some(original_token_count),
                      output_omitted_bytes,
                      hook_command: Some(hook_command),
@@ -839,10 +832,10 @@ index f7a24e86d4e9373c63e65cd9c1534d41cc31a5f1..e6376d6db040946ae7dade0bb71ce3f0
              Err(err) => Err(FunctionCallError::RespondToModel(format!(
 diff --git a/codex-rs/core/src/tools/handlers/unified_exec/terminal_wait_control.rs b/codex-rs/core/src/tools/handlers/unified_exec/terminal_wait_control.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..89be8018880b0ebe9e53311b2b45470c6293ed02
+index 0000000000000000000000000000000000000000..a59dd977da874fbcbad8ba00df334fe4ef0ca3c7
 --- /dev/null
 +++ b/codex-rs/core/src/tools/handlers/unified_exec/terminal_wait_control.rs
-@@ -0,0 +1,109 @@
+@@ -0,0 +1,120 @@
 +use crate::function_tool::FunctionCallError;
 +use crate::tools::context::ToolCallSource;
 +use crate::tools::context::ToolInvocation;
@@ -854,6 +847,7 @@ index 0000000000000000000000000000000000000000..89be8018880b0ebe9e53311b2b45470c
 +use crate::tools::registry::PreToolUsePayload;
 +use crate::tools::registry::ToolExecutor;
 +use crate::unified_exec::TerminalWaitControlRequest;
++use crate::unified_exec::UnifiedExecContext;
 +use crate::unified_exec::WriteStdinInteractionEvent;
 +use codex_tools::ToolName;
 +use codex_tools::ToolSpec;
@@ -883,7 +877,10 @@ index 0000000000000000000000000000000000000000..89be8018880b0ebe9e53311b2b45470c
 +        false
 +    }
 +
-+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
++    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
++    where
++        ToolInvocation: 'a,
++    {
 +        Box::pin(self.handle_call(invocation))
 +    }
 +}
@@ -896,6 +893,9 @@ index 0000000000000000000000000000000000000000..89be8018880b0ebe9e53311b2b45470c
 +        let ToolInvocation {
 +            session,
 +            turn,
++            step_context,
++            cancellation_token,
++            call_id,
 +            payload,
 +            source,
 +            ..
@@ -914,18 +914,22 @@ index 0000000000000000000000000000000000000000..89be8018880b0ebe9e53311b2b45470c
 +            } => (Some(cell_id), Some(runtime_tool_call_id)),
 +            ToolCallSource::Direct | ToolCallSource::DirectPlaintextMessage => (None, None),
 +        };
++        let context =
++            UnifiedExecContext::new(session.clone(), step_context, cancellation_token, call_id)
++                .with_code_mode_source(code_mode_cell_id, code_mode_tool_call_id);
 +        let manager = &session.services.unified_exec_manager;
 +        let response = manager
-+            .terminal_wait_control(TerminalWaitControlRequest {
-+                action: args.action,
-+                truncation_policy: turn.model_info.truncation_policy.into(),
-+                interaction_event: Some(WriteStdinInteractionEvent {
-+                    session: &session,
-+                    turn: &turn,
-+                }),
-+                code_mode_cell_id,
-+                code_mode_tool_call_id,
-+            })
++            .terminal_wait_control(
++                &context,
++                TerminalWaitControlRequest {
++                    action: args.action,
++                    truncation_policy: turn.model_info().truncation_policy.into(),
++                    interaction_event: Some(WriteStdinInteractionEvent {
++                        session: &session,
++                        turn: &turn,
++                    }),
++                },
++            )
 +            .await
 +            .map_err(|err| {
 +                FunctionCallError::RespondToModel(format!("terminal_wait_control failed: {err}"))
@@ -953,7 +957,7 @@ index 0000000000000000000000000000000000000000..89be8018880b0ebe9e53311b2b45470c
 +    }
 +}
 diff --git a/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs b/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs
-index 7f1709b0450f63d662289be04270fcba970cfac6..a6c6d8956606ebe51b77243c9405c02ebcaf7a9a 100644
+index 657da466741eaad82ea3febbcc5a7fd124a967fd..8646b76cbccf7119bfef51a9e4e00cd3d67c906c 100644
 --- a/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs
 +++ b/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs
 @@ -1,4 +1,5 @@
@@ -962,15 +966,15 @@ index 7f1709b0450f63d662289be04270fcba970cfac6..a6c6d8956606ebe51b77243c9405c02e
  use crate::tools::context::ToolInvocation;
  use crate::tools::context::ToolPayload;
  use crate::tools::context::boxed_tool_output;
-@@ -57,6 +58,7 @@ impl WriteStdinHandler {
-             session,
-             turn,
+@@ -66,6 +67,7 @@ impl WriteStdinHandler {
+             cancellation_token,
+             call_id,
              payload,
 +            source,
              ..
          } = invocation;
  
-@@ -70,6 +72,13 @@ impl WriteStdinHandler {
+@@ -79,8 +81,16 @@ impl WriteStdinHandler {
          };
  
          let args: WriteStdinArgs = parse_arguments(&arguments)?;
@@ -981,23 +985,18 @@ index 7f1709b0450f63d662289be04270fcba970cfac6..a6c6d8956606ebe51b77243c9405c02e
 +            } => (Some(cell_id), Some(runtime_tool_call_id)),
 +            ToolCallSource::Direct | ToolCallSource::DirectPlaintextMessage => (None, None),
 +        };
+         let context =
+-            UnifiedExecContext::new(session.clone(), step_context, cancellation_token, call_id);
++            UnifiedExecContext::new(session.clone(), step_context, cancellation_token, call_id)
++                .with_code_mode_source(code_mode_cell_id, code_mode_tool_call_id);
          let response = session
              .services
              .unified_exec_manager
-@@ -83,6 +92,8 @@ impl WriteStdinHandler {
-                     session: &session,
-                     turn: &turn,
-                 }),
-+                code_mode_cell_id,
-+                code_mode_tool_call_id,
-             })
-             .await
-             .map_err(|err| {
 diff --git a/codex-rs/core/src/tools/handlers/unified_exec_tests.rs b/codex-rs/core/src/tools/handlers/unified_exec_tests.rs
-index eee95fd43a88054990ca37e4f941286eb93989d5..7470254a90214d1ff98f1c6b4a4028dcc6d440de 100644
+index 775d78cc1f77093f27a67b683db63f5a9833c452..521ea691dd6870d50ed1718d6d501d08c85a5de6 100644
 --- a/codex-rs/core/src/tools/handlers/unified_exec_tests.rs
 +++ b/codex-rs/core/src/tools/handlers/unified_exec_tests.rs
-@@ -14,6 +14,7 @@ use crate::function_tool::FunctionCallError;
+@@ -15,6 +15,7 @@ use crate::function_tool::FunctionCallError;
  use crate::session::step_context::StepContext;
  use crate::session::tests::make_session_and_context;
  use crate::tools::context::ExecCommandToolOutput;
@@ -1005,7 +1004,7 @@ index eee95fd43a88054990ca37e4f941286eb93989d5..7470254a90214d1ff98f1c6b4a4028dc
  use crate::tools::context::ToolCallSource;
  use crate::tools::context::ToolInvocation;
  use crate::tools::context::ToolPayload;
-@@ -346,6 +347,7 @@ async fn exec_command_post_tool_use_payload_uses_output_for_noninteractive_one_s
+@@ -350,6 +351,7 @@ async fn exec_command_post_tool_use_payload_uses_output_for_noninteractive_one_s
          original_token_count: None,
          output_omitted_bytes: None,
          hook_command: Some("echo three".to_string()),
@@ -1013,7 +1012,7 @@ index eee95fd43a88054990ca37e4f941286eb93989d5..7470254a90214d1ff98f1c6b4a4028dc
      };
      let invocation = invocation_for_payload("exec_command", "call-43", payload).await;
      let handler = ExecCommandHandler::default();
-@@ -377,6 +379,7 @@ async fn exec_command_post_tool_use_payload_uses_output_for_interactive_completi
+@@ -381,6 +383,7 @@ async fn exec_command_post_tool_use_payload_uses_output_for_interactive_completi
          original_token_count: None,
          output_omitted_bytes: None,
          hook_command: Some("echo three".to_string()),
@@ -1021,7 +1020,7 @@ index eee95fd43a88054990ca37e4f941286eb93989d5..7470254a90214d1ff98f1c6b4a4028dc
      };
      let invocation = invocation_for_payload("exec_command", "call-44", payload).await;
      let handler = ExecCommandHandler::default();
-@@ -409,6 +412,7 @@ async fn exec_command_post_tool_use_payload_skips_running_sessions() {
+@@ -413,6 +416,7 @@ async fn exec_command_post_tool_use_payload_skips_running_sessions() {
          original_token_count: None,
          output_omitted_bytes: None,
          hook_command: Some("echo three".to_string()),
@@ -1029,7 +1028,7 @@ index eee95fd43a88054990ca37e4f941286eb93989d5..7470254a90214d1ff98f1c6b4a4028dc
      };
      let invocation = invocation_for_payload("exec_command", "call-45", payload).await;
      let handler = ExecCommandHandler::default();
-@@ -436,6 +440,7 @@ async fn write_stdin_post_tool_use_payload_uses_original_exec_call_id_and_comman
+@@ -440,6 +444,7 @@ async fn write_stdin_post_tool_use_payload_uses_original_exec_call_id_and_comman
          original_token_count: None,
          output_omitted_bytes: None,
          hook_command: Some("sleep 1; echo finished".to_string()),
@@ -1037,7 +1036,7 @@ index eee95fd43a88054990ca37e4f941286eb93989d5..7470254a90214d1ff98f1c6b4a4028dc
      };
      let invocation = invocation_for_payload("write_stdin", "write-stdin-call", payload).await;
      let handler = WriteStdinHandler;
-@@ -451,6 +456,45 @@ async fn write_stdin_post_tool_use_payload_uses_original_exec_call_id_and_comman
+@@ -455,6 +460,45 @@ async fn write_stdin_post_tool_use_payload_uses_original_exec_call_id_and_comman
      );
  }
  
@@ -1083,7 +1082,7 @@ index eee95fd43a88054990ca37e4f941286eb93989d5..7470254a90214d1ff98f1c6b4a4028dc
  #[tokio::test]
  async fn write_stdin_post_tool_use_payload_keeps_parallel_session_metadata_separate() {
      let payload = ToolPayload::Function {
-@@ -468,6 +512,7 @@ async fn write_stdin_post_tool_use_payload_keeps_parallel_session_metadata_separ
+@@ -472,6 +516,7 @@ async fn write_stdin_post_tool_use_payload_keeps_parallel_session_metadata_separ
          original_token_count: None,
          output_omitted_bytes: None,
          hook_command: Some("sleep 2; echo alpha".to_string()),
@@ -1091,7 +1090,7 @@ index eee95fd43a88054990ca37e4f941286eb93989d5..7470254a90214d1ff98f1c6b4a4028dc
      };
      let output_b = ExecCommandToolOutput {
          event_call_id: "exec-call-b".to_string(),
-@@ -481,6 +526,7 @@ async fn write_stdin_post_tool_use_payload_keeps_parallel_session_metadata_separ
+@@ -485,6 +530,7 @@ async fn write_stdin_post_tool_use_payload_keeps_parallel_session_metadata_separ
          original_token_count: None,
          output_omitted_bytes: None,
          hook_command: Some("sleep 1; echo beta".to_string()),
@@ -1100,30 +1099,30 @@ index eee95fd43a88054990ca37e4f941286eb93989d5..7470254a90214d1ff98f1c6b4a4028dc
      let invocation_b = invocation_for_payload("write_stdin", "write-call-b", payload.clone()).await;
      let invocation_a = invocation_for_payload("write_stdin", "write-call-a", payload).await;
 diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
-index 3da01c002302594b4ee27778fa87b4bd9b9e338e..03b5c04e1c6aecd1195fbb6889216d4fc92185f8 100644
+index 15d7d4c2cdb341a82bc6a9ebb104c8892b218e4c..5fb9646aad1c9883bf25176962da49aaaf57da26 100644
 --- a/codex-rs/core/src/tools/spec_plan.rs
 +++ b/codex-rs/core/src/tools/spec_plan.rs
-@@ -27,6 +27,7 @@ use crate::tools::handlers::RequestUserInputHandler;
- use crate::tools::handlers::ShellCommandHandler;
- use crate::tools::handlers::ShellCommandHandlerOptions;
+@@ -26,6 +26,7 @@ use crate::tools::handlers::RequestPluginInstallHandler;
+ use crate::tools::handlers::RequestUserInputHandler;
+ use crate::tools::handlers::SendUserMessageAsyncHandler;
  use crate::tools::handlers::SleepHandler;
 +use crate::tools::handlers::TerminalWaitControlHandler;
  use crate::tools::handlers::TestSyncHandler;
  use crate::tools::handlers::ToolSearchHandlerCache;
  use crate::tools::handlers::ViewImageHandler;
-@@ -914,6 +915,9 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
-                 ),
-             }));
-             registry.add(WriteStdinHandler);
-+            if terminal_wait_control_enabled(turn_context) {
-+                registry.add(TerminalWaitControlHandler);
-+            }
+@@ -1010,6 +1011,9 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
+                     ),
+                 }));
+                 registry.add(WriteStdinHandler);
++                if terminal_wait_control_enabled(turn_context) {
++                    registry.add(TerminalWaitControlHandler);
++                }
+             }
              if turn_context.config.features.enabled(Feature::ViewImage) {
                  registry.add(ViewImageHandler::new(ViewImageToolOptions {
-                     can_request_original_image_detail: can_request_original_image_detail(
-@@ -1007,6 +1011,17 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
-             }
-         }
+@@ -1087,6 +1091,17 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
+         // resumable process or write_stdin authority prohibited by policy.
+         registry.add(ExecCommandHandler::one_shot(options));
      }
 +    if terminal_wait_control_enabled(turn_context) {
 +        registry.add(TerminalWaitControlHandler);
@@ -1140,10 +1139,10 @@ index 3da01c002302594b4ee27778fa87b4bd9b9e338e..03b5c04e1c6aecd1195fbb6889216d4f
  
  fn unified_exec_should_include_shell_parameter(
 diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
-index 87ab8df556acd413c7621caf22f014a4a4095b03..e0790c05741326137da2bee095cefa02b23b3ae3 100644
+index 76cda520ad4ab5fa1f43336ee48e119962a11c65..9a3e6d61487357dc3112f1b4f03489af4b3626ca 100644
 --- a/codex-rs/core/src/tools/spec_plan_tests.rs
 +++ b/codex-rs/core/src/tools/spec_plan_tests.rs
-@@ -1,6 +1,8 @@
+@@ -2,6 +2,8 @@ use crate::session::tests::update_turn_settings_for_test;
  use std::collections::BTreeMap;
  use std::sync::Arc;
  
@@ -1152,7 +1151,7 @@ index 87ab8df556acd413c7621caf22f014a4a4095b03..e0790c05741326137da2bee095cefa02
  use codex_features::Feature;
  use codex_login::AuthManager;
  use codex_login::CodexAuth;
-@@ -275,6 +277,21 @@ fn update_config(turn: &mut TurnContext, update: impl FnOnce(&mut crate::config:
+@@ -301,6 +303,21 @@ fn update_config(turn: &mut TurnContext, update: impl FnOnce(&mut crate::config:
      turn.config = Arc::new(config);
  }
  
@@ -1174,7 +1173,7 @@ index 87ab8df556acd413c7621caf22f014a4a4095b03..e0790c05741326137da2bee095cefa02
  fn set_web_search_mode(turn: &mut TurnContext, mode: WebSearchMode) {
      update_config(turn, |config| {
          config
-@@ -811,6 +828,60 @@ async fn dynamic_tools_cannot_reclaim_the_reserved_shell_command_name() {
+@@ -1031,6 +1048,66 @@ async fn dynamic_tools_cannot_reclaim_the_reserved_exec_command_name() {
      );
  }
  
@@ -1191,7 +1190,9 @@ index 87ab8df556acd413c7621caf22f014a4a4095b03..e0790c05741326137da2bee095cefa02
 +    let enabled = probe(|turn| {
 +        set_features(turn, &[Feature::ShellTool, Feature::UnifiedExec]);
 +        set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
-+        Arc::make_mut(&mut turn.model_info).shell_type = ConfigShellToolType::ShellCommand;
++        update_turn_settings_for_test(turn, |settings| {
++            Arc::make_mut(&mut settings.model_info).shell_type = ConfigShellToolType::UnifiedExec;
++        });
 +        set_terminal_wait(turn, /*enabled*/ true);
 +    })
 +    .await;
@@ -1200,15 +1201,17 @@ index 87ab8df556acd413c7621caf22f014a4a4095b03..e0790c05741326137da2bee095cefa02
 +}
 +
 +#[tokio::test]
-+async fn terminal_wait_control_remains_available_with_legacy_shell_and_code_mode() {
-+    let legacy = probe(|turn| {
++async fn terminal_wait_control_remains_available_with_shell_and_code_mode() {
++    let shell = probe(|turn| {
 +        set_feature(turn, Feature::ShellTool, /*enabled*/ true);
 +        set_feature(turn, Feature::UnifiedExec, /*enabled*/ false);
-+        Arc::make_mut(&mut turn.model_info).shell_type = ConfigShellToolType::ShellCommand;
++        update_turn_settings_for_test(turn, |settings| {
++            Arc::make_mut(&mut settings.model_info).shell_type = ConfigShellToolType::UnifiedExec;
++        });
 +        set_terminal_wait(turn, /*enabled*/ true);
 +    })
 +    .await;
-+    legacy.assert_visible_contains(&["shell_command", "terminal_wait_control"]);
++    shell.assert_visible_contains(&["exec_command", "write_stdin", "terminal_wait_control"]);
 +
 +    let code_mode = probe(|turn| {
 +        set_features(
@@ -1221,7 +1224,9 @@ index 87ab8df556acd413c7621caf22f014a4a4095b03..e0790c05741326137da2bee095cefa02
 +            ],
 +        );
 +        set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
-+        Arc::make_mut(&mut turn.model_info).shell_type = ConfigShellToolType::ShellCommand;
++        update_turn_settings_for_test(turn, |settings| {
++            Arc::make_mut(&mut settings.model_info).shell_type = ConfigShellToolType::UnifiedExec;
++        });
 +        set_terminal_wait(turn, /*enabled*/ true);
 +    })
 +    .await;
@@ -1233,13 +1238,13 @@ index 87ab8df556acd413c7621caf22f014a4a4095b03..e0790c05741326137da2bee095cefa02
 +}
 +
  #[tokio::test]
- async fn shell_zsh_fork_stays_standalone_until_unified_exec_composition_is_enabled() {
-     let standalone = probe(|turn| {
+ async fn shell_zsh_fork_keeps_unified_exec_available() {
+     let without_composition = probe(|turn| {
 diff --git a/codex-rs/core/src/unified_exec/errors.rs b/codex-rs/core/src/unified_exec/errors.rs
-index dd401046ae67ca756ef663cae744b5579a53078d..ac350f9868f39f87a3c65710c063750507c42594 100644
+index 8fa2ef7857bbe6c9870c59cc47dbe1540a5ba7a8..1cf1f6b11d0af134928ebe93bc97491e5c729347 100644
 --- a/codex-rs/core/src/unified_exec/errors.rs
 +++ b/codex-rs/core/src/unified_exec/errors.rs
-@@ -18,6 +18,18 @@ pub(crate) enum UnifiedExecError {
+@@ -20,6 +20,18 @@ pub(crate) enum UnifiedExecError {
          "stdin is closed for this session; rerun exec_command with tty=true to keep stdin open"
      )]
      StdinClosed,
@@ -1259,10 +1264,10 @@ index dd401046ae67ca756ef663cae744b5579a53078d..ac350f9868f39f87a3c65710c0637505
      MissingCommandLine,
      #[error("Command denied by sandbox: {message}")]
 diff --git a/codex-rs/core/src/unified_exec/mod.rs b/codex-rs/core/src/unified_exec/mod.rs
-index 77b23625c63351bda9904e15f441956dc2c14c9a..b529a199be8ba08b8405ae9b2d5bda6869c03454 100644
+index 0af579e332054ac0a34c163393810cb9f37cf4cc..738e1fcf694acb46655cb4dcf2f2eceb28f1d50d 100644
 --- a/codex-rs/core/src/unified_exec/mod.rs
 +++ b/codex-rs/core/src/unified_exec/mod.rs
-@@ -25,8 +25,10 @@
+@@ -26,8 +26,10 @@
  use std::collections::HashMap;
  use std::collections::HashSet;
  use std::sync::Arc;
@@ -1273,7 +1278,7 @@ index 77b23625c63351bda9904e15f441956dc2c14c9a..b529a199be8ba08b8405ae9b2d5bda68
  use codex_network_proxy::NetworkProxy;
  use codex_protocol::models::AdditionalPermissionProfile;
  use codex_tools::UnifiedExecShellMode;
-@@ -34,6 +36,9 @@ use codex_utils_output_truncation::TruncationPolicy;
+@@ -35,6 +37,9 @@ use codex_utils_output_truncation::TruncationPolicy;
  use codex_utils_path_uri::PathUri;
  use rand::Rng;
  use rand::rng;
@@ -1281,20 +1286,20 @@ index 77b23625c63351bda9904e15f441956dc2c14c9a..b529a199be8ba08b8405ae9b2d5bda68
 +use serde::Deserialize;
 +use serde::Serialize;
  use tokio::sync::Mutex;
+ use tokio_util::sync::CancellationToken;
  
- use crate::sandboxing::SandboxPermissions;
-@@ -78,6 +83,8 @@ pub(crate) struct UnifiedExecContext {
-     pub session: Arc<Session>,
+@@ -83,6 +88,8 @@ pub(crate) struct UnifiedExecContext {
      pub step_context: Arc<StepContext>,
+     pub cancellation_token: CancellationToken,
      pub call_id: String,
 +    pub code_mode_cell_id: Option<String>,
 +    pub code_mode_tool_call_id: Option<String>,
  }
  
  impl UnifiedExecContext {
-@@ -86,8 +93,20 @@ impl UnifiedExecContext {
-             session,
+@@ -97,8 +104,20 @@ impl UnifiedExecContext {
              step_context,
+             cancellation_token,
              call_id,
 +            code_mode_cell_id: None,
 +            code_mode_tool_call_id: None,
@@ -1313,16 +1318,7 @@ index 77b23625c63351bda9904e15f441956dc2c14c9a..b529a199be8ba08b8405ae9b2d5bda68
  }
  
  #[derive(Debug)]
-@@ -119,6 +138,8 @@ pub(crate) struct WriteStdinRequest<'a> {
-     pub max_output_tokens: Option<usize>,
-     pub truncation_policy: TruncationPolicy,
-     pub interaction_event: Option<WriteStdinInteractionEvent<'a>>,
-+    pub code_mode_cell_id: Option<String>,
-+    pub code_mode_tool_call_id: Option<String>,
- }
- 
- pub(crate) struct WriteStdinInteractionEvent<'a> {
-@@ -132,6 +153,31 @@ impl std::fmt::Debug for WriteStdinInteractionEvent<'_> {
+@@ -143,6 +162,29 @@ impl std::fmt::Debug for WriteStdinInteractionEvent<'_> {
      }
  }
  
@@ -1347,14 +1343,12 @@ index 77b23625c63351bda9904e15f441956dc2c14c9a..b529a199be8ba08b8405ae9b2d5bda68
 +    pub action: TerminalWaitAction,
 +    pub truncation_policy: TruncationPolicy,
 +    pub interaction_event: Option<WriteStdinInteractionEvent<'a>>,
-+    pub code_mode_cell_id: Option<String>,
-+    pub code_mode_tool_call_id: Option<String>,
 +}
 +
  #[derive(Default)]
  pub(crate) struct ProcessStore {
      processes: HashMap<i32, ProcessEntry>,
-@@ -148,14 +194,25 @@ impl ProcessStore {
+@@ -159,14 +201,25 @@ impl ProcessStore {
  pub(crate) struct UnifiedExecProcessManager {
      process_store: Mutex<ProcessStore>,
      max_write_stdin_yield_time_ms: u64,
@@ -1380,16 +1374,16 @@ index 77b23625c63351bda9904e15f441956dc2c14c9a..b529a199be8ba08b8405ae9b2d5bda68
          }
      }
  }
-@@ -175,6 +232,8 @@ struct ProcessEntry {
-     initial_exec_command_active: Arc<std::sync::atomic::AtomicBool>,
-     hook_command: String,
-     tty: bool,
+@@ -190,6 +243,8 @@ struct ProcessEntry {
+     // The successful launch bypassed sandboxing required by its ambient policy.
+     // Preserve this across turns so subsequent stdin writes can require approval.
+     escalated: bool,
 +    terminal_wait_rule: Option<Arc<TerminalWaitCommandRule>>,
 +    terminal_wait_generation: Option<u64>,
      network_approval: Option<DeferredNetworkApproval>,
      session: Weak<Session>,
      last_used: tokio::time::Instant,
-@@ -191,6 +250,297 @@ fn take_plugin_metrics_sidecar(
+@@ -206,6 +261,297 @@ fn take_plugin_metrics_sidecar(
          .take()
  }
  
@@ -1688,10 +1682,10 @@ index 77b23625c63351bda9904e15f441956dc2c14c9a..b529a199be8ba08b8405ae9b2d5bda68
      let yield_time_ms = if cfg!(windows) {
          yield_time_ms.max(WINDOWS_INITIAL_EXEC_YIELD_TIME_FLOOR_MS)
 diff --git a/codex-rs/core/src/unified_exec/mod_tests.rs b/codex-rs/core/src/unified_exec/mod_tests.rs
-index d097e783d9b18f450b962d78d20c9122b43c73ee..0d0aa0d2ee88cad1953578e87c7d239a9c5fe048 100644
+index f70caaa0591df18d42a7bd81fe96fd3e0c5d8b4b..eb986b107521b7836f858b81e904fc7dd668eb96 100644
 --- a/codex-rs/core/src/unified_exec/mod_tests.rs
 +++ b/codex-rs/core/src/unified_exec/mod_tests.rs
-@@ -41,6 +41,148 @@ async fn test_session_and_turn() -> (Arc<Session>, Arc<TurnContext>) {
+@@ -40,6 +40,148 @@ async fn test_session_and_turn() -> (Arc<Session>, Arc<TurnContext>) {
      (Arc::new(session), Arc::new(turn))
  }
  
@@ -1840,16 +1834,16 @@ index d097e783d9b18f450b962d78d20c9122b43c73ee..0d0aa0d2ee88cad1953578e87c7d239a
  async fn exec_command(
      session: &Arc<Session>,
      turn: &Arc<TurnContext>,
-@@ -141,6 +283,8 @@ async fn exec_command_with_tty(
-             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-             hook_command: cmd.to_string(),
+@@ -143,6 +285,8 @@ async fn exec_command_with_tty(
              tty,
+             environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
+             escalated: false,
 +            terminal_wait_rule: None,
 +            terminal_wait_generation: None,
              network_approval: None,
              session: Arc::downgrade(session),
              last_used: started_at,
-@@ -200,6 +344,7 @@ async fn exec_command_with_tty(
+@@ -202,6 +346,7 @@ async fn exec_command_with_tty(
          original_token_count: Some(original_token_count),
          output_omitted_bytes,
          hook_command: Some(cmd.to_string()),
@@ -1857,46 +1851,37 @@ index d097e783d9b18f450b962d78d20c9122b43c73ee..0d0aa0d2ee88cad1953578e87c7d239a
      })
  }
  
-@@ -318,6 +463,8 @@ async fn write_stdin(
-             max_output_tokens: None,
-             truncation_policy: TruncationPolicy::Tokens(10_000),
-             interaction_event: None,
-+            code_mode_cell_id: None,
-+            code_mode_tool_call_id: None,
-         })
-         .await
- }
-@@ -615,6 +762,8 @@ async fn terminating_initial_exec_command_rechecks_initial_response_state() -> a
-             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-             hook_command: "sleep 60".to_string(),
+@@ -610,6 +755,8 @@ async fn terminating_initial_exec_command_rechecks_initial_response_state() -> a
              tty: true,
+             environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
+             escalated: false,
 +            terminal_wait_rule: None,
 +            terminal_wait_generation: None,
              network_approval: None,
              session: Arc::downgrade(&session),
              last_used: Instant::now(),
-@@ -689,6 +838,8 @@ async fn terminating_during_stdin_poll_returns_exited_response() -> anyhow::Resu
-             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-             hook_command: "sleep 60".to_string(),
+@@ -686,6 +833,8 @@ async fn terminating_during_stdin_poll_returns_exited_response() -> anyhow::Resu
              tty: true,
+             environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
+             escalated: false,
 +            terminal_wait_rule: None,
 +            terminal_wait_generation: None,
              network_approval: None,
              session: Arc::downgrade(&session),
              last_used,
 diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
-index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d7cf27618 100644
+index 74e61a9c72532760f0e097352b165d505781f525..2a81ddacebca147cc99d5ca826fb2eca019d211e 100644
 --- a/codex-rs/core/src/unified_exec/process_manager.rs
 +++ b/codex-rs/core/src/unified_exec/process_manager.rs
-@@ -25,6 +25,7 @@ use crate::sandboxing::ExecOptions;
- use crate::sandboxing::ExecRequest;
+@@ -29,6 +29,7 @@ use crate::sandboxing::ExecRequest;
  use crate::sandboxing::ExecServerEnvConfig;
+ use crate::tools::ApprovalContext;
  use crate::tools::context::ExecCommandToolOutput;
 +use crate::tools::context::TerminalWaitToolOutput;
  use crate::tools::events::ToolEmitter;
  use crate::tools::events::ToolEventCtx;
  use crate::tools::events::ToolEventStage;
-@@ -45,6 +46,12 @@ use crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS;
+@@ -50,6 +51,12 @@ use crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS;
  use crate::unified_exec::MIN_YIELD_TIME_MS;
  use crate::unified_exec::ProcessEntry;
  use crate::unified_exec::ProcessStore;
@@ -1909,7 +1894,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
  use crate::unified_exec::UnifiedExecContext;
  use crate::unified_exec::UnifiedExecError;
  use crate::unified_exec::UnifiedExecProcessManager;
-@@ -78,6 +85,7 @@ use codex_protocol::shell_environment::is_non_inheritable_env_var;
+@@ -85,6 +92,7 @@ use codex_protocol::shell_environment::is_non_inheritable_env_var;
  use codex_sandboxing::SandboxCommand;
  use codex_tools::ToolName;
  use codex_utils_output_truncation::approx_tokens_from_byte_count;
@@ -1917,7 +1902,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
  use codex_utils_path_uri::PathUri;
  
  const UNIFIED_EXEC_ENV: [(&str, &str); 10] = [
-@@ -95,8 +103,20 @@ const UNIFIED_EXEC_ENV: [(&str, &str); 10] = [
+@@ -102,8 +110,20 @@ const UNIFIED_EXEC_ENV: [(&str, &str); 10] = [
  const NETWORK_ACCESS_DENIED_MESSAGE: &str =
      "Network access was denied by the Codex sandbox network proxy.";
  const LATE_NETWORK_DENIAL_GRACE_PERIOD: Duration = Duration::from_millis(100);
@@ -1938,7 +1923,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
  /// Test-only override for deterministic unified exec process IDs.
  ///
  /// In production builds this value should remain at its default (`false`) and
-@@ -232,6 +252,63 @@ fn exec_server_params_for_request(
+@@ -247,6 +267,63 @@ fn exec_server_params_for_request(
      }
  }
  
@@ -2002,7 +1987,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
  /// Borrowed process state prepared for a `write_stdin` or poll operation.
  struct PreparedProcessHandles {
      process: Arc<UnifiedExecProcess>,
-@@ -243,6 +320,7 @@ struct PreparedProcessHandles {
+@@ -258,6 +335,7 @@ struct PreparedProcessHandles {
      hook_command: String,
      process_id: i32,
      tty: bool,
@@ -2010,18 +1995,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
  }
  
  struct InitialExecCommandGuard {
-@@ -419,6 +497,10 @@ fn terminate_process_on_network_denial(
- }
- 
- impl UnifiedExecProcessManager {
-+    pub(crate) fn ensure_terminal_available(&self) -> Result<(), UnifiedExecError> {
-+        self.terminal_wait_gate.ensure_terminal_available()
-+    }
-+
-     pub(crate) async fn allocate_process_id(&self) -> i32 {
-         loop {
-             let mut store = self.process_store.lock().await;
-@@ -447,21 +529,135 @@ impl UnifiedExecProcessManager {
+@@ -462,15 +540,82 @@ impl UnifiedExecProcessManager {
      }
  
      pub(crate) async fn release_process_id(&self, process_id: i32) {
@@ -2105,7 +2079,8 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
      pub(crate) async fn exec_command(
          &self,
          request: ExecCommandRequest,
-         context: &UnifiedExecContext,
+@@ -487,6 +632,53 @@ impl UnifiedExecProcessManager {
+         mut completion: Option<&mut Completion<'_>>,
      ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
          let cwd = request.cwd.clone();
 +        let terminal_wait_cwd = terminal_wait_cwd_string(&cwd);
@@ -2158,7 +2133,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
          let process = self
              .open_session_with_sandbox(&request, cwd.clone(), context)
              .await;
-@@ -469,7 +665,8 @@ impl UnifiedExecProcessManager {
+@@ -494,7 +686,8 @@ impl UnifiedExecProcessManager {
          let (attempt, mut deferred_network_approval) = match process {
              Ok((attempt, deferred_network_approval)) => (attempt, deferred_network_approval),
              Err(err) => {
@@ -2168,7 +2143,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
                  return Err(err);
              }
          };
-@@ -528,23 +725,48 @@ impl UnifiedExecProcessManager {
+@@ -557,25 +750,50 @@ impl UnifiedExecProcessManager {
          let process_started_alive = !process.has_exited() && process.exit_code().is_none();
          let mut initial_exec_command_guard = if process_started_alive {
              let initial_exec_command_active = Arc::new(AtomicBool::new(true));
@@ -2178,6 +2153,8 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
 -                &request.command,
 -                request.hook_command.clone(),
 -                cwd.clone(),
+-                request.turn_environment.selection.environment_id.clone(),
+-                escalated,
 -                plugin_attribution.clone(),
 -                start,
 -                request.process_id,
@@ -2196,6 +2173,8 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
 +                    &request.command,
 +                    request.hook_command.clone(),
 +                    cwd.clone(),
++                    request.turn_environment.selection.environment_id.clone(),
++                    escalated,
 +                    plugin_attribution.clone(),
 +                    start,
 +                    request.process_id,
@@ -2234,7 +2213,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
              InitialExecCommandGuard {
                  active: Some(initial_exec_command_active),
                  metrics_sidecar: None,
-@@ -556,11 +778,11 @@ impl UnifiedExecProcessManager {
+@@ -587,17 +805,24 @@ impl UnifiedExecProcessManager {
              }
          };
  
@@ -2242,13 +2221,40 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
          // For the initial exec_command call, we both stream output to events
          // (via start_streaming_output above) and collect a snapshot here for
          // the tool response body.
--        let deadline = start + Duration::from_millis(yield_time_ms);
-+        let deadline =
-+            initial_exec_deadline(start, request.yield_time_ms, terminal_wait_rule.as_deref());
+-        let wait = completion.as_ref().map_or_else(
+-            || Duration::from_millis(yield_time_ms),
+-            |completion| completion.timeout,
+-        );
+-        let deadline = start
+-            .checked_add(wait)
+-            .ok_or_else(|| UnifiedExecError::process_failed("timeout_ms is too large".into()))?;
++        let completion_deadline = completion
++            .as_ref()
++            .map(|completion| checked_deadline(start, completion.timeout));
++        let terminal_wait_deadline = terminal_wait_rule
++            .as_deref()
++            .map(|rule| initial_exec_deadline(start, request.yield_time_ms, Some(rule)));
++        let deadline = match (completion_deadline, terminal_wait_deadline) {
++            (Some(completion_deadline), Some(terminal_wait_deadline)) => {
++                completion_deadline.min(terminal_wait_deadline)
++            }
++            (Some(completion_deadline), None) => completion_deadline,
++            (None, _) => {
++                initial_exec_deadline(start, request.yield_time_ms, terminal_wait_rule.as_deref())
++            }
++        };
          let collected_output = Self::collect_output_until_deadline(
              process.output_handles(),
              Some(context.session.subscribe_elicitation_pause_state()),
-@@ -598,7 +820,13 @@ impl UnifiedExecProcessManager {
+@@ -606,6 +831,7 @@ impl UnifiedExecProcessManager {
+         .await;
+         if let Some(completion) = completion.as_mut()
+             && !process.has_exited()
++            && completion_deadline.is_some_and(|deadline| Instant::now() >= deadline)
+         {
+             completion.timed_out = true;
+             process.mark_timed_out();
+@@ -644,7 +870,13 @@ impl UnifiedExecProcessManager {
                  wall_time,
              )
              .await;
@@ -2263,7 +2269,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
              return Err(fail_process_with_message(process.as_ref(), message));
          }
          if let Some(message) = process.failure_message() {
-@@ -619,7 +847,13 @@ impl UnifiedExecProcessManager {
+@@ -665,7 +897,13 @@ impl UnifiedExecProcessManager {
                  wall_time,
              )
              .await;
@@ -2278,7 +2284,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
              if let Err(message) = finish_result {
                  return Err(fail_process_with_message(process.as_ref(), message));
              }
-@@ -627,7 +861,7 @@ impl UnifiedExecProcessManager {
+@@ -673,7 +911,7 @@ impl UnifiedExecProcessManager {
          }
          let process_id = request.process_id;
          let (response_process_id, exit_code) = if process_started_alive {
@@ -2287,7 +2293,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
                  ProcessStatus::Alive {
                      exit_code,
                      process_id,
-@@ -691,7 +925,13 @@ impl UnifiedExecProcessManager {
+@@ -742,7 +980,13 @@ impl UnifiedExecProcessManager {
                      wall_time,
                  )
                  .await;
@@ -2302,7 +2308,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
                  return Err(fail_process_with_message(process.as_ref(), message));
              }
              let exit_code = process.exit_code();
-@@ -714,7 +954,13 @@ impl UnifiedExecProcessManager {
+@@ -766,7 +1010,13 @@ impl UnifiedExecProcessManager {
              )
              .await;
  
@@ -2317,7 +2323,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
              process
                  .check_for_sandbox_denial_with_text(&text)
                  .await
-@@ -724,6 +970,24 @@ impl UnifiedExecProcessManager {
+@@ -776,6 +1026,24 @@ impl UnifiedExecProcessManager {
              (None, exit_code)
          };
  
@@ -2342,8 +2348,8 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
          let response = ExecCommandToolOutput {
              event_call_id: context.call_id.clone(),
              chunk_id,
-@@ -735,22 +999,273 @@ impl UnifiedExecProcessManager {
-                 .model_info
+@@ -787,13 +1055,239 @@ impl UnifiedExecProcessManager {
+                 .model_info()
                  .truncation_policy
                  .into(),
 -            max_output_tokens: request.max_output_tokens,
@@ -2357,13 +2363,14 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
              output_omitted_bytes,
              hook_command: Some(request.hook_command.clone()),
 +            terminal_wait,
-         };
- 
-         Ok(response)
-     }
- 
++        };
++
++        Ok(response)
++    }
++
 +    pub(crate) async fn terminal_wait_control(
 +        &self,
++        context: &UnifiedExecContext,
 +        request: TerminalWaitControlRequest<'_>,
 +    ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
 +        self.run_terminal_wait_action(
@@ -2372,8 +2379,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
 +            request.truncation_policy,
 +            /*request_max_output_tokens*/ None,
 +            request.interaction_event,
-+            request.code_mode_cell_id,
-+            request.code_mode_tool_call_id,
++            context,
 +        )
 +        .await
 +    }
@@ -2385,8 +2391,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
 +        truncation_policy: codex_utils_output_truncation::TruncationPolicy,
 +        request_max_output_tokens: Option<usize>,
 +        interaction_event: Option<WriteStdinInteractionEvent<'_>>,
-+        code_mode_cell_id: Option<String>,
-+        code_mode_tool_call_id: Option<String>,
++        context: &UnifiedExecContext,
 +    ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
 +        let (managed, terminal_wait_guard) =
 +            self.terminal_wait_gate.begin_action(action, expected)?;
@@ -2420,7 +2425,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
 +            .await?;
 +
 +        let _terminal_wait_lease = if let (Some(session), Some(cell_id)) =
-+            (session.as_ref(), code_mode_cell_id.as_deref())
++            (session.as_ref(), context.code_mode_cell_id.as_deref())
 +        {
 +            Some(
 +                session
@@ -2436,8 +2441,8 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
 +                .services
 +                .code_mode_service
 +                .resolve_terminal_wait_decision(
-+                    code_mode_cell_id.as_deref(),
-+                    code_mode_tool_call_id.as_deref(),
++                    context.code_mode_cell_id.as_deref(),
++                    context.code_mode_tool_call_id.as_deref(),
 +                );
 +        }
 +
@@ -2457,7 +2462,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
 +                checked_deadline(start, TERMINAL_WAIT_INTERRUPT_GRACE_PERIOD)
 +            }
 +            TerminalWaitAction::Terminate => checked_deadline(start, Duration::from_millis(50)),
-+        };
+         };
 +        let pause_state = if action == TerminalWaitAction::Continue {
 +            pause_state
 +        } else {
@@ -2581,12 +2586,10 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
 +                .send_event(turn.as_ref(), EventMsg::TerminalInteraction(interaction))
 +                .await;
 +        }
-+
-+        Ok(response)
-+    }
-+
-     pub(crate) async fn write_stdin(
-         &self,
+ 
+         Ok(response)
+     }
+@@ -804,6 +1298,29 @@ impl UnifiedExecProcessManager {
          request: WriteStdinRequest<'_>,
      ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
          let process_id = request.process_id;
@@ -2609,15 +2612,14 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
 +                    request.truncation_policy,
 +                    request.max_output_tokens,
 +                    request.interaction_event,
-+                    request.code_mode_cell_id,
-+                    request.code_mode_tool_call_id,
++                    context,
 +                )
 +                .await;
 +        }
  
          // Different terminal sessions can be polled concurrently, but reads and
          // writes against one terminal must not overlap because they share a
-@@ -775,10 +1290,34 @@ impl UnifiedExecProcessManager {
+@@ -899,10 +1416,34 @@ impl UnifiedExecProcessManager {
              hook_command,
              process_id,
              tty,
@@ -2629,7 +2631,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
 +        let _terminal_wait_lease = if request.input.is_empty()
 +            && terminal_wait_rule.is_some()
 +            && let (Some(session), Some(cell_id)) =
-+                (session.as_ref(), request.code_mode_cell_id.as_deref())
++                (session.as_ref(), context.code_mode_cell_id.as_deref())
 +        {
 +            Some(
 +                session
@@ -2645,14 +2647,14 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
 +                .services
 +                .code_mode_service
 +                .resolve_terminal_wait_decision(
-+                    request.code_mode_cell_id.as_deref(),
-+                    request.code_mode_tool_call_id.as_deref(),
++                    context.code_mode_cell_id.as_deref(),
++                    context.code_mode_tool_call_id.as_deref(),
 +                );
 +        }
          let mut status_after_write = None;
  
          if !request.input.is_empty() {
-@@ -796,12 +1335,12 @@ impl UnifiedExecProcessManager {
+@@ -920,12 +1461,12 @@ impl UnifiedExecProcessManager {
                          tokio::time::sleep(Duration::from_millis(100)).await;
                      }
                      Err(err) => {
@@ -2667,7 +2669,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
                              return Err(err);
                          } else {
                              return Err(err);
-@@ -811,18 +1350,13 @@ impl UnifiedExecProcessManager {
+@@ -935,18 +1476,13 @@ impl UnifiedExecProcessManager {
              }
          }
  
@@ -2692,7 +2694,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
          let collected_output =
              Self::collect_output_until_deadline(&output, pause_state, deadline).await;
          let wall_time = Instant::now().saturating_duration_since(start);
-@@ -841,7 +1375,7 @@ impl UnifiedExecProcessManager {
+@@ -965,7 +1501,7 @@ impl UnifiedExecProcessManager {
              let message =
                  network_denial_message_for_session(session.as_ref(), network_approval.clone())
                      .await;
@@ -2701,7 +2703,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
              return Err(fail_process_with_message(process.as_ref(), message));
          }
          if let Some(message) = process.failure_message() {
-@@ -850,7 +1384,7 @@ impl UnifiedExecProcessManager {
+@@ -974,7 +1510,7 @@ impl UnifiedExecProcessManager {
                  network_approval.clone(),
              )
              .await;
@@ -2710,7 +2712,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
              if let Err(message) = finish_result {
                  return Err(fail_process_with_message(process.as_ref(), message));
              }
-@@ -864,7 +1398,7 @@ impl UnifiedExecProcessManager {
+@@ -988,7 +1524,7 @@ impl UnifiedExecProcessManager {
          let status = if let Some(status) = status_after_write {
              status
          } else {
@@ -2719,7 +2721,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
          };
          let (process_id, exit_code, event_call_id) = match status {
              ProcessStatus::Alive {
-@@ -898,12 +1432,16 @@ impl UnifiedExecProcessManager {
+@@ -1022,12 +1558,16 @@ impl UnifiedExecProcessManager {
              wall_time,
              raw_output: collected,
              truncation_policy: request.truncation_policy,
@@ -2737,7 +2739,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
          };
  
          let should_emit_interaction = !request.input.is_empty() || response.process_id.is_some();
-@@ -926,11 +1464,45 @@ impl UnifiedExecProcessManager {
+@@ -1050,11 +1590,45 @@ impl UnifiedExecProcessManager {
          Ok(response)
      }
  
@@ -2784,7 +2786,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
  
          let exit_code = entry.process.exit_code();
          let process_id = entry.process_id;
-@@ -939,6 +1511,7 @@ impl UnifiedExecProcessManager {
+@@ -1063,6 +1637,7 @@ impl UnifiedExecProcessManager {
              let Some(entry) = store.remove(process_id) else {
                  return ProcessStatus::Unknown;
              };
@@ -2792,7 +2794,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
              ProcessStatus::Exited {
                  exit_code,
                  entry: Box::new(entry),
-@@ -983,6 +1556,7 @@ impl UnifiedExecProcessManager {
+@@ -1107,6 +1682,7 @@ impl UnifiedExecProcessManager {
              hook_command: entry.hook_command.clone(),
              process_id: entry.process_id,
              tty: entry.tty,
@@ -2800,7 +2802,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
          })
      }
  
-@@ -998,12 +1572,14 @@ impl UnifiedExecProcessManager {
+@@ -1124,12 +1700,14 @@ impl UnifiedExecProcessManager {
          started_at: Instant,
          process_id: i32,
          tty: bool,
@@ -2816,16 +2818,16 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
          let plugin_metrics_sidecar =
              metrics_sidecar.map(|sidecar| Arc::new(std::sync::Mutex::new(Some(sidecar))));
          let entry = ProcessEntry {
-@@ -1015,6 +1591,8 @@ impl UnifiedExecProcessManager {
-             initial_exec_command_active,
-             hook_command,
+@@ -1143,6 +1721,8 @@ impl UnifiedExecProcessManager {
              tty,
+             environment_id,
+             escalated,
 +            terminal_wait_rule,
 +            terminal_wait_generation,
              network_approval,
              session: Arc::downgrade(&context.session),
              last_used: started_at,
-@@ -1025,13 +1603,9 @@ impl UnifiedExecProcessManager {
+@@ -1153,13 +1733,9 @@ impl UnifiedExecProcessManager {
              store.processes.insert(process_id, entry);
              pruned_entry
          };
@@ -2841,7 +2843,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
          spawn_exit_watcher(
              Arc::clone(&process),
              Arc::clone(&context.session),
-@@ -1046,6 +1620,14 @@ impl UnifiedExecProcessManager {
+@@ -1174,6 +1750,14 @@ impl UnifiedExecProcessManager {
              network_denial_monitor,
              plugin_metrics_sidecar,
          );
@@ -2856,7 +2858,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
      }
  
      #[allow(clippy::too_many_arguments)]
-@@ -1356,15 +1938,16 @@ impl UnifiedExecProcessManager {
+@@ -1494,15 +2078,16 @@ impl UnifiedExecProcessManager {
                  {
                      break;
                  }
@@ -2877,7 +2879,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
                      let close_wait_remaining = close_wait_deadline.saturating_duration_since(now);
                      if close_wait_remaining == Duration::ZERO {
                          break;
-@@ -1516,6 +2099,7 @@ impl UnifiedExecProcessManager {
+@@ -1654,6 +2239,7 @@ impl UnifiedExecProcessManager {
      }
  
      pub(crate) async fn terminate_all_processes(&self) {
@@ -2885,7 +2887,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
          let entries: Vec<ProcessEntry> = {
              let mut processes = self.process_store.lock().await;
              let entries: Vec<ProcessEntry> = processes
-@@ -1553,17 +2137,24 @@ impl UnifiedExecProcessManager {
+@@ -1691,17 +2277,24 @@ impl UnifiedExecProcessManager {
      }
  
      pub(crate) async fn terminate_process(&self, process_id: i32) -> bool {
@@ -2913,7 +2915,7 @@ index 6b12ea2c520938489f2676881f8cbf7ce61eb55b..af12a7ee6b26b4f699abb05ee4f9621d
          let entry = {
              let mut store = self.process_store.lock().await;
 diff --git a/codex-rs/core/src/unified_exec/process_manager_tests.rs b/codex-rs/core/src/unified_exec/process_manager_tests.rs
-index 4d3429e03895d752fdaa7c77fc6669a9d3396f8c..0f9f4afc3dbde2b07f4453ce1ce90aa4eec61339 100644
+index 5db327ecea9334919890bc830da2cfc6adc92b0b..2af7557c4a42c489951bac5650e34b4c73024dc0 100644
 --- a/codex-rs/core/src/unified_exec/process_manager_tests.rs
 +++ b/codex-rs/core/src/unified_exec/process_manager_tests.rs
 @@ -1,7 +1,12 @@
@@ -2929,7 +2931,7 @@ index 4d3429e03895d752fdaa7c77fc6669a9d3396f8c..0f9f4afc3dbde2b07f4453ce1ce90aa4
  use tokio::sync::Notify;
  use tokio::time::Duration;
  use tokio::time::Instant;
-@@ -281,6 +286,461 @@ fn initial_exec_yield_time_has_no_platform_floor() {
+@@ -294,6 +299,464 @@ fn initial_exec_yield_time_has_no_platform_floor() {
      );
  }
  
@@ -3230,6 +3232,7 @@ index 4d3429e03895d752fdaa7c77fc6669a9d3396f8c..0f9f4afc3dbde2b07f4453ce1ce90aa4
 +        let context = UnifiedExecContext::new(
 +            Arc::clone(&session),
 +            crate::session::step_context::StepContext::for_test(Arc::clone(&turn)),
++            tokio_util::sync::CancellationToken::new(),
 +            call_id.clone(),
 +        );
 +        let first = manager
@@ -3309,26 +3312,28 @@ index 4d3429e03895d752fdaa7c77fc6669a9d3396f8c..0f9f4afc3dbde2b07f4453ce1ce90aa4
 +        });
 +        let completed = if action == TerminalWaitAction::Interrupt {
 +            manager
-+                .write_stdin(WriteStdinRequest {
-+                    process_id,
-+                    input: INTERRUPT,
-+                    yield_time_ms: 1,
-+                    max_output_tokens: None,
-+                    truncation_policy,
-+                    interaction_event,
-+                    code_mode_cell_id: None,
-+                    code_mode_tool_call_id: None,
-+                })
++                .write_stdin(
++                    &context,
++                    WriteStdinRequest {
++                        process_id,
++                        input: INTERRUPT,
++                        yield_time_ms: 1,
++                        max_output_tokens: None,
++                        truncation_policy,
++                        interaction_event,
++                    },
++                )
 +                .await?
 +        } else {
 +            manager
-+                .terminal_wait_control(TerminalWaitControlRequest {
-+                    action,
-+                    truncation_policy,
-+                    interaction_event,
-+                    code_mode_cell_id: None,
-+                    code_mode_tool_call_id: None,
-+                })
++                .terminal_wait_control(
++                    &context,
++                    TerminalWaitControlRequest {
++                        action,
++                        truncation_policy,
++                        interaction_event,
++                    },
++                )
 +                .await?
 +        };
 +
@@ -3390,11 +3395,11 @@ index 4d3429e03895d752fdaa7c77fc6669a9d3396f8c..0f9f4afc3dbde2b07f4453ce1ce90aa4
 +
  #[tokio::test]
  async fn output_collection_stays_bounded_across_repeated_drains() {
-     let output_buffer = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
-@@ -588,6 +1048,8 @@ async fn pruning_does_not_evict_live_process_while_exited_process_is_finalizing(
-                 initial_exec_command_active: Arc::new(AtomicBool::new(false)),
-                 hook_command: format!("command-{process_id}"),
+     let chunks: [&[u8]; 4] = [b"01234567", b"89ABCDEF", b"ghijklmnopq", b"rs"];
+@@ -591,6 +1054,8 @@ async fn pruning_does_not_evict_live_process_while_exited_process_is_finalizing(
                  tty: false,
+                 environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
+                 escalated: false,
 +                terminal_wait_rule: None,
 +                terminal_wait_generation: None,
                  network_approval: None,

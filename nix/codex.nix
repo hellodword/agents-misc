@@ -9,6 +9,12 @@ let
   seriesFile = ../codex/series.toml;
   upstream = builtins.fromTOML (builtins.readFile upstreamFile);
   series = builtins.fromTOML (builtins.readFile seriesFile);
+  pinnedVersion = lib.removePrefix "rust-v" upstream.ref;
+  pinnedSource = builtins.fetchGit {
+    url = upstream.url;
+    rev = upstream.revision;
+    shallow = true;
+  };
   expectedUpstreamFields = [
     "generate_commands"
     "ref"
@@ -95,7 +101,7 @@ let
             patches = (old.patches or [ ]) ++ patchPaths;
             nativeBuildInputs = [ pkgs.gitMinimal ];
             patchPhase = gitPatchPhase;
-            hash = "sha256-TCY5pdWvarEqVo8d9cHt3O7+tHbGSrAilx5q7GnXz8Y=";
+            hash = "sha256-uvi01QZwuif0WjnsiTbWXVwdsqJ7dvIKPCv2Q0EO9MI=";
           };
           patches = (old.patches or [ ]) ++ patchPaths;
 
@@ -118,7 +124,15 @@ let
 
   supportedSystems = builtins.attrNames llm-agents.packages;
   codexFor =
-    system: patchCodex (import nixpkgs { inherit system; }) llm-agents.packages.${system}.codex;
+    system:
+    let
+      pkgs = import nixpkgs { inherit system; };
+      codex = llm-agents.packages.${system}.codex.override {
+        version = pinnedVersion;
+        srcOverride = pinnedSource;
+      };
+    in
+    patchCodex pkgs codex;
   codexCheckFor =
     system:
     let

@@ -86,7 +86,6 @@ source_files = [
   "codex-rs/core/src/tools/context.rs",
   "codex-rs/core/src/tools/context_tests.rs",
   "codex-rs/core/src/tools/handlers/mod.rs",
-  "codex-rs/core/src/tools/handlers/shell/shell_command.rs",
   "codex-rs/core/src/tools/handlers/shell_spec.rs",
   "codex-rs/core/src/tools/handlers/shell_spec_tests.rs",
   "codex-rs/core/src/tools/handlers/unified_exec.rs",
@@ -144,6 +143,7 @@ source_files = [
   "codex-rs/core/src/tools/code_mode/execute_handler.rs",
   "codex-rs/core/src/tools/code_mode/mod.rs",
   "codex-rs/core/src/tools/code_mode/wait_handler.rs",
+  "codex-rs/core/src/unified_exec/oneshot.rs",
   "codex-rs/core/tests/suite/code_mode.rs",
   "codex-rs/thread-manager-sample/src/main.rs",
 ]

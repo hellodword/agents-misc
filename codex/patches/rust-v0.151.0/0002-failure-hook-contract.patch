@@ -1,8 +1,8 @@
 diff --git a/codex-rs/analytics/src/events.rs b/codex-rs/analytics/src/events.rs
-index 7080aa20b7fc09bbedd4b14873bd580f898c3085..884ed756554f274af2c3c0dbe82a39217ae11c25 100644
+index dcfed40304833781ea0b2db0424108a02b76263f..5482b6c9695b3de31b89956837fd16d8217f1d5b 100644
 --- a/codex-rs/analytics/src/events.rs
 +++ b/codex-rs/analytics/src/events.rs
-@@ -1370,6 +1370,8 @@ fn analytics_hook_event_name(event_name: HookEventName) -> &'static str {
+@@ -1406,6 +1406,8 @@ fn analytics_hook_event_name(event_name: HookEventName) -> &'static str {
          HookEventName::PostToolUse => "PostToolUse",
          HookEventName::PreCompact => "PreCompact",
          HookEventName::PostCompact => "PostCompact",
@@ -12,37 +12,37 @@ index 7080aa20b7fc09bbedd4b14873bd580f898c3085..884ed756554f274af2c3c0dbe82a3921
          HookEventName::SessionEnd => "SessionEnd",
          HookEventName::UserPromptSubmit => "UserPromptSubmit",
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/config.rs b/codex-rs/app-server-protocol/src/protocol/v2/config.rs
-index 5b04cdf532ed6a3ef665c01c9345d930bd06a346..fb2341efc35f38ae5027f0b5992537310f8cb556 100644
+index e36240c4ac4abff51a55cc23d122dde226b0659d..c1d32a24692f798ab59e2ded88f7c9174d07cb14 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/config.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/config.rs
-@@ -483,6 +483,12 @@ pub struct ManagedHooksRequirements {
+@@ -571,6 +571,12 @@ pub struct ManagedHooksRequirements {
      #[serde(rename = "PostCompact")]
      #[ts(rename = "PostCompact")]
      pub post_compact: Vec<ConfiguredHookMatcherGroup>,
-+    #[serde(rename = "RequestError")]
++    #[serde(rename = "RequestError", default)]
 +    #[ts(rename = "RequestError")]
 +    pub request_error: Vec<ConfiguredHookMatcherGroup>,
-+    #[serde(rename = "AbnormalStop")]
++    #[serde(rename = "AbnormalStop", default)]
 +    #[ts(rename = "AbnormalStop")]
 +    pub abnormal_stop: Vec<ConfiguredHookMatcherGroup>,
      #[serde(rename = "SessionStart")]
      #[ts(rename = "SessionStart")]
      pub session_start: Vec<ConfiguredHookMatcherGroup>,
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/hook.rs b/codex-rs/app-server-protocol/src/protocol/v2/hook.rs
-index 41e34a3f8f11f34c12c8f880f029e734442f0400..53288b770c9898e8f86444fb4ff4fd97f4640946 100644
+index b2f944e1ae88f0aa63ead7c19a4e765a0b4e6f3d..fbb19bca567ac3e390260cf656c525fd68694142 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/hook.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/hook.rs
 @@ -17,7 +17,7 @@ use serde::Serialize;
  
  v2_enum_from_core!(
      pub enum HookEventName from CoreHookEventName {
--        PreToolUse, PermissionRequest, PostToolUse, PreCompact, PostCompact, SessionStart, SessionEnd, UserPromptSubmit, SubagentStart, SubagentStop, Stop
-+        PreToolUse, PermissionRequest, PostToolUse, PreCompact, PostCompact, RequestError, AbnormalStop, SessionStart, SessionEnd, UserPromptSubmit, SubagentStart, SubagentStop, Stop
+-        PreToolUse, PermissionRequest, PostToolUse, PreCompact, PostCompact, SessionStart, SessionEnd, UserPromptSubmit, SubagentStart, SubagentStop, Stop, Interrupt
++        PreToolUse, PermissionRequest, PostToolUse, PreCompact, PostCompact, RequestError, AbnormalStop, SessionStart, SessionEnd, UserPromptSubmit, SubagentStart, SubagentStop, Stop, Interrupt
      }
  );
  
 diff --git a/codex-rs/config/src/hook_config.rs b/codex-rs/config/src/hook_config.rs
-index 9716db03621a859b96a283a897b3cc48c873dffb..79a421346eace1b5084721027912d3022bd0da19 100644
+index 7f2d61bc472438b0cbd335e719b6618dd94b286c..c8f0bcfe7599f8a3306dbe5d67052202709e99ae 100644
 --- a/codex-rs/config/src/hook_config.rs
 +++ b/codex-rs/config/src/hook_config.rs
 @@ -44,6 +44,10 @@ pub struct HookEventsToml {
@@ -56,7 +56,7 @@ index 9716db03621a859b96a283a897b3cc48c873dffb..79a421346eace1b5084721027912d302
      #[serde(rename = "SessionStart", default)]
      pub session_start: Vec<MatcherGroup>,
      #[serde(rename = "SessionEnd", default)]
-@@ -66,6 +70,8 @@ impl HookEventsToml {
+@@ -68,6 +72,8 @@ impl HookEventsToml {
              post_tool_use,
              pre_compact,
              post_compact,
@@ -65,7 +65,7 @@ index 9716db03621a859b96a283a897b3cc48c873dffb..79a421346eace1b5084721027912d302
              session_start,
              session_end,
              user_prompt_submit,
-@@ -78,6 +84,8 @@ impl HookEventsToml {
+@@ -81,6 +87,8 @@ impl HookEventsToml {
              && post_tool_use.is_empty()
              && pre_compact.is_empty()
              && post_compact.is_empty()
@@ -74,7 +74,7 @@ index 9716db03621a859b96a283a897b3cc48c873dffb..79a421346eace1b5084721027912d302
              && session_start.is_empty()
              && session_end.is_empty()
              && user_prompt_submit.is_empty()
-@@ -93,6 +101,8 @@ impl HookEventsToml {
+@@ -97,6 +105,8 @@ impl HookEventsToml {
              post_tool_use,
              pre_compact,
              post_compact,
@@ -83,7 +83,7 @@ index 9716db03621a859b96a283a897b3cc48c873dffb..79a421346eace1b5084721027912d302
              session_start,
              session_end,
              user_prompt_submit,
-@@ -106,6 +116,8 @@ impl HookEventsToml {
+@@ -111,6 +121,8 @@ impl HookEventsToml {
              post_tool_use,
              pre_compact,
              post_compact,
@@ -92,12 +92,12 @@ index 9716db03621a859b96a283a897b3cc48c873dffb..79a421346eace1b5084721027912d302
              session_start,
              session_end,
              user_prompt_submit,
-@@ -119,13 +131,15 @@ impl HookEventsToml {
+@@ -125,13 +137,15 @@ impl HookEventsToml {
          .sum()
      }
  
--    pub fn into_matcher_groups(self) -> [(HookEventName, Vec<MatcherGroup>); 11] {
-+    pub fn into_matcher_groups(self) -> [(HookEventName, Vec<MatcherGroup>); 13] {
+-    pub fn into_matcher_groups(self) -> [(HookEventName, Vec<MatcherGroup>); 12] {
++    pub fn into_matcher_groups(self) -> [(HookEventName, Vec<MatcherGroup>); 14] {
          [
              (HookEventName::PreToolUse, self.pre_tool_use),
              (HookEventName::PermissionRequest, self.permission_request),
@@ -110,7 +110,7 @@ index 9716db03621a859b96a283a897b3cc48c873dffb..79a421346eace1b5084721027912d302
              (HookEventName::SessionEnd, self.session_end),
              (HookEventName::UserPromptSubmit, self.user_prompt_submit),
 diff --git a/codex-rs/config/src/requirements_layers/hooks.rs b/codex-rs/config/src/requirements_layers/hooks.rs
-index 10b6c1c09cb332131ef5231c61dec415a0ae91f5..176dbf3673fa38395237052a252e0a4c12c8b88e 100644
+index 01ed3eab47f0a5d45eeaa9a95d7240efeea633d6..59bb6a368840326a979015fcd003049d47d92851 100644
 --- a/codex-rs/config/src/requirements_layers/hooks.rs
 +++ b/codex-rs/config/src/requirements_layers/hooks.rs
 @@ -209,6 +209,8 @@ fn append_hook_events(existing: &mut HookEventsToml, incoming: HookEventsToml) -
@@ -122,7 +122,7 @@ index 10b6c1c09cb332131ef5231c61dec415a0ae91f5..176dbf3673fa38395237052a252e0a4c
          session_start,
          session_end,
          user_prompt_submit,
-@@ -223,6 +225,8 @@ fn append_hook_events(existing: &mut HookEventsToml, incoming: HookEventsToml) -
+@@ -224,6 +226,8 @@ fn append_hook_events(existing: &mut HookEventsToml, incoming: HookEventsToml) -
      changed |= append_vec(&mut existing.post_tool_use, post_tool_use);
      changed |= append_vec(&mut existing.pre_compact, pre_compact);
      changed |= append_vec(&mut existing.post_compact, post_compact);
@@ -132,38 +132,40 @@ index 10b6c1c09cb332131ef5231c61dec415a0ae91f5..176dbf3673fa38395237052a252e0a4c
      changed |= append_vec(&mut existing.session_end, session_end);
      changed |= append_vec(&mut existing.user_prompt_submit, user_prompt_submit);
 diff --git a/codex-rs/hooks/src/events/common.rs b/codex-rs/hooks/src/events/common.rs
-index c67602086c54c2ab8d399d93c5ebd199496f5162..56a18c3f9dce6a965622d8321a84c7ba86bb9168 100644
+index 7b4c4dcab31e9e5747594c39ec582fb0c49f4095..48fb7e21bebe60809f0c584a0b57c0c441cd9b6a 100644
 --- a/codex-rs/hooks/src/events/common.rs
 +++ b/codex-rs/hooks/src/events/common.rs
-@@ -121,7 +121,10 @@ pub(crate) fn matcher_pattern_for_event(
+@@ -123,7 +123,11 @@ pub(crate) fn matcher_pattern_for_event(
          | HookEventName::SubagentStop
          | HookEventName::PreCompact
          | HookEventName::PostCompact => matcher,
--        HookEventName::UserPromptSubmit | HookEventName::Stop => None,
+-        HookEventName::UserPromptSubmit | HookEventName::Stop | HookEventName::Interrupt => None,
 +        HookEventName::UserPromptSubmit
 +        | HookEventName::RequestError
 +        | HookEventName::AbnormalStop
-+        | HookEventName::Stop => None,
++        | HookEventName::Stop
++        | HookEventName::Interrupt => None,
      }
  }
  
 diff --git a/codex-rs/hooks/src/events/mod.rs b/codex-rs/hooks/src/events/mod.rs
-index eb5c727d3179db8a0bec1601aafc52fb56ec1ed9..707780000774016113013a91832626146f011663 100644
+index 3d5ea1baad17c0b3814a59aa19c8b23feae49ed8..04335442d95df76b9c4417c3765ae518c7bd3bee 100644
 --- a/codex-rs/hooks/src/events/mod.rs
 +++ b/codex-rs/hooks/src/events/mod.rs
-@@ -1,5 +1,6 @@
+@@ -1,6 +1,7 @@
  pub(crate) mod common;
  pub mod compact;
+ pub mod interrupt;
 +pub mod model_request;
  pub mod permission_request;
  pub mod post_tool_use;
  pub mod pre_tool_use;
 diff --git a/codex-rs/hooks/src/events/model_request.rs b/codex-rs/hooks/src/events/model_request.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..deff5af4b6b8dcc50447129757d65fb224c19fab
+index 0000000000000000000000000000000000000000..cc7b2d2e37c82ccce3f748da0893cdc2624b4636
 --- /dev/null
 +++ b/codex-rs/hooks/src/events/model_request.rs
-@@ -0,0 +1,837 @@
+@@ -0,0 +1,838 @@
 +use std::path::PathBuf;
 +
 +use codex_protocol::ThreadId;
@@ -737,10 +739,11 @@ index 0000000000000000000000000000000000000000..deff5af4b6b8dcc50447129757d65fb2
 +                    program: String::new(),
 +                    args: Vec::new(),
 +                },
++                Arc::new(Vec::new()),
 +                ThreadId::new(),
 +                result_sender,
 +            ),
-+            Some(executor),
++            executor,
 +        )
 +    }
 +
@@ -755,7 +758,7 @@ index 0000000000000000000000000000000000000000..deff5af4b6b8dcc50447129757d65fb2
 +            timeout_sec: 60,
 +            status_message: None,
 +            additional_context_limit: Default::default(),
-+            source_path: cwd().join(format!("hook-{order}.json")),
++            source_path: cwd().join(format!("hook-{order}.json")).into(),
 +            source: HookSource::User,
 +            display_order: order,
 +            kind: ConfiguredHandlerKind::McpTool {
@@ -1002,7 +1005,7 @@ index 0000000000000000000000000000000000000000..deff5af4b6b8dcc50447129757d65fb2
 +    }
 +}
 diff --git a/codex-rs/hooks/src/schema.rs b/codex-rs/hooks/src/schema.rs
-index 3847cc91818a9a141c066e1fc6d734adb60f9bde..989bce7699c480fb0a2111bdac327ad6ffd796b7 100644
+index 5558b6665bf4a05d622f7d814b984c885e98db74..b3d9376b910ebd3ff053bd9cd1b3884a23ff90a1 100644
 --- a/codex-rs/hooks/src/schema.rs
 +++ b/codex-rs/hooks/src/schema.rs
 @@ -13,6 +13,9 @@ use std::path::Path;
@@ -1026,7 +1029,7 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..989bce7699c480fb0a2111bdac327ad6
  const PRE_TOOL_USE_INPUT_FIXTURE: &str = "pre-tool-use.command.input.schema.json";
  const PRE_TOOL_USE_OUTPUT_FIXTURE: &str = "pre-tool-use.command.output.schema.json";
  const PRE_COMPACT_INPUT_FIXTURE: &str = "pre-compact.command.input.schema.json";
-@@ -108,6 +115,10 @@ pub(crate) enum HookEventNameWire {
+@@ -110,6 +117,10 @@ pub(crate) enum HookEventNameWire {
      PreCompact,
      #[serde(rename = "PostCompact")]
      PostCompact,
@@ -1037,7 +1040,7 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..989bce7699c480fb0a2111bdac327ad6
      #[serde(rename = "SessionStart")]
      SessionStart,
      #[serde(rename = "UserPromptSubmit")]
-@@ -179,6 +190,25 @@ pub(crate) struct PostCompactCommandOutputWire {
+@@ -183,6 +194,25 @@ pub(crate) struct PostCompactCommandOutputWire {
      pub universal: HookUniversalOutputWire,
  }
  
@@ -1063,7 +1066,7 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..989bce7699c480fb0a2111bdac327ad6
  #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
  #[serde(rename_all = "camelCase")]
  #[serde(deny_unknown_fields)]
-@@ -377,6 +407,55 @@ pub(crate) struct PostCompactCommandInput {
+@@ -381,6 +411,55 @@ pub(crate) struct PostCompactCommandInput {
      pub trigger: String,
  }
  
@@ -1119,7 +1122,7 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..989bce7699c480fb0a2111bdac327ad6
  #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
  #[serde(rename_all = "camelCase")]
  #[serde(deny_unknown_fields)]
-@@ -636,6 +715,22 @@ pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
+@@ -665,6 +744,22 @@ pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
          &generated_dir.join(POST_COMPACT_OUTPUT_FIXTURE),
          schema_json::<PostCompactCommandOutputWire>()?,
      )?;
@@ -1142,7 +1145,7 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..989bce7699c480fb0a2111bdac327ad6
      write_schema(
          &generated_dir.join(PRE_COMPACT_INPUT_FIXTURE),
          schema_json::<PreCompactCommandInput>()?,
-@@ -775,6 +870,14 @@ fn post_compact_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+@@ -812,6 +907,14 @@ fn post_compact_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
      string_const_schema("PostCompact")
  }
  
@@ -1157,7 +1160,7 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..989bce7699c480fb0a2111bdac327ad6
  fn pre_tool_use_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
      string_const_schema("PreToolUse")
  }
-@@ -817,6 +920,14 @@ fn compaction_trigger_schema(_gen: &mut SchemaGenerator) -> Schema {
+@@ -858,6 +961,14 @@ fn compaction_trigger_schema(_gen: &mut SchemaGenerator) -> Schema {
      string_enum_schema(&["manual", "auto"])
  }
  
@@ -1172,17 +1175,17 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..989bce7699c480fb0a2111bdac327ad6
  fn string_const_schema(value: &str) -> Schema {
      let mut schema = SchemaObject {
          instance_type: Some(InstanceType::String.into()),
-@@ -846,6 +957,9 @@ fn default_continue() -> bool {
+@@ -887,6 +998,9 @@ fn default_continue() -> bool {
  
  #[cfg(test)]
  mod tests {
 +    use super::ABNORMAL_STOP_INPUT_FIXTURE;
 +    use super::ABNORMAL_STOP_OUTPUT_FIXTURE;
 +    use super::AbnormalStopCommandInput;
-     use super::NullableString;
-     use super::PERMISSION_REQUEST_INPUT_FIXTURE;
-     use super::PERMISSION_REQUEST_OUTPUT_FIXTURE;
-@@ -865,6 +979,9 @@ mod tests {
+     use super::INTERRUPT_INPUT_FIXTURE;
+     use super::INTERRUPT_OUTPUT_FIXTURE;
+     use super::InterruptCommandInput;
+@@ -909,6 +1023,9 @@ mod tests {
      use super::PreCompactCommandInput;
      use super::PreToolUseCommandInput;
      use super::PreToolUseCommandOutputWire;
@@ -1192,7 +1195,7 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..989bce7699c480fb0a2111bdac327ad6
      use super::SESSION_END_INPUT_FIXTURE;
      use super::SESSION_START_INPUT_FIXTURE;
      use super::SESSION_START_OUTPUT_FIXTURE;
-@@ -887,6 +1004,10 @@ mod tests {
+@@ -931,6 +1048,10 @@ mod tests {
      use super::schema_json;
      use super::write_schema_fixtures;
      use crate::events::common::SubagentHookContext;
@@ -1203,7 +1206,7 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..989bce7699c480fb0a2111bdac327ad6
      use pretty_assertions::assert_eq;
      use schemars::JsonSchema;
      use serde_json::Value;
-@@ -913,6 +1034,18 @@ mod tests {
+@@ -957,6 +1078,18 @@ mod tests {
              POST_COMPACT_OUTPUT_FIXTURE => {
                  include_str!("../schema/generated/post-compact.command.output.schema.json")
              }
@@ -1222,7 +1225,7 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..989bce7699c480fb0a2111bdac327ad6
              PRE_COMPACT_INPUT_FIXTURE => {
                  include_str!("../schema/generated/pre-compact.command.input.schema.json")
              }
-@@ -993,6 +1126,10 @@ mod tests {
+@@ -1043,6 +1176,10 @@ mod tests {
              PERMISSION_REQUEST_OUTPUT_FIXTURE,
              POST_COMPACT_INPUT_FIXTURE,
              POST_COMPACT_OUTPUT_FIXTURE,
@@ -1233,7 +1236,7 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..989bce7699c480fb0a2111bdac327ad6
              PRE_COMPACT_INPUT_FIXTURE,
              PRE_COMPACT_OUTPUT_FIXTURE,
              PRE_TOOL_USE_INPUT_FIXTURE,
-@@ -1071,6 +1208,16 @@ mod tests {
+@@ -1123,6 +1260,16 @@ mod tests {
                  .expect("serialize permission request input schema"),
          )
          .expect("parse permission request input schema");
@@ -1250,7 +1253,7 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..989bce7699c480fb0a2111bdac327ad6
          let user_prompt_submit: Value = serde_json::from_slice(
              &schema_json::<UserPromptSubmitCommandInput>()
                  .expect("serialize user prompt submit input schema"),
-@@ -1110,6 +1257,162 @@ mod tests {
+@@ -1167,6 +1314,162 @@ mod tests {
                      .contains(&Value::String("turn_id".to_string()))
              );
          }
@@ -1414,10 +1417,10 @@ index 3847cc91818a9a141c066e1fc6d734adb60f9bde..989bce7699c480fb0a2111bdac327ad6
  
      #[test]
 diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
-index 2ae44aea087d623dabe45cfcb84ca7b21b22000a..8674f1c8d275b8b99d6cce9e47339bc9c9bc2ff8 100644
+index f5986aa3ae379c51751d4d87ec562267f45a4c33..fbc672b94f5a6dcfb5c85948db3b98fa6a42eeef 100644
 --- a/codex-rs/protocol/src/protocol.rs
 +++ b/codex-rs/protocol/src/protocol.rs
-@@ -1502,6 +1502,8 @@ pub enum HookEventName {
+@@ -1552,6 +1552,8 @@ pub enum HookEventName {
      PostToolUse,
      PreCompact,
      PostCompact,

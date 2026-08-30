@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/src/request_processors/config_processor.rs b/codex-rs/app-server/src/request_processors/config_processor.rs
-index e3e17b30fa15c523ee82f0d8dfad3c2c47c15064..589cd510b2ec462b3eb98f7718de92ee91f675da 100644
+index 278fc8e05061e82e2d65d0c179661e77cb750436..ef683781aabc022a9d3714cba4faabeaf0c0da81 100644
 --- a/codex-rs/app-server/src/request_processors/config_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/config_processor.rs
-@@ -469,6 +469,8 @@ fn map_hooks_requirements_to_api(hooks: ManagedHooksRequirementsToml) -> Managed
+@@ -611,6 +611,8 @@ fn map_hooks_requirements_to_api(hooks: ManagedHooksRequirementsToml) -> Managed
          post_tool_use,
          pre_compact,
          post_compact,
@@ -11,7 +11,7 @@ index e3e17b30fa15c523ee82f0d8dfad3c2c47c15064..589cd510b2ec462b3eb98f7718de92ee
          session_start,
          session_end,
          user_prompt_submit,
-@@ -485,6 +487,8 @@ fn map_hooks_requirements_to_api(hooks: ManagedHooksRequirementsToml) -> Managed
+@@ -628,6 +630,8 @@ fn map_hooks_requirements_to_api(hooks: ManagedHooksRequirementsToml) -> Managed
          post_tool_use: map_hook_matcher_groups_to_api(post_tool_use),
          pre_compact: map_hook_matcher_groups_to_api(pre_compact),
          post_compact: map_hook_matcher_groups_to_api(post_compact),
@@ -21,12 +21,12 @@ index e3e17b30fa15c523ee82f0d8dfad3c2c47c15064..589cd510b2ec462b3eb98f7718de92ee
          session_end: map_hook_matcher_groups_to_api(session_end),
          user_prompt_submit: map_hook_matcher_groups_to_api(user_prompt_submit),
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index b58e99d9d9fc3146cdf3a91f314f05ff3e6a44e5..2d3b8a12ee05d40241f8bd7219b870eb7b1f4145 100644
+index 999458501176f23c98cb729ce1386f177c742d29..a33f5c29c3379c93a771949d1e96317c9d833a0d 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
-@@ -5,10 +5,14 @@ use crate::Prompt;
- use crate::client::ModelClientSession;
- use crate::client_common::ResponseEvent;
+@@ -7,10 +7,14 @@ use crate::client_common::ResponseEvent;
+ use crate::context::CompactionSummary;
+ use crate::context::ContextualUserFragment;
  use crate::context::world_state::WorldState;
 +use crate::hook_runtime::ModelRequestFailure;
 +use crate::hook_runtime::ModelRequestHookContext;
@@ -39,7 +39,7 @@ index b58e99d9d9fc3146cdf3a91f314f05ff3e6a44e5..2d3b8a12ee05d40241f8bd7219b870eb
  use crate::responses_metadata::CodexResponsesMetadata;
  use crate::responses_metadata::CodexResponsesRequestKind;
  use crate::responses_metadata::CompactionTurnMetadata;
-@@ -308,6 +312,13 @@ async fn run_compact_task_inner_impl(
+@@ -313,6 +317,13 @@ async fn run_compact_task_inner_impl(
              }
              Err(e) if matches!(e.details(), CodexErrorDetails::ContextWindowExceeded) => {
                  if turn_input_len > 1 {
@@ -53,7 +53,7 @@ index b58e99d9d9fc3146cdf3a91f314f05ff3e6a44e5..2d3b8a12ee05d40241f8bd7219b870eb
                      // Trim from the beginning to preserve cache (prefix-based) and keep recent messages intact.
                      error!(
                          "Context window exceeded while compacting; removing oldest history item. Error: {e}"
-@@ -318,12 +329,27 @@ async fn run_compact_task_inner_impl(
+@@ -323,12 +334,27 @@ async fn run_compact_task_inner_impl(
                  }
                  sess.set_total_tokens_full(turn_context.as_ref()).await;
                  sess.track_turn_codex_error(turn_context.as_ref(), &e);
@@ -81,7 +81,7 @@ index b58e99d9d9fc3146cdf3a91f314f05ff3e6a44e5..2d3b8a12ee05d40241f8bd7219b870eb
                      retries += 1;
                      let delay = backoff(retries);
                      sess.notify_stream_error(
-@@ -336,6 +362,14 @@ async fn run_compact_task_inner_impl(
+@@ -341,6 +367,14 @@ async fn run_compact_task_inner_impl(
                      continue;
                  } else {
                      sess.track_turn_codex_error(turn_context.as_ref(), &e);
@@ -97,7 +97,7 @@ index b58e99d9d9fc3146cdf3a91f314f05ff3e6a44e5..2d3b8a12ee05d40241f8bd7219b870eb
                      sess.send_event(&turn_context, event).await;
                      return Err(e);
 diff --git a/codex-rs/core/src/compact_remote.rs b/codex-rs/core/src/compact_remote.rs
-index 392fb991c1c5122fa40515359d30f58fcda3fbaa..805fb955e59875c7b791b4d27fb655b9cf600881 100644
+index 932993d14c251dc27018387bb5f38846ad24163f..a4bf7cf721c3b716a070ea82fe327fb4b969a0a6 100644
 --- a/codex-rs/core/src/compact_remote.rs
 +++ b/codex-rs/core/src/compact_remote.rs
 @@ -15,10 +15,14 @@ use crate::compact_remote_history::history_item_groups;
@@ -198,7 +198,7 @@ index 392fb991c1c5122fa40515359d30f58fcda3fbaa..805fb955e59875c7b791b4d27fb655b9
      sess: &Session,
      compacted_history: Vec<ResponseItem>,
 diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
-index 89d5c5a1b15d0a96063ea27a03b6fa8b7afc76ba..5176f291480bedcd9f77bc4ccc8f1705da0af065 100644
+index ee82bbcb7a093b6d8149e62ace1af125c00cb8a1..58d982020ca503ea1898fa15b0eb394200170524 100644
 --- a/codex-rs/core/src/compact_remote_v2.rs
 +++ b/codex-rs/core/src/compact_remote_v2.rs
 @@ -17,10 +17,14 @@ use crate::compact_remote::should_keep_compacted_history_item;
@@ -216,7 +216,7 @@ index 89d5c5a1b15d0a96063ea27a03b6fa8b7afc76ba..5176f291480bedcd9f77bc4ccc8f1705
  use crate::responses_metadata::CodexResponsesMetadata;
  use crate::responses_metadata::CompactionTurnMetadata;
  use crate::responses_retry::ResponsesStreamRequest;
-@@ -243,11 +247,35 @@ async fn run_remote_compact_task_inner_impl(
+@@ -255,11 +259,35 @@ async fn run_remote_compact_task_inner_impl(
          Ok(attempt) => (attempt, turn_context),
          Err(error) => {
              let Some(fallback_step_context) = fallback_step_context else {
@@ -252,7 +252,7 @@ index 89d5c5a1b15d0a96063ea27a03b6fa8b7afc76ba..5176f291480bedcd9f77bc4ccc8f1705
              let fallback_turn_context = &fallback_step_context.turn;
              let fallback_compaction_trace =
                  sess.services.rollout_thread_trace.compaction_trace_context(
-@@ -275,7 +303,17 @@ async fn run_remote_compact_task_inner_impl(
+@@ -287,7 +315,17 @@ async fn run_remote_compact_task_inner_impl(
              );
              match fallback_result {
                  Ok(attempt) => (attempt, fallback_turn_context),
@@ -271,7 +271,7 @@ index 89d5c5a1b15d0a96063ea27a03b6fa8b7afc76ba..5176f291480bedcd9f77bc4ccc8f1705
              }
          }
      };
-@@ -341,6 +379,30 @@ async fn run_remote_compact_task_inner_impl(
+@@ -358,6 +396,30 @@ async fn run_remote_compact_task_inner_impl(
      Ok(())
  }
  
@@ -302,7 +302,7 @@ index 89d5c5a1b15d0a96063ea27a03b6fa8b7afc76ba..5176f291480bedcd9f77bc4ccc8f1705
  struct RemoteCompactionV2Output {
      compaction_output: ResponseItem,
      response_id: String,
-@@ -348,8 +410,8 @@ struct RemoteCompactionV2Output {
+@@ -366,8 +428,8 @@ struct RemoteCompactionV2Output {
  }
  
  async fn run_remote_compaction_request_v2(
@@ -313,7 +313,7 @@ index 89d5c5a1b15d0a96063ea27a03b6fa8b7afc76ba..5176f291480bedcd9f77bc4ccc8f1705
      client_session: &mut ModelClientSession,
      prompt: &Prompt,
      responses_metadata: &CodexResponsesMetadata,
-@@ -382,7 +444,7 @@ async fn run_remote_compaction_request_v2(
+@@ -400,7 +462,7 @@ async fn run_remote_compaction_request_v2(
              Ok(compaction_output) => return Ok(compaction_output),
              Err(err) if !err.is_retryable() => return Err(err),
              Err(err) => {
@@ -322,7 +322,7 @@ index 89d5c5a1b15d0a96063ea27a03b6fa8b7afc76ba..5176f291480bedcd9f77bc4ccc8f1705
                      &mut retry_state,
                      max_retries,
                      err,
-@@ -391,7 +453,10 @@ async fn run_remote_compaction_request_v2(
+@@ -409,7 +471,10 @@ async fn run_remote_compaction_request_v2(
                      turn_context,
                      ResponsesStreamRequest::RemoteCompactionV2,
                  )
@@ -335,10 +335,10 @@ index 89d5c5a1b15d0a96063ea27a03b6fa8b7afc76ba..5176f291480bedcd9f77bc4ccc8f1705
          }
      }
 diff --git a/codex-rs/core/src/compact_remote_v2_attempt.rs b/codex-rs/core/src/compact_remote_v2_attempt.rs
-index d66bf519be3d65b0c72b5f856865fd54eaf65a3c..1229f13a4447d75a1619d20d13b2c55d43642bde 100644
+index 7fe14113a65fb63e0289dc7c6c90a05e671850ba..5174fa213f051629f3c49fc2cb2facaddb82306d 100644
 --- a/codex-rs/core/src/compact_remote_v2_attempt.rs
 +++ b/codex-rs/core/src/compact_remote_v2_attempt.rs
-@@ -103,7 +103,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
+@@ -104,7 +104,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
      };
      let compaction_output_result = run_remote_compaction_request_v2(
          sess,
@@ -348,19 +348,19 @@ index d66bf519be3d65b0c72b5f856865fd54eaf65a3c..1229f13a4447d75a1619d20d13b2c55d
          &prompt,
          &responses_metadata,
 diff --git a/codex-rs/core/src/hook_runtime.rs b/codex-rs/core/src/hook_runtime.rs
-index 279edbf9d207b75175d23fd409f9d9054bebbe40..672939d6cdec3fc1174d34b469779471db348e10 100644
+index 3f0b6b4b22bda7a31ab36e0fea4a8b6c62c3a866..c90ee7f257e62c3e0eed34dc08ad199033ffa2d1 100644
 --- a/codex-rs/core/src/hook_runtime.rs
 +++ b/codex-rs/core/src/hook_runtime.rs
-@@ -21,6 +21,8 @@ use codex_hooks::UserPromptSubmitOutcome;
- use codex_hooks::UserPromptSubmitRequest;
+@@ -25,6 +25,8 @@ use codex_hooks::hook_execution_mode_label;
+ use codex_hooks::hook_handler_type_label;
  use codex_otel::HOOK_RUN_DURATION_METRIC;
  use codex_otel::HOOK_RUN_METRIC;
 +use codex_protocol::error::CodexErr;
 +use codex_protocol::error::CodexErrorDetails;
+ use codex_protocol::items::FunctionCallOutputItem;
  use codex_protocol::items::TurnItem;
  use codex_protocol::items::UserMessageItem;
- use codex_protocol::models::ResponseItem;
-@@ -62,6 +64,72 @@ pub(crate) enum PreToolUseHookResult {
+@@ -72,6 +74,72 @@ pub(crate) enum PreToolUseHookResult {
      Blocked(String),
  }
  
@@ -433,7 +433,7 @@ index 279edbf9d207b75175d23fd409f9d9054bebbe40..672939d6cdec3fc1174d34b469779471
  struct ContextInjectingHookOutcome {
      hook_events: Vec<HookCompletedEvent>,
      outcome: HookRuntimeOutcome,
-@@ -465,6 +533,92 @@ pub(crate) async fn run_post_compact_hooks(
+@@ -528,6 +596,92 @@ pub(crate) async fn run_post_compact_hooks(
      }
  }
  
@@ -448,7 +448,7 @@ index 279edbf9d207b75175d23fd409f9d9054bebbe40..672939d6cdec3fc1174d34b469779471
 +        transcript_path: sess.hook_transcript_path().await,
 +        #[allow(deprecated)]
 +        cwd: turn_context.cwd.clone(),
-+        model: turn_context.model_info.slug.clone(),
++        model: turn_context.model_info().slug.clone(),
 +        provider: turn_context.config.model_provider_id.clone(),
 +        operation: failure.context.operation,
 +        endpoint_path: failure.context.endpoint_path.to_string(),
@@ -491,7 +491,7 @@ index 279edbf9d207b75175d23fd409f9d9054bebbe40..672939d6cdec3fc1174d34b469779471
 +        transcript_path: sess.hook_transcript_path().await,
 +        #[allow(deprecated)]
 +        cwd: turn_context.cwd.clone(),
-+        model: turn_context.model_info.slug.clone(),
++        model: turn_context.model_info().slug.clone(),
 +        provider: turn_context.config.model_provider_id.clone(),
 +        goal_mode: turn_context
 +            .extension_data
@@ -526,7 +526,7 @@ index 279edbf9d207b75175d23fd409f9d9054bebbe40..672939d6cdec3fc1174d34b469779471
  #[instrument(level = "trace", skip_all)]
  pub(crate) async fn run_legacy_after_agent_hook(
      sess: &Arc<Session>,
-@@ -790,6 +944,8 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str);
+@@ -895,6 +1049,8 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str);
          HookEventName::PostToolUse => "PostToolUse",
          HookEventName::PreCompact => "PreCompact",
          HookEventName::PostCompact => "PostCompact",
@@ -535,7 +535,7 @@ index 279edbf9d207b75175d23fd409f9d9054bebbe40..672939d6cdec3fc1174d34b469779471
          HookEventName::SessionStart => "SessionStart",
          HookEventName::SessionEnd => "SessionEnd",
          HookEventName::UserPromptSubmit => "UserPromptSubmit",
-@@ -825,6 +981,63 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str);
+@@ -935,6 +1091,64 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str);
      ]
  }
  
@@ -560,6 +560,7 @@ index 279edbf9d207b75175d23fd409f9d9054bebbe40..672939d6cdec3fc1174d34b469779471
 +            500..=599 => Category::Server,
 +            _ => Category::Other,
 +        },
++        CodexErrorDetails::RateLimitExceeded(_) => Category::RateLimit,
 +        CodexErrorDetails::SessionBudgetExceeded
 +        | CodexErrorDetails::UsageLimitReached(_)
 +        | CodexErrorDetails::QuotaExceeded
@@ -599,7 +600,7 @@ index 279edbf9d207b75175d23fd409f9d9054bebbe40..672939d6cdec3fc1174d34b469779471
  fn hook_permission_mode(turn_context: &TurnContext) -> String {
      match turn_context.approval_policy() {
          AskForApproval::Never => "bypassPermissions",
-@@ -865,6 +1078,10 @@ fn compaction_trigger_label(value: CompactionTrigger) -> &'static str {
+@@ -975,6 +1189,10 @@ fn compaction_trigger_label(value: CompactionTrigger) -> &'static str {
  
  #[cfg(test)]
  mod tests {
@@ -610,7 +611,7 @@ index 279edbf9d207b75175d23fd409f9d9054bebbe40..672939d6cdec3fc1174d34b469779471
      use codex_protocol::models::ContentItem;
      use codex_protocol::protocol::HookEventName;
      use codex_protocol::protocol::HookExecutionMode;
-@@ -879,12 +1096,73 @@ mod tests {
+@@ -989,12 +1207,73 @@ mod tests {
      use super::emit_hook_started_events;
      use super::hook_run_analytics_payload;
      use super::hook_run_metric_tags;
@@ -685,7 +686,7 @@ index 279edbf9d207b75175d23fd409f9d9054bebbe40..672939d6cdec3fc1174d34b469779471
      #[test]
      fn additional_context_messages_stay_separate_and_ordered() {
 diff --git a/codex-rs/core/src/responses_retry.rs b/codex-rs/core/src/responses_retry.rs
-index 178c13df494f0c3a73f646ef526230945c0faeb8..56b0657621bc5cce1b4a413c9e4a5ffe0e451bfa 100644
+index fb0505411e19db75d29d6ea16300825001cdd1c2..e5d3f6ad7f66fa184828b741c2157dc6cd6eac35 100644
 --- a/codex-rs/core/src/responses_retry.rs
 +++ b/codex-rs/core/src/responses_retry.rs
 @@ -1,13 +1,18 @@
@@ -884,10 +885,10 @@ index b6465ded37cb6d7eccd5906cdc39e2b12dc3e1dd..9bbbbc0f9701740549661b1a567574ba
 +    );
 +}
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..08cb84660ec698c26688f4bad4a1999085118217 100644
+index 4a749b28b86d654fe71ff3f3e6809a903bcfd9fc..d7b0160cfff7712c1cf76c4b651ce51f822aaf6f 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -14,12 +14,16 @@ use crate::connectors;
+@@ -15,12 +15,16 @@ use crate::connectors;
  use crate::context::ContextualUserFragment;
  use crate::environment_selection::TurnEnvironmentSnapshot;
  use crate::feedback_tags;
@@ -904,7 +905,7 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..08cb84660ec698c26688f4bad4a19990
  use crate::hook_runtime::run_turn_stop_hooks;
  use crate::mcp_skill_dependencies::maybe_prompt_and_install_mcp_dependencies;
  use crate::mentions::build_connector_slug_counts;
-@@ -1383,9 +1387,18 @@ async fn run_sampling_request(
+@@ -1423,9 +1427,18 @@ async fn run_sampling_request(
              Ok(output) => {
                  return Ok((output, original_input.unwrap_or(prompt.input)));
              }
@@ -924,7 +925,7 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..08cb84660ec698c26688f4bad4a19990
                      return Err(err);
                  }
                  CodexErrorDetails::UsageLimitReached(e) => {
-@@ -1393,6 +1406,14 @@ async fn run_sampling_request(
+@@ -1433,6 +1446,14 @@ async fn run_sampling_request(
                      if let Some(rate_limits) = rate_limits {
                          sess.update_rate_limits(&turn_context, *rate_limits).await;
                      }
@@ -939,7 +940,7 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..08cb84660ec698c26688f4bad4a19990
                      return Err(err);
                  }
                  _ => err,
-@@ -1404,10 +1425,19 @@ async fn run_sampling_request(
+@@ -1444,10 +1465,19 @@ async fn run_sampling_request(
          }
  
          if !err.is_retryable() {
@@ -960,7 +961,7 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..08cb84660ec698c26688f4bad4a19990
              &mut retry_state,
              max_retries,
              err,
-@@ -1416,7 +1446,18 @@ async fn run_sampling_request(
+@@ -1456,7 +1486,18 @@ async fn run_sampling_request(
              &turn_context,
              ResponsesStreamRequest::Sampling,
          )
@@ -980,7 +981,7 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..08cb84660ec698c26688f4bad4a19990
          turn_context.turn_timing_state.record_sampling_retry();
      }
  }
-@@ -1558,6 +1599,12 @@ struct SamplingRequestResult {
+@@ -1600,6 +1641,12 @@ struct SamplingRequestResult {
      last_agent_message: Option<String>,
  }
  
@@ -993,7 +994,7 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..08cb84660ec698c26688f4bad4a19990
  /// Ephemeral per-response state for streaming a single proposed plan.
  /// This is intentionally not persisted or stored in session/state since it
  /// only exists while a response is actively streaming. The final plan text
-@@ -2155,7 +2202,7 @@ async fn try_run_sampling_request(
+@@ -2210,7 +2257,7 @@ async fn try_run_sampling_request(
      turn_diff_tracker: SharedTurnDiffTracker,
      prompt: &Prompt,
      cancellation_token: CancellationToken,
@@ -1001,8 +1002,8 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..08cb84660ec698c26688f4bad4a19990
 +) -> Result<SamplingRequestResult, SamplingAttemptError> {
      let turn_context = Arc::clone(&step_context.turn);
      feedback_tags!(
-         model = step_context.model_info.slug.clone(),
-@@ -2176,7 +2223,7 @@ async fn try_run_sampling_request(
+         model = step_context.settings.model_info.slug.clone(),
+@@ -2231,7 +2278,7 @@ async fn try_run_sampling_request(
          .features
          .enabled(Feature::ConcurrentReasoningSummaries)
          && turn_context.provider.info().is_openai();
@@ -1010,8 +1011,8 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..08cb84660ec698c26688f4bad4a19990
 +    let stream_result = client_session
          .stream(
              prompt,
-             &step_context.model_info,
-@@ -2189,7 +2236,14 @@ async fn try_run_sampling_request(
+             &step_context.settings.model_info,
+@@ -2244,7 +2291,14 @@ async fn try_run_sampling_request(
          )
          .instrument(trace_span!("stream_request"))
          .or_cancel(&cancellation_token)
@@ -1027,7 +1028,7 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..08cb84660ec698c26688f4bad4a19990
      let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
          FuturesOrdered::new();
      let mut needs_follow_up = false;
-@@ -2216,7 +2270,7 @@ async fn try_run_sampling_request(
+@@ -2275,7 +2329,7 @@ async fn try_run_sampling_request(
          !sess.services.extensions.turn_item_contributors().is_empty();
      let mut active_item_is_streaming_to_client = false;
      let receiving_span = trace_span!("receiving_stream");
@@ -1036,7 +1037,7 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..08cb84660ec698c26688f4bad4a19990
          let handle_responses = trace_span!(
              parent: &receiving_span,
              "handle_responses",
-@@ -2240,17 +2294,17 @@ async fn try_run_sampling_request(
+@@ -2299,17 +2353,17 @@ async fn try_run_sampling_request(
          {
              Ok(event) => event,
              Err(codex_async_utils::CancelErr::Cancelled) => {
@@ -1058,7 +1059,7 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..08cb84660ec698c26688f4bad4a19990
              }
          };
  
-@@ -2355,7 +2409,7 @@ async fn try_run_sampling_request(
+@@ -2414,7 +2468,7 @@ async fn try_run_sampling_request(
                          .await
                      {
                          Ok(output_result) => output_result,
@@ -1067,7 +1068,7 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..08cb84660ec698c26688f4bad4a19990
                      };
                  if let Some(tool_future) = output_result.tool_future {
                      in_flight.push_back(tool_future);
-@@ -2541,7 +2595,7 @@ async fn try_run_sampling_request(
+@@ -2602,7 +2656,7 @@ async fn try_run_sampling_request(
                  should_emit_token_count = true;
                  should_emit_turn_diff = true;
                  if let Err(err) = budget_result {
@@ -1076,7 +1077,7 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..08cb84660ec698c26688f4bad4a19990
                  }
                  if let Some(false) = end_turn {
                      needs_follow_up = true;
-@@ -2715,7 +2769,9 @@ async fn try_run_sampling_request(
+@@ -2776,7 +2830,9 @@ async fn try_run_sampling_request(
      } else {
          Some(turn_context.turn_timing_state.begin_tool_blocking())
      };
@@ -1087,7 +1088,7 @@ index 7ff56e4da33d2dbcff69a3d92dbc7f6df467cdb7..08cb84660ec698c26688f4bad4a19990
      drop(tool_blocking_timing_guard);
  
      if should_emit_token_count {
-@@ -2727,7 +2783,7 @@ async fn try_run_sampling_request(
+@@ -2788,7 +2844,7 @@ async fn try_run_sampling_request(
      }
  
      if cancellation_token.is_cancelled() {
@@ -1123,10 +1124,10 @@ index cde3fc7d728e1447678f7a4e1214f72759f789ce..9c45e9bfe524b5557aa004f72a156b9d
              contributor
                  .on_turn_error(codex_extension_api::TurnErrorInput {
 diff --git a/codex-rs/core/tests/suite/compact.rs b/codex-rs/core/tests/suite/compact.rs
-index 02e555ced01d585a80d230ca38429ad5b04a4015..be52d597978d1a1b4554f4a852a48d3e5ec09392 100644
+index bd97ff635e17f3d0ecd6b316cbb3051729088b32..71ffe9a2091bf75b7daff2816187f2e604eb438c 100644
 --- a/codex-rs/core/tests/suite/compact.rs
 +++ b/codex-rs/core/tests/suite/compact.rs
-@@ -271,6 +271,59 @@ with Path(r"{manual_post_log_path}").open("a", encoding="utf-8") as handle:
+@@ -284,6 +284,59 @@ with Path(r"{manual_post_log_path}").open("a", encoding="utf-8") as handle:
      fs::write(home.join("hooks.json"), hooks.to_string()).expect("write hooks.json");
  }
  
@@ -1186,7 +1187,7 @@ index 02e555ced01d585a80d230ca38429ad5b04a4015..be52d597978d1a1b4554f4a852a48d3e
  fn non_openai_model_provider(server: &MockServer) -> ModelProviderInfo {
      let mut provider =
          built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone();
-@@ -2550,12 +2603,14 @@ async fn pre_sampling_compact_falls_back_after_previous_model_invalid_request_on
+@@ -2708,6 +2761,7 @@ async fn pre_sampling_compact_falls_back_after_previous_model_invalid_request_on
  
      let model_provider = openai_model_provider(&server);
      let mut builder = test_codex()
@@ -1194,17 +1195,18 @@ index 02e555ced01d585a80d230ca38429ad5b04a4015..be52d597978d1a1b4554f4a852a48d3e
          .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
          .with_model(retired_model)
          .with_config(move |config| {
-             config.model_provider = model_provider;
+@@ -2715,6 +2769,7 @@ async fn pre_sampling_compact_falls_back_after_previous_model_invalid_request_on
+             config.tool_registry.turn_metadata_includes_tool_info = true;
              set_test_compact_prompt(config);
              let _ = config.features.enable(Feature::RemoteCompactionV2);
 +            trust_discovered_hooks(config);
          });
      let test = builder.build(&server).await.expect("build test codex");
  
-@@ -2599,6 +2654,19 @@ async fn pre_sampling_compact_falls_back_after_previous_model_invalid_request_on
+@@ -2777,6 +2832,19 @@ async fn pre_sampling_compact_falls_back_after_previous_model_invalid_request_on
+         compact_metadata["tool_namespaces_info"],
+         first_metadata["tool_namespaces_info"],
      );
-     assert_eq!(requests[2].body_json()["model"].as_str(), Some(next_model));
-     assert_eq!(requests[3].body_json()["model"].as_str(), Some(next_model));
 +
 +    let hook_inputs =
 +        wait_for_model_request_failure_inputs(&test.codex_home_path(), /*count*/ 1).await;
@@ -1221,7 +1223,7 @@ index 02e555ced01d585a80d230ca38429ad5b04a4015..be52d597978d1a1b4554f4a852a48d3e
  }
  
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-@@ -2655,12 +2723,14 @@ async fn pre_sampling_legacy_remote_compact_falls_back_after_previous_model_inva
+@@ -2833,12 +2901,14 @@ async fn pre_sampling_legacy_remote_compact_falls_back_after_previous_model_inva
  
      let model_provider = openai_model_provider(&server);
      let mut builder = test_codex()
@@ -1236,7 +1238,7 @@ index 02e555ced01d585a80d230ca38429ad5b04a4015..be52d597978d1a1b4554f4a852a48d3e
          });
      let test = builder.build(&server).await.expect("build test codex");
  
-@@ -2705,6 +2775,208 @@ async fn pre_sampling_legacy_remote_compact_falls_back_after_previous_model_inva
+@@ -2883,6 +2953,208 @@ async fn pre_sampling_legacy_remote_compact_falls_back_after_previous_model_inva
          Some(next_model)
      );
      assert_eq!(requests[1].body_json()["model"].as_str(), Some(next_model));
@@ -1446,17 +1448,17 @@ index 02e555ced01d585a80d230ca38429ad5b04a4015..be52d597978d1a1b4554f4a852a48d3e
  
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
-index 69b4903af27ae334bc0367cec3991cdb6b88b159..a3e5aa3c960817cfdb20c428b6b83b0b3b9d30a9 100644
+index d927ab65a1fe556ea46ccceeb406e1a1d340ff31..ee5568cb85d4bebb161351f0c88434936f200b81 100644
 --- a/codex-rs/ext/extension-api/src/lib.rs
 +++ b/codex-rs/ext/extension-api/src/lib.rs
-@@ -79,6 +79,7 @@ pub use contributors::WorldStateSectionContribution;
+@@ -92,6 +92,7 @@ pub use contributors::WorldStateSectionContribution;
  pub use registry::ExtensionRegistry;
  pub use registry::ExtensionRegistryBuilder;
  pub use registry::empty_extension_registry;
 +pub use state::ActiveGoalTurn;
  pub use state::ExtensionData;
  pub use state::ExtensionDataInit;
- pub use user_instructions::LoadUserInstructionsFuture;
+ pub use user_instructions::Instructions;
 diff --git a/codex-rs/ext/extension-api/src/state.rs b/codex-rs/ext/extension-api/src/state.rs
 index 7d6e79dc5872968147c1aba00b4aa08d1efdae4c..70c5149da408c297b722e4e79108fd3b2fddad19 100644
 --- a/codex-rs/ext/extension-api/src/state.rs
@@ -1473,10 +1475,10 @@ index 7d6e79dc5872968147c1aba00b4aa08d1efdae4c..70c5149da408c297b722e4e79108fd3b
  ///
  /// Hosts may retain a clone when later operations must use the same initial
 diff --git a/codex-rs/ext/goal/src/extension.rs b/codex-rs/ext/goal/src/extension.rs
-index 923f436581b36c90556030ebdfc8e1dc30969ab4..3c60c7247e8959303a6a9d5eb5ebdd6e12627a65 100644
+index 349652da4f2608c39986adc5517d5a43dd7b89ce..db445573d838d3159a1e1f278879104a11fc2b44 100644
 --- a/codex-rs/ext/goal/src/extension.rs
 +++ b/codex-rs/ext/goal/src/extension.rs
-@@ -240,6 +240,7 @@ where
+@@ -265,6 +265,7 @@ where
                  )
              {
                  accounting.mark_turn_goal_active(input.turn_id, goal.goal_id);
@@ -1485,7 +1487,7 @@ index 923f436581b36c90556030ebdfc8e1dc30969ab4..3c60c7247e8959303a6a9d5eb5ebdd6e
          })
      }
 diff --git a/codex-rs/hooks/src/engine/dispatcher.rs b/codex-rs/hooks/src/engine/dispatcher.rs
-index 8361de803ad1ddd66e04ac9d3f8cfd7ca4375506..3a19e3b151deb0d22ce74742d043dd2f812bf1fd 100644
+index 8e77e9bbca3a24560ed9a316da8815c0cde171fc..e17258a2ae45fe9c4bb6dc69c3e38b6dd182fe2d 100644
 --- a/codex-rs/hooks/src/engine/dispatcher.rs
 +++ b/codex-rs/hooks/src/engine/dispatcher.rs
 @@ -1,4 +1,5 @@
@@ -1494,7 +1496,7 @@ index 8361de803ad1ddd66e04ac9d3f8cfd7ca4375506..3a19e3b151deb0d22ce74742d043dd2f
  
  use futures::StreamExt;
  use futures::stream::FuturesUnordered;
-@@ -26,6 +27,12 @@ pub(crate) struct ParsedHandler<T> {
+@@ -29,6 +30,12 @@ pub(crate) struct ParsedHandler<T> {
      pub completion_order: usize,
  }
  
@@ -1507,20 +1509,23 @@ index 8361de803ad1ddd66e04ac9d3f8cfd7ca4375506..3a19e3b151deb0d22ce74742d043dd2f
  pub(crate) fn select_handlers(
      handlers: &[ConfiguredHandler],
      event_name: HookEventName,
-@@ -64,7 +71,10 @@ pub(crate) fn select_handlers_for_matcher_inputs(
+@@ -67,9 +74,11 @@ pub(crate) fn select_handlers_for_matcher_inputs(
                          .any(|input| matches_matcher(handler.matcher.as_deref(), Some(input)))
                  }
              }
--            HookEventName::UserPromptSubmit | HookEventName::Stop => true,
+-            HookEventName::UserPromptSubmit | HookEventName::Stop | HookEventName::Interrupt => {
+-                true
+-            }
 +            HookEventName::UserPromptSubmit
 +            | HookEventName::RequestError
 +            | HookEventName::AbnormalStop
-+            | HookEventName::Stop => true,
++            | HookEventName::Stop
++            | HookEventName::Interrupt => true,
          })
          .cloned()
          .collect()
-@@ -151,6 +161,103 @@ pub(crate) async fn execute_handlers<T: 'static>(
-     completed.into_iter().map(|(_, parsed)| parsed).collect()
+@@ -224,6 +233,81 @@ async fn execute_handler(
+     }
  }
  
 +/// Execute every selected handler directly with a fixed concurrency bound.
@@ -1559,28 +1564,9 @@ index 8361de803ad1ddd66e04ac9d3f8cfd7ca4375506..3a19e3b151deb0d22ce74742d043dd2f
 +            let input_json = input_json.clone();
 +            let turn_id = turn_id.clone();
 +            pending.push(async move {
-+                let result = match &handler.kind {
-+                    ConfiguredHandlerKind::Command { command, env, .. } => {
-+                        run_command(
-+                            &engine.command_runtime,
-+                            &handler,
-+                            command,
-+                            env,
-+                            &input_json,
-+                            cwd,
-+                        )
-+                        .await
-+                    }
-+                    ConfiguredHandlerKind::McpTool {
-+                        server,
-+                        tool,
-+                        input,
-+                    } => {
-+                        let executor = engine.mcp_executor.as_deref()?;
-+                        run_mcp_tool(executor, &handler, server, tool, input, &input_json).await
-+                    }
-+                };
-+                Some((configured_order, parse(&handler, result, turn_id)))
++                let result =
++                    execute_handler(engine, &handler, &input_json, cwd, /*metadata*/ None).await;
++                (configured_order, parse(&handler, result, turn_id))
 +            });
 +        }
 +
@@ -1594,11 +1580,8 @@ index 8361de803ad1ddd66e04ac9d3f8cfd7ca4375506..3a19e3b151deb0d22ce74742d043dd2f
 +            },
 +            None => pending.next().await,
 +        };
-+        let Some(result) = next else {
++        let Some((configured_order, mut parsed)) = next else {
 +            break;
-+        };
-+        let Some((configured_order, mut parsed)) = result else {
-+            continue;
 +        };
 +        parsed.completion_order = completion_order;
 +        completion_order += 1;
@@ -1623,7 +1606,7 @@ index 8361de803ad1ddd66e04ac9d3f8cfd7ca4375506..3a19e3b151deb0d22ce74742d043dd2f
  pub(crate) fn completed_summary(
      handler: &ConfiguredHandler,
      run_result: &HandlerRunResult,
-@@ -185,6 +292,8 @@ pub(crate) fn scope_for_event(event_name: HookEventName) -> HookScope {
+@@ -261,6 +345,8 @@ pub(crate) fn scope_for_event(event_name: HookEventName) -> HookScope {
          | HookEventName::PostToolUse
          | HookEventName::PreCompact
          | HookEventName::PostCompact
@@ -1631,8 +1614,8 @@ index 8361de803ad1ddd66e04ac9d3f8cfd7ca4375506..3a19e3b151deb0d22ce74742d043dd2f
 +        | HookEventName::AbnormalStop
          | HookEventName::UserPromptSubmit
          | HookEventName::SubagentStop
-         | HookEventName::Stop => HookScope::Turn,
-@@ -201,6 +310,8 @@ pub(crate) fn hook_event_name_label(event_name: HookEventName) -> &'static str {
+         | HookEventName::Stop
+@@ -278,6 +364,8 @@ pub(crate) fn hook_event_name_label(event_name: HookEventName) -> &'static str {
          HookEventName::SessionStart => "SessionStart",
          HookEventName::SessionEnd => "SessionEnd",
          HookEventName::UserPromptSubmit => "UserPromptSubmit",
@@ -1642,20 +1625,20 @@ index 8361de803ad1ddd66e04ac9d3f8cfd7ca4375506..3a19e3b151deb0d22ce74742d043dd2f
          HookEventName::SubagentStop => "SubagentStop",
          HookEventName::Stop => "Stop",
 diff --git a/codex-rs/hooks/src/engine/mod.rs b/codex-rs/hooks/src/engine/mod.rs
-index c9f44ece9e9a9a222e7c17d86d87d2f76c095d2f..c5d3f7a990e14964cce9145dd797468b4a4fa13f 100644
+index 5934f46322b4fc9ce080c0275207f4bc3e89801a..5760f1c5f7bc20718a67edf768b33c17d2fa2e13 100644
 --- a/codex-rs/hooks/src/engine/mod.rs
 +++ b/codex-rs/hooks/src/engine/mod.rs
-@@ -9,6 +9,9 @@ use crate::events::compact::PostCompactRequest;
- use crate::events::compact::PreCompactOutcome;
- use crate::events::compact::PreCompactRequest;
+@@ -11,6 +11,9 @@ use crate::events::compact::PreCompactRequest;
  use crate::events::compact::StatelessHookOutcome;
+ use crate::events::interrupt::InterruptOutcome;
+ use crate::events::interrupt::InterruptRequest;
 +use crate::events::model_request::AbnormalStopRequest;
 +use crate::events::model_request::NotificationHookOutcome;
 +use crate::events::model_request::RequestErrorRequest;
  use crate::events::permission_request::PermissionRequestOutcome;
  use crate::events::permission_request::PermissionRequestRequest;
  use crate::events::post_tool_use::PostToolUseOutcome;
-@@ -114,6 +117,8 @@ impl ConfiguredHandler {
+@@ -165,6 +168,8 @@ impl ConfiguredHandler {
              codex_protocol::protocol::HookEventName::PostToolUse => "post-tool-use",
              codex_protocol::protocol::HookEventName::PreCompact => "pre-compact",
              codex_protocol::protocol::HookEventName::PostCompact => "post-compact",
@@ -1664,7 +1647,7 @@ index c9f44ece9e9a9a222e7c17d86d87d2f76c095d2f..c5d3f7a990e14964cce9145dd797468b
              codex_protocol::protocol::HookEventName::SessionStart => "session-start",
              codex_protocol::protocol::HookEventName::SessionEnd => "session-end",
              codex_protocol::protocol::HookEventName::UserPromptSubmit => "user-prompt-submit",
-@@ -315,6 +320,34 @@ impl ClaudeHooksEngine {
+@@ -420,6 +425,34 @@ impl ClaudeHooksEngine {
          crate::events::compact::run_post(self, request).await
      }
  
@@ -1700,10 +1683,10 @@ index c9f44ece9e9a9a222e7c17d86d87d2f76c095d2f..c5d3f7a990e14964cce9145dd797468b
          &self,
          request: &UserPromptSubmitRequest,
 diff --git a/codex-rs/hooks/src/engine/output_parser.rs b/codex-rs/hooks/src/engine/output_parser.rs
-index d4c71a172bcf9f8df79bb6598f72018c3d704c4b..a347fe0231540944a4b0c647c68b9f38fc927029 100644
+index aaefa46dc10217a5e9259b9f8ff010bfee0f7c36..8a7c203779bcf848c4df2506e07fb9a1aa3c4534 100644
 --- a/codex-rs/hooks/src/engine/output_parser.rs
 +++ b/codex-rs/hooks/src/engine/output_parser.rs
-@@ -64,9 +64,11 @@ pub(crate) struct StopOutput {
+@@ -64,6 +64,7 @@ pub(crate) struct StopOutput {
  #[derive(Debug, Clone)]
  pub(crate) struct StatelessHookOutput {
      pub universal: UniversalOutput,
@@ -1711,11 +1694,15 @@ index d4c71a172bcf9f8df79bb6598f72018c3d704c4b..a347fe0231540944a4b0c647c68b9f38
      pub invalid_reason: Option<String>,
  }
  
+@@ -72,6 +73,7 @@ pub(crate) struct InterruptOutput {
+     pub system_message: Option<String>,
+ }
+ 
 +use crate::schema::AbnormalStopCommandOutputWire;
  use crate::schema::BlockDecisionWire;
  use crate::schema::HookUniversalOutputWire;
- use crate::schema::PermissionRequestBehaviorWire;
-@@ -78,6 +80,7 @@ use crate::schema::PreCompactCommandOutputWire;
+ use crate::schema::InterruptCommandOutputWire;
+@@ -84,6 +86,7 @@ use crate::schema::PreCompactCommandOutputWire;
  use crate::schema::PreToolUseCommandOutputWire;
  use crate::schema::PreToolUseDecisionWire;
  use crate::schema::PreToolUsePermissionDecisionWire;
@@ -1723,7 +1710,7 @@ index d4c71a172bcf9f8df79bb6598f72018c3d704c4b..a347fe0231540944a4b0c647c68b9f38
  use crate::schema::SessionStartCommandOutputWire;
  use crate::schema::StopCommandOutputWire;
  use crate::schema::SubagentStartCommandOutputWire;
-@@ -237,6 +240,7 @@ pub(crate) fn parse_pre_compact(stdout: &str) -> Option<StatelessHookOutput> {
+@@ -243,6 +246,7 @@ pub(crate) fn parse_pre_compact(stdout: &str) -> Option<StatelessHookOutput> {
      let universal = UniversalOutput::from(wire.universal);
      Some(StatelessHookOutput {
          universal,
@@ -1731,7 +1718,7 @@ index d4c71a172bcf9f8df79bb6598f72018c3d704c4b..a347fe0231540944a4b0c647c68b9f38
          invalid_reason: None,
      })
  }
-@@ -246,6 +250,25 @@ pub(crate) fn parse_post_compact(stdout: &str) -> Option<StatelessHookOutput> {
+@@ -252,6 +256,25 @@ pub(crate) fn parse_post_compact(stdout: &str) -> Option<StatelessHookOutput> {
      let universal = UniversalOutput::from(wire.universal);
      Some(StatelessHookOutput {
          universal,
@@ -1757,7 +1744,7 @@ index d4c71a172bcf9f8df79bb6598f72018c3d704c4b..a347fe0231540944a4b0c647c68b9f38
          invalid_reason: None,
      })
  }
-@@ -512,6 +535,7 @@ mod tests {
+@@ -525,6 +548,7 @@ mod tests {
      use pretty_assertions::assert_eq;
      use serde_json::json;
  
@@ -1765,7 +1752,7 @@ index d4c71a172bcf9f8df79bb6598f72018c3d704c4b..a347fe0231540944a4b0c647c68b9f38
      use super::parse_permission_request;
      use super::parse_user_prompt_submit;
  
-@@ -533,6 +557,24 @@ mod tests {
+@@ -546,6 +570,24 @@ mod tests {
          }
      }
  
@@ -1791,7 +1778,7 @@ index d4c71a172bcf9f8df79bb6598f72018c3d704c4b..a347fe0231540944a4b0c647c68b9f38
      fn permission_request_rejects_reserved_updated_input_field() {
          let parsed = parse_permission_request(
 diff --git a/codex-rs/hooks/src/engine/schema_loader.rs b/codex-rs/hooks/src/engine/schema_loader.rs
-index e5fbf42d2cf3aa86c1b484c935a5cfb95e49efab..10a28522685614da5b8aff4d39d28174a307c9dd 100644
+index 7fce9a3c435ca0a43a4798c77d7bd61399e34845..37e1942914d43408ed9c1d0e173987e0ae351faa 100644
 --- a/codex-rs/hooks/src/engine/schema_loader.rs
 +++ b/codex-rs/hooks/src/engine/schema_loader.rs
 @@ -10,6 +10,10 @@ pub(crate) struct GeneratedHookSchemas {
@@ -1805,7 +1792,7 @@ index e5fbf42d2cf3aa86c1b484c935a5cfb95e49efab..10a28522685614da5b8aff4d39d28174
      pub pre_tool_use_command_input: Value,
      pub pre_tool_use_command_output: Value,
      pub pre_compact_command_input: Value,
-@@ -54,6 +58,22 @@ pub(crate) fn generated_hook_schemas() -> &'static GeneratedHookSchemas {
+@@ -56,6 +60,22 @@ pub(crate) fn generated_hook_schemas() -> &'static GeneratedHookSchemas {
              "post-compact.command.output",
              include_str!("../../schema/generated/post-compact.command.output.schema.json"),
          ),
@@ -1828,7 +1815,7 @@ index e5fbf42d2cf3aa86c1b484c935a5cfb95e49efab..10a28522685614da5b8aff4d39d28174
          pre_tool_use_command_input: parse_json_schema(
              "pre-tool-use.command.input",
              include_str!("../../schema/generated/pre-tool-use.command.input.schema.json"),
-@@ -137,6 +157,10 @@ mod tests {
+@@ -147,6 +167,10 @@ mod tests {
          assert_eq!(schemas.permission_request_command_output["type"], "object");
          assert_eq!(schemas.post_compact_command_input["type"], "object");
          assert_eq!(schemas.post_compact_command_output["type"], "object");
@@ -1840,15 +1827,15 @@ index e5fbf42d2cf3aa86c1b484c935a5cfb95e49efab..10a28522685614da5b8aff4d39d28174
          assert_eq!(schemas.pre_tool_use_command_output["type"], "object");
          assert_eq!(schemas.pre_compact_command_input["type"], "object");
 diff --git a/codex-rs/hooks/src/lib.rs b/codex-rs/hooks/src/lib.rs
-index 7536bda0b413e5e39dfb6e589907687ad65f5010..0584d45071121ff6510bba243cbbf9b78504e304 100644
+index 6abc173535b23b5ee6bd057fd3f49d9b82ea7fe0..9735627a0d7bcd8db4f095ce8b136d423ec0a662 100644
 --- a/codex-rs/hooks/src/lib.rs
 +++ b/codex-rs/hooks/src/lib.rs
-@@ -18,12 +18,14 @@ pub use engine::HookListEntry;
- pub use engine::HookListEntryHandler;
+@@ -20,12 +20,14 @@ pub use engine::dispatcher::hook_execution_mode_label;
+ pub use engine::dispatcher::hook_handler_type_label;
  pub use events::common::SubagentHookContext;
  /// Hook event names as they appear in hooks JSON and config files.
--pub const HOOK_EVENT_NAMES: [&str; 11] = [
-+pub const HOOK_EVENT_NAMES: [&str; 13] = [
+-pub const HOOK_EVENT_NAMES: [&str; 12] = [
++pub const HOOK_EVENT_NAMES: [&str; 14] = [
      "PreToolUse",
      "PermissionRequest",
      "PostToolUse",
@@ -1859,10 +1846,10 @@ index 7536bda0b413e5e39dfb6e589907687ad65f5010..0584d45071121ff6510bba243cbbf9b7
      "SessionStart",
      "SessionEnd",
      "UserPromptSubmit",
-@@ -53,6 +55,13 @@ pub use events::compact::PostCompactRequest;
- pub use events::compact::PreCompactOutcome;
- pub use events::compact::PreCompactRequest;
+@@ -58,6 +60,13 @@ pub use events::compact::PreCompactRequest;
  pub use events::compact::StatelessHookOutcome;
+ pub use events::interrupt::InterruptOutcome;
+ pub use events::interrupt::InterruptRequest;
 +pub use events::model_request::AbnormalStopRequest;
 +pub use events::model_request::ModelRequestError;
 +pub use events::model_request::ModelRequestErrorCategory;
@@ -1873,15 +1860,15 @@ index 7536bda0b413e5e39dfb6e589907687ad65f5010..0584d45071121ff6510bba243cbbf9b7
  pub use events::permission_request::PermissionRequestDecision;
  pub use events::permission_request::PermissionRequestOutcome;
  pub use events::permission_request::PermissionRequestRequest;
-@@ -78,6 +87,7 @@ pub use mcp::HookMcpExecutor;
+@@ -82,6 +91,7 @@ pub use mcp::HookMcpExecutor;
  pub use registry::HookListOutcome;
  pub use registry::Hooks;
  pub use registry::HooksConfig;
 +pub use registry::RequestErrorDispatch;
- pub use registry::command_from_argv;
  pub use registry::list_hooks;
  pub use schema::write_schema_fixtures;
-@@ -96,6 +106,8 @@ pub fn hook_event_key_label(event_name: HookEventName) -> &'static str {
+ pub use types::Hook;
+@@ -99,6 +109,8 @@ pub fn hook_event_key_label(event_name: HookEventName) -> &'static str {
          HookEventName::PostToolUse => "post_tool_use",
          HookEventName::PreCompact => "pre_compact",
          HookEventName::PostCompact => "post_compact",
@@ -1891,29 +1878,31 @@ index 7536bda0b413e5e39dfb6e589907687ad65f5010..0584d45071121ff6510bba243cbbf9b7
          HookEventName::SessionEnd => "session_end",
          HookEventName::UserPromptSubmit => "user_prompt_submit",
 diff --git a/codex-rs/hooks/src/registry.rs b/codex-rs/hooks/src/registry.rs
-index f45a645e3d0fb7d8e6ca3dad594c2cc7cd254273..98099223c270a5072731767f4b3d1d5f9196dcf1 100644
+index b322da55d807157532f9b4490f0811a67805834d..55b0457209c8b5dc52f6e42840f62dfe088afa76 100644
 --- a/codex-rs/hooks/src/registry.rs
 +++ b/codex-rs/hooks/src/registry.rs
-@@ -6,6 +6,9 @@ use crate::events::compact::PostCompactRequest;
- use crate::events::compact::PreCompactOutcome;
- use crate::events::compact::PreCompactRequest;
+@@ -8,6 +8,9 @@ use crate::events::compact::PreCompactRequest;
  use crate::events::compact::StatelessHookOutcome;
+ use crate::events::interrupt::InterruptOutcome;
+ use crate::events::interrupt::InterruptRequest;
 +use crate::events::model_request::AbnormalStopRequest;
 +use crate::events::model_request::NotificationHookOutcome;
 +use crate::events::model_request::RequestErrorRequest;
  use crate::events::permission_request::PermissionRequestOutcome;
  use crate::events::permission_request::PermissionRequestRequest;
  use crate::events::post_tool_use::PostToolUseOutcome;
-@@ -26,13 +29,100 @@ use crate::types::HookEvent;
+@@ -28,6 +31,8 @@ use crate::types::HookEvent;
  use crate::types::HookPayload;
  use crate::types::HookResponse;
  use async_channel::Receiver;
 +use async_channel::Sender;
 +use async_channel::TrySendError;
  use codex_config::ConfigLayerStack;
+ use codex_plugin::ExecutorPluginHookSource;
  use codex_plugin::PluginHookSource;
- use codex_protocol::ThreadId;
+@@ -35,8 +40,93 @@ use codex_protocol::ThreadId;
  use codex_protocol::shell_environment::scrub_non_inheritable_env_vars;
+ use std::ffi::OsString;
  use std::sync::Arc;
 +use std::sync::atomic::AtomicBool;
 +use std::sync::atomic::Ordering;
@@ -2005,23 +1994,23 @@ index f45a645e3d0fb7d8e6ca3dad594c2cc7cd254273..98099223c270a5072731767f4b3d1d5f
  
  #[derive(Default, Clone)]
  pub struct HooksConfig {
-@@ -57,6 +147,7 @@ pub struct HookListOutcome {
- pub struct Hooks {
+@@ -63,6 +153,7 @@ pub struct Hooks {
+     environment: Arc<Vec<(OsString, OsString)>>,
      after_agent: Vec<Hook>,
      engine: ClaudeHooksEngine,
 +    request_error_dispatcher: RequestErrorDispatcher,
  }
  
  impl Hooks {
-@@ -113,6 +204,7 @@ impl Hooks {
-         Self {
+@@ -133,6 +224,7 @@ impl Hooks {
+             environment,
              after_agent,
              engine,
 +            request_error_dispatcher: RequestErrorDispatcher::new(),
          }
      }
  
-@@ -226,6 +318,29 @@ impl Hooks {
+@@ -246,6 +338,29 @@ impl Hooks {
          self.engine.run_post_compact(request).await
      }
  
@@ -2051,7 +2040,7 @@ index f45a645e3d0fb7d8e6ca3dad594c2cc7cd254273..98099223c270a5072731767f4b3d1d5f
      pub fn preview_user_prompt_submit(
          &self,
          request: &UserPromptSubmitRequest,
-@@ -287,3 +402,211 @@ pub fn command_from_argv(argv: &[String]) -> Option<Command> {
+@@ -321,3 +436,212 @@ pub(crate) fn command_from_argv(
      scrub_non_inheritable_env_vars(command.as_std_mut());
      Some(command)
  }
@@ -2140,10 +2129,11 @@ index f45a645e3d0fb7d8e6ca3dad594c2cc7cd254273..98099223c270a5072731767f4b3d1d5f
 +                    program: String::new(),
 +                    args: Vec::new(),
 +                },
++                Arc::new(Vec::new()),
 +                ThreadId::new(),
 +                result_sender,
 +            ),
-+            Some(executor),
++            executor,
 +        );
 +        engine.handlers = vec![ConfiguredHandler {
 +            event_name: HookEventName::RequestError,
@@ -2151,7 +2141,7 @@ index f45a645e3d0fb7d8e6ca3dad594c2cc7cd254273..98099223c270a5072731767f4b3d1d5f
 +            timeout_sec: 60,
 +            status_message: None,
 +            additional_context_limit: Default::default(),
-+            source_path: cwd().join("request-error.json"),
++            source_path: cwd().join("request-error.json").into(),
 +            source: HookSource::User,
 +            display_order: 0,
 +            kind: ConfiguredHandlerKind::McpTool {
@@ -2264,7 +2254,7 @@ index f45a645e3d0fb7d8e6ca3dad594c2cc7cd254273..98099223c270a5072731767f4b3d1d5f
 +    }
 +}
 diff --git a/codex-rs/tui/src/bottom_pane/hooks_browser_view.rs b/codex-rs/tui/src/bottom_pane/hooks_browser_view.rs
-index 2a765613bfd77aefd6f278af14aaf2e710525034..45e5f21cf132bb3ddaa7363eab48cb0f0f7112b2 100644
+index 88318fb08adad1165eb1f64201802152a1608a32..6cf0a2fd18ad99dd5844948fad660daecc2cc3a4 100644
 --- a/codex-rs/tui/src/bottom_pane/hooks_browser_view.rs
 +++ b/codex-rs/tui/src/bottom_pane/hooks_browser_view.rs
 @@ -773,6 +773,8 @@ fn event_label(event_name: HookEventName) -> &'static str {
@@ -2276,7 +2266,7 @@ index 2a765613bfd77aefd6f278af14aaf2e710525034..45e5f21cf132bb3ddaa7363eab48cb0f
          HookEventName::SessionStart => "SessionStart",
          HookEventName::SessionEnd => "SessionEnd",
          HookEventName::UserPromptSubmit => "UserPromptSubmit",
-@@ -789,6 +791,8 @@ fn event_description(event_name: HookEventName) -> &'static str {
+@@ -790,6 +792,8 @@ fn event_description(event_name: HookEventName) -> &'static str {
          HookEventName::PostToolUse => "After a tool executes",
          HookEventName::PreCompact => "Before context compaction",
          HookEventName::PostCompact => "After context compaction",
@@ -2286,10 +2276,10 @@ index 2a765613bfd77aefd6f278af14aaf2e710525034..45e5f21cf132bb3ddaa7363eab48cb0f
          HookEventName::SessionEnd => "Right before a session ends",
          HookEventName::UserPromptSubmit => "When the user submits a prompt",
 diff --git a/codex-rs/tui/src/chatwidget/tests/helpers.rs b/codex-rs/tui/src/chatwidget/tests/helpers.rs
-index a8dc6917e16a8686f969be33eae2462af84e9445..36d9179a8727a24d16d7281f79ce052b40e66971 100644
+index 73a33d83a7c01eba30d077a71df3aa9f308813ac..94936549404aa8159709b2685117762d6f725896 100644
 --- a/codex-rs/tui/src/chatwidget/tests/helpers.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/helpers.rs
-@@ -1702,6 +1702,8 @@ fn hook_event_label(event_name: codex_app_server_protocol::HookEventName) -> &'s
+@@ -1709,6 +1709,8 @@ fn hook_event_label(event_name: codex_app_server_protocol::HookEventName) -> &'s
          codex_app_server_protocol::HookEventName::PostToolUse => "PostToolUse",
          codex_app_server_protocol::HookEventName::PreCompact => "PreCompact",
          codex_app_server_protocol::HookEventName::PostCompact => "PostCompact",
@@ -2299,7 +2289,7 @@ index a8dc6917e16a8686f969be33eae2462af84e9445..36d9179a8727a24d16d7281f79ce052b
          codex_app_server_protocol::HookEventName::SessionEnd => "SessionEnd",
          codex_app_server_protocol::HookEventName::UserPromptSubmit => "UserPromptSubmit",
 diff --git a/codex-rs/tui/src/history_cell/hook_cell.rs b/codex-rs/tui/src/history_cell/hook_cell.rs
-index 7b3868ed2863c126d202b082a3f7e4e38242e1c4..fd71e4df4c212efd58ffe0e1de197fdf871b1104 100644
+index 97567b18bf1b7b06dd948571acb665eb745034e6..e93a5ea2bad60a67e976418f750ff3c9f63d9cab 100644
 --- a/codex-rs/tui/src/history_cell/hook_cell.rs
 +++ b/codex-rs/tui/src/history_cell/hook_cell.rs
 @@ -840,6 +840,8 @@ fn hook_event_label(event_name: HookEventName) -> &'static str {

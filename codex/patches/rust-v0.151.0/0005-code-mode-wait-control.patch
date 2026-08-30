@@ -260,10 +260,10 @@ index d41c548f793787b9f0669cb3d5934e35989362c5..b16811266144581908b9d5afcbd113a6
      );
  
 diff --git a/codex-rs/code-mode-protocol/src/host/host_tests.rs b/codex-rs/code-mode-protocol/src/host/host_tests.rs
-index 7404cb6d4d8d63171d0874b539da06f59be68f00..095150b9c72b88a7e583182ee48066ac30fb1f0e 100644
+index e215d2a30b9ff7ec2ffca79be8ced064bf7dd9a3..175cbe83bda6482b4c113bff5b160f2043fa2beb 100644
 --- a/codex-rs/code-mode-protocol/src/host/host_tests.rs
 +++ b/codex-rs/code-mode-protocol/src/host/host_tests.rs
-@@ -590,6 +590,7 @@ fn host_to_client_v1_variants_are_pinned() {
+@@ -465,6 +465,7 @@ fn host_to_client_v1_variants_are_pinned() {
                  outcome: WireWaitOutcome::LiveCell(WireRuntimeResponse::Yielded {
                      cell_id: cell_id("cell-1"),
                      content_items: content_items(),
@@ -271,7 +271,7 @@ index 7404cb6d4d8d63171d0874b539da06f59be68f00..095150b9c72b88a7e583182ee48066ac
                  }),
              },
              json!({
-@@ -681,6 +682,32 @@ fn host_to_client_v1_variants_are_pinned() {
+@@ -556,6 +557,32 @@ fn host_to_client_v1_variants_are_pinned() {
              },
          }),
      );
@@ -588,7 +588,7 @@ index 9b0ba3e454f2e9034980985f81758a2b71a30abc..8e75f298fe78f385278147c4a27b3dfd
      );
  
 diff --git a/codex-rs/code-mode-runtime/src/service_tests.rs b/codex-rs/code-mode-runtime/src/service_tests.rs
-index 8ec8cbe15fae7581c335a3e3210c074c98ab4b60..d4ca9bee31673617c25bcd8f75f472c3dcc079cd 100644
+index 2f97e1c3de4fb64101e321f4786e69fdeedcea7b..7f758988b81be8b56dd79861a3ec5efb100386e9 100644
 --- a/codex-rs/code-mode-runtime/src/service_tests.rs
 +++ b/codex-rs/code-mode-runtime/src/service_tests.rs
 @@ -120,6 +120,7 @@ async fn execute_and_wait_clamp_yield_grace_without_stopping_the_cell() {
@@ -714,7 +714,7 @@ index dd77766067adcdd710df597c8bf15e6c5a748ebc..12943f4e842dc1420c0c0b07455fd537
              cell_id,
              content_items,
 diff --git a/codex-rs/code-mode/src/grpc_session/conversion_tests.rs b/codex-rs/code-mode/src/grpc_session/conversion_tests.rs
-index ef7847c9697bfcd2b9183654fc924fc23826fac4..b1bf96091af2ce3a602ddd173c2317ab8110d1cb 100644
+index ed0e66e2a9dce9385000ab786f487cb05bae2301..47ba54dffc5ec01d7e1518bcac3665f931a7d81f 100644
 --- a/codex-rs/code-mode/src/grpc_session/conversion_tests.rs
 +++ b/codex-rs/code-mode/src/grpc_session/conversion_tests.rs
 @@ -7,6 +7,7 @@ use codex_code_mode_protocol::ImageDetail;
@@ -725,7 +725,7 @@ index ef7847c9697bfcd2b9183654fc924fc23826fac4..b1bf96091af2ce3a602ddd173c2317ab
  use codex_code_mode_protocol::grpc;
  use codex_protocol::ToolName;
  use pretty_assertions::assert_eq;
-@@ -166,7 +167,9 @@ fn oversized_response_cell_ids_are_rejected() {
+@@ -167,7 +168,9 @@ fn oversized_response_cell_ids_are_rejected() {
          cell_id: "x".repeat(grpc::MAX_IDENTIFIER_BYTES + 1),
          content_items: Vec::new(),
          outcome: Some(grpc::execution_outcome::Outcome::Yielded(
@@ -736,7 +736,7 @@ index ef7847c9697bfcd2b9183654fc924fc23826fac4..b1bf96091af2ce3a602ddd173c2317ab
          )),
      };
  
-@@ -190,10 +193,42 @@ fn invalid_output_enums_and_missing_oneofs_are_rejected() {
+@@ -191,10 +194,42 @@ fn invalid_output_enums_and_missing_oneofs_are_rejected() {
              })),
          }],
          outcome: Some(grpc::execution_outcome::Outcome::Yielded(
@@ -841,10 +841,10 @@ index 666f6edda662ed89b062398460a6aa399dd7b2e3..3bc64f2f89612e6708a04a9878e5c52a
          RuntimeResponse::Terminated {
              cell_id,
 diff --git a/codex-rs/code-mode/src/remote_session/connection/driver_tests.rs b/codex-rs/code-mode/src/remote_session/connection/driver_tests.rs
-index 3f51607b44fc724b660b349a6bf6cc66b08c919f..1d7ca19f5c166ff85f3b8c61b677962969cc4c72 100644
+index 85571c1eec2dabc4ef91ed2c06c20208204eb235..661f7d42af118839be20575e0c7c94ad812761d4 100644
 --- a/codex-rs/code-mode/src/remote_session/connection/driver_tests.rs
 +++ b/codex-rs/code-mode/src/remote_session/connection/driver_tests.rs
-@@ -1224,6 +1224,7 @@ async fn mismatched_initial_response_fails_connection_and_closes_cell_once() {
+@@ -1098,6 +1098,7 @@ async fn mismatched_initial_response_fails_connection_and_closes_cell_once() {
                  value: WireRuntimeResponse::Yielded {
                      cell_id: CellId::new("2".to_string()).into(),
                      content_items: Vec::new(),
@@ -852,7 +852,7 @@ index 3f51607b44fc724b660b349a6bf6cc66b08c919f..1d7ca19f5c166ff85f3b8c61b6779629
                  },
              },
          }))
-@@ -1271,6 +1272,7 @@ async fn mismatched_wait_response_fails_connection() {
+@@ -1145,6 +1146,7 @@ async fn mismatched_wait_response_fails_connection() {
                      outcome: WireWaitOutcome::LiveCell(WireRuntimeResponse::Yielded {
                          cell_id: CellId::new("2".to_string()).into(),
                          content_items: Vec::new(),
@@ -860,7 +860,7 @@ index 3f51607b44fc724b660b349a6bf6cc66b08c919f..1d7ca19f5c166ff85f3b8c61b6779629
                      }),
                  },
              },
-@@ -1367,6 +1369,7 @@ async fn remote_wait_accepts_durations_longer_than_five_minutes() {
+@@ -1241,6 +1243,7 @@ async fn remote_wait_accepts_durations_longer_than_five_minutes() {
                      outcome: WireWaitOutcome::LiveCell(WireRuntimeResponse::Yielded {
                          cell_id: CellId::new("1".to_string()).into(),
                          content_items: Vec::new(),
@@ -868,7 +868,7 @@ index 3f51607b44fc724b660b349a6bf6cc66b08c919f..1d7ca19f5c166ff85f3b8c61b6779629
                      }),
                  },
              },
-@@ -1380,6 +1383,7 @@ async fn remote_wait_accepts_durations_longer_than_five_minutes() {
+@@ -1254,6 +1257,7 @@ async fn remote_wait_accepts_durations_longer_than_five_minutes() {
              codex_code_mode_protocol::RuntimeResponse::Yielded {
                  cell_id: CellId::new("1".to_string()),
                  content_items: Vec::new(),
@@ -876,7 +876,7 @@ index 3f51607b44fc724b660b349a6bf6cc66b08c919f..1d7ca19f5c166ff85f3b8c61b6779629
              }
          ))
      );
-@@ -1544,6 +1548,7 @@ async fn cancelled_wait_is_retired_before_next_wait_is_sent() {
+@@ -1418,6 +1422,7 @@ async fn cancelled_wait_is_retired_before_next_wait_is_sent() {
                      outcome: WireWaitOutcome::LiveCell(WireRuntimeResponse::Yielded {
                          cell_id: CellId::new("1".to_string()).into(),
                          content_items: Vec::new(),
@@ -884,7 +884,7 @@ index 3f51607b44fc724b660b349a6bf6cc66b08c919f..1d7ca19f5c166ff85f3b8c61b6779629
                      }),
                  },
              },
-@@ -1557,6 +1562,7 @@ async fn cancelled_wait_is_retired_before_next_wait_is_sent() {
+@@ -1431,6 +1436,7 @@ async fn cancelled_wait_is_retired_before_next_wait_is_sent() {
              codex_code_mode_protocol::RuntimeResponse::Yielded {
                  cell_id: CellId::new("1".to_string()),
                  content_items: Vec::new(),
@@ -892,7 +892,7 @@ index 3f51607b44fc724b660b349a6bf6cc66b08c919f..1d7ca19f5c166ff85f3b8c61b6779629
              }
          ))
      );
-@@ -1780,6 +1786,7 @@ async fn session_accepts_more_than_4096_cells_without_growing_a_tombstone_set()
+@@ -1654,6 +1660,7 @@ async fn session_accepts_more_than_4096_cells_without_growing_a_tombstone_set()
                      value: WireRuntimeResponse::Yielded {
                          cell_id: CellId::new(cell_id.clone()).into(),
                          content_items: Vec::new(),
@@ -901,7 +901,7 @@ index 3f51607b44fc724b660b349a6bf6cc66b08c919f..1d7ca19f5c166ff85f3b8c61b6779629
                  },
              }))
 diff --git a/codex-rs/core/src/tools/code_mode/execute_handler.rs b/codex-rs/core/src/tools/code_mode/execute_handler.rs
-index 87d260be4e7fece993060e39cc887331ccdb37ac..8b06c5a63098c848ec2cd739039ad46c46f9359a 100644
+index 313290da5ad687bf8caa41d1d86235888065177c..5346075e28b45a52e3dba52b35e416899cae27bc 100644
 --- a/codex-rs/core/src/tools/code_mode/execute_handler.rs
 +++ b/codex-rs/core/src/tools/code_mode/execute_handler.rs
 @@ -11,6 +11,7 @@ use std::sync::Arc;
@@ -912,9 +912,9 @@ index 87d260be4e7fece993060e39cc887331ccdb37ac..8b06c5a63098c848ec2cd739039ad46c
  use super::handle_runtime_response;
  use super::is_exec_tool_name;
  use super::telemetry::CodeModeToolCallGuard;
-@@ -89,6 +90,11 @@ impl CodeModeExecuteHandler {
+@@ -90,6 +91,11 @@ impl CodeModeExecuteHandler {
          if let Some(executed_tool_calls) = exec.session.services.executed_tool_calls.as_ref() {
-             executed_tool_calls.register_cell(&cell_id, &call_id);
+             executed_tool_calls.start_cell(&cell_id, &call_id);
          }
 +        let terminal_wait_snapshot = exec
 +            .session
@@ -924,7 +924,7 @@ index 87d260be4e7fece993060e39cc887331ccdb37ac..8b06c5a63098c848ec2cd739039ad46c
          let runtime_cell_id = cell_id.to_string();
          let code_cell_trace = exec
              .session
-@@ -108,6 +114,15 @@ impl CodeModeExecuteHandler {
+@@ -109,6 +115,15 @@ impl CodeModeExecuteHandler {
              .initial_response()
              .await
              .map_err(FunctionCallError::RespondToModel)?;
@@ -941,7 +941,7 @@ index 87d260be4e7fece993060e39cc887331ccdb37ac..8b06c5a63098c848ec2cd739039ad46c
          // is produced by `handle_runtime_response` and later linked through
          // `CodeCell.output_item_ids` in the reduced trace.
 diff --git a/codex-rs/core/src/tools/code_mode/mod.rs b/codex-rs/core/src/tools/code_mode/mod.rs
-index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..d58653eed07d593ce9d7ec383dce89cc016aae9a 100644
+index 1465766a82f6059b3af4e0fcfd633ad08051fee6..74353427a6d238e6494425122b3770f8a4fc3a7b 100644
 --- a/codex-rs/core/src/tools/code_mode/mod.rs
 +++ b/codex-rs/core/src/tools/code_mode/mod.rs
 @@ -6,8 +6,12 @@ mod telemetry;
@@ -965,23 +965,23 @@ index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..d58653eed07d593ce9d7ec383dce89cc
  use tokio::sync::OnceCell;
  use tokio_util::sync::CancellationToken;
  
-@@ -72,6 +77,7 @@ pub(crate) struct CodeModeService {
-     availability: Result<(), String>,
+@@ -73,6 +78,7 @@ pub(crate) struct CodeModeService {
      dispatch_broker: Arc<CodeModeDispatchBroker>,
      default_exec_yield_time_ms: u64,
+     shutdown_token: CancellationToken,
 +    terminal_wait_leases: Arc<TerminalWaitLeases>,
-     shutting_down: AtomicBool,
      unavailable_warning_emitted: AtomicBool,
  }
-@@ -89,6 +95,7 @@ impl CodeModeService {
-             availability,
+ 
+@@ -91,6 +97,7 @@ impl CodeModeService {
              dispatch_broker,
              default_exec_yield_time_ms: config.default_exec_yield_time_ms,
+             shutdown_token: CancellationToken::new(),
 +            terminal_wait_leases: Arc::new(TerminalWaitLeases::default()),
-             shutting_down: AtomicBool::new(false),
              unavailable_warning_emitted: AtomicBool::new(false),
          }
-@@ -182,6 +189,61 @@ impl CodeModeService {
+     }
+@@ -195,6 +202,61 @@ impl CodeModeService {
  
      pub(crate) fn finish_cell_dispatch(&self, cell_id: &CellId) {
          self.dispatch_broker.close_cell(cell_id);
@@ -1043,7 +1043,7 @@ index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..d58653eed07d593ce9d7ec383dce89cc
      }
  
      pub(crate) fn start_turn_worker(
-@@ -230,6 +292,329 @@ impl CodeModeService {
+@@ -247,6 +309,329 @@ impl CodeModeService {
      }
  }
  
@@ -1373,11 +1373,11 @@ index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..d58653eed07d593ce9d7ec383dce89cc
  pub(super) async fn handle_runtime_response(
      exec: &ExecContext,
      response: RuntimeResponse,
-@@ -348,6 +733,21 @@ async fn call_nested_tool(
+@@ -369,6 +754,21 @@ fn submit_nested_tool(
          Err(error) => return Err(FunctionCallError::RespondToModel(error)),
      };
  
-+    let _terminal_wait_decision = if tool_name.namespace.is_none()
++    let terminal_wait_decision = if tool_name.namespace.is_none()
 +        && matches!(
 +            tool_name.name.as_str(),
 +            "exec_command" | "write_stdin" | "terminal_wait_control"
@@ -1395,19 +1395,29 @@ index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..d58653eed07d593ce9d7ec383dce89cc
      let call = ToolCall {
          tool_name: tool_name.with_default_namespace(),
          call_id: format!("{PUBLIC_TOOL_NAME}-{}", uuid::Uuid::new_v4()),
-@@ -421,6 +821,9 @@ fn build_freeform_tool_payload(
+@@ -392,7 +792,10 @@ fn submit_nested_tool(
+         },
+         cancellation_token,
+     );
+-    Ok(async move { Ok(result.await?.code_mode_result()) })
++    Ok(async move {
++        let _terminal_wait_decision = terminal_wait_decision;
++        Ok(result.await?.code_mode_result())
++    })
+ }
  
- #[cfg(test)]
- mod tests {
-+    use std::sync::Arc;
-+
+ fn build_nested_tool_payload(
+@@ -443,6 +846,7 @@ mod tests {
+     use std::collections::BTreeMap;
+     use std::sync::Arc;
+ 
 +    use super::TerminalWaitLeases;
      use super::build_nested_tool_payload;
      use super::truncate_code_mode_result;
-     use crate::tools::context::ToolPayload;
-@@ -429,6 +832,87 @@ mod tests {
-     use codex_tools::ToolName;
-     use serde_json::json;
+     use crate::session::step_context::StepContext;
+@@ -486,6 +890,87 @@ mod tests {
+         assert!(worker.is_some());
+     }
  
 +    #[tokio::test]
 +    async fn terminal_wait_lease_classifies_early_yield_and_resumes_once() {
@@ -1494,7 +1504,7 @@ index 0ce1e66b9cf04fb4e3a255ae1cd1e044e25b1d2c..d58653eed07d593ce9d7ec383dce89cc
      fn build_nested_tool_payload_uses_function_kind() {
          let payload = build_nested_tool_payload(
 diff --git a/codex-rs/core/src/tools/code_mode/wait_handler.rs b/codex-rs/core/src/tools/code_mode/wait_handler.rs
-index 4f65cef15e9d683466a88f0c07ed0598998aae7c..5b46c5ec98a533ff9290d2ccdc994b795f0e1a95 100644
+index bf34f2d1362c9ed8b048cc309a91be938044b446..47fa264f56fae864c5607162d0955c4a9d6e62d7 100644
 --- a/codex-rs/core/src/tools/code_mode/wait_handler.rs
 +++ b/codex-rs/core/src/tools/code_mode/wait_handler.rs
 @@ -15,6 +15,7 @@ use codex_tools::ToolSpec;
@@ -1505,7 +1515,7 @@ index 4f65cef15e9d683466a88f0c07ed0598998aae7c..5b46c5ec98a533ff9290d2ccdc994b79
  use super::handle_runtime_response;
  use super::telemetry::CodeModeToolCallGuard;
  use super::wait_spec::create_wait_tool;
-@@ -91,28 +92,54 @@ impl CodeModeWaitHandler {
+@@ -95,28 +96,54 @@ impl CodeModeWaitHandler {
                  let exec = ExecContext { session, turn };
                  let started_at = std::time::Instant::now();
                  let cell_id = codex_code_mode::CellId::new(args.cell_id);
@@ -1572,7 +1582,7 @@ index 4f65cef15e9d683466a88f0c07ed0598998aae7c..5b46c5ec98a533ff9290d2ccdc994b79
                          codex_code_mode::RuntimeResponse::Yielded { cell_id, .. }
                          | codex_code_mode::RuntimeResponse::Terminated { cell_id, .. }
                          | codex_code_mode::RuntimeResponse::Result { cell_id, .. } => cell_id,
-@@ -124,6 +151,9 @@ impl CodeModeWaitHandler {
+@@ -128,6 +155,9 @@ impl CodeModeWaitHandler {
                          executed_tool_calls.register_cell(runtime_cell_id, &call_id);
                      }
                      if !matches!(response, codex_code_mode::RuntimeResponse::Yielded { .. }) {
@@ -1582,7 +1592,7 @@ index 4f65cef15e9d683466a88f0c07ed0598998aae7c..5b46c5ec98a533ff9290d2ccdc994b79
                          exec.session
                              .services
                              .rollout_thread_trace
-@@ -131,7 +161,7 @@ impl CodeModeWaitHandler {
+@@ -135,7 +165,7 @@ impl CodeModeWaitHandler {
                                  exec.turn.sub_id.as_str(),
                                  runtime_cell_id.as_str(),
                              )
@@ -1591,7 +1601,7 @@ index 4f65cef15e9d683466a88f0c07ed0598998aae7c..5b46c5ec98a533ff9290d2ccdc994b79
                          exec.session
                              .services
                              .code_mode_service
-@@ -149,7 +179,7 @@ impl CodeModeWaitHandler {
+@@ -153,7 +183,7 @@ impl CodeModeWaitHandler {
                      }
                  }
                  exec.session.services.elicitations.wait_until_clear().await;
@@ -1600,8 +1610,23 @@ index 4f65cef15e9d683466a88f0c07ed0598998aae7c..5b46c5ec98a533ff9290d2ccdc994b79
                      .await
                      .map_err(FunctionCallError::RespondToModel)
                      .map(boxed_tool_output)
+diff --git a/codex-rs/core/src/unified_exec/oneshot.rs b/codex-rs/core/src/unified_exec/oneshot.rs
+index ec7cffdb163d786c22e8303cba10ef129c12e7a0..69e171edc84d3ecf875d42ca9c82fe763861ff3c 100644
+--- a/codex-rs/core/src/unified_exec/oneshot.rs
++++ b/codex-rs/core/src/unified_exec/oneshot.rs
+@@ -33,6 +33,10 @@ impl UnifiedExecProcessManager {
+             Arc::clone(&context.step_context),
+             context.cancellation_token.child_token(),
+             context.call_id.clone(),
++        )
++        .with_code_mode_source(
++            context.code_mode_cell_id.clone(),
++            context.code_mode_tool_call_id.clone(),
+         );
+         let _cancel_on_drop = context.cancellation_token.clone().drop_guard();
+         tokio::spawn(async move {
 diff --git a/codex-rs/core/tests/suite/code_mode.rs b/codex-rs/core/tests/suite/code_mode.rs
-index f9429a1464234cb24f29f49765012ee9ba96c4b4..b09d6eff7d4a4cf9be139ed8caa68d104d24108f 100644
+index 90eb2c6d2e063923e33fe7e6afc04a0ef3c080f8..61b3682868ad73b49ab39a5f92ac221d59ff6011 100644
 --- a/codex-rs/core/tests/suite/code_mode.rs
 +++ b/codex-rs/core/tests/suite/code_mode.rs
 @@ -3,6 +3,8 @@
@@ -1613,7 +1638,7 @@ index f9429a1464234cb24f29f49765012ee9ba96c4b4..b09d6eff7d4a4cf9be139ed8caa68d10
  use codex_config::types::McpServerConfig;
  use codex_config::types::McpServerTransportConfig;
  use codex_core::StartThreadOptions;
-@@ -1754,6 +1756,199 @@ text(result.output);
+@@ -1879,6 +1881,199 @@ text(result.output);
      Ok(())
  }
  
@@ -1814,12 +1839,12 @@ index f9429a1464234cb24f29f49765012ee9ba96c4b4..b09d6eff7d4a4cf9be139ed8caa68d10
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
  async fn code_mode_exec_nested_limit_preserves_result_variable_before_default_history_truncation()
 diff --git a/codex-rs/thread-manager-sample/src/main.rs b/codex-rs/thread-manager-sample/src/main.rs
-index f01bc12251f5a58f0707596854fc6577743eb3a2..946bf867a604c040612b28c73805a06541482046 100644
+index e65038840a9bd78883721c17098b27bccd23c93c..7c51d4711dd2262dd02524977e71e79185a5e68a 100644
 --- a/codex-rs/thread-manager-sample/src/main.rs
 +++ b/codex-rs/thread-manager-sample/src/main.rs
 @@ -298,6 +298,7 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
+         tool_registry: Default::default(),
          code_mode: Default::default(),
-         use_experimental_unified_exec_tool: false,
          background_terminal_max_timeout: 300_000,
 +        terminal_wait: None,
          ghost_snapshot: GhostSnapshotConfig::default(),
