@@ -101,7 +101,7 @@ let
             patches = (old.patches or [ ]) ++ patchPaths;
             nativeBuildInputs = [ pkgs.gitMinimal ];
             patchPhase = gitPatchPhase;
-            hash = "sha256-uvi01QZwuif0WjnsiTbWXVwdsqJ7dvIKPCv2Q0EO9MI=";
+            hash = "sha256-Gf29NYWxKeyImf+ln4P5leiWdgwv8PLGP7eFTtjyvYE=";
           };
           patches = (old.patches or [ ]) ++ patchPaths;
 

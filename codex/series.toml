@@ -113,15 +113,18 @@ source_files = [
   "codex-rs/code-mode-host/src/grpc/service_tests.rs",
   "codex-rs/code-mode-host/tests/grpc.rs",
   "codex-rs/code-mode-host/tests/grpc_notifications.rs",
+  "codex-rs/code-mode-host/tests/grpc_timing.rs",
   "codex-rs/code-mode-host/tests/stdio.rs",
   "codex-rs/code-mode-protocol/src/host/host_tests.rs",
   "codex-rs/code-mode-protocol/src/host/payload.rs",
   "codex-rs/code-mode-protocol/src/lib.rs",
   "codex-rs/code-mode-protocol/src/runtime.rs",
+  "codex-rs/code-mode-protocol/src/runtime_tests.rs",
   "codex-rs/code-mode-runtime/src/cell_actor/mod.rs",
   "codex-rs/code-mode-runtime/src/cell_actor/tests.rs",
   "codex-rs/code-mode-runtime/src/cell_actor/types.rs",
   "codex-rs/code-mode-runtime/src/service.rs",
+  "codex-rs/code-mode-runtime/src/service_audio_tests.rs",
   "codex-rs/code-mode-runtime/src/service_contract_tests.rs",
   "codex-rs/code-mode-runtime/src/service_tests.rs",
   "codex-rs/code-mode-runtime/src/session_runtime/tests.rs",
@@ -153,6 +156,7 @@ generated_prefixes = []
 tests = [
   ["cargo", "test", "-p", "codex-code-mode-protocol"],
   ["cargo", "test", "-p", "codex-code-mode-runtime"],
+  ["cargo", "test", "-p", "codex-code-mode-host"],
   ["cargo", "test", "-p", "codex-code-mode"],
 ]
 

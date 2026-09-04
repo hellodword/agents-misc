@@ -1,0 +1,3410 @@
+diff --git a/codex-rs/config/src/lib.rs b/codex-rs/config/src/lib.rs
+index 5cbf501fe08fee51c296e628126ace2170504bc3..56715b0ffbeb223b9b363fa879a35c1ea23b8d7c 100644
+--- a/codex-rs/config/src/lib.rs
++++ b/codex-rs/config/src/lib.rs
+@@ -32,6 +32,7 @@ mod shell_environment_policy;
+ mod skills_config;
+ mod state;
+ mod strict_config;
++pub mod terminal_wait;
+ pub mod test_support;
+ mod thread_config;
+ mod tui_keymap;
+diff --git a/codex-rs/config/src/terminal_wait.rs b/codex-rs/config/src/terminal_wait.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..0e01a0db830528b82c35ae69810a7b9766de91a9
+--- /dev/null
++++ b/codex-rs/config/src/terminal_wait.rs
+@@ -0,0 +1,346 @@
++use std::collections::HashSet;
++
++use regex_lite::Regex;
++use schemars::JsonSchema;
++use serde::Deserialize;
++use serde::Deserializer;
++use serde::Serialize;
++use serde::de::Error as SerdeError;
++
++pub const MAX_TERMINAL_WAIT_POLL_INTERVAL_MS: u64 = 3_600_000;
++
++#[derive(Serialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
++#[schemars(deny_unknown_fields)]
++pub struct TerminalWaitToml {
++    pub commands: Vec<TerminalWaitCommandToml>,
++}
++
++impl TerminalWaitToml {
++    pub fn has_enabled_commands(&self) -> bool {
++        self.commands.iter().any(|command| command.enabled)
++    }
++}
++
++#[derive(Serialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
++#[schemars(deny_unknown_fields)]
++pub struct TerminalWaitCommandToml {
++    pub pattern: String,
++    #[schemars(range(min = 1, max = 3_600_000))]
++    pub poll_interval_ms: u64,
++    pub name: String,
++    #[serde(default = "default_true")]
++    pub enabled: bool,
++    pub cwd_pattern: Option<String>,
++    #[schemars(range(min = 1))]
++    pub max_output_tokens: Option<usize>,
++}
++
++impl<'de> Deserialize<'de> for TerminalWaitToml {
++    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
++    where
++        D: Deserializer<'de>,
++    {
++        #[derive(Deserialize)]
++        #[serde(deny_unknown_fields)]
++        struct RawTerminalWaitToml {
++            #[serde(default)]
++            commands: Vec<TerminalWaitCommandToml>,
++        }
++
++        let raw = RawTerminalWaitToml::deserialize(deserializer)?;
++        let mut names = HashSet::with_capacity(raw.commands.len());
++        for command in &raw.commands {
++            if !names.insert(command.name.as_str()) {
++                return Err(D::Error::custom(format!(
++                    "terminal_wait command name {:?} is duplicated",
++                    command.name
++                )));
++            }
++        }
++        Ok(Self {
++            commands: raw.commands,
++        })
++    }
++}
++
++const fn default_true() -> bool {
++    true
++}
++
++impl<'de> Deserialize<'de> for TerminalWaitCommandToml {
++    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
++    where
++        D: Deserializer<'de>,
++    {
++        #[derive(Deserialize)]
++        #[serde(deny_unknown_fields)]
++        struct RawTerminalWaitCommandToml {
++            pattern: String,
++            poll_interval_ms: u64,
++            name: String,
++            #[serde(default = "default_true")]
++            enabled: bool,
++            cwd_pattern: Option<String>,
++            max_output_tokens: Option<usize>,
++        }
++
++        let raw = RawTerminalWaitCommandToml::deserialize(deserializer)?;
++        if raw.name.trim().is_empty() {
++            return Err(D::Error::custom(
++                "terminal_wait command name must not be empty",
++            ));
++        }
++        if raw.pattern.trim().is_empty() {
++            return Err(D::Error::custom(
++                "terminal_wait command pattern must not be empty",
++            ));
++        }
++        validate_regex("pattern", &raw.pattern).map_err(D::Error::custom)?;
++        if let Some(cwd_pattern) = raw.cwd_pattern.as_deref() {
++            validate_regex("cwd_pattern", cwd_pattern).map_err(D::Error::custom)?;
++        }
++        if !(1..=MAX_TERMINAL_WAIT_POLL_INTERVAL_MS).contains(&raw.poll_interval_ms) {
++            return Err(D::Error::custom(format!(
++                "poll_interval_ms must be between 1 and {MAX_TERMINAL_WAIT_POLL_INTERVAL_MS}"
++            )));
++        }
++        if raw.max_output_tokens == Some(0) {
++            return Err(D::Error::custom("max_output_tokens must be greater than 0"));
++        }
++
++        Ok(Self {
++            pattern: raw.pattern,
++            poll_interval_ms: raw.poll_interval_ms,
++            name: raw.name,
++            enabled: raw.enabled,
++            cwd_pattern: raw.cwd_pattern,
++            max_output_tokens: raw.max_output_tokens,
++        })
++    }
++}
++
++fn validate_regex(field: &str, pattern: &str) -> Result<(), String> {
++    Regex::new(pattern)
++        .map(|_| ())
++        .map_err(|err| format!("{field} is not a valid regex-lite pattern: {err}"))
++}
++
++#[cfg(test)]
++mod tests {
++    use crate::config_toml::ConfigToml;
++
++    #[test]
++    fn terminal_wait_deserializes_command() {
++        let config: ConfigToml = toml::from_str(
++            r#"
++            [terminal_wait]
++
++            [[terminal_wait.commands]]
++            name = "cargo"
++            pattern = "cargo test"
++            cwd_pattern = "/repo"
++            enabled = false
++            poll_interval_ms = 60000
++            max_output_tokens = 2000
++            "#,
++        )
++        .expect("terminal_wait should parse");
++
++        let terminal_wait = config.terminal_wait.expect("terminal_wait should be set");
++        let command = &terminal_wait.commands[0];
++        assert_eq!(command.name, "cargo");
++        assert_eq!(command.pattern, "cargo test");
++        assert_eq!(command.cwd_pattern.as_deref(), Some("/repo"));
++        assert!(!command.enabled);
++        assert_eq!(command.poll_interval_ms, 60000);
++        assert_eq!(command.max_output_tokens, Some(2000));
++        assert!(!terminal_wait.has_enabled_commands());
++    }
++
++    #[test]
++    fn terminal_wait_defaults_command_to_enabled() {
++        let config: ConfigToml = toml::from_str(
++            r#"
++            [[terminal_wait.commands]]
++            name = "cargo"
++            pattern = "cargo test"
++            poll_interval_ms = 1000
++            "#,
++        )
++        .expect("terminal_wait should parse");
++
++        let terminal_wait = config.terminal_wait.expect("terminal_wait should be set");
++        assert!(terminal_wait.commands[0].enabled);
++        assert!(terminal_wait.has_enabled_commands());
++    }
++
++    #[test]
++    fn terminal_wait_rejects_invalid_regex() {
++        let err = toml::from_str::<ConfigToml>(
++            r#"
++            [[terminal_wait.commands]]
++            name = "cargo"
++            pattern = "["
++            poll_interval_ms = 1000
++            "#,
++        )
++        .expect_err("invalid regex should fail");
++
++        assert!(
++            err.to_string()
++                .contains("pattern is not a valid regex-lite pattern")
++        );
++    }
++
++    #[test]
++    fn terminal_wait_rejects_missing_or_out_of_range_poll_interval() {
++        for (toml, expected) in [
++            (
++                r#"
++                [[terminal_wait.commands]]
++                name = "cargo"
++                pattern = "cargo"
++                "#,
++                "missing field `poll_interval_ms`",
++            ),
++            (
++                r#"
++                [[terminal_wait.commands]]
++                name = "cargo"
++                pattern = "cargo"
++                poll_interval_ms = 0
++                "#,
++                "poll_interval_ms must be between 1 and 3600000",
++            ),
++            (
++                r#"
++                [[terminal_wait.commands]]
++                name = "cargo"
++                pattern = "cargo"
++                poll_interval_ms = 3600001
++                "#,
++                "poll_interval_ms must be between 1 and 3600000",
++            ),
++        ] {
++            let err = toml::from_str::<ConfigToml>(toml).expect_err("config should fail");
++            assert!(
++                err.to_string().contains(expected),
++                "expected {expected:?} in {err}"
++            );
++        }
++    }
++
++    #[test]
++    fn terminal_wait_rejects_removed_fields() {
++        for removed_field in [
++            r#"mode = "long_poll""#,
++            "wait_timeout_ms = 1000",
++            "allow_tty = true",
++        ] {
++            let toml = format!(
++                r#"
++                [[terminal_wait.commands]]
++                name = "cargo"
++                pattern = "cargo"
++                poll_interval_ms = 1000
++                {removed_field}
++                "#
++            );
++            let err = toml::from_str::<ConfigToml>(&toml).expect_err("config should fail");
++            assert!(
++                err.to_string().contains("unknown field"),
++                "expected unknown field error in {err}"
++            );
++        }
++    }
++
++    #[test]
++    fn terminal_wait_rejects_zero_output_limit() {
++        let err = toml::from_str::<ConfigToml>(
++            r#"
++            [[terminal_wait.commands]]
++            name = "cargo"
++            pattern = "cargo"
++            poll_interval_ms = 1000
++            max_output_tokens = 0
++            "#,
++        )
++        .expect_err("config should fail");
++
++        assert!(
++            err.to_string()
++                .contains("max_output_tokens must be greater than 0")
++        );
++    }
++
++    #[test]
++    fn terminal_wait_accepts_poll_interval_boundaries() {
++        for poll_interval_ms in [1, 3_600_000] {
++            let config: ConfigToml = toml::from_str(&format!(
++                r#"
++                [[terminal_wait.commands]]
++                name = "rule-{poll_interval_ms}"
++                pattern = "cargo"
++                poll_interval_ms = {poll_interval_ms}
++                "#
++            ))
++            .expect("boundary should parse");
++            assert_eq!(
++                config.terminal_wait.unwrap().commands[0].poll_interval_ms,
++                poll_interval_ms
++            );
++        }
++    }
++
++    #[test]
++    fn terminal_wait_rejects_missing_empty_and_duplicate_names_and_empty_patterns() {
++        for (toml, expected) in [
++            (
++                r#"
++                [[terminal_wait.commands]]
++                pattern = "cargo"
++                poll_interval_ms = 1
++                "#,
++                "missing field `name`",
++            ),
++            (
++                r#"
++                [[terminal_wait.commands]]
++                name = "   "
++                pattern = "cargo"
++                poll_interval_ms = 1
++                "#,
++                "terminal_wait command name must not be empty",
++            ),
++            (
++                r#"
++                [[terminal_wait.commands]]
++                name = "cargo"
++                pattern = "   "
++                poll_interval_ms = 1
++                "#,
++                "terminal_wait command pattern must not be empty",
++            ),
++            (
++                r#"
++                [[terminal_wait.commands]]
++                name = "cargo"
++                pattern = "cargo"
++                poll_interval_ms = 1
++
++                [[terminal_wait.commands]]
++                name = "cargo"
++                pattern = "next"
++                poll_interval_ms = 2
++                "#,
++                "terminal_wait command name \"cargo\" is duplicated",
++            ),
++        ] {
++            let err = toml::from_str::<ConfigToml>(toml).expect_err("config should fail");
++            assert!(
++                err.to_string().contains(expected),
++                "expected {expected:?} in {err}"
++            );
++        }
++    }
++}
+diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
+index dca329ab98ea218f7b96f1bd2d4cf25612a5fc1f..62c1d0446e3cd4718e26e034cacbd7c6d6222541 100644
+--- a/codex-rs/core/src/config/mod.rs
++++ b/codex-rs/core/src/config/mod.rs
+@@ -36,6 +36,7 @@ use codex_config::loader::project_trust_key;
+ use codex_config::permissions_toml::PermissionProfileToml;
+ use codex_config::permissions_toml::PermissionsToml;
+ use codex_config::sandbox_mode_requirement_for_permission_profile;
++use codex_config::terminal_wait::TerminalWaitToml;
+ use codex_config::types::ApprovalsReviewer;
+ use codex_config::types::AuthCredentialsStoreMode;
+ use codex_config::types::AuthKeyringBackendKind;
+@@ -1037,6 +1038,9 @@ pub struct Config {
+     /// Default: `300000` (5 minutes).
+     pub background_terminal_max_timeout: u64,
+ 
++    /// Command-specific unified exec wait and polling rules.
++    pub terminal_wait: Option<TerminalWaitToml>,
++
+     /// Compatibility-only settings retained for legacy `ghost_snapshot`
+     /// config loading.
+     pub ghost_snapshot: GhostSnapshotConfig,
+@@ -4298,6 +4302,7 @@ impl Config {
+             tool_registry,
+             code_mode,
+             background_terminal_max_timeout,
++            terminal_wait: cfg.terminal_wait,
+             ghost_snapshot,
+             multi_agent_v2,
+             token_budget,
+diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
+index 6d1953e3a2665139e328cc31250ccae32763bb62..47d9d39c23f32543fd1bd12f3d3d4d5e312c8c8a 100644
+--- a/codex-rs/core/src/session/session.rs
++++ b/codex-rs/core/src/session/session.rs
+@@ -1400,8 +1400,9 @@ impl Session {
+                 // published after SessionConfigured so MCP events follow it.
+                 mcp_runtime,
+                 mcp_handler_cache: Default::default(),
+-                unified_exec_manager: UnifiedExecProcessManager::new(
++                unified_exec_manager: UnifiedExecProcessManager::new_with_terminal_wait(
+                     config.background_terminal_max_timeout,
++                    config.terminal_wait.clone(),
+                 ),
+                 elicitations: crate::elicitation::ElicitationService::new(),
+                 shell_zsh_path: config.zsh_path.clone(),
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index b5931b330e1df00ba3432d63ad97449fe8c6847d..cc49f45fbc5dc53ac322d8139820356026b17666 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -6517,8 +6517,9 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+     let services = SessionServices {
+         mcp_runtime,
+         mcp_handler_cache: Default::default(),
+-        unified_exec_manager: UnifiedExecProcessManager::new(
++        unified_exec_manager: UnifiedExecProcessManager::new_with_terminal_wait(
+             config.background_terminal_max_timeout,
++            config.terminal_wait.clone(),
+         ),
+         elicitations: crate::elicitation::ElicitationService::new(),
+         shell_zsh_path: None,
+@@ -8817,8 +8818,9 @@ where
+     let services = SessionServices {
+         mcp_runtime,
+         mcp_handler_cache: Default::default(),
+-        unified_exec_manager: UnifiedExecProcessManager::new(
++        unified_exec_manager: UnifiedExecProcessManager::new_with_terminal_wait(
+             config.background_terminal_max_timeout,
++            config.terminal_wait.clone(),
+         ),
+         elicitations: crate::elicitation::ElicitationService::new(),
+         shell_zsh_path: None,
+diff --git a/codex-rs/core/src/tools/context.rs b/codex-rs/core/src/tools/context.rs
+index 72f9481ff33705dec69806ae5003c66d10b2e462..da72cdea4ae679ce607e65736e7032b1dc759c45 100644
+--- a/codex-rs/core/src/tools/context.rs
++++ b/codex-rs/core/src/tools/context.rs
+@@ -3,6 +3,7 @@ use crate::session::session::Session;
+ use crate::session::step_context::StepContext;
+ use crate::session::turn_context::TurnContext;
+ use crate::turn_diff_tracker::TurnDiffTracker;
++use crate::unified_exec::TerminalWaitToolState;
+ use crate::unified_exec::format_output_omission_marker;
+ use crate::unified_exec::resolve_max_tokens;
+ use codex_protocol::ResponseItemId;
+@@ -357,6 +358,14 @@ pub struct ExecCommandToolOutput {
+     /// Bytes omitted by the output collection cap before model-facing truncation.
+     pub output_omitted_bytes: Option<NonZeroUsize>,
+     pub hook_command: Option<String>,
++    pub terminal_wait: Option<TerminalWaitToolOutput>,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct TerminalWaitToolOutput {
++    pub rule_name: String,
++    pub state: TerminalWaitToolState,
++    pub poll_interval_ms: u64,
+ }
+ 
+ impl ToolOutput for ExecCommandToolOutput {
+@@ -423,15 +432,41 @@ impl ToolOutput for ExecCommandToolOutput {
+             session_id: Option<i32>,
+             #[serde(skip_serializing_if = "Option::is_none")]
+             original_token_count: Option<usize>,
++            #[serde(skip_serializing_if = "Option::is_none")]
++            terminal_wait_state: Option<TerminalWaitToolState>,
++            #[serde(skip_serializing_if = "Option::is_none")]
++            terminal_wait_rule: Option<String>,
++            #[serde(skip_serializing_if = "Option::is_none")]
++            poll_interval_ms: Option<u64>,
++            #[serde(skip_serializing_if = "Option::is_none")]
++            available_actions: Option<[&'static str; 3]>,
+             output: String,
+         }
+ 
++        let terminal_wait_state = self.terminal_wait.as_ref().map(|wait| wait.state);
++        let terminal_wait_rule = self
++            .terminal_wait
++            .as_ref()
++            .map(|wait| wait.rule_name.clone());
++        let poll_interval_ms = self
++            .terminal_wait
++            .as_ref()
++            .map(|wait| wait.poll_interval_ms);
++        let available_actions = matches!(
++            terminal_wait_state,
++            Some(TerminalWaitToolState::DecisionRequired)
++        )
++        .then_some(["continue", "interrupt", "terminate"]);
+         let result = UnifiedExecCodeModeResult {
+             chunk_id: (!self.chunk_id.is_empty()).then(|| self.chunk_id.clone()),
+             wall_time_seconds: self.wall_time.as_secs_f64(),
+             exit_code: self.exit_code,
+             session_id: self.process_id,
+             original_token_count: self.original_token_count,
++            terminal_wait_state,
++            terminal_wait_rule,
++            poll_interval_ms,
++            available_actions,
+             output: match self.max_output_tokens {
+                 Some(max_tokens) => self.truncated_output(max_tokens),
+                 None => String::from_utf8_lossy(&self.raw_output).to_string(),
+@@ -509,6 +544,24 @@ impl ExecCommandToolOutput {
+             sections.push(format!("Original token count: {original_token_count}"));
+         }
+ 
++        if let Some(terminal_wait) = self.terminal_wait.as_ref() {
++            sections.push(format!("Terminal wait rule: {}", terminal_wait.rule_name));
++            let state = serde_json::to_value(terminal_wait.state)
++                .ok()
++                .and_then(|value| value.as_str().map(str::to_string))
++                .unwrap_or_else(|| format!("{:?}", terminal_wait.state).to_lowercase());
++            sections.push(format!("Terminal wait state: {state}"));
++            sections.push(format!(
++                "Terminal wait poll interval: {} ms",
++                terminal_wait.poll_interval_ms
++            ));
++            if terminal_wait.state == TerminalWaitToolState::DecisionRequired {
++                sections.push(
++                    "Available terminal wait actions: continue, interrupt, terminate".to_string(),
++                );
++            }
++        }
++
+         sections.push("Output:".to_string());
+         sections.join("\n")
+     }
+diff --git a/codex-rs/core/src/tools/context_tests.rs b/codex-rs/core/src/tools/context_tests.rs
+index 391b8b0c034b4dafca87dfc0135ca00ab1faa018..e20be6093b86ed8c314690c51e1ea98575052ba0 100644
+--- a/codex-rs/core/src/tools/context_tests.rs
++++ b/codex-rs/core/src/tools/context_tests.rs
+@@ -413,6 +413,7 @@ fn exec_command_tool_output_formats_truncated_response() {
+         original_token_count: Some(10),
+         output_omitted_bytes: None,
+         hook_command: None,
++        terminal_wait: None,
+     };
+     assert_eq!(
+         output.log_output(),
+@@ -470,6 +471,7 @@ fn exec_command_tool_output_reserves_metadata_budget_and_preserves_policy_units(
+             original_token_count: Some(123),
+             output_omitted_bytes: None,
+             hook_command: None,
++            terminal_wait: None,
+         }
+         .to_response_item("call-42", &payload);
+ 
+@@ -490,6 +492,87 @@ fn exec_command_tool_output_reserves_metadata_budget_and_preserves_policy_units(
+     }
+ }
+ 
++#[test]
++fn managed_terminal_output_reports_decision_and_available_actions() {
++    let output = ExecCommandToolOutput {
++        event_call_id: "call-managed".to_string(),
++        chunk_id: "managed".to_string(),
++        wall_time: std::time::Duration::from_secs(2),
++        raw_output: b"still running".to_vec(),
++        truncation_policy: TruncationPolicy::Tokens(10_000),
++        max_output_tokens: None,
++        process_id: Some(41),
++        exit_code: None,
++        original_token_count: Some(2),
++        output_omitted_bytes: None,
++        hook_command: Some("cargo test".to_string()),
++        terminal_wait: Some(TerminalWaitToolOutput {
++            rule_name: "cargo".to_string(),
++            state: TerminalWaitToolState::DecisionRequired,
++            poll_interval_ms: 2_000,
++        }),
++    };
++    let payload = ToolPayload::Function {
++        arguments: "{}".to_string(),
++    };
++
++    let text = output.response_text();
++    assert!(text.contains("Terminal wait state: decision_required"));
++    assert!(text.contains("Terminal wait rule: cargo"));
++    assert!(text.contains("Terminal wait poll interval: 2000 ms"));
++    assert!(text.contains("Available terminal wait actions: continue, interrupt, terminate"));
++    assert_eq!(
++        output.code_mode_result(&payload),
++        json!({
++            "chunk_id": "managed",
++            "wall_time_seconds": 2.0,
++            "session_id": 41,
++            "original_token_count": 2,
++            "terminal_wait_state": "decision_required",
++            "terminal_wait_rule": "cargo",
++            "poll_interval_ms": 2_000,
++            "available_actions": ["continue", "interrupt", "terminate"],
++            "output": "still running",
++        })
++    );
++}
++
++#[test]
++fn managed_terminal_terminal_state_omits_available_actions() {
++    let output = ExecCommandToolOutput {
++        event_call_id: "call-managed".to_string(),
++        chunk_id: "managed".to_string(),
++        wall_time: std::time::Duration::from_secs(2),
++        raw_output: b"done".to_vec(),
++        truncation_policy: TruncationPolicy::Tokens(10_000),
++        max_output_tokens: None,
++        process_id: None,
++        exit_code: Some(0),
++        original_token_count: Some(1),
++        output_omitted_bytes: None,
++        hook_command: Some("cargo test".to_string()),
++        terminal_wait: Some(TerminalWaitToolOutput {
++            rule_name: "cargo".to_string(),
++            state: TerminalWaitToolState::Completed,
++            poll_interval_ms: 2_000,
++        }),
++    };
++    let payload = ToolPayload::Function {
++        arguments: "{}".to_string(),
++    };
++
++    assert!(
++        !output
++            .response_text()
++            .contains("Available terminal wait actions")
++    );
++    let result = output.code_mode_result(&payload);
++    assert_eq!(result["terminal_wait_state"], "completed");
++    assert_eq!(result["terminal_wait_rule"], "cargo");
++    assert_eq!(result["poll_interval_ms"], 2_000);
++    assert!(result.get("available_actions").is_none());
++}
++
+ #[test]
+ fn exec_command_tool_output_preserves_omission_metadata_when_truncated() {
+     let payload = ToolPayload::Function {
+@@ -514,6 +597,7 @@ fn exec_command_tool_output_preserves_omission_metadata_when_truncated() {
+         original_token_count: Some(42_000),
+         output_omitted_bytes: NonZeroUsize::new(/*n*/ 123_456),
+         hook_command: None,
++        terminal_wait: None,
+     };
+     let expected_header = "Chunk ID: abc123\nWall time: 1.2500 seconds\nProcess exited with code 0\nOriginal token count: 42000\nOutput:\n";
+     assert_eq!(
+diff --git a/codex-rs/core/src/tools/handlers/mod.rs b/codex-rs/core/src/tools/handlers/mod.rs
+index 25a2ae15082946c942a8eebe6dcd342af69b2f1c..1ac57f8d2a99720ecf4d18c46d7eb4b3e907338f 100644
+--- a/codex-rs/core/src/tools/handlers/mod.rs
++++ b/codex-rs/core/src/tools/handlers/mod.rs
+@@ -75,6 +75,7 @@ pub use test_sync::TestSyncHandler;
+ pub(crate) use tool_search::ToolSearchHandlerCache;
+ pub use unified_exec::ExecCommandHandler;
+ pub(crate) use unified_exec::ExecCommandHandlerOptions;
++pub use unified_exec::TerminalWaitControlHandler;
+ pub use unified_exec::WriteStdinHandler;
+ pub use view_image::ViewImageHandler;
+ pub(crate) use wait_for_environment::WaitForEnvironmentHandler;
+diff --git a/codex-rs/core/src/tools/handlers/shell_spec.rs b/codex-rs/core/src/tools/handlers/shell_spec.rs
+index b39408a375077caf0263a18760d10617fa822bb7..ee4b577a93d011c6255bb1ed45ad0c47801b29fa 100644
+--- a/codex-rs/core/src/tools/handlers/shell_spec.rs
++++ b/codex-rs/core/src/tools/handlers/shell_spec.rs
+@@ -158,6 +158,32 @@ pub fn create_write_stdin_tool() -> ToolSpec {
+     })
+ }
+ 
++pub fn create_terminal_wait_control_tool() -> ToolSpec {
++    let properties = BTreeMap::from([(
++        "action".to_string(),
++        JsonSchema::string_enum(
++            vec![json!("continue"), json!("interrupt"), json!("terminate")],
++            Some(
++                "Decision for the current managed terminal process. Continue waits for a fresh configured poll interval, interrupt sends a gentle interrupt and waits up to 10 seconds, and terminate stops the process tree."
++                    .to_string(),
++            ),
++        ),
++    )]);
++
++    ToolSpec::Function(ResponsesApiTool {
++        name: "terminal_wait_control".to_string(),
++        description: "Controls the current managed terminal process when its terminal wait state is decision_required. The managed process is implicit because each Codex session allows only one. Every action waits for a resulting decision or terminal state instead of returning an immediate acknowledgement.".to_string(),
++        strict: false,
++        defer_loading: None,
++        parameters: JsonSchema::object(
++            properties,
++            Some(vec!["action".to_string()]),
++            Some(false.into()),
++        ),
++        output_schema: Some(unified_exec_output_schema()),
++    })
++}
++
+ pub fn create_request_permissions_tool(description: String) -> ToolSpec {
+     let properties = BTreeMap::from([
+         (
+@@ -219,6 +245,23 @@ fn unified_exec_output_schema() -> Value {
+                 "type": "number",
+                 "description": "Approximate token count before output truncation."
+             },
++            "terminal_wait_state": {
++                "type": "string",
++                "enum": ["decision_required", "completed", "terminated"],
++                "description": "Managed terminal wait lifecycle state for a command matched by terminal_wait."
++            },
++            "poll_interval_ms": {
++                "type": "number",
++                "description": "Configured terminal wait polling interval in milliseconds."
++            },
++            "available_actions": {
++                "type": "array",
++                "items": {
++                    "type": "string",
++                    "enum": ["continue", "interrupt", "terminate"]
++                },
++                "description": "Actions available when terminal_wait_state is decision_required."
++            },
+             "output": {
+                 "type": "string",
+                 "description": "Command output text, possibly truncated."
+diff --git a/codex-rs/core/src/tools/handlers/shell_spec_tests.rs b/codex-rs/core/src/tools/handlers/shell_spec_tests.rs
+index 000add0bbd117fa584ff263f7c7aef278594666f..7f7af9ae065ad5a753b55b4fd47e901f2ad5ea4f 100644
+--- a/codex-rs/core/src/tools/handlers/shell_spec_tests.rs
++++ b/codex-rs/core/src/tools/handlers/shell_spec_tests.rs
+@@ -164,6 +164,34 @@ fn write_stdin_tool_matches_expected_spec() {
+     );
+ }
+ 
++#[test]
++fn terminal_wait_control_tool_has_an_implicit_target_and_three_actions() {
++    let tool = create_terminal_wait_control_tool();
++    let value = serde_json::to_value(&tool).expect("tool spec should serialize");
++    let ToolSpec::Function(ResponsesApiTool { output_schema, .. }) = &tool else {
++        panic!("expected function tool");
++    };
++
++    assert_eq!(value["name"], "terminal_wait_control");
++    assert_eq!(
++        value["parameters"]["required"],
++        serde_json::json!(["action"])
++    );
++    assert_eq!(
++        value["parameters"]["properties"]["action"]["enum"],
++        serde_json::json!(["continue", "interrupt", "terminate"])
++    );
++    assert!(
++        value["parameters"]["properties"]
++            .get("session_id")
++            .is_none()
++    );
++    assert_eq!(
++        output_schema.as_ref().expect("output schema")["properties"]["terminal_wait_state"]["enum"],
++        serde_json::json!(["decision_required", "completed", "terminated"])
++    );
++}
++
+ #[test]
+ fn request_permissions_tool_includes_full_permission_schema() {
+     let tool =
+diff --git a/codex-rs/core/src/tools/handlers/unified_exec.rs b/codex-rs/core/src/tools/handlers/unified_exec.rs
+index 9f9f8a8cf1ea9fbd01f01813e9dcf1ccca6ab1e1..2e57ef10c003738736d8c38fa06d94a8a3dc419d 100644
+--- a/codex-rs/core/src/tools/handlers/unified_exec.rs
++++ b/codex-rs/core/src/tools/handlers/unified_exec.rs
+@@ -18,10 +18,12 @@ use std::sync::Arc;
+ use crate::tools::handlers::parse_arguments;
+ 
+ mod exec_command;
++mod terminal_wait_control;
+ mod write_stdin;
+ 
+ pub use exec_command::ExecCommandHandler;
+ pub(crate) use exec_command::ExecCommandHandlerOptions;
++pub use terminal_wait_control::TerminalWaitControlHandler;
+ pub use write_stdin::WriteStdinHandler;
+ 
+ #[derive(Debug, Deserialize)]
+diff --git a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
+index 8b97ff06b243cc20974a2aa747e7883acae25f37..1c397451be45ecc91fb71440f94fbeb5b6398905 100644
+--- a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
++++ b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
+@@ -7,6 +7,7 @@ use crate::exec_policy::prompt_is_rejected_by_policy;
+ use crate::function_tool::FunctionCallError;
+ use crate::maybe_emit_implicit_skill_invocation;
+ use crate::tools::context::ExecCommandToolOutput;
++use crate::tools::context::ToolCallSource;
+ use crate::tools::context::ToolInvocation;
+ use crate::tools::context::ToolPayload;
+ use crate::tools::context::boxed_tool_output;
+@@ -153,6 +154,7 @@ impl ExecCommandHandler {
+             tracker,
+             call_id,
+             payload,
++            source,
+             ..
+         } = invocation;
+ 
+@@ -166,12 +168,20 @@ impl ExecCommandHandler {
+         };
+ 
+         let manager: &UnifiedExecProcessManager = &session.services.unified_exec_manager;
++        let (code_mode_cell_id, code_mode_tool_call_id) = match source {
++            ToolCallSource::CodeMode {
++                cell_id,
++                runtime_tool_call_id,
++            } => (Some(cell_id), Some(runtime_tool_call_id)),
++            ToolCallSource::Direct | ToolCallSource::DirectPlaintextMessage => (None, None),
++        };
+         let context = UnifiedExecContext::new(
+             session.clone(),
+             step_context.clone(),
+             cancellation_token,
+             call_id.clone(),
+-        );
++        )
++        .with_code_mode_source(code_mode_cell_id, code_mode_tool_call_id);
+         let environment_args: ExecCommandEnvironmentArgs = parse_arguments(&arguments)?;
+         let Some(turn_environment) = resolve_tool_environment(
+             &step_context.environments,
+@@ -398,6 +408,7 @@ impl ExecCommandHandler {
+                 original_token_count: None,
+                 output_omitted_bytes: None,
+                 hook_command: None,
++                terminal_wait: None,
+             }));
+         }
+ 
+@@ -454,6 +465,7 @@ impl ExecCommandHandler {
+                     original_token_count: Some(original_token_count),
+                     output_omitted_bytes,
+                     hook_command: Some(hook_command),
++                    terminal_wait: None,
+                 }))
+             }
+             Err(err) => {
+diff --git a/codex-rs/core/src/tools/handlers/unified_exec/terminal_wait_control.rs b/codex-rs/core/src/tools/handlers/unified_exec/terminal_wait_control.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..a59dd977da874fbcbad8ba00df334fe4ef0ca3c7
+--- /dev/null
++++ b/codex-rs/core/src/tools/handlers/unified_exec/terminal_wait_control.rs
+@@ -0,0 +1,120 @@
++use crate::function_tool::FunctionCallError;
++use crate::tools::context::ToolCallSource;
++use crate::tools::context::ToolInvocation;
++use crate::tools::context::ToolPayload;
++use crate::tools::context::boxed_tool_output;
++use crate::tools::handlers::parse_arguments;
++use crate::tools::registry::CoreToolRuntime;
++use crate::tools::registry::PostToolUsePayload;
++use crate::tools::registry::PreToolUsePayload;
++use crate::tools::registry::ToolExecutor;
++use crate::unified_exec::TerminalWaitControlRequest;
++use crate::unified_exec::UnifiedExecContext;
++use crate::unified_exec::WriteStdinInteractionEvent;
++use codex_tools::ToolName;
++use codex_tools::ToolSpec;
++use serde::Deserialize;
++
++use super::super::shell_spec::create_terminal_wait_control_tool;
++use super::post_unified_exec_tool_use_payload;
++use crate::unified_exec::TerminalWaitAction;
++
++#[derive(Debug, Deserialize)]
++struct TerminalWaitControlArgs {
++    action: TerminalWaitAction,
++}
++
++pub struct TerminalWaitControlHandler;
++
++impl ToolExecutor<ToolInvocation> for TerminalWaitControlHandler {
++    fn tool_name(&self) -> ToolName {
++        ToolName::plain("terminal_wait_control")
++    }
++
++    fn spec(&self) -> ToolSpec {
++        create_terminal_wait_control_tool()
++    }
++
++    fn supports_parallel_tool_calls(&self) -> bool {
++        false
++    }
++
++    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
++    where
++        ToolInvocation: 'a,
++    {
++        Box::pin(self.handle_call(invocation))
++    }
++}
++
++impl TerminalWaitControlHandler {
++    async fn handle_call(
++        &self,
++        invocation: ToolInvocation,
++    ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
++        let ToolInvocation {
++            session,
++            turn,
++            step_context,
++            cancellation_token,
++            call_id,
++            payload,
++            source,
++            ..
++        } = invocation;
++
++        let ToolPayload::Function { arguments } = payload else {
++            return Err(FunctionCallError::RespondToModel(
++                "terminal_wait_control handler received unsupported payload".to_string(),
++            ));
++        };
++        let args: TerminalWaitControlArgs = parse_arguments(&arguments)?;
++        let (code_mode_cell_id, code_mode_tool_call_id) = match source {
++            ToolCallSource::CodeMode {
++                cell_id,
++                runtime_tool_call_id,
++            } => (Some(cell_id), Some(runtime_tool_call_id)),
++            ToolCallSource::Direct | ToolCallSource::DirectPlaintextMessage => (None, None),
++        };
++        let context =
++            UnifiedExecContext::new(session.clone(), step_context, cancellation_token, call_id)
++                .with_code_mode_source(code_mode_cell_id, code_mode_tool_call_id);
++        let manager = &session.services.unified_exec_manager;
++        let response = manager
++            .terminal_wait_control(
++                &context,
++                TerminalWaitControlRequest {
++                    action: args.action,
++                    truncation_policy: turn.model_info().truncation_policy.into(),
++                    interaction_event: Some(WriteStdinInteractionEvent {
++                        session: &session,
++                        turn: &turn,
++                    }),
++                },
++            )
++            .await
++            .map_err(|err| {
++                FunctionCallError::RespondToModel(format!("terminal_wait_control failed: {err}"))
++            })?;
++
++        Ok(boxed_tool_output(response))
++    }
++}
++
++impl CoreToolRuntime for TerminalWaitControlHandler {
++    fn matches_kind(&self, payload: &ToolPayload) -> bool {
++        matches!(payload, ToolPayload::Function { .. })
++    }
++
++    fn pre_tool_use_payload(&self, _invocation: &ToolInvocation) -> Option<PreToolUsePayload> {
++        None
++    }
++
++    fn post_tool_use_payload(
++        &self,
++        invocation: &ToolInvocation,
++        result: &dyn crate::tools::context::ToolOutput,
++    ) -> Option<PostToolUsePayload> {
++        post_unified_exec_tool_use_payload(invocation, result)
++    }
++}
+diff --git a/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs b/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs
+index 657da466741eaad82ea3febbcc5a7fd124a967fd..8646b76cbccf7119bfef51a9e4e00cd3d67c906c 100644
+--- a/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs
++++ b/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs
+@@ -1,4 +1,5 @@
+ use crate::function_tool::FunctionCallError;
++use crate::tools::context::ToolCallSource;
+ use crate::tools::context::ToolInvocation;
+ use crate::tools::context::ToolPayload;
+ use crate::tools::context::boxed_tool_output;
+@@ -66,6 +67,7 @@ impl WriteStdinHandler {
+             cancellation_token,
+             call_id,
+             payload,
++            source,
+             ..
+         } = invocation;
+ 
+@@ -79,8 +81,16 @@ impl WriteStdinHandler {
+         };
+ 
+         let args: WriteStdinArgs = parse_arguments(&arguments)?;
++        let (code_mode_cell_id, code_mode_tool_call_id) = match source {
++            ToolCallSource::CodeMode {
++                cell_id,
++                runtime_tool_call_id,
++            } => (Some(cell_id), Some(runtime_tool_call_id)),
++            ToolCallSource::Direct | ToolCallSource::DirectPlaintextMessage => (None, None),
++        };
+         let context =
+-            UnifiedExecContext::new(session.clone(), step_context, cancellation_token, call_id);
++            UnifiedExecContext::new(session.clone(), step_context, cancellation_token, call_id)
++                .with_code_mode_source(code_mode_cell_id, code_mode_tool_call_id);
+         let response = session
+             .services
+             .unified_exec_manager
+diff --git a/codex-rs/core/src/tools/handlers/unified_exec_tests.rs b/codex-rs/core/src/tools/handlers/unified_exec_tests.rs
+index f75b57d213869048813a2ebf8da8f49ac69eb32f..8168b585f7a56e5cb55fb4d555c85c0932608373 100644
+--- a/codex-rs/core/src/tools/handlers/unified_exec_tests.rs
++++ b/codex-rs/core/src/tools/handlers/unified_exec_tests.rs
+@@ -15,6 +15,7 @@ use crate::function_tool::FunctionCallError;
+ use crate::session::step_context::StepContext;
+ use crate::session::tests::make_session_and_context;
+ use crate::tools::context::ExecCommandToolOutput;
++use crate::tools::context::TerminalWaitToolOutput;
+ use crate::tools::context::ToolCallSource;
+ use crate::tools::context::ToolInvocation;
+ use crate::tools::context::ToolPayload;
+@@ -443,6 +444,7 @@ async fn exec_command_post_tool_use_payload_uses_output_for_noninteractive_one_s
+         original_token_count: None,
+         output_omitted_bytes: None,
+         hook_command: Some("echo three".to_string()),
++        terminal_wait: None,
+     };
+     let invocation = invocation_for_payload("exec_command", "call-43", payload).await;
+     let handler = ExecCommandHandler::default();
+@@ -474,6 +476,7 @@ async fn exec_command_post_tool_use_payload_uses_output_for_interactive_completi
+         original_token_count: None,
+         output_omitted_bytes: None,
+         hook_command: Some("echo three".to_string()),
++        terminal_wait: None,
+     };
+     let invocation = invocation_for_payload("exec_command", "call-44", payload).await;
+     let handler = ExecCommandHandler::default();
+@@ -506,6 +509,7 @@ async fn exec_command_post_tool_use_payload_skips_running_sessions() {
+         original_token_count: None,
+         output_omitted_bytes: None,
+         hook_command: Some("echo three".to_string()),
++        terminal_wait: None,
+     };
+     let invocation = invocation_for_payload("exec_command", "call-45", payload).await;
+     let handler = ExecCommandHandler::default();
+@@ -533,6 +537,7 @@ async fn write_stdin_post_tool_use_payload_uses_original_exec_call_id_and_comman
+         original_token_count: None,
+         output_omitted_bytes: None,
+         hook_command: Some("sleep 1; echo finished".to_string()),
++        terminal_wait: None,
+     };
+     let invocation = invocation_for_payload("write_stdin", "write-stdin-call", payload).await;
+     let handler = WriteStdinHandler;
+@@ -548,6 +553,45 @@ async fn write_stdin_post_tool_use_payload_uses_original_exec_call_id_and_comman
+     );
+ }
+ 
++#[tokio::test]
++async fn terminal_wait_control_post_tool_use_payload_completes_the_original_command() {
++    let payload = ToolPayload::Function {
++        arguments: serde_json::json!({ "action": "continue" }).to_string(),
++    };
++    let output = ExecCommandToolOutput {
++        event_call_id: "exec-call-managed".to_string(),
++        chunk_id: "chunk-managed".to_string(),
++        wall_time: std::time::Duration::from_millis(1),
++        raw_output: b"finished naturally\n".to_vec(),
++        truncation_policy: TEST_TRUNCATION_POLICY,
++        max_output_tokens: None,
++        process_id: None,
++        exit_code: Some(0),
++        original_token_count: None,
++        output_omitted_bytes: None,
++        hook_command: Some("sleep 1; echo finished naturally".to_string()),
++        terminal_wait: Some(TerminalWaitToolOutput {
++            rule_name: "sleep".to_string(),
++            state: crate::unified_exec::TerminalWaitToolState::Completed,
++            poll_interval_ms: 50,
++        }),
++    };
++    let invocation = invocation_for_payload("terminal_wait_control", "control-call", payload).await;
++    let handler = TerminalWaitControlHandler;
++
++    assert_eq!(
++        handler.post_tool_use_payload(&invocation, &output),
++        Some(crate::tools::registry::PostToolUsePayload {
++            tool_name: HookToolName::bash(),
++            tool_use_id: "exec-call-managed".to_string(),
++            tool_input: serde_json::json!({
++                "command": "sleep 1; echo finished naturally"
++            }),
++            tool_response: serde_json::json!("finished naturally\n"),
++        })
++    );
++}
++
+ #[tokio::test]
+ async fn write_stdin_post_tool_use_payload_keeps_parallel_session_metadata_separate() {
+     let payload = ToolPayload::Function {
+@@ -565,6 +609,7 @@ async fn write_stdin_post_tool_use_payload_keeps_parallel_session_metadata_separ
+         original_token_count: None,
+         output_omitted_bytes: None,
+         hook_command: Some("sleep 2; echo alpha".to_string()),
++        terminal_wait: None,
+     };
+     let output_b = ExecCommandToolOutput {
+         event_call_id: "exec-call-b".to_string(),
+@@ -578,6 +623,7 @@ async fn write_stdin_post_tool_use_payload_keeps_parallel_session_metadata_separ
+         original_token_count: None,
+         output_omitted_bytes: None,
+         hook_command: Some("sleep 1; echo beta".to_string()),
++        terminal_wait: None,
+     };
+     let invocation_b = invocation_for_payload("write_stdin", "write-call-b", payload.clone()).await;
+     let invocation_a = invocation_for_payload("write_stdin", "write-call-a", payload).await;
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index 908bb143afcbe3b8f0523ce5c3406c7b8c443603..97f20639d085ec4561959f0252286ea7420614eb 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -26,6 +26,7 @@ use crate::tools::handlers::RequestPluginInstallHandler;
+ use crate::tools::handlers::RequestUserInputAsyncHandler;
+ use crate::tools::handlers::RequestUserInputHandler;
+ use crate::tools::handlers::SleepHandler;
++use crate::tools::handlers::TerminalWaitControlHandler;
+ use crate::tools::handlers::TestSyncHandler;
+ use crate::tools::handlers::ToolSearchHandlerCache;
+ use crate::tools::handlers::ViewImageHandler;
+@@ -1007,6 +1008,9 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
+                     ),
+                 }));
+                 registry.add(WriteStdinHandler);
++                if terminal_wait_control_enabled(turn_context) {
++                    registry.add(TerminalWaitControlHandler);
++                }
+             }
+             if turn_context.config.features.enabled(Feature::ViewImage) {
+                 registry.add(ViewImageHandler::new(ViewImageToolOptions {
+@@ -1104,6 +1108,17 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
+         // resumable process or write_stdin authority prohibited by policy.
+         registry.add(ExecCommandHandler::one_shot(options));
+     }
++    if terminal_wait_control_enabled(turn_context) {
++        registry.add(TerminalWaitControlHandler);
++    }
++}
++
++fn terminal_wait_control_enabled(turn_context: &TurnContext) -> bool {
++    turn_context
++        .config
++        .terminal_wait
++        .as_ref()
++        .is_some_and(codex_config::terminal_wait::TerminalWaitToml::has_enabled_commands)
+ }
+ 
+ fn unified_exec_should_include_shell_parameter(
+diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
+index c77936fc9055d75a34819a97ffc224dbe15c6690..6b498287fe9edaa55438d4460aad5bb35c48213b 100644
+--- a/codex-rs/core/src/tools/spec_plan_tests.rs
++++ b/codex-rs/core/src/tools/spec_plan_tests.rs
+@@ -2,6 +2,8 @@ use crate::session::tests::update_turn_settings_for_test;
+ use std::collections::BTreeMap;
+ use std::sync::Arc;
+ 
++use codex_config::terminal_wait::TerminalWaitCommandToml;
++use codex_config::terminal_wait::TerminalWaitToml;
+ use codex_features::Feature;
+ use codex_login::AuthManager;
+ use codex_login::CodexAuth;
+@@ -301,6 +303,21 @@ fn update_config(turn: &mut TurnContext, update: impl FnOnce(&mut crate::config:
+     turn.config = Arc::new(config);
+ }
+ 
++fn set_terminal_wait(turn: &mut TurnContext, enabled: bool) {
++    update_config(turn, |config| {
++        config.terminal_wait = Some(TerminalWaitToml {
++            commands: vec![TerminalWaitCommandToml {
++                pattern: "cargo".to_string(),
++                poll_interval_ms: 1_000,
++                name: "cargo".to_string(),
++                enabled,
++                cwd_pattern: None,
++                max_output_tokens: None,
++            }],
++        });
++    });
++}
++
+ fn set_web_search_mode(turn: &mut TurnContext, mode: WebSearchMode) {
+     update_config(turn, |config| {
+         config
+@@ -1081,6 +1098,66 @@ async fn dynamic_tools_cannot_reclaim_the_reserved_exec_command_name() {
+     );
+ }
+ 
++#[tokio::test]
++async fn terminal_wait_control_is_exposed_only_for_an_enabled_rule() {
++    let absent = probe(|_| {}).await;
++    absent.assert_visible_lacks(&["terminal_wait_control"]);
++    absent.assert_registered_lacks(&["terminal_wait_control"]);
++
++    let disabled = probe(|turn| set_terminal_wait(turn, /*enabled*/ false)).await;
++    disabled.assert_visible_lacks(&["terminal_wait_control"]);
++    disabled.assert_registered_lacks(&["terminal_wait_control"]);
++
++    let enabled = probe(|turn| {
++        set_features(turn, &[Feature::ShellTool, Feature::UnifiedExec]);
++        set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
++        update_turn_settings_for_test(turn, |settings| {
++            Arc::make_mut(&mut settings.model_info).shell_type = ConfigShellToolType::UnifiedExec;
++        });
++        set_terminal_wait(turn, /*enabled*/ true);
++    })
++    .await;
++    enabled.assert_visible_contains(&["terminal_wait_control"]);
++    enabled.assert_registered_contains(&["terminal_wait_control"]);
++}
++
++#[tokio::test]
++async fn terminal_wait_control_remains_available_with_shell_and_code_mode() {
++    let shell = probe(|turn| {
++        set_feature(turn, Feature::ShellTool, /*enabled*/ true);
++        set_feature(turn, Feature::UnifiedExec, /*enabled*/ false);
++        update_turn_settings_for_test(turn, |settings| {
++            Arc::make_mut(&mut settings.model_info).shell_type = ConfigShellToolType::UnifiedExec;
++        });
++        set_terminal_wait(turn, /*enabled*/ true);
++    })
++    .await;
++    shell.assert_visible_contains(&["exec_command", "write_stdin", "terminal_wait_control"]);
++
++    let code_mode = probe(|turn| {
++        set_features(
++            turn,
++            &[
++                Feature::ShellTool,
++                Feature::UnifiedExec,
++                Feature::CodeMode,
++                Feature::CodeModeOnly,
++            ],
++        );
++        set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
++        update_turn_settings_for_test(turn, |settings| {
++            Arc::make_mut(&mut settings.model_info).shell_type = ConfigShellToolType::UnifiedExec;
++        });
++        set_terminal_wait(turn, /*enabled*/ true);
++    })
++    .await;
++    code_mode.assert_registered_contains(&["terminal_wait_control"]);
++    let ToolSpec::Freeform(exec) = code_mode.visible_spec(codex_code_mode::PUBLIC_TOOL_NAME) else {
++        panic!("expected code mode exec tool");
++    };
++    assert!(exec.description.contains("terminal_wait_control"));
++}
++
+ #[tokio::test]
+ async fn shell_zsh_fork_keeps_unified_exec_available() {
+     let without_composition = probe(|turn| {
+diff --git a/codex-rs/core/src/unified_exec/errors.rs b/codex-rs/core/src/unified_exec/errors.rs
+index 8fa2ef7857bbe6c9870c59cc47dbe1540a5ba7a8..1cf1f6b11d0af134928ebe93bc97491e5c729347 100644
+--- a/codex-rs/core/src/unified_exec/errors.rs
++++ b/codex-rs/core/src/unified_exec/errors.rs
+@@ -20,6 +20,18 @@ pub(crate) enum UnifiedExecError {
+         "stdin is closed for this session; rerun exec_command with tty=true to keep stdin open"
+     )]
+     StdinClosed,
++    #[error(
++        "managed terminal process {process_id} is active in phase {phase}; resolve it with terminal_wait_control before starting or controlling another terminal"
++    )]
++    TerminalWaitActive { process_id: i32, phase: String },
++    #[error("no managed terminal process requires a decision")]
++    NoTerminalWaitDecision,
++    #[error(
++        "managed terminal process {process_id} is in phase {phase}; terminal_wait_control actions are only valid in phase decision_required"
++    )]
++    TerminalWaitDecisionUnavailable { process_id: i32, phase: String },
++    #[error("managed terminal start was cancelled before it became active")]
++    TerminalWaitStartCancelled,
+     #[error("missing command line for unified exec request")]
+     MissingCommandLine,
+     #[error("Command denied by sandbox: {message}")]
+diff --git a/codex-rs/core/src/unified_exec/mod.rs b/codex-rs/core/src/unified_exec/mod.rs
+index 8dc8f359d4e09cc5db417a67e2923b80323a59c9..e96e834eab6d5251961dfc2ee4131bb43d635cc5 100644
+--- a/codex-rs/core/src/unified_exec/mod.rs
++++ b/codex-rs/core/src/unified_exec/mod.rs
+@@ -26,8 +26,10 @@
+ use std::collections::HashMap;
+ use std::collections::HashSet;
+ use std::sync::Arc;
++use std::sync::Mutex as StdMutex;
+ use std::sync::Weak;
+ 
++use codex_config::terminal_wait::TerminalWaitToml;
+ use codex_network_proxy::NetworkProxy;
+ use codex_protocol::models::AdditionalPermissionProfile;
+ use codex_tools::UnifiedExecShellMode;
+@@ -35,6 +37,9 @@ use codex_utils_output_truncation::TruncationPolicy;
+ use codex_utils_path_uri::PathUri;
+ use rand::Rng;
+ use rand::rng;
++use regex_lite::Regex;
++use serde::Deserialize;
++use serde::Serialize;
+ use tokio::sync::Mutex;
+ use tokio_util::sync::CancellationToken;
+ 
+@@ -86,6 +91,8 @@ pub(crate) struct UnifiedExecContext {
+     pub step_context: Arc<StepContext>,
+     pub cancellation_token: CancellationToken,
+     pub call_id: String,
++    pub code_mode_cell_id: Option<String>,
++    pub code_mode_tool_call_id: Option<String>,
+ }
+ 
+ impl UnifiedExecContext {
+@@ -100,8 +107,20 @@ impl UnifiedExecContext {
+             step_context,
+             cancellation_token,
+             call_id,
++            code_mode_cell_id: None,
++            code_mode_tool_call_id: None,
+         }
+     }
++
++    pub fn with_code_mode_source(
++        mut self,
++        cell_id: Option<String>,
++        runtime_tool_call_id: Option<String>,
++    ) -> Self {
++        self.code_mode_cell_id = cell_id;
++        self.code_mode_tool_call_id = runtime_tool_call_id;
++        self
++    }
+ }
+ 
+ #[derive(Debug)]
+@@ -146,6 +165,29 @@ impl std::fmt::Debug for WriteStdinInteractionEvent<'_> {
+     }
+ }
+ 
++#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
++#[serde(rename_all = "snake_case")]
++pub(crate) enum TerminalWaitAction {
++    Continue,
++    Interrupt,
++    Terminate,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
++#[serde(rename_all = "snake_case")]
++pub(crate) enum TerminalWaitToolState {
++    DecisionRequired,
++    Completed,
++    Terminated,
++}
++
++#[derive(Debug)]
++pub(crate) struct TerminalWaitControlRequest<'a> {
++    pub action: TerminalWaitAction,
++    pub truncation_policy: TruncationPolicy,
++    pub interaction_event: Option<WriteStdinInteractionEvent<'a>>,
++}
++
+ #[derive(Default)]
+ pub(crate) struct ProcessStore {
+     processes: HashMap<i32, ProcessEntry>,
+@@ -162,14 +204,25 @@ impl ProcessStore {
+ pub(crate) struct UnifiedExecProcessManager {
+     process_store: Mutex<ProcessStore>,
+     max_write_stdin_yield_time_ms: u64,
++    terminal_wait_rules: TerminalWaitRules,
++    terminal_wait_gate: Arc<TerminalWaitGate>,
+ }
+ 
+ impl UnifiedExecProcessManager {
+     pub(crate) fn new(max_write_stdin_yield_time_ms: u64) -> Self {
++        Self::new_with_terminal_wait(max_write_stdin_yield_time_ms, None)
++    }
++
++    pub(crate) fn new_with_terminal_wait(
++        max_write_stdin_yield_time_ms: u64,
++        terminal_wait: Option<TerminalWaitToml>,
++    ) -> Self {
+         Self {
+             process_store: Mutex::new(ProcessStore::default()),
+             max_write_stdin_yield_time_ms: max_write_stdin_yield_time_ms
+                 .max(MIN_EMPTY_YIELD_TIME_MS),
++            terminal_wait_rules: TerminalWaitRules::compile(terminal_wait),
++            terminal_wait_gate: Arc::new(TerminalWaitGate::default()),
+         }
+     }
+ }
+@@ -191,6 +244,8 @@ struct ProcessEntry {
+     tty: bool,
+     environment_id: String,
+     permissions: TerminalPermissions,
++    terminal_wait_rule: Option<Arc<TerminalWaitCommandRule>>,
++    terminal_wait_generation: Option<u64>,
+     network_approval: Option<DeferredNetworkApproval>,
+     session: Weak<Session>,
+     last_used: tokio::time::Instant,
+@@ -207,6 +262,297 @@ fn take_plugin_metrics_sidecar(
+         .take()
+ }
+ 
++#[derive(Default)]
++struct TerminalWaitRules {
++    commands: Vec<Arc<TerminalWaitCommandRule>>,
++}
++
++struct TerminalWaitCommandRule {
++    name: String,
++    pattern: Regex,
++    cwd_pattern: Option<Regex>,
++    poll_interval_ms: u64,
++    max_output_tokens: Option<usize>,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum TerminalWaitPhase {
++    PendingStart,
++    Waiting,
++    DecisionRequired,
++    Interrupting,
++    Terminating,
++}
++
++impl std::fmt::Display for TerminalWaitPhase {
++    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        let value = match self {
++            Self::PendingStart => "pending_start",
++            Self::Waiting => "waiting",
++            Self::DecisionRequired => "decision_required",
++            Self::Interrupting => "interrupting",
++            Self::Terminating => "terminating",
++        };
++        formatter.write_str(value)
++    }
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++struct TerminalWaitGateSnapshot {
++    process_id: i32,
++    poll_interval_ms: u64,
++    phase: TerminalWaitPhase,
++    generation: u64,
++}
++
++#[derive(Default)]
++struct TerminalWaitGateState {
++    active: Option<TerminalWaitGateSnapshot>,
++    generation: u64,
++}
++
++#[derive(Default)]
++struct TerminalWaitGate {
++    state: StdMutex<TerminalWaitGateState>,
++}
++
++impl TerminalWaitGate {
++    fn lock_state(&self) -> std::sync::MutexGuard<'_, TerminalWaitGateState> {
++        self.state
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++    }
++
++    fn snapshot(&self) -> Option<TerminalWaitGateSnapshot> {
++        self.lock_state().active
++    }
++
++    fn ensure_terminal_available(&self) -> Result<(), UnifiedExecError> {
++        match self.snapshot() {
++            Some(active) => Err(UnifiedExecError::TerminalWaitActive {
++                process_id: active.process_id,
++                phase: active.phase.to_string(),
++            }),
++            None => Ok(()),
++        }
++    }
++
++    fn reserve(
++        self: &Arc<Self>,
++        process_id: i32,
++        poll_interval_ms: u64,
++    ) -> Result<TerminalWaitOperationGuard, UnifiedExecError> {
++        let mut state = self.lock_state();
++        if let Some(active) = state.active {
++            return Err(UnifiedExecError::TerminalWaitActive {
++                process_id: active.process_id,
++                phase: active.phase.to_string(),
++            });
++        }
++        state.generation = state.generation.wrapping_add(1).max(1);
++        let generation = state.generation;
++        state.active = Some(TerminalWaitGateSnapshot {
++            process_id,
++            poll_interval_ms,
++            phase: TerminalWaitPhase::PendingStart,
++            generation,
++        });
++        Ok(TerminalWaitOperationGuard {
++            gate: Arc::clone(self),
++            process_id,
++            generation,
++            drop_action: TerminalWaitDropAction::Release,
++            resolved: false,
++        })
++    }
++
++    fn begin_action(
++        self: &Arc<Self>,
++        action: TerminalWaitAction,
++        expected: Option<TerminalWaitGateSnapshot>,
++    ) -> Result<(TerminalWaitGateSnapshot, TerminalWaitOperationGuard), UnifiedExecError> {
++        let mut state = self.lock_state();
++        let Some(mut active) = state.active else {
++            return Err(UnifiedExecError::NoTerminalWaitDecision);
++        };
++        if expected.is_some_and(|expected| {
++            expected.process_id != active.process_id || expected.generation != active.generation
++        }) {
++            return Err(UnifiedExecError::TerminalWaitActive {
++                process_id: active.process_id,
++                phase: active.phase.to_string(),
++            });
++        }
++        if active.phase != TerminalWaitPhase::DecisionRequired {
++            return Err(UnifiedExecError::TerminalWaitDecisionUnavailable {
++                process_id: active.process_id,
++                phase: active.phase.to_string(),
++            });
++        }
++        active.phase = match action {
++            TerminalWaitAction::Continue => TerminalWaitPhase::Waiting,
++            TerminalWaitAction::Interrupt => TerminalWaitPhase::Interrupting,
++            TerminalWaitAction::Terminate => TerminalWaitPhase::Terminating,
++        };
++        state.active = Some(active);
++        Ok((
++            active,
++            TerminalWaitOperationGuard {
++                gate: Arc::clone(self),
++                process_id: active.process_id,
++                generation: active.generation,
++                drop_action: TerminalWaitDropAction::DecisionRequired,
++                resolved: false,
++            },
++        ))
++    }
++
++    fn set_phase(&self, process_id: i32, generation: u64, phase: TerminalWaitPhase) -> bool {
++        let mut state = self.lock_state();
++        if let Some(active) = state.active.as_mut()
++            && active.process_id == process_id
++            && active.generation == generation
++        {
++            active.phase = phase;
++            true
++        } else {
++            false
++        }
++    }
++
++    fn release(&self, process_id: i32, generation: u64) -> bool {
++        let mut state = self.lock_state();
++        if state.active.as_ref().is_some_and(|active| {
++            active.process_id == process_id && active.generation == generation
++        }) {
++            state.active = None;
++            true
++        } else {
++            false
++        }
++    }
++
++    fn clear(&self) {
++        self.lock_state().active = None;
++    }
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum TerminalWaitDropAction {
++    Release,
++    DecisionRequired,
++}
++
++struct TerminalWaitOperationGuard {
++    gate: Arc<TerminalWaitGate>,
++    process_id: i32,
++    generation: u64,
++    drop_action: TerminalWaitDropAction,
++    resolved: bool,
++}
++
++impl TerminalWaitOperationGuard {
++    fn generation(&self) -> u64 {
++        self.generation
++    }
++
++    fn mark_process_stored(&mut self) -> bool {
++        let stored =
++            self.gate
++                .set_phase(self.process_id, self.generation, TerminalWaitPhase::Waiting);
++        if stored {
++            self.drop_action = TerminalWaitDropAction::DecisionRequired;
++        }
++        stored
++    }
++
++    fn finish_decision_required(mut self) {
++        self.gate.set_phase(
++            self.process_id,
++            self.generation,
++            TerminalWaitPhase::DecisionRequired,
++        );
++        self.resolved = true;
++    }
++
++    fn finish_released(mut self) {
++        self.gate.release(self.process_id, self.generation);
++        self.resolved = true;
++    }
++}
++
++impl Drop for TerminalWaitOperationGuard {
++    fn drop(&mut self) {
++        if self.resolved {
++            return;
++        }
++        match self.drop_action {
++            TerminalWaitDropAction::Release => {
++                self.gate.release(self.process_id, self.generation);
++            }
++            TerminalWaitDropAction::DecisionRequired => {
++                self.gate.set_phase(
++                    self.process_id,
++                    self.generation,
++                    TerminalWaitPhase::DecisionRequired,
++                );
++            }
++        }
++    }
++}
++
++impl TerminalWaitRules {
++    fn compile(config: Option<TerminalWaitToml>) -> Self {
++        let Some(config) = config else {
++            return Self::default();
++        };
++
++        let commands = config
++            .commands
++            .into_iter()
++            .filter(|command| command.enabled)
++            .map(|command| {
++                Arc::new(TerminalWaitCommandRule {
++                    name: command.name,
++                    pattern: Regex::new(&command.pattern)
++                        .expect("terminal_wait pattern should be validated during config load"),
++                    cwd_pattern: command.cwd_pattern.map(|pattern| {
++                        Regex::new(&pattern).expect(
++                            "terminal_wait cwd_pattern should be validated during config load",
++                        )
++                    }),
++                    poll_interval_ms: command.poll_interval_ms,
++                    max_output_tokens: command.max_output_tokens,
++                })
++            })
++            .collect();
++
++        Self { commands }
++    }
++
++    fn matching_rule(
++        &self,
++        command: &str,
++        cwd: &str,
++        tty: bool,
++    ) -> Option<Arc<TerminalWaitCommandRule>> {
++        if tty {
++            return None;
++        }
++        self.commands.iter().find_map(|rule| {
++            if !rule.pattern.is_match(command) {
++                return None;
++            }
++            if let Some(cwd_pattern) = rule.cwd_pattern.as_ref()
++                && !cwd_pattern.is_match(cwd)
++            {
++                return None;
++            }
++            Some(Arc::clone(rule))
++        })
++    }
++}
++
+ pub(crate) fn clamp_yield_time(yield_time_ms: u64) -> u64 {
+     let yield_time_ms = if cfg!(windows) {
+         yield_time_ms.max(WINDOWS_INITIAL_EXEC_YIELD_TIME_FLOOR_MS)
+diff --git a/codex-rs/core/src/unified_exec/mod_tests.rs b/codex-rs/core/src/unified_exec/mod_tests.rs
+index dc32b21ee19853f76ad1d427e277f0e1c9cfe625..f3d491440f05a3725177dbaa58ef166cc32837f8 100644
+--- a/codex-rs/core/src/unified_exec/mod_tests.rs
++++ b/codex-rs/core/src/unified_exec/mod_tests.rs
+@@ -40,6 +40,148 @@ async fn test_session_and_turn() -> (Arc<Session>, Arc<TurnContext>) {
+     (Arc::new(session), Arc::new(turn))
+ }
+ 
++#[test]
++fn terminal_wait_gate_reserves_before_spawn_and_releases_failed_start() {
++    let gate = Arc::new(TerminalWaitGate::default());
++    let reservation = gate
++        .reserve(/*process_id*/ 41, /*poll_interval_ms*/ 2_000)
++        .expect("first managed command should reserve the gate");
++
++    assert_eq!(
++        gate.snapshot(),
++        Some(TerminalWaitGateSnapshot {
++            process_id: 41,
++            poll_interval_ms: 2_000,
++            phase: TerminalWaitPhase::PendingStart,
++            generation: 1,
++        })
++    );
++    assert!(matches!(
++        gate.ensure_terminal_available(),
++        Err(UnifiedExecError::TerminalWaitActive { process_id: 41, .. })
++    ));
++    assert!(matches!(
++        gate.reserve(/*process_id*/ 42, /*poll_interval_ms*/ 3_000),
++        Err(UnifiedExecError::TerminalWaitActive { process_id: 41, .. })
++    ));
++
++    drop(reservation);
++    assert_eq!(gate.snapshot(), None);
++}
++
++#[test]
++fn terminal_wait_gate_cancellation_returns_a_stored_process_to_decision() {
++    let gate = Arc::new(TerminalWaitGate::default());
++    let mut reservation = gate
++        .reserve(/*process_id*/ 41, /*poll_interval_ms*/ 2_000)
++        .expect("managed command should reserve the gate");
++    assert!(reservation.mark_process_stored());
++    assert_eq!(
++        gate.snapshot().map(|snapshot| snapshot.phase),
++        Some(TerminalWaitPhase::Waiting)
++    );
++
++    drop(reservation);
++    assert_eq!(
++        gate.snapshot().map(|snapshot| snapshot.phase),
++        Some(TerminalWaitPhase::DecisionRequired)
++    );
++
++    let (_, control) = gate
++        .begin_action(TerminalWaitAction::Continue, /*expected*/ None)
++        .expect("decision should accept one control action");
++    assert!(matches!(
++        gate.begin_action(TerminalWaitAction::Interrupt, /*expected*/ None),
++        Err(UnifiedExecError::TerminalWaitDecisionUnavailable { process_id: 41, .. })
++    ));
++    drop(control);
++    assert_eq!(
++        gate.snapshot().map(|snapshot| snapshot.phase),
++        Some(TerminalWaitPhase::DecisionRequired)
++    );
++}
++
++#[test]
++fn terminal_wait_gate_releases_after_a_terminal_result() {
++    let gate = Arc::new(TerminalWaitGate::default());
++    let mut reservation = gate
++        .reserve(/*process_id*/ 41, /*poll_interval_ms*/ 2_000)
++        .expect("managed command should reserve the gate");
++    assert!(reservation.mark_process_stored());
++    reservation.finish_decision_required();
++
++    let (_, control) = gate
++        .begin_action(TerminalWaitAction::Terminate, /*expected*/ None)
++        .expect("decision should accept terminate");
++    control.finish_released();
++
++    assert_eq!(gate.snapshot(), None);
++    assert!(matches!(
++        gate.begin_action(TerminalWaitAction::Continue, /*expected*/ None),
++        Err(UnifiedExecError::NoTerminalWaitDecision)
++    ));
++}
++
++#[test]
++fn terminal_wait_gate_rejects_a_store_after_the_gate_is_cleared() {
++    let gate = Arc::new(TerminalWaitGate::default());
++    let mut reservation = gate
++        .reserve(/*process_id*/ 41, /*poll_interval_ms*/ 2_000)
++        .expect("managed command should reserve the gate");
++
++    gate.clear();
++
++    assert!(!reservation.mark_process_stored());
++    drop(reservation);
++    assert_eq!(gate.snapshot(), None);
++}
++
++#[test]
++fn terminal_wait_gate_rejects_a_rebound_compatibility_target() {
++    let gate = Arc::new(TerminalWaitGate::default());
++    let mut first_reservation = gate
++        .reserve(/*process_id*/ 41, /*poll_interval_ms*/ 2_000)
++        .expect("first managed command should reserve the gate");
++    assert!(first_reservation.mark_process_stored());
++    first_reservation.finish_decision_required();
++    let first = gate.snapshot().expect("first decision should be active");
++
++    let (_, first_control) = gate
++        .begin_action(TerminalWaitAction::Terminate, Some(first))
++        .expect("first decision should accept terminate");
++    first_control.finish_released();
++
++    let mut rebound_reservation = gate
++        .reserve(/*process_id*/ 41, /*poll_interval_ms*/ 2_000)
++        .expect("rebound command should reserve the released process id");
++    assert!(rebound_reservation.mark_process_stored());
++    rebound_reservation.finish_decision_required();
++    let rebound = gate.snapshot().expect("rebound decision should be active");
++
++    assert_ne!(first.generation, rebound.generation);
++    assert!(matches!(
++        gate.begin_action(TerminalWaitAction::Continue, Some(first)),
++        Err(UnifiedExecError::TerminalWaitActive { process_id: 41, .. })
++    ));
++    assert!(!gate.release(first.process_id, first.generation));
++    assert_eq!(gate.snapshot(), Some(rebound));
++}
++
++#[tokio::test]
++async fn terminate_all_processes_clears_the_terminal_wait_gate() {
++    let manager = UnifiedExecProcessManager::default();
++    let mut reservation = manager
++        .terminal_wait_gate
++        .reserve(/*process_id*/ 41, /*poll_interval_ms*/ 2_000)
++        .expect("managed command should reserve the gate");
++    assert!(reservation.mark_process_stored());
++    drop(reservation);
++
++    manager.terminate_all_processes().await;
++
++    assert_eq!(manager.terminal_wait_gate.snapshot(), None);
++}
++
+ async fn exec_command(
+     session: &Arc<Session>,
+     turn: &Arc<TurnContext>,
+@@ -150,6 +292,8 @@ async fn exec_command_with_tty(
+                 /*additional_permissions*/ None,
+                 /*internal_permissions*/ None,
+             ),
++            terminal_wait_rule: None,
++            terminal_wait_generation: None,
+             network_approval: None,
+             session: Arc::downgrade(session),
+             last_used: started_at,
+@@ -209,6 +353,7 @@ async fn exec_command_with_tty(
+         original_token_count: Some(original_token_count),
+         output_omitted_bytes,
+         hook_command: Some(cmd.to_string()),
++        terminal_wait: None,
+     })
+ }
+ 
+@@ -624,6 +769,8 @@ async fn terminating_initial_exec_command_rechecks_initial_response_state() -> a
+                 /*additional_permissions*/ None,
+                 /*internal_permissions*/ None,
+             ),
++            terminal_wait_rule: None,
++            terminal_wait_generation: None,
+             network_approval: None,
+             session: Arc::downgrade(&session),
+             last_used: Instant::now(),
+@@ -707,6 +854,8 @@ async fn terminating_during_stdin_poll_returns_exited_response() -> anyhow::Resu
+                 /*additional_permissions*/ None,
+                 /*internal_permissions*/ None,
+             ),
++            terminal_wait_rule: None,
++            terminal_wait_generation: None,
+             network_approval: None,
+             session: Arc::downgrade(&session),
+             last_used,
+diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
+index 21218570af85277b4e21885cfa77c53c6271bed1..7f0e9b4d5cc0ba4682084137a4cd7bdc56e81f35 100644
+--- a/codex-rs/core/src/unified_exec/process_manager.rs
++++ b/codex-rs/core/src/unified_exec/process_manager.rs
+@@ -29,6 +29,7 @@ use crate::sandboxing::ExecRequest;
+ use crate::sandboxing::ExecServerEnvConfig;
+ use crate::tools::ApprovalContext;
+ use crate::tools::context::ExecCommandToolOutput;
++use crate::tools::context::TerminalWaitToolOutput;
+ use crate::tools::events::ToolEmitter;
+ use crate::tools::events::ToolEventCtx;
+ use crate::tools::events::ToolEventStage;
+@@ -49,6 +50,12 @@ use crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS;
+ use crate::unified_exec::MIN_YIELD_TIME_MS;
+ use crate::unified_exec::ProcessEntry;
+ use crate::unified_exec::ProcessStore;
++use crate::unified_exec::TerminalWaitAction;
++use crate::unified_exec::TerminalWaitCommandRule;
++use crate::unified_exec::TerminalWaitControlRequest;
++use crate::unified_exec::TerminalWaitGateSnapshot;
++use crate::unified_exec::TerminalWaitOperationGuard;
++use crate::unified_exec::TerminalWaitToolState;
+ use crate::unified_exec::UnifiedExecContext;
+ use crate::unified_exec::UnifiedExecError;
+ use crate::unified_exec::UnifiedExecProcessManager;
+@@ -84,6 +91,7 @@ use codex_sandboxing::SandboxCommand;
+ use codex_shell_command::is_dangerous_command::DangerousCommandPlatform;
+ use codex_tools::ToolName;
+ use codex_utils_output_truncation::approx_tokens_from_byte_count;
++use codex_utils_path_uri::PathConvention;
+ use codex_utils_path_uri::PathUri;
+ 
+ const UNIFIED_EXEC_ENV: [(&str, &str); 10] = [
+@@ -101,8 +109,20 @@ const UNIFIED_EXEC_ENV: [(&str, &str); 10] = [
+ const NETWORK_ACCESS_DENIED_MESSAGE: &str =
+     "Network access was denied by the Codex sandbox network proxy.";
+ const LATE_NETWORK_DENIAL_GRACE_PERIOD: Duration = Duration::from_millis(100);
++const TERMINAL_WAIT_INTERRUPT_GRACE_PERIOD: Duration = Duration::from_secs(10);
+ const INTERRUPT: &str = "\u{3}";
+ 
++fn terminal_wait_interaction_input(
++    action: TerminalWaitAction,
++    process_remains_alive: bool,
++) -> Option<&'static str> {
++    match action {
++        TerminalWaitAction::Continue if process_remains_alive => Some(""),
++        TerminalWaitAction::Interrupt => Some(INTERRUPT),
++        TerminalWaitAction::Continue | TerminalWaitAction::Terminate => None,
++    }
++}
++
+ /// Test-only override for deterministic unified exec process IDs.
+ ///
+ /// In production builds this value should remain at its default (`false`) and
+@@ -246,6 +266,63 @@ fn exec_server_params_for_request(
+     }
+ }
+ 
++fn terminal_wait_cwd_string(cwd: &PathUri) -> String {
++    if cwd.infer_path_convention() == Some(PathConvention::native())
++        && let Ok(path) = cwd.to_abs_path()
++    {
++        return path.to_string_lossy().into_owned();
++    }
++    cwd.to_string()
++}
++
++fn terminal_wait_max_output_tokens(
++    rule: Option<&TerminalWaitCommandRule>,
++    request_max_output_tokens: Option<usize>,
++) -> Option<usize> {
++    rule.and_then(|rule| rule.max_output_tokens)
++        .or(request_max_output_tokens)
++}
++
++fn initial_exec_deadline(
++    start: Instant,
++    request_yield_time_ms: u64,
++    rule: Option<&TerminalWaitCommandRule>,
++) -> Instant {
++    match rule {
++        Some(rule) => checked_deadline(start, Duration::from_millis(rule.poll_interval_ms)),
++        None => checked_deadline(
++            start,
++            Duration::from_millis(clamp_yield_time(request_yield_time_ms)),
++        ),
++    }
++}
++
++fn terminal_wait_deadline(start: Instant, poll_interval_ms: u64) -> Instant {
++    checked_deadline(start, Duration::from_millis(poll_interval_ms))
++}
++
++fn checked_deadline(start: Instant, duration: Duration) -> Instant {
++    // Valid terminal-wait intervals are capped at one hour. Failing closed at
++    // the current instant also keeps other callers safe if an untrusted or
++    // synthetic duration cannot be represented by the platform clock.
++    start.checked_add(duration).unwrap_or(start)
++}
++
++fn default_write_stdin_deadline(
++    start: Instant,
++    request_yield_time_ms: u64,
++    input_is_empty: bool,
++    max_write_stdin_yield_time_ms: u64,
++) -> Instant {
++    let time_ms = request_yield_time_ms.max(MIN_YIELD_TIME_MS);
++    let yield_time_ms = if input_is_empty {
++        time_ms.clamp(MIN_EMPTY_YIELD_TIME_MS, max_write_stdin_yield_time_ms)
++    } else {
++        time_ms.min(MAX_YIELD_TIME_MS)
++    };
++    checked_deadline(start, Duration::from_millis(yield_time_ms))
++}
++
+ /// Borrowed process state prepared for a `write_stdin` or poll operation.
+ struct PreparedProcessHandles {
+     process: Arc<UnifiedExecProcess>,
+@@ -257,6 +334,7 @@ struct PreparedProcessHandles {
+     hook_command: String,
+     process_id: i32,
+     tty: bool,
++    terminal_wait_rule: Option<Arc<TerminalWaitCommandRule>>,
+ }
+ 
+ struct InitialExecCommandGuard {
+@@ -461,19 +539,82 @@ impl UnifiedExecProcessManager {
+     }
+ 
+     pub(crate) async fn release_process_id(&self, process_id: i32) {
++        self.release_process_id_for_start(process_id, /*terminal_wait_generation*/ None)
++            .await;
++    }
++
++    async fn release_process_id_for_start(
++        &self,
++        process_id: i32,
++        terminal_wait_generation: Option<u64>,
++    ) {
+         let removed = {
+             let mut store = self.process_store.lock().await;
+-            let entry = store.processes.remove(&process_id);
+-            if !should_use_deterministic_process_ids() {
+-                store.reserved_process_ids.remove(&process_id);
++            // A stop can clear reservations while an older start is still
++            // unwinding. Only that exact terminal-wait generation may release
++            // the reused process id.
++            let terminal_wait_matches = terminal_wait_generation.is_none_or(|generation| {
++                self.terminal_wait_gate.snapshot().is_some_and(|active| {
++                    active.process_id == process_id && active.generation == generation
++                })
++            });
++            if terminal_wait_matches {
++                store.remove(process_id)
++            } else {
++                None
++            }
++        };
++        if let Some(entry) = removed {
++            self.release_terminal_wait_for_entry(&entry);
++            unregister_network_approval_for_entry(&entry).await;
++        }
++    }
++
++    async fn release_process_if_matches(
++        &self,
++        process_id: i32,
++        expected_process: &Arc<UnifiedExecProcess>,
++    ) {
++        let removed = {
++            let mut store = self.process_store.lock().await;
++            let matches = store
++                .processes
++                .get(&process_id)
++                .is_some_and(|entry| Arc::ptr_eq(&entry.process, expected_process));
++            if matches {
++                store.remove(process_id)
++            } else {
++                None
+             }
+-            entry
+         };
+         if let Some(entry) = removed {
++            self.release_terminal_wait_for_entry(&entry);
+             unregister_network_approval_for_entry(&entry).await;
+         }
+     }
+ 
++    async fn release_initial_process(
++        &self,
++        process_id: i32,
++        process: &Arc<UnifiedExecProcess>,
++        process_started_alive: bool,
++        terminal_wait_generation: Option<u64>,
++    ) {
++        if process_started_alive {
++            self.release_process_if_matches(process_id, process).await;
++        } else {
++            self.release_process_id_for_start(process_id, terminal_wait_generation)
++                .await;
++        }
++    }
++
++    fn release_terminal_wait_for_entry(&self, entry: &ProcessEntry) {
++        if let Some(generation) = entry.terminal_wait_generation {
++            self.terminal_wait_gate
++                .release(entry.process_id, generation);
++        }
++    }
++
+     pub(crate) async fn exec_command(
+         &self,
+         request: ExecCommandRequest,
+@@ -490,6 +631,53 @@ impl UnifiedExecProcessManager {
+         mut completion: Option<&mut Completion<'_>>,
+     ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
+         let cwd = request.cwd.clone();
++        let terminal_wait_cwd = terminal_wait_cwd_string(&cwd);
++        let terminal_wait_rule = self.terminal_wait_rules.matching_rule(
++            &request.hook_command,
++            &terminal_wait_cwd,
++            request.tty,
++        );
++        let terminal_wait_reservation = match terminal_wait_rule.as_deref() {
++            Some(rule) => self
++                .terminal_wait_gate
++                .reserve(request.process_id, rule.poll_interval_ms)
++                .map(Some),
++            None => self
++                .terminal_wait_gate
++                .ensure_terminal_available()
++                .map(|()| None),
++        };
++        let mut terminal_wait_guard = match terminal_wait_reservation {
++            Ok(guard) => guard,
++            Err(err) => {
++                self.release_process_id(request.process_id).await;
++                return Err(err);
++            }
++        };
++        let terminal_wait_generation = terminal_wait_guard
++            .as_ref()
++            .map(TerminalWaitOperationGuard::generation);
++        let _terminal_wait_lease = match (
++            terminal_wait_rule.as_ref(),
++            context.code_mode_cell_id.as_deref(),
++        ) {
++            (Some(_), Some(cell_id)) => Some(
++                context
++                    .session
++                    .services
++                    .code_mode_service
++                    .acquire_terminal_wait(cell_id),
++            ),
++            _ => None,
++        };
++        context
++            .session
++            .services
++            .code_mode_service
++            .resolve_terminal_wait_decision(
++                context.code_mode_cell_id.as_deref(),
++                context.code_mode_tool_call_id.as_deref(),
++            );
+         let process = self
+             .open_session_with_sandbox(&request, cwd.clone(), context)
+             .await;
+@@ -497,7 +685,8 @@ impl UnifiedExecProcessManager {
+         let (attempt, mut deferred_network_approval) = match process {
+             Ok((attempt, deferred_network_approval)) => (attempt, deferred_network_approval),
+             Err(err) => {
+-                self.release_process_id(request.process_id).await;
++                self.release_process_id_for_start(request.process_id, terminal_wait_generation)
++                    .await;
+                 return Err(err);
+             }
+         };
+@@ -560,25 +749,50 @@ impl UnifiedExecProcessManager {
+         let process_started_alive = !process.has_exited() && process.exit_code().is_none();
+         let mut initial_exec_command_guard = if process_started_alive {
+             let initial_exec_command_active = Arc::new(AtomicBool::new(true));
+-            self.store_process(
+-                Arc::clone(&process),
+-                context,
+-                &request.command,
+-                request.hook_command.clone(),
+-                cwd.clone(),
+-                request.turn_environment.selection.environment_id.clone(),
+-                permissions,
+-                plugin_attribution.clone(),
+-                start,
+-                request.process_id,
+-                request.tty,
+-                deferred_network_approval.clone(),
+-                network_denial_monitor,
+-                metrics_sidecar,
+-                Arc::clone(&transcript),
+-                Arc::clone(&initial_exec_command_active),
+-            )
+-            .await;
++            let pruned_entry = self
++                .store_process(
++                    Arc::clone(&process),
++                    context,
++                    &request.command,
++                    request.hook_command.clone(),
++                    cwd.clone(),
++                    request.turn_environment.selection.environment_id.clone(),
++                    permissions,
++                    plugin_attribution.clone(),
++                    start,
++                    request.process_id,
++                    request.tty,
++                    terminal_wait_rule.clone(),
++                    terminal_wait_generation,
++                    deferred_network_approval.clone(),
++                    network_denial_monitor,
++                    metrics_sidecar,
++                    Arc::clone(&transcript),
++                    Arc::clone(&initial_exec_command_active),
++                )
++                .await;
++            let terminal_wait_stored = match terminal_wait_guard.as_mut() {
++                Some(guard) => guard.mark_process_stored(),
++                None => true,
++            };
++            if !terminal_wait_stored {
++                // The gate was cleared after spawn (for example by /stop).
++                // Do not let the just-created process escape without a gate.
++                let termination_result = process.terminate_confirmed().await;
++                if termination_result.is_err() {
++                    process.terminate();
++                }
++                self.release_process_if_matches(request.process_id, &process)
++                    .await;
++                if let Some(pruned_entry) = pruned_entry {
++                    self.cleanup_pruned_process(pruned_entry).await;
++                }
++                termination_result?;
++                return Err(UnifiedExecError::TerminalWaitStartCancelled);
++            }
++            if let Some(pruned_entry) = pruned_entry {
++                self.cleanup_pruned_process(pruned_entry).await;
++            }
+             InitialExecCommandGuard {
+                 active: Some(initial_exec_command_active),
+                 metrics_sidecar: None,
+@@ -590,17 +804,24 @@ impl UnifiedExecProcessManager {
+             }
+         };
+ 
+-        let yield_time_ms = clamp_yield_time(request.yield_time_ms);
+         // For the initial exec_command call, we both stream output to events
+         // (via start_streaming_output above) and collect a snapshot here for
+         // the tool response body.
+-        let wait = completion.as_ref().map_or_else(
+-            || Duration::from_millis(yield_time_ms),
+-            |completion| completion.timeout,
+-        );
+-        let deadline = start
+-            .checked_add(wait)
+-            .ok_or_else(|| UnifiedExecError::process_failed("timeout_ms is too large".into()))?;
++        let completion_deadline = completion
++            .as_ref()
++            .map(|completion| checked_deadline(start, completion.timeout));
++        let terminal_wait_deadline = terminal_wait_rule
++            .as_deref()
++            .map(|rule| initial_exec_deadline(start, request.yield_time_ms, Some(rule)));
++        let deadline = match (completion_deadline, terminal_wait_deadline) {
++            (Some(completion_deadline), Some(terminal_wait_deadline)) => {
++                completion_deadline.min(terminal_wait_deadline)
++            }
++            (Some(completion_deadline), None) => completion_deadline,
++            (None, _) => {
++                initial_exec_deadline(start, request.yield_time_ms, terminal_wait_rule.as_deref())
++            }
++        };
+         let collected_output = Self::collect_output_until_deadline(
+             process.output_handles(),
+             Some(context.session.subscribe_elicitation_pause_state()),
+@@ -609,6 +830,7 @@ impl UnifiedExecProcessManager {
+         .await;
+         if let Some(completion) = completion.as_mut()
+             && !process.has_exited()
++            && completion_deadline.is_some_and(|deadline| Instant::now() >= deadline)
+         {
+             completion.timed_out = true;
+             process.mark_timed_out();
+@@ -647,7 +869,13 @@ impl UnifiedExecProcessManager {
+                 wall_time,
+             )
+             .await;
+-            self.release_process_id(request.process_id).await;
++            self.release_initial_process(
++                request.process_id,
++                &process,
++                process_started_alive,
++                terminal_wait_generation,
++            )
++            .await;
+             return Err(fail_process_with_message(process.as_ref(), message));
+         }
+         if let Some(message) = process.failure_message() {
+@@ -668,7 +896,13 @@ impl UnifiedExecProcessManager {
+                 wall_time,
+             )
+             .await;
+-            self.release_process_id(request.process_id).await;
++            self.release_initial_process(
++                request.process_id,
++                &process,
++                process_started_alive,
++                terminal_wait_generation,
++            )
++            .await;
+             if let Err(message) = finish_result {
+                 return Err(fail_process_with_message(process.as_ref(), message));
+             }
+@@ -676,7 +910,7 @@ impl UnifiedExecProcessManager {
+         }
+         let process_id = request.process_id;
+         let (response_process_id, exit_code) = if process_started_alive {
+-            match self.refresh_process_state(process_id).await {
++            match self.refresh_process_state(process_id, &process).await {
+                 ProcessStatus::Alive {
+                     exit_code,
+                     process_id,
+@@ -745,7 +979,13 @@ impl UnifiedExecProcessManager {
+                     wall_time,
+                 )
+                 .await;
+-                self.release_process_id(request.process_id).await;
++                self.release_initial_process(
++                    request.process_id,
++                    &process,
++                    process_started_alive,
++                    terminal_wait_generation,
++                )
++                .await;
+                 return Err(fail_process_with_message(process.as_ref(), message));
+             }
+             let exit_code = process.exit_code();
+@@ -769,7 +1009,13 @@ impl UnifiedExecProcessManager {
+             )
+             .await;
+ 
+-            self.release_process_id(request.process_id).await;
++            self.release_initial_process(
++                request.process_id,
++                &process,
++                process_started_alive,
++                terminal_wait_generation,
++            )
++            .await;
+             process
+                 .check_for_sandbox_denial_with_text(&text)
+                 .await
+@@ -779,6 +1025,24 @@ impl UnifiedExecProcessManager {
+             (None, exit_code)
+         };
+ 
++        let terminal_wait = terminal_wait_rule.as_ref().map(|rule| {
++            let state = if response_process_id.is_some() {
++                if let Some(guard) = terminal_wait_guard.take() {
++                    guard.finish_decision_required();
++                }
++                TerminalWaitToolState::DecisionRequired
++            } else {
++                if let Some(guard) = terminal_wait_guard.take() {
++                    guard.finish_released();
++                }
++                TerminalWaitToolState::Completed
++            };
++            TerminalWaitToolOutput {
++                rule_name: rule.name.clone(),
++                state,
++                poll_interval_ms: rule.poll_interval_ms,
++            }
++        });
+         let response = ExecCommandToolOutput {
+             event_call_id: context.call_id.clone(),
+             chunk_id,
+@@ -790,13 +1054,239 @@ impl UnifiedExecProcessManager {
+                 .model_info()
+                 .truncation_policy
+                 .into(),
+-            max_output_tokens: request.max_output_tokens,
++            max_output_tokens: terminal_wait_max_output_tokens(
++                terminal_wait_rule.as_deref(),
++                request.max_output_tokens,
++            ),
+             process_id: response_process_id,
+             exit_code,
+             original_token_count: Some(original_token_count),
+             output_omitted_bytes,
+             hook_command: Some(request.hook_command.clone()),
++            terminal_wait,
++        };
++
++        Ok(response)
++    }
++
++    pub(crate) async fn terminal_wait_control(
++        &self,
++        context: &UnifiedExecContext,
++        request: TerminalWaitControlRequest<'_>,
++    ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
++        self.run_terminal_wait_action(
++            request.action,
++            /*expected*/ None,
++            request.truncation_policy,
++            /*request_max_output_tokens*/ None,
++            request.interaction_event,
++            context,
++        )
++        .await
++    }
++
++    async fn run_terminal_wait_action(
++        &self,
++        action: TerminalWaitAction,
++        expected: Option<TerminalWaitGateSnapshot>,
++        truncation_policy: codex_utils_output_truncation::TruncationPolicy,
++        request_max_output_tokens: Option<usize>,
++        interaction_event: Option<WriteStdinInteractionEvent<'_>>,
++        context: &UnifiedExecContext,
++    ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
++        let (managed, terminal_wait_guard) =
++            self.terminal_wait_gate.begin_action(action, expected)?;
++        let process_id = managed.process_id;
++
++        let locked_process = {
++            let store = self.process_store.lock().await;
++            let Some(entry) = store.processes.get(&process_id) else {
++                terminal_wait_guard.finish_released();
++                return Err(UnifiedExecError::UnknownProcessId { process_id });
++            };
++            if entry.terminal_wait_generation != Some(managed.generation) {
++                terminal_wait_guard.finish_released();
++                return Err(UnifiedExecError::UnknownProcessId { process_id });
++            }
++            Arc::clone(&entry.process)
++        };
++        let _interaction_guard = locked_process.interaction_lock().lock_owned().await;
++        let PreparedProcessHandles {
++            process,
++            output,
++            pause_state,
++            session,
++            network_approval,
++            call_id,
++            hook_command,
++            terminal_wait_rule,
++            ..
++        } = self
++            .prepare_process_handles(process_id, &locked_process)
++            .await?;
++
++        let _terminal_wait_lease = if let (Some(session), Some(cell_id)) =
++            (session.as_ref(), context.code_mode_cell_id.as_deref())
++        {
++            Some(
++                session
++                    .services
++                    .code_mode_service
++                    .acquire_terminal_wait(cell_id),
++            )
++        } else {
++            None
++        };
++        if let Some(session) = session.as_ref() {
++            session
++                .services
++                .code_mode_service
++                .resolve_terminal_wait_decision(
++                    context.code_mode_cell_id.as_deref(),
++                    context.code_mode_tool_call_id.as_deref(),
++                );
++        }
++
++        let process_was_alive = !process.has_exited();
++        if process_was_alive {
++            match action {
++                TerminalWaitAction::Continue => {}
++                TerminalWaitAction::Interrupt => process.interrupt().await?,
++                TerminalWaitAction::Terminate => process.terminate_confirmed().await?,
++            }
++        }
++
++        let start = Instant::now();
++        let deadline = match action {
++            TerminalWaitAction::Continue => terminal_wait_deadline(start, managed.poll_interval_ms),
++            TerminalWaitAction::Interrupt => {
++                checked_deadline(start, TERMINAL_WAIT_INTERRUPT_GRACE_PERIOD)
++            }
++            TerminalWaitAction::Terminate => checked_deadline(start, Duration::from_millis(50)),
+         };
++        let pause_state = if action == TerminalWaitAction::Continue {
++            pause_state
++        } else {
++            None
++        };
++        let collected_output =
++            Self::collect_output_until_deadline(&output, pause_state, deadline).await;
++        let wall_time = Instant::now().saturating_duration_since(start);
++        let original_token_count = usize::try_from(approx_tokens_from_byte_count(
++            collected_output.total_bytes(),
++        ))
++        .unwrap_or(usize::MAX);
++        let output_omitted_bytes = NonZeroUsize::new(collected_output.omitted_bytes());
++        let collected = collected_output.to_bytes_with_omission_marker();
++        let chunk_id = generate_chunk_id();
++
++        if network_approval
++            .as_ref()
++            .is_some_and(DeferredNetworkApproval::is_cancelled)
++        {
++            let message =
++                network_denial_message_for_session(session.as_ref(), network_approval.clone())
++                    .await;
++            self.release_process_if_matches(process_id, &process).await;
++            return Err(fail_process_with_message(process.as_ref(), message));
++        }
++        if let Some(message) = process.failure_message() {
++            let finish_result = finish_deferred_network_approval_for_session(
++                session.as_ref(),
++                network_approval.clone(),
++            )
++            .await;
++            self.release_process_if_matches(process_id, &process).await;
++            if let Err(message) = finish_result {
++                return Err(fail_process_with_message(process.as_ref(), message));
++            }
++            return Err(UnifiedExecError::process_failed(message));
++        }
++
++        let status = self.refresh_process_state(process_id, &process).await;
++        let (response_process_id, exit_code, event_call_id, terminal_wait_state) = match status {
++            ProcessStatus::Alive {
++                exit_code,
++                call_id,
++                process_id,
++            } => {
++                terminal_wait_guard.finish_decision_required();
++                (
++                    Some(process_id),
++                    exit_code,
++                    call_id,
++                    TerminalWaitToolState::DecisionRequired,
++                )
++            }
++            ProcessStatus::Exited { exit_code, entry } => {
++                let event_call_id = entry.call_id.clone();
++                if let Err(message) =
++                    finish_network_approval_after_process_exit_for_entry(&entry).await
++                {
++                    return Err(fail_process_with_message(entry.process.as_ref(), message));
++                }
++                terminal_wait_guard.finish_released();
++                let state = if action == TerminalWaitAction::Terminate && process_was_alive {
++                    TerminalWaitToolState::Terminated
++                } else {
++                    TerminalWaitToolState::Completed
++                };
++                (None, exit_code, event_call_id, state)
++            }
++            ProcessStatus::Unknown if process.has_exited() => {
++                terminal_wait_guard.finish_released();
++                let state = if action == TerminalWaitAction::Terminate && process_was_alive {
++                    TerminalWaitToolState::Terminated
++                } else {
++                    TerminalWaitToolState::Completed
++                };
++                (None, process.exit_code(), call_id, state)
++            }
++            ProcessStatus::Unknown => {
++                return Err(UnifiedExecError::UnknownProcessId { process_id });
++            }
++        };
++
++        let response = ExecCommandToolOutput {
++            event_call_id,
++            chunk_id,
++            wall_time,
++            raw_output: collected,
++            truncation_policy,
++            max_output_tokens: terminal_wait_max_output_tokens(
++                terminal_wait_rule.as_deref(),
++                request_max_output_tokens,
++            ),
++            process_id: response_process_id,
++            exit_code,
++            original_token_count: Some(original_token_count),
++            output_omitted_bytes,
++            hook_command: Some(hook_command),
++            terminal_wait: Some(TerminalWaitToolOutput {
++                rule_name: terminal_wait_rule
++                    .as_ref()
++                    .expect("managed terminal process must retain its matching rule")
++                    .name
++                    .clone(),
++                state: terminal_wait_state,
++                poll_interval_ms: managed.poll_interval_ms,
++            }),
++        };
++
++        let interaction_input =
++            terminal_wait_interaction_input(action, response.process_id.is_some());
++        if let Some(input) = interaction_input
++            && let Some(WriteStdinInteractionEvent { session, turn }) = interaction_event
++        {
++            let interaction = TerminalInteractionEvent {
++                call_id: response.event_call_id.clone(),
++                process_id: managed.process_id.to_string(),
++                stdin: input.to_string(),
++            };
++            session
++                .send_event(turn.as_ref(), EventMsg::TerminalInteraction(interaction))
++                .await;
++        }
+ 
+         Ok(response)
+     }
+@@ -807,6 +1297,29 @@ impl UnifiedExecProcessManager {
+         request: WriteStdinRequest<'_>,
+     ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
+         let process_id = request.process_id;
++        if let Some(managed) = self.terminal_wait_gate.snapshot() {
++            if managed.process_id != process_id {
++                return Err(UnifiedExecError::TerminalWaitActive {
++                    process_id: managed.process_id,
++                    phase: managed.phase.to_string(),
++                });
++            }
++            let action = match request.input {
++                "" => TerminalWaitAction::Continue,
++                INTERRUPT => TerminalWaitAction::Interrupt,
++                _ => return Err(UnifiedExecError::StdinClosed),
++            };
++            return self
++                .run_terminal_wait_action(
++                    action,
++                    Some(managed),
++                    request.truncation_policy,
++                    request.max_output_tokens,
++                    request.interaction_event,
++                    context,
++                )
++                .await;
++        }
+ 
+         // Different terminal sessions can be polled concurrently, but reads and
+         // writes against one terminal must not overlap because they share a
+@@ -895,10 +1408,34 @@ impl UnifiedExecProcessManager {
+             hook_command,
+             process_id,
+             tty,
++            terminal_wait_rule,
+             ..
+         } = self
+             .prepare_process_handles(process_id, &locked_process)
+             .await?;
++        let _terminal_wait_lease = if request.input.is_empty()
++            && terminal_wait_rule.is_some()
++            && let (Some(session), Some(cell_id)) =
++                (session.as_ref(), context.code_mode_cell_id.as_deref())
++        {
++            Some(
++                session
++                    .services
++                    .code_mode_service
++                    .acquire_terminal_wait(cell_id),
++            )
++        } else {
++            None
++        };
++        if let Some(session) = session.as_ref() {
++            session
++                .services
++                .code_mode_service
++                .resolve_terminal_wait_decision(
++                    context.code_mode_cell_id.as_deref(),
++                    context.code_mode_tool_call_id.as_deref(),
++                );
++        }
+         let mut status_after_write = None;
+ 
+         if !request.input.is_empty() {
+@@ -916,12 +1453,12 @@ impl UnifiedExecProcessManager {
+                         tokio::time::sleep(Duration::from_millis(100)).await;
+                     }
+                     Err(err) => {
+-                        let status = self.refresh_process_state(process_id).await;
++                        let status = self.refresh_process_state(process_id, &process).await;
+                         if matches!(status, ProcessStatus::Exited { .. }) {
+                             status_after_write = Some(status);
+                         } else if matches!(err, UnifiedExecError::ProcessFailed { .. }) {
+                             process.terminate();
+-                            self.release_process_id(process_id).await;
++                            self.release_process_if_matches(process_id, &process).await;
+                             return Err(err);
+                         } else {
+                             return Err(err);
+@@ -931,18 +1468,13 @@ impl UnifiedExecProcessManager {
+             }
+         }
+ 
+-        let yield_time_ms = {
+-            // Empty polls use configurable background timeout bounds. Non-empty
+-            // writes keep a fixed max cap so interactive stdin remains responsive.
+-            let time_ms = request.yield_time_ms.max(MIN_YIELD_TIME_MS);
+-            if request.input.is_empty() {
+-                time_ms.clamp(MIN_EMPTY_YIELD_TIME_MS, self.max_write_stdin_yield_time_ms)
+-            } else {
+-                time_ms.min(MAX_YIELD_TIME_MS)
+-            }
+-        };
+         let start = Instant::now();
+-        let deadline = start + Duration::from_millis(yield_time_ms);
++        let deadline = self.write_stdin_deadline(
++            start,
++            request.yield_time_ms,
++            request.input.is_empty(),
++            terminal_wait_rule.as_deref(),
++        );
+         let collected_output =
+             Self::collect_output_until_deadline(&output, pause_state, deadline).await;
+         let wall_time = Instant::now().saturating_duration_since(start);
+@@ -961,7 +1493,7 @@ impl UnifiedExecProcessManager {
+             let message =
+                 network_denial_message_for_session(session.as_ref(), network_approval.clone())
+                     .await;
+-            self.release_process_id(process_id).await;
++            self.release_process_if_matches(process_id, &process).await;
+             return Err(fail_process_with_message(process.as_ref(), message));
+         }
+         if let Some(message) = process.failure_message() {
+@@ -970,7 +1502,7 @@ impl UnifiedExecProcessManager {
+                 network_approval.clone(),
+             )
+             .await;
+-            self.release_process_id(process_id).await;
++            self.release_process_if_matches(process_id, &process).await;
+             if let Err(message) = finish_result {
+                 return Err(fail_process_with_message(process.as_ref(), message));
+             }
+@@ -984,7 +1516,7 @@ impl UnifiedExecProcessManager {
+         let status = if let Some(status) = status_after_write {
+             status
+         } else {
+-            self.refresh_process_state(process_id).await
++            self.refresh_process_state(process_id, &process).await
+         };
+         let (process_id, exit_code, event_call_id) = match status {
+             ProcessStatus::Alive {
+@@ -1018,12 +1550,16 @@ impl UnifiedExecProcessManager {
+             wall_time,
+             raw_output: collected,
+             truncation_policy: request.truncation_policy,
+-            max_output_tokens: request.max_output_tokens,
++            max_output_tokens: terminal_wait_max_output_tokens(
++                terminal_wait_rule.as_deref(),
++                request.max_output_tokens,
++            ),
+             process_id,
+             exit_code,
+             original_token_count: Some(original_token_count),
+             output_omitted_bytes,
+             hook_command: Some(hook_command),
++            terminal_wait: None,
+         };
+ 
+         let should_emit_interaction = !request.input.is_empty() || response.process_id.is_some();
+@@ -1046,11 +1582,45 @@ impl UnifiedExecProcessManager {
+         Ok(response)
+     }
+ 
+-    async fn refresh_process_state(&self, process_id: i32) -> ProcessStatus {
++    fn write_stdin_deadline(
++        &self,
++        start: Instant,
++        request_yield_time_ms: u64,
++        input_is_empty: bool,
++        rule: Option<&TerminalWaitCommandRule>,
++    ) -> Instant {
++        if !input_is_empty {
++            return default_write_stdin_deadline(
++                start,
++                request_yield_time_ms,
++                /*input_is_empty*/ false,
++                self.max_write_stdin_yield_time_ms,
++            );
++        }
++
++        match rule {
++            Some(rule) => terminal_wait_deadline(start, rule.poll_interval_ms),
++            None => default_write_stdin_deadline(
++                start,
++                request_yield_time_ms,
++                /*input_is_empty*/ true,
++                self.max_write_stdin_yield_time_ms,
++            ),
++        }
++    }
++
++    async fn refresh_process_state(
++        &self,
++        process_id: i32,
++        expected_process: &Arc<UnifiedExecProcess>,
++    ) -> ProcessStatus {
+         let mut store = self.process_store.lock().await;
+         let Some(entry) = store.processes.get_mut(&process_id) else {
+             return ProcessStatus::Unknown;
+         };
++        if !Arc::ptr_eq(&entry.process, expected_process) {
++            return ProcessStatus::Unknown;
++        }
+ 
+         let exit_code = entry.process.exit_code();
+         let process_id = entry.process_id;
+@@ -1059,6 +1629,7 @@ impl UnifiedExecProcessManager {
+             let Some(entry) = store.remove(process_id) else {
+                 return ProcessStatus::Unknown;
+             };
++            self.release_terminal_wait_for_entry(&entry);
+             ProcessStatus::Exited {
+                 exit_code,
+                 entry: Box::new(entry),
+@@ -1103,6 +1674,7 @@ impl UnifiedExecProcessManager {
+             hook_command: entry.hook_command.clone(),
+             process_id: entry.process_id,
+             tty: entry.tty,
++            terminal_wait_rule: entry.terminal_wait_rule.clone(),
+         })
+     }
+ 
+@@ -1120,12 +1692,14 @@ impl UnifiedExecProcessManager {
+         started_at: Instant,
+         process_id: i32,
+         tty: bool,
++        terminal_wait_rule: Option<Arc<TerminalWaitCommandRule>>,
++        terminal_wait_generation: Option<u64>,
+         network_approval: Option<DeferredNetworkApproval>,
+         network_denial_monitor: Option<tokio::task::JoinHandle<()>>,
+         metrics_sidecar: Option<PluginMetricsSidecar>,
+         transcript: Arc<tokio::sync::Mutex<HeadTailBuffer>>,
+         initial_exec_command_active: Arc<AtomicBool>,
+-    ) {
++    ) -> Option<ProcessEntry> {
+         let plugin_metrics_sidecar =
+             metrics_sidecar.map(|sidecar| Arc::new(std::sync::Mutex::new(Some(sidecar))));
+         let entry = ProcessEntry {
+@@ -1139,6 +1713,8 @@ impl UnifiedExecProcessManager {
+             tty,
+             environment_id,
+             permissions,
++            terminal_wait_rule,
++            terminal_wait_generation,
+             network_approval,
+             session: Arc::downgrade(&context.session),
+             last_used: started_at,
+@@ -1149,13 +1725,9 @@ impl UnifiedExecProcessManager {
+             store.processes.insert(process_id, entry);
+             pruned_entry
+         };
+-        // prune_processes_if_needed runs while holding process_store; do async
+-        // network-approval cleanup only after dropping that lock.
+-        if let Some(pruned_entry) = pruned_entry {
+-            unregister_network_approval_for_entry(&pruned_entry).await;
+-            pruned_entry.process.terminate();
+-        }
+ 
++        // The watcher reports process completion but must not release the terminal-wait gate:
++        // a decision remains the implicit control target until its final output is consumed.
+         spawn_exit_watcher(
+             Arc::clone(&process),
+             Arc::clone(&context.session),
+@@ -1170,6 +1742,14 @@ impl UnifiedExecProcessManager {
+             network_denial_monitor,
+             plugin_metrics_sidecar,
+         );
++
++        pruned_entry
++    }
++
++    async fn cleanup_pruned_process(&self, entry: ProcessEntry) {
++        self.release_terminal_wait_for_entry(&entry);
++        unregister_network_approval_for_entry(&entry).await;
++        entry.process.terminate();
+     }
+ 
+     #[allow(clippy::too_many_arguments)]
+@@ -1498,15 +2078,16 @@ impl UnifiedExecProcessManager {
+                 {
+                     break;
+                 }
+-                let remaining = deadline.saturating_duration_since(Instant::now());
++                let now = Instant::now();
++                let remaining = deadline.saturating_duration_since(now);
+                 if remaining == Duration::ZERO {
+                     break;
+                 }
+ 
+                 if exit_signal_received {
+-                    let now = Instant::now();
+-                    let close_wait_deadline = *post_exit_deadline
+-                        .get_or_insert_with(|| now + remaining.min(POST_EXIT_CLOSE_WAIT_CAP));
++                    let post_exit_wait = remaining.min(POST_EXIT_CLOSE_WAIT_CAP);
++                    let close_wait_deadline =
++                        *post_exit_deadline.get_or_insert_with(|| now + post_exit_wait);
+                     let close_wait_remaining = close_wait_deadline.saturating_duration_since(now);
+                     if close_wait_remaining == Duration::ZERO {
+                         break;
+@@ -1658,6 +2239,7 @@ impl UnifiedExecProcessManager {
+     }
+ 
+     pub(crate) async fn terminate_all_processes(&self) {
++        self.terminal_wait_gate.clear();
+         let entries: Vec<ProcessEntry> = {
+             let mut processes = self.process_store.lock().await;
+             let entries: Vec<ProcessEntry> = processes
+@@ -1695,17 +2277,24 @@ impl UnifiedExecProcessManager {
+     }
+ 
+     pub(crate) async fn terminate_process(&self, process_id: i32) -> bool {
+-        let (process, already_exited) = {
++        let (process, already_exited, terminal_wait_generation) = {
+             let store = self.process_store.lock().await;
+             let Some(entry) = store.processes.get(&process_id) else {
+                 return false;
+             };
+-            (Arc::clone(&entry.process), entry.process.has_exited())
++            (
++                Arc::clone(&entry.process),
++                entry.process.has_exited(),
++                entry.terminal_wait_generation,
++            )
+         };
+ 
+         if !already_exited && process.terminate_confirmed().await.is_err() {
+             return false;
+         }
++        if let Some(generation) = terminal_wait_generation {
++            self.terminal_wait_gate.release(process_id, generation);
++        }
+ 
+         let entry = {
+             let mut store = self.process_store.lock().await;
+diff --git a/codex-rs/core/src/unified_exec/process_manager_tests.rs b/codex-rs/core/src/unified_exec/process_manager_tests.rs
+index 523e7eb513921c29b8cc617325ad380f1325e35b..c8edc6c1c83915573941fc474924165c050794dd 100644
+--- a/codex-rs/core/src/unified_exec/process_manager_tests.rs
++++ b/codex-rs/core/src/unified_exec/process_manager_tests.rs
+@@ -1,7 +1,12 @@
+ use super::*;
++use crate::unified_exec::TerminalWaitPhase;
+ use crate::unified_exec::clamp_yield_time;
++use codex_config::config_toml::ConfigToml;
+ use codex_network_proxy::ManagedNetworkSandboxContext;
++use core_test_support::skip_if_sandbox;
+ use pretty_assertions::assert_eq;
++use std::sync::atomic::AtomicBool;
++use std::sync::atomic::Ordering;
+ use tokio::sync::Notify;
+ use tokio::time::Duration;
+ use tokio::time::Instant;
+@@ -304,6 +309,464 @@ fn initial_exec_yield_time_has_no_platform_floor() {
+     );
+ }
+ 
++fn terminal_wait_manager(toml: &str) -> UnifiedExecProcessManager {
++    let config: ConfigToml = toml::from_str(toml).expect("terminal_wait config should parse");
++    UnifiedExecProcessManager::new_with_terminal_wait(
++        crate::unified_exec::DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS,
++        config.terminal_wait,
++    )
++}
++
++fn terminal_wait_rule(
++    manager: &UnifiedExecProcessManager,
++    command: &str,
++    cwd: &str,
++    tty: bool,
++) -> Arc<TerminalWaitCommandRule> {
++    manager
++        .terminal_wait_rules
++        .matching_rule(command, cwd, tty)
++        .expect("rule should match")
++}
++
++fn wait_duration_ms(start: Instant, deadline: Instant) -> u64 {
++    deadline.duration_since(start).as_millis() as u64
++}
++
++#[test]
++fn terminal_wait_deadlines_fail_closed_on_clock_overflow() {
++    let start = Instant::now();
++    assert_eq!(checked_deadline(start, Duration::MAX), start);
++}
++
++#[test]
++fn terminal_wait_rules_match_first_enabled_command_and_cwd() {
++    let manager = terminal_wait_manager(
++        r#"
++        [terminal_wait]
++
++        [[terminal_wait.commands]]
++        name = "disabled"
++        pattern = "cargo"
++        enabled = false
++        poll_interval_ms = 999
++        max_output_tokens = 999
++
++        [[terminal_wait.commands]]
++        name = "repo"
++        pattern = "cargo"
++        cwd_pattern = "/repo"
++        poll_interval_ms = 111
++        max_output_tokens = 111
++
++        [[terminal_wait.commands]]
++        name = "fallback"
++        pattern = "cargo"
++        poll_interval_ms = 222
++        max_output_tokens = 222
++        "#,
++    );
++
++    let rule = terminal_wait_rule(&manager, "cargo test", "/repo/project", /*tty*/ false);
++    assert_eq!(rule.poll_interval_ms, 111);
++    assert_eq!(rule.name, "repo");
++    assert_eq!(rule.max_output_tokens, Some(111));
++}
++
++#[test]
++fn terminal_wait_rules_never_match_tty_commands() {
++    let manager = terminal_wait_manager(
++        r#"
++        [terminal_wait]
++
++        [[terminal_wait.commands]]
++        name = "npm"
++        pattern = "npm"
++        poll_interval_ms = 111
++        "#,
++    );
++
++    assert!(
++        manager
++            .terminal_wait_rules
++            .matching_rule("npm run dev", "/repo", /*tty*/ true)
++            .is_none()
++    );
++}
++
++#[test]
++fn terminal_wait_no_match_keeps_default_wait_limits() {
++    let start = Instant::now();
++
++    assert_eq!(
++        wait_duration_ms(start, initial_exec_deadline(start, 1, None)),
++        crate::unified_exec::MIN_YIELD_TIME_MS
++    );
++    assert_eq!(
++        wait_duration_ms(
++            start,
++            default_write_stdin_deadline(
++                start,
++                1,
++                /*input_is_empty*/ true,
++                crate::unified_exec::DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS,
++            )
++        ),
++        crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS
++    );
++    assert_eq!(
++        wait_duration_ms(
++            start,
++            default_write_stdin_deadline(
++                start,
++                120_000,
++                /*input_is_empty*/ false,
++                crate::unified_exec::DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS,
++            )
++        ),
++        crate::unified_exec::MAX_YIELD_TIME_MS
++    );
++}
++
++#[test]
++fn terminal_wait_poll_interval_controls_initial_exec_and_empty_poll() {
++    let manager = terminal_wait_manager(
++        r#"
++        [terminal_wait]
++
++        [[terminal_wait.commands]]
++        name = "cargo"
++        pattern = "cargo"
++        poll_interval_ms = 60000
++        "#,
++    );
++    let rule = terminal_wait_rule(&manager, "cargo test", "/repo", /*tty*/ false);
++    let start = Instant::now();
++
++    assert_eq!(
++        wait_duration_ms(start, initial_exec_deadline(start, 1, Some(&rule))),
++        60_000
++    );
++    assert_eq!(
++        wait_duration_ms(
++            start,
++            manager.write_stdin_deadline(start, 1, /*input_is_empty*/ true, Some(&rule))
++        ),
++        60_000
++    );
++}
++
++#[test]
++fn terminal_wait_nonempty_write_stdin_keeps_default_limit() {
++    let manager = terminal_wait_manager(
++        r#"
++        [terminal_wait]
++
++        [[terminal_wait.commands]]
++        name = "cargo"
++        pattern = "cargo"
++        poll_interval_ms = 45000
++        "#,
++    );
++    let rule = terminal_wait_rule(&manager, "cargo test", "/repo", /*tty*/ false);
++    let start = Instant::now();
++
++    assert_eq!(
++        wait_duration_ms(
++            start,
++            manager.write_stdin_deadline(
++                start,
++                120_000,
++                /*input_is_empty*/ false,
++                Some(&rule)
++            )
++        ),
++        crate::unified_exec::MAX_YIELD_TIME_MS
++    );
++}
++
++#[test]
++fn terminal_wait_max_output_tokens_overrides_tool_request() {
++    let manager = terminal_wait_manager(
++        r#"
++        [terminal_wait]
++
++        [[terminal_wait.commands]]
++        name = "cargo"
++        pattern = "cargo"
++        poll_interval_ms = 45000
++        max_output_tokens = 123
++        "#,
++    );
++    let rule = terminal_wait_rule(&manager, "cargo test", "/repo", /*tty*/ false);
++
++    assert_eq!(
++        terminal_wait_max_output_tokens(Some(&rule), Some(456)),
++        Some(123)
++    );
++    assert_eq!(terminal_wait_max_output_tokens(None, Some(456)), Some(456));
++}
++
++#[test]
++fn terminal_wait_interactions_match_write_stdin_event_semantics() {
++    assert_eq!(
++        terminal_wait_interaction_input(TerminalWaitAction::Continue, true),
++        Some("")
++    );
++    assert_eq!(
++        terminal_wait_interaction_input(TerminalWaitAction::Continue, false),
++        None
++    );
++    assert_eq!(
++        terminal_wait_interaction_input(TerminalWaitAction::Interrupt, true),
++        Some(INTERRUPT)
++    );
++    assert_eq!(
++        terminal_wait_interaction_input(TerminalWaitAction::Interrupt, false),
++        Some(INTERRUPT)
++    );
++    assert_eq!(
++        terminal_wait_interaction_input(TerminalWaitAction::Terminate, true),
++        None
++    );
++}
++
++#[tokio::test]
++async fn stale_terminal_start_does_not_release_a_rebound_reservation() {
++    let manager = UnifiedExecProcessManager::default();
++    let first = manager
++        .terminal_wait_gate
++        .reserve(/*process_id*/ 41, /*poll_interval_ms*/ 2_000)
++        .expect("first managed command should reserve the gate");
++    let first_generation = first.generation();
++    manager.terminal_wait_gate.clear();
++    drop(first);
++
++    let rebound = manager
++        .terminal_wait_gate
++        .reserve(/*process_id*/ 41, /*poll_interval_ms*/ 2_000)
++        .expect("rebound managed command should reserve the gate");
++    let rebound_snapshot = manager
++        .terminal_wait_gate
++        .snapshot()
++        .expect("rebound reservation should be active");
++    manager
++        .process_store
++        .lock()
++        .await
++        .reserved_process_ids
++        .insert(41);
++
++    manager
++        .release_process_id_for_start(41, Some(first_generation))
++        .await;
++
++    assert!(
++        manager
++            .process_store
++            .lock()
++            .await
++            .reserved_process_ids
++            .contains(&41)
++    );
++    assert_eq!(
++        manager.terminal_wait_gate.snapshot(),
++        Some(rebound_snapshot)
++    );
++    drop(rebound);
++}
++
++#[cfg(unix)]
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn terminal_wait_actions_consume_a_process_that_exited_after_the_decision()
++-> anyhow::Result<()> {
++    skip_if_sandbox!(Ok(()));
++
++    let manager = terminal_wait_manager(
++        r#"
++        [terminal_wait]
++
++        [[terminal_wait.commands]]
++        name = "sleep"
++        pattern = "^sleep "
++        poll_interval_ms = 20
++        "#,
++    );
++    let (session, turn, rx_event) = crate::session::tests::make_session_and_context_with_rx().await;
++
++    for (action, action_name) in [
++        (TerminalWaitAction::Continue, "continue"),
++        (TerminalWaitAction::Interrupt, "interrupt"),
++        (TerminalWaitAction::Terminate, "terminate"),
++    ] {
++        let call_id = format!("call-terminal-wait-{action_name}");
++        let final_output = format!("FINAL_{action_name}");
++        let hook_command = format!("sleep 0.5; printf {final_output}");
++        let process_id = manager.allocate_process_id().await;
++        let context = UnifiedExecContext::new(
++            Arc::clone(&session),
++            crate::session::step_context::StepContext::for_test(Arc::clone(&turn)),
++            tokio_util::sync::CancellationToken::new(),
++            call_id.clone(),
++        );
++        let first = manager
++            .exec_command(
++                ExecCommandRequest {
++                    command: vec!["sh".to_string(), "-lc".to_string(), hook_command.clone()],
++                    shell_type: crate::shell::ShellType::Sh,
++                    hook_command: hook_command.clone(),
++                    process_id,
++                    yield_time_ms: 1,
++                    max_output_tokens: None,
++                    #[allow(deprecated)]
++                    cwd: turn.cwd.clone().into(),
++                    #[allow(deprecated)]
++                    sandbox_cwd: turn.cwd.clone().into(),
++                    turn_environment: turn
++                        .environments
++                        .primary()
++                        .cloned()
++                        .expect("primary environment"),
++                    shell_mode: codex_tools::UnifiedExecShellMode::Direct,
++                    network: None,
++                    tty: false,
++                    sandbox_permissions: crate::sandboxing::SandboxPermissions::RequireEscalated,
++                    additional_permissions: None,
++                    additional_permissions_preapproved: true,
++                    justification: None,
++                    prefix_rule: None,
++                },
++                &context,
++            )
++            .await?;
++
++        assert_eq!(first.process_id, Some(process_id));
++        assert_eq!(
++            first.terminal_wait.as_ref().map(|wait| wait.state),
++            Some(TerminalWaitToolState::DecisionRequired)
++        );
++        assert_eq!(
++            first
++                .terminal_wait
++                .as_ref()
++                .map(|wait| wait.rule_name.as_str()),
++            Some("sleep")
++        );
++
++        tokio::time::timeout(Duration::from_secs(3), async {
++            loop {
++                let event = rx_event
++                    .recv()
++                    .await
++                    .expect("event channel should stay open");
++                if let codex_protocol::protocol::EventMsg::ItemCompleted(completed) = event.msg
++                    && let codex_protocol::items::TurnItem::CommandExecution(item) = completed.item
++                    && item.id == call_id
++                {
++                    break;
++                }
++            }
++        })
++        .await
++        .expect("natural process exit should emit ItemCompleted");
++
++        assert_eq!(
++            manager
++                .terminal_wait_gate
++                .snapshot()
++                .map(|active| { (active.process_id, active.phase, active.poll_interval_ms,) }),
++            Some((process_id, TerminalWaitPhase::DecisionRequired, 20,)),
++            "natural exit must retain the implicit target until {action_name} consumes it"
++        );
++
++        let truncation_policy = codex_utils_output_truncation::TruncationPolicy::Tokens(10_000);
++        let interaction_event = Some(WriteStdinInteractionEvent {
++            session: &session,
++            turn: &turn,
++        });
++        let completed = if action == TerminalWaitAction::Interrupt {
++            manager
++                .write_stdin(
++                    &context,
++                    WriteStdinRequest {
++                        process_id,
++                        input: INTERRUPT,
++                        yield_time_ms: 1,
++                        max_output_tokens: None,
++                        truncation_policy,
++                        interaction_event,
++                    },
++                )
++                .await?
++        } else {
++            manager
++                .terminal_wait_control(
++                    &context,
++                    TerminalWaitControlRequest {
++                        action,
++                        truncation_policy,
++                        interaction_event,
++                    },
++                )
++                .await?
++        };
++
++        assert_eq!(completed.process_id, None);
++        assert_eq!(completed.exit_code, Some(0));
++        assert_eq!(completed.event_call_id, call_id);
++        assert_eq!(
++            completed.hook_command.as_deref(),
++            Some(hook_command.as_str())
++        );
++        assert_eq!(
++            completed.terminal_wait.as_ref().map(|wait| wait.state),
++            Some(TerminalWaitToolState::Completed)
++        );
++        assert_eq!(
++            completed
++                .terminal_wait
++                .as_ref()
++                .map(|wait| wait.rule_name.as_str()),
++            Some("sleep")
++        );
++        assert_eq!(
++            completed.truncated_output(crate::unified_exec::DEFAULT_MAX_OUTPUT_TOKENS),
++            final_output
++        );
++        if action == TerminalWaitAction::Interrupt {
++            let interaction = tokio::time::timeout(Duration::from_secs(1), async {
++                loop {
++                    let event = rx_event
++                        .recv()
++                        .await
++                        .expect("event channel should stay open");
++                    if let codex_protocol::protocol::EventMsg::TerminalInteraction(interaction) =
++                        event.msg
++                    {
++                        break interaction;
++                    }
++                }
++            })
++            .await
++            .expect("compatibility interrupt should emit TerminalInteraction");
++            assert_eq!(interaction.call_id, call_id);
++            assert_eq!(interaction.process_id, process_id.to_string());
++            assert_eq!(interaction.stdin, INTERRUPT);
++        }
++        assert_eq!(manager.terminal_wait_gate.snapshot(), None);
++        assert!(
++            !manager
++                .process_store
++                .lock()
++                .await
++                .processes
++                .contains_key(&process_id)
++        );
++    }
++
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn output_collection_stays_bounded_across_repeated_drains() {
+     let chunks: [&[u8]; 4] = [b"01234567", b"89ABCDEF", b"ghijklmnopq", b"rs"];
+@@ -609,6 +1072,8 @@ async fn pruning_does_not_evict_live_process_while_exited_process_is_finalizing(
+                     /*additional_permissions*/ None,
+                     /*internal_permissions*/ None,
+                 ),
++                terminal_wait_rule: None,
++                terminal_wait_generation: None,
+                 network_approval: None,
+                 session: std::sync::Weak::new(),
+                 last_used: if is_exited {
