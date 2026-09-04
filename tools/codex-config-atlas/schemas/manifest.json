@@ -180,6 +180,24 @@
       "schemaPath": "rust-v0.151.0/config.schema.json",
       "tag": "rust-v0.151.0",
       "version": "0.151.0"
+    },
+    {
+      "metadataPath": "rust-v0.152.0/metadata.json",
+      "schemaPath": "rust-v0.152.0/config.schema.json",
+      "tag": "rust-v0.152.0",
+      "version": "0.152.0"
+    },
+    {
+      "metadataPath": "rust-v0.153.0/metadata.json",
+      "schemaPath": "rust-v0.153.0/config.schema.json",
+      "tag": "rust-v0.153.0",
+      "version": "0.153.0"
+    },
+    {
+      "metadataPath": "rust-v0.153.2/metadata.json",
+      "schemaPath": "rust-v0.153.2/config.schema.json",
+      "tag": "rust-v0.153.2",
+      "version": "0.153.2"
     }
   ]
 }
