@@ -10,6 +10,8 @@ pub(super) fn event_title(event: &str) -> &str {
         "entered_review_mode" => "Review started",
         "exited_review_mode" => "Review completed",
         "thread_goal_updated" => "Goal updated",
+        "auth_recovery_started" => "Authentication recovery started",
+        "auth_recovery_completed" => "Authentication recovery completed",
         "token_count" => "Token usage",
         "session_configured" => "Session configured",
         "mcp_startup_update" => "MCP startup",
@@ -31,6 +33,7 @@ pub(super) fn is_known_envelope(kind: &str) -> bool {
         kind,
         "session_meta"
             | "turn_context"
+            | "token_usage_record"
             | "world_state"
             | "security_risk_score"
             | "inter_agent_communication"

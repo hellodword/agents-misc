@@ -25,6 +25,12 @@ pub(super) fn normalize_envelope(
             timestamp_micros,
             raw_id,
         )),
+        "token_usage_record" => NormalizeResult::Entry(context_entry(
+            "Token usage record",
+            &envelope.payload,
+            timestamp_micros,
+            raw_id,
+        )),
         "world_state" => NormalizeResult::Entry(context_entry(
             "World state",
             &envelope.payload,

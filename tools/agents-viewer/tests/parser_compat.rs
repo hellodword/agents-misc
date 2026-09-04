@@ -21,6 +21,8 @@ const V148: &[u8] = include_bytes!("fixtures/rollouts/v0_148.jsonl");
 const V149: &[u8] = include_bytes!("fixtures/rollouts/v0_149.jsonl");
 const V150: &[u8] = include_bytes!("fixtures/rollouts/v0_150.jsonl");
 const V151: &[u8] = include_bytes!("fixtures/rollouts/v0_151.jsonl");
+const V152: &[u8] = include_bytes!("fixtures/rollouts/v0_152.jsonl");
+const V153_2: &[u8] = include_bytes!("fixtures/rollouts/v0_153_2.jsonl");
 const PLANS: &[u8] = include_bytes!("fixtures/rollouts/plans.jsonl");
 const PLAN_MODE_FINAL_ANSWER: &[u8] =
     include_bytes!("fixtures/rollouts/plan_mode_final_answer.jsonl");
@@ -649,6 +651,120 @@ fn parses_v151_standalone_function_outputs_and_guardian_review_source() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(!rendered.contains("must-not-render"));
+}
+
+#[test]
+fn parses_v152_harness_limits_thread_ownership_and_auth_recovery() {
+    let parsed = parse(
+        V152,
+        "rollout-2026-08-23T10-00-00-15215215-2152-4152-8152-152152152152.jsonl",
+        1024 * 1024,
+    );
+
+    assert_eq!(
+        parsed.summary.session.cli_version.as_deref(),
+        Some("0.152.0")
+    );
+    assert_eq!(parsed.summary.recognized_record_count, 6);
+    assert!(parsed.diagnostics.is_empty());
+    assert_ne!(parsed.summary.session.completeness, Completeness::Partial);
+
+    let developer = parsed
+        .entries
+        .iter()
+        .find(|entry| {
+            entry.metadata.get("sourceItemId") == Some(&serde_json::json!("developer-152"))
+        })
+        .expect("0.152 developer response item");
+    assert_eq!(developer.metadata["clientAuthored"], true);
+    assert_eq!(developer.metadata["fallbackTokenLimitOverride"], 20_000);
+
+    let settings = parsed
+        .entries
+        .iter()
+        .find(|entry| entry.title == "Thread settings applied")
+        .expect("0.152 thread settings");
+    assert_eq!(
+        settings.metadata["threadId"],
+        "15215215-2152-4152-8152-152152152152"
+    );
+
+    let recovery = parsed
+        .entries
+        .iter()
+        .filter(|entry| entry.title.starts_with("Authentication recovery"))
+        .collect::<Vec<_>>();
+    assert_eq!(recovery.len(), 2);
+    assert!(recovery.iter().all(|entry| entry.kind == EntryKind::Marker
+        && entry.metadata["provider"] == "Synthetic provider"));
+    assert_eq!(recovery[0].primary_text, "Synthetic credentials expired");
+    assert_eq!(recovery[1].primary_text, "Synthetic credentials restored");
+}
+
+#[test]
+fn parses_v153_2_token_usage_root_turn_and_async_questions() {
+    let parsed = parse(
+        V153_2,
+        "rollout-2026-08-24T10-00-00-15321532-1532-4532-8532-153215321532.jsonl",
+        1024 * 1024,
+    );
+
+    assert_eq!(
+        parsed.summary.session.cli_version.as_deref(),
+        Some("0.153.2")
+    );
+    assert_eq!(parsed.summary.recognized_record_count, 6);
+    assert!(parsed.diagnostics.is_empty());
+    assert_ne!(parsed.summary.session.completeness, Completeness::Partial);
+
+    let turn_context = parsed
+        .entries
+        .iter()
+        .find(|entry| entry.title == "Turn context")
+        .expect("0.153 turn context");
+    assert!(turn_context.primary_text.contains("root-turn-1532"));
+    assert!(turn_context.default_collapsed);
+    assert!(!turn_context.searchable);
+
+    let usage = parsed
+        .entries
+        .iter()
+        .find(|entry| entry.title == "Token usage record")
+        .expect("0.153 token usage record");
+    assert_eq!(usage.kind, EntryKind::Context);
+    assert!(usage.primary_text.contains("response-usage-1532"));
+    assert!(usage.primary_text.contains("\"total_tokens\": 21"));
+    assert!(usage.default_collapsed);
+    assert!(!usage.searchable);
+
+    let agent = parsed
+        .entries
+        .iter()
+        .find(|entry| entry.metadata.get("sourceItemId") == Some(&serde_json::json!("agent-1532")))
+        .expect("0.153 asynchronous question message");
+    assert_eq!(agent.metadata["agentMessageDelivery"], "async");
+    assert_eq!(
+        agent.metadata["asyncUserInputQuestions"],
+        serde_json::json!([
+            {"title": "Which synthetic lane?", "options": ["Canary", "Stable"]},
+            {"title": "What synthetic deadline?", "options": null}
+        ])
+    );
+
+    assert!(
+        parsed
+            .entries
+            .iter()
+            .any(|entry| entry.title == "Conversation compacted")
+    );
+    let rendered = parsed
+        .entries
+        .iter()
+        .flat_map(|entry| [&entry.primary_text, &entry.secondary_text])
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!rendered.contains("guardian-history-must-not-render"));
 }
 
 #[test]

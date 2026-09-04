@@ -21,7 +21,7 @@ pub(super) fn normalize_item_completed(
             }
             add_execution_attribution_metadata(entry, item);
             add_tool_capability_metadata(entry, item);
-            add_agent_message_delivery_metadata(entry, item);
+            add_agent_message_metadata(entry, item);
             add_event_timing_metadata(entry, payload);
             if let Some(turn_id) = string_option(payload, "turn_id") {
                 entry

@@ -101,7 +101,7 @@ The compatibility promise is for Codex CLI rollout records. Source metadata prod
 | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
 | `session_meta`                                       | Stable session ID, source, cwd, parent/fork, version, provider, Git, and paginated-history data    |
 | `turn_context`, `world_state`, `security_risk_score` | Collapsed technical context, excluded from default search                                          |
-| `event_msg.item_completed`                           | Codex turn-item families through 0.151, including standalone function output and extension items   |
+| `event_msg.item_completed`                           | Codex turn-item families through 0.153.2, including asynchronous questions and function output     |
 | other known `event_msg` payloads                     | Messages, reasoning, tool lifecycle, plans, settings, and diagnostics                              |
 | known `response_item` payloads                       | Messages, assistant plan blocks, reasoning summaries, inter-agent messages, tools, and attachments |
 | `realtime_item`                                      | Session lifecycle markers plus normalized user/assistant transcript segments                       |
@@ -123,25 +123,29 @@ Codex 0.149 asynchronous agent delivery metadata and compaction checkpoints are 
 
 Codex 0.151 standalone `FunctionCallOutput` records preserve namespace, name, structured output, and source item identity even when no preceding call record exists. `guardian_review` is classified as a first-class session source.
 
+Codex 0.152 response-item fallback token limits and thread-settings owner IDs are retained as normalized metadata. Provider authentication recovery is represented as collapsed lifecycle activity instead of making an otherwise supported rollout partial.
+
+Codex 0.153 token-usage records and root-turn context are retained as collapsed, non-searchable context. Structured asynchronous questions remain attached to their assistant message, while Guardian history inside compaction checkpoints remains available only through the raw record and is never projected into rendered text. Codex 0.153.2 has the same persisted history, protocol, and rollout shapes as 0.153.0 and is the tested compatibility baseline.
+
 Message image and audio attachments are represented only by localized count badges. The transcript does not render attachment URLs, data URIs, ciphertext, or media players; copying a message copies its text only.
 
-Fixtures cover Codex 0.120 and every persisted compatibility boundary from 0.144 through 0.151, including realtime items, asynchronous delivery, standalone function outputs, guardian review, line-level plan extraction and deduplication, malformed input, source classification, parent/fork metadata, incremental indexing, and plan handoff grouping.
+Fixtures cover Codex 0.120 and every persisted compatibility boundary from 0.144 through the 0.153.2 baseline, including realtime items, asynchronous delivery and questions, token-usage records, standalone function outputs, guardian review, line-level plan extraction and deduplication, malformed input, source classification, parent/fork metadata, incremental indexing, and plan handoff grouping.
 
 ## Following upstream Codex
 
-The declared compatibility baseline is OpenAI Codex tag [`rust-v0.151.0`](https://github.com/openai/codex/tree/rust-v0.151.0). The important boundary is the persisted rollout, not the shape of an internal crate API.
+The declared compatibility baseline is OpenAI Codex tag [`rust-v0.153.2`](https://github.com/openai/codex/tree/rust-v0.153.2). The important boundary is the persisted rollout, not the shape of an internal crate API.
 
 Upstream references for the baseline are:
 
-- [`codex-rs/history/src/lib.rs`](https://github.com/openai/codex/blob/rust-v0.151.0/codex-rs/history/src/lib.rs) for rollout envelopes, response-item harness metadata, compaction payloads, and rollout lines;
-- [`codex-rs/protocol/src/protocol.rs`](https://github.com/openai/codex/blob/rust-v0.151.0/codex-rs/protocol/src/protocol.rs) for session metadata, events, realtime items, and inter-agent communication;
-- [`codex-rs/protocol/src/items.rs`](https://github.com/openai/codex/blob/rust-v0.151.0/codex-rs/protocol/src/items.rs) for durable `TurnItem` families;
-- [`codex-rs/protocol/src/models.rs`](https://github.com/openai/codex/blob/rust-v0.151.0/codex-rs/protocol/src/models.rs) for response items, standalone function outputs, and structured attachment content;
-- [`codex-rs/protocol/src/security_risk.rs`](https://github.com/openai/codex/blob/rust-v0.151.0/codex-rs/protocol/src/security_risk.rs) for durable security-risk snapshots;
-- [`codex-rs/utils/stream-parser/src/proposed_plan.rs`](https://github.com/openai/codex/blob/rust-v0.151.0/codex-rs/utils/stream-parser/src/proposed_plan.rs) for line-level plan extraction semantics;
-- [`codex-rs/rollout/src/recorder.rs`](https://github.com/openai/codex/blob/rust-v0.151.0/codex-rs/rollout/src/recorder.rs) for `RolloutRecorder`, ordinals, and resume behavior;
-- [`codex-rs/state/src/runtime.rs`](https://github.com/openai/codex/blob/rust-v0.151.0/codex-rs/state/src/runtime.rs) for the state boundary that the viewer must not open;
-- [`codex-rs/file-watcher/src/lib.rs`](https://github.com/openai/codex/blob/rust-v0.151.0/codex-rs/file-watcher/src/lib.rs) for comparison with the viewer's narrower rollout-root watcher.
+- [`codex-rs/history/src/lib.rs`](https://github.com/openai/codex/blob/rust-v0.153.2/codex-rs/history/src/lib.rs) for rollout envelopes, response-item harness metadata, compaction payloads, and rollout lines;
+- [`codex-rs/protocol/src/protocol.rs`](https://github.com/openai/codex/blob/rust-v0.153.2/codex-rs/protocol/src/protocol.rs) for session metadata, events, token-usage records, realtime items, and inter-agent communication;
+- [`codex-rs/protocol/src/items.rs`](https://github.com/openai/codex/blob/rust-v0.153.2/codex-rs/protocol/src/items.rs) for durable `TurnItem` families and asynchronous question metadata;
+- [`codex-rs/protocol/src/models.rs`](https://github.com/openai/codex/blob/rust-v0.153.2/codex-rs/protocol/src/models.rs) for response items, standalone function outputs, and structured attachment content;
+- [`codex-rs/protocol/src/security_risk.rs`](https://github.com/openai/codex/blob/rust-v0.153.2/codex-rs/protocol/src/security_risk.rs) for durable security-risk snapshots;
+- [`codex-rs/utils/stream-parser/src/proposed_plan.rs`](https://github.com/openai/codex/blob/rust-v0.153.2/codex-rs/utils/stream-parser/src/proposed_plan.rs) for line-level plan extraction semantics;
+- [`codex-rs/rollout/src/recorder.rs`](https://github.com/openai/codex/blob/rust-v0.153.2/codex-rs/rollout/src/recorder.rs) for `RolloutRecorder`, ordinals, and resume behavior;
+- [`codex-rs/state/src/runtime.rs`](https://github.com/openai/codex/blob/rust-v0.153.2/codex-rs/state/src/runtime.rs) for the state boundary that the viewer must not open;
+- [`codex-rs/file-watcher/src/lib.rs`](https://github.com/openai/codex/blob/rust-v0.153.2/codex-rs/file-watcher/src/lib.rs) for comparison with the viewer's narrower rollout-root watcher.
 
 Advancing the baseline is an evidence-driven maintenance task:
 

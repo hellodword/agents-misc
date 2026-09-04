@@ -33,7 +33,7 @@ pub(super) fn normalize_event(
             );
             entries
                 .iter_mut()
-                .for_each(|entry| add_agent_message_delivery_metadata(entry, payload));
+                .for_each(|entry| add_agent_message_metadata(entry, payload));
             NormalizeResult::Entries(entries)
         }
         "agent_reasoning" => NormalizeResult::Entry(reasoning_entry(
@@ -59,6 +59,11 @@ pub(super) fn normalize_event(
                 "eventType".into(),
                 Value::String("thread_settings_applied".into()),
             );
+            if let Some(thread_id) = string_option(payload, "thread_id") {
+                entry
+                    .metadata
+                    .insert("threadId".into(), Value::String(thread_id));
+            }
             NormalizeResult::Entry(entry)
         }
         "plan_update" | "plan_delta" => NormalizeResult::Entry(simple_entry(
@@ -98,6 +103,27 @@ pub(super) fn normalize_event(
             timestamp_micros,
             raw_id,
         )),
+        "auth_recovery_started" | "auth_recovery_completed" => {
+            let mut entry = simple_entry(
+                EntryKind::Marker,
+                event_title(kind),
+                string_field(payload, &["message"]),
+                timestamp_micros,
+                raw_id,
+                EntryOrigin::EventPresentation,
+                false,
+                true,
+            );
+            entry
+                .metadata
+                .insert("eventType".into(), Value::String(kind.into()));
+            if let Some(provider) = string_option(payload, "provider") {
+                entry
+                    .metadata
+                    .insert("provider".into(), Value::String(provider));
+            }
+            NormalizeResult::Entry(entry)
+        }
         event if tool_event_kind(event).is_some() => {
             NormalizeResult::Entry(tool_event_entry(event, payload, timestamp_micros, raw_id))
         }

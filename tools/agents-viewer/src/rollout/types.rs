@@ -8,7 +8,7 @@ use crate::model::{
     SessionParentRelation, SourceKind, ToolKind, ToolStatus,
 };
 
-pub const PARSER_VERSION: u32 = 8;
+pub const PARSER_VERSION: u32 = 9;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RootKind {

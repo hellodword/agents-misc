@@ -189,11 +189,16 @@ pub(super) fn add_tool_capability_metadata(entry: &mut NormalizedEntry, payload:
     }
 }
 
-pub(super) fn add_agent_message_delivery_metadata(entry: &mut NormalizedEntry, payload: &Value) {
+pub(super) fn add_agent_message_metadata(entry: &mut NormalizedEntry, payload: &Value) {
     if let Some(delivery) = payload.get("delivery").filter(|value| !value.is_null()) {
         entry
             .metadata
             .insert("agentMessageDelivery".into(), delivery.clone());
+    }
+    if let Some(questions) = payload.get("questions").filter(|value| value.is_array()) {
+        entry
+            .metadata
+            .insert("asyncUserInputQuestions".into(), questions.clone());
     }
 }
 
@@ -313,17 +318,29 @@ pub(super) fn add_response_item_metadata(entry: &mut NormalizedEntry, payload: &
 }
 
 pub(super) fn add_response_item_envelope_metadata(result: &mut NormalizeResult, metadata: &Value) {
-    let Some(client_authored) = metadata
+    let client_authored = metadata
         .get("client_authored")
         .or_else(|| metadata.get("clientAuthored"))
-        .and_then(Value::as_bool)
-    else {
+        .and_then(Value::as_bool);
+    let fallback_token_limit = metadata
+        .get("fallback_token_limit_override")
+        .or_else(|| metadata.get("fallbackTokenLimitOverride"))
+        .and_then(Value::as_u64);
+    if client_authored.is_none() && fallback_token_limit.is_none() {
         return;
-    };
+    }
     let add = |entry: &mut NormalizedEntry| {
-        entry
-            .metadata
-            .insert("clientAuthored".into(), Value::Bool(client_authored));
+        if let Some(client_authored) = client_authored {
+            entry
+                .metadata
+                .insert("clientAuthored".into(), Value::Bool(client_authored));
+        }
+        if let Some(fallback_token_limit) = fallback_token_limit {
+            entry.metadata.insert(
+                "fallbackTokenLimitOverride".into(),
+                Value::from(fallback_token_limit),
+            );
+        }
     };
     match result {
         NormalizeResult::Entry(entry) | NormalizeResult::Unknown(entry, _) => add(entry),
