@@ -144,6 +144,7 @@ let
       pname = "check-codex-maintenance";
 
       nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [
+        pkgs.cacert
         pkgs.gitMinimal
         pkgs.just
         pkgs.protobuf
