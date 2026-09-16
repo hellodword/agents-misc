@@ -202,6 +202,40 @@ pub(super) fn add_agent_message_metadata(entry: &mut NormalizedEntry, payload: &
     }
 }
 
+pub(super) fn add_retained_context_metadata(entry: &mut NormalizedEntry, payload: &Value) {
+    if let Some(kind) = string_option(payload, "type") {
+        entry
+            .metadata
+            .insert("retainedContextType".into(), Value::String(kind));
+    }
+    for (sources, target) in [
+        (["turn_id", "turnId"], "turnId"),
+        (["call_id", "callId"], "callId"),
+    ] {
+        if let Some(value) = sources
+            .iter()
+            .find_map(|source| string_option(payload, source))
+            .filter(|value| !value.is_empty())
+        {
+            entry.metadata.insert(target.into(), Value::String(value));
+        }
+    }
+    if let Some(questions) = payload.get("questions").and_then(Value::as_array) {
+        entry
+            .metadata
+            .insert("retainedQuestionCount".into(), Value::from(questions.len()));
+    }
+    if let Some(order) = payload
+        .get("acceptance_order")
+        .or_else(|| payload.get("acceptanceOrder"))
+        .and_then(Value::as_u64)
+    {
+        entry
+            .metadata
+            .insert("acceptanceOrder".into(), Value::from(order));
+    }
+}
+
 pub(super) fn add_response_item_metadata(entry: &mut NormalizedEntry, payload: &Value) {
     add_tool_capability_metadata(entry, payload);
 
@@ -326,7 +360,30 @@ pub(super) fn add_response_item_envelope_metadata(result: &mut NormalizeResult, 
         .get("fallback_token_limit_override")
         .or_else(|| metadata.get("fallbackTokenLimitOverride"))
         .and_then(Value::as_u64);
-    if client_authored.is_none() && fallback_token_limit.is_none() {
+    let harness_authored_configuration = metadata
+        .get("harness_authored_configuration")
+        .or_else(|| metadata.get("harnessAuthoredConfiguration"))
+        .and_then(Value::as_bool);
+    let compaction_model_hash = metadata
+        .get("compaction_model_hash")
+        .or_else(|| metadata.get("compactionModelHash"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+    let user_input_order = metadata
+        .get("user_input_order")
+        .or_else(|| metadata.get("userInputOrder"))
+        .and_then(Value::as_u64);
+    let inherited_user_message = metadata
+        .get("inherited_user_message")
+        .or_else(|| metadata.get("inheritedUserMessage"))
+        .and_then(Value::as_bool);
+    if client_authored.is_none()
+        && fallback_token_limit.is_none()
+        && harness_authored_configuration.is_none()
+        && compaction_model_hash.is_none()
+        && user_input_order.is_none()
+        && inherited_user_message.is_none()
+    {
         return;
     }
     let add = |entry: &mut NormalizedEntry| {
@@ -339,6 +396,29 @@ pub(super) fn add_response_item_envelope_metadata(result: &mut NormalizeResult, 
             entry.metadata.insert(
                 "fallbackTokenLimitOverride".into(),
                 Value::from(fallback_token_limit),
+            );
+        }
+        if let Some(harness_authored_configuration) = harness_authored_configuration {
+            entry.metadata.insert(
+                "harnessAuthoredConfiguration".into(),
+                Value::Bool(harness_authored_configuration),
+            );
+        }
+        if let Some(compaction_model_hash) = compaction_model_hash {
+            entry.metadata.insert(
+                "compactionModelHash".into(),
+                Value::String(compaction_model_hash.into()),
+            );
+        }
+        if let Some(user_input_order) = user_input_order {
+            entry
+                .metadata
+                .insert("userInputOrder".into(), Value::from(user_input_order));
+        }
+        if let Some(inherited_user_message) = inherited_user_message {
+            entry.metadata.insert(
+                "inheritedUserMessage".into(),
+                Value::Bool(inherited_user_message),
             );
         }
     };

@@ -52,6 +52,7 @@ const ROLLOUTS: &[(&str, &[u8])] = &[
         "v0.153.2",
         include_bytes!("fixtures/rollouts/v0_153_2.jsonl"),
     ),
+    ("v0.154.0", include_bytes!("fixtures/rollouts/v0_154.jsonl")),
 ];
 
 #[test]

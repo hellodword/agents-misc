@@ -41,6 +41,7 @@ pub(super) fn is_known_envelope(kind: &str) -> bool {
             | "event_msg"
             | "response_item"
             | "realtime_item"
+            | "retained_context"
             | "compacted"
     )
 }

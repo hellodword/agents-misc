@@ -84,16 +84,46 @@ pub(super) fn normalize_envelope(
             result
         }
         "realtime_item" => normalize_realtime_item(&envelope.payload, timestamp_micros, raw_id),
-        "compacted" => NormalizeResult::Entry(simple_entry(
-            EntryKind::Marker,
-            "Conversation compacted",
-            String::new(),
-            timestamp_micros,
-            raw_id,
-            EntryOrigin::Derived,
-            false,
-            true,
-        )),
+        "retained_context" => {
+            let mut entry = context_entry(
+                "Retained context",
+                &envelope.payload,
+                timestamp_micros,
+                raw_id,
+            );
+            add_retained_context_metadata(&mut entry, &envelope.payload);
+            NormalizeResult::Entry(entry)
+        }
+        "compacted" => {
+            let marker = simple_entry(
+                EntryKind::Marker,
+                "Conversation compacted",
+                String::new(),
+                timestamp_micros,
+                raw_id,
+                EntryOrigin::Derived,
+                false,
+                true,
+            );
+            let Some(retained) = envelope
+                .payload
+                .get("retained_context")
+                .filter(|value| !value.is_null())
+            else {
+                return NormalizeResult::Entry(marker);
+            };
+            let mut context = context_entry(
+                "Retained context checkpoint",
+                retained,
+                timestamp_micros,
+                raw_id,
+            );
+            context.metadata.insert(
+                "retainedContextSource".into(),
+                Value::String("compaction".into()),
+            );
+            NormalizeResult::Entries(vec![marker, context])
+        }
         _ => NormalizeResult::Unknown(
             simple_entry(
                 EntryKind::Unknown,

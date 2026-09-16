@@ -23,6 +23,7 @@ const V150: &[u8] = include_bytes!("fixtures/rollouts/v0_150.jsonl");
 const V151: &[u8] = include_bytes!("fixtures/rollouts/v0_151.jsonl");
 const V152: &[u8] = include_bytes!("fixtures/rollouts/v0_152.jsonl");
 const V153_2: &[u8] = include_bytes!("fixtures/rollouts/v0_153_2.jsonl");
+const V154: &[u8] = include_bytes!("fixtures/rollouts/v0_154.jsonl");
 const PLANS: &[u8] = include_bytes!("fixtures/rollouts/plans.jsonl");
 const PLAN_MODE_FINAL_ANSWER: &[u8] =
     include_bytes!("fixtures/rollouts/plan_mode_final_answer.jsonl");
@@ -765,6 +766,61 @@ fn parses_v153_2_token_usage_root_turn_and_async_questions() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(!rendered.contains("guardian-history-must-not-render"));
+}
+
+#[test]
+fn parses_v154_configuration_updates_and_retained_context() {
+    let parsed = parse(
+        V154,
+        "rollout-2026-08-25T10-00-00-15415415-4154-4154-8154-154154154154.jsonl",
+        1024 * 1024,
+    );
+
+    assert_eq!(
+        parsed.summary.session.cli_version.as_deref(),
+        Some("0.154.0")
+    );
+    assert_eq!(parsed.summary.recognized_record_count, 6);
+    assert!(parsed.diagnostics.is_empty());
+    assert_ne!(parsed.summary.session.completeness, Completeness::Partial);
+
+    let configuration = parsed
+        .entries
+        .iter()
+        .find(|entry| entry.title == "Configuration update")
+        .expect("0.154 configuration update");
+    assert_eq!(configuration.kind, EntryKind::Context);
+    assert!(configuration.default_collapsed);
+    assert!(!configuration.searchable);
+    assert!(configuration.primary_text.contains("configuration_update"));
+    assert_eq!(
+        configuration.metadata["configurationReasoning"],
+        serde_json::json!({"effort": "high"})
+    );
+    assert_eq!(configuration.metadata["harnessAuthoredConfiguration"], true);
+
+    let user = parsed
+        .entries
+        .iter()
+        .find(|entry| entry.metadata.get("sourceItemId") == Some(&serde_json::json!("user-154")))
+        .expect("0.154 user response item");
+    assert_eq!(user.metadata["compactionModelHash"], "model-hash-154");
+    assert_eq!(user.metadata["userInputOrder"], 7);
+    assert_eq!(user.metadata["inheritedUserMessage"], true);
+
+    let retained = parsed
+        .entries
+        .iter()
+        .find(|entry| entry.title == "Retained context")
+        .expect("0.154 retained context");
+    assert_eq!(retained.kind, EntryKind::Context);
+    assert!(retained.default_collapsed);
+    assert!(!retained.searchable);
+    assert_eq!(retained.metadata["retainedContextType"], "verified_answer");
+    assert_eq!(retained.metadata["turnId"], "turn-154");
+    assert_eq!(retained.metadata["callId"], "ask-154");
+    assert_eq!(retained.metadata["retainedQuestionCount"], 1);
+    assert_eq!(retained.metadata["acceptanceOrder"], 3);
 }
 
 #[test]

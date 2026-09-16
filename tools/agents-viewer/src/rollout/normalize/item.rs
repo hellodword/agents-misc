@@ -466,6 +466,18 @@ pub(super) fn normalize_response_item(
             add_response_item_metadata(&mut entry, payload);
             NormalizeResult::Entry(entry)
         }
+        "configuration_update" => {
+            let mut entry =
+                context_entry("Configuration update", payload, timestamp_micros, raw_id);
+            if let Some(reasoning) = payload.get("reasoning").filter(|value| !value.is_null()) {
+                entry
+                    .metadata
+                    .insert("configurationReasoning".into(), reasoning.clone());
+            }
+            add_source_item_id(&mut entry, payload);
+            add_response_item_metadata(&mut entry, payload);
+            NormalizeResult::Entry(entry)
+        }
         "function_call" | "custom_tool_call" | "tool_search_call" => {
             let name = string_field(payload, &["name", "execution"]);
             let title =
