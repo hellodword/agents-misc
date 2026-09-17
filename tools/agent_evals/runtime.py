@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import stat
@@ -168,6 +169,7 @@ def _render_config(
             "",
             "[skills]",
             f"include_instructions = {str(include_skill_instructions).lower()}",
+            "bundled = { enabled = false }",
         ]
     )
     for path in disabled_skill_paths:
@@ -445,6 +447,107 @@ def _extract_skill_entries(prompt_value: Any) -> list[tuple[str, str, str]]:
     return [tuple(match.groups()) for match in SKILL_ENTRY_PATTERN.finditer(text)]
 
 
+_SKILL_ROOT_LINE_PATTERN = re.compile(
+    r"^\s*-\s+`(?P<alias>[A-Za-z][A-Za-z0-9_-]*)`\s*=\s*"
+    r"`(?P<root>[^`\r\n]+)`\s*$"
+)
+
+
+def _extract_skill_roots(prompt_value: Any) -> dict[str, Path]:
+    """Return the short-path roots advertised by Codex's skill prompt.
+
+    Recent Codex versions deliberately replace absolute skill paths with
+    aliases such as ``r0/foo/SKILL.md``.  The root table is part of the
+    generated prompt, so resolve those aliases from the table instead of
+    interpreting them relative to the evaluator's working directory.
+    """
+
+    lines = _flatten_prompt_text(prompt_value).splitlines()
+    roots: dict[str, Path] = {}
+    in_root_section = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped == "### Skill roots":
+            in_root_section = True
+            continue
+        if not in_root_section:
+            continue
+        if stripped.startswith("### "):
+            break
+        match = _SKILL_ROOT_LINE_PATTERN.match(line)
+        if match is None:
+            # Root entries are contiguous in Codex's prompt.  A blank line
+            # is harmless, while any other content marks the end of the
+            # generated table (and avoids interpreting skill text as roots).
+            if not stripped:
+                continue
+            break
+        raw_root = Path(match.group("root"))
+        if not raw_root.is_absolute():
+            raise EvalRuntimeError(
+                f"Codex skill root is not absolute: {match.group('root')}"
+            )
+        try:
+            root = raw_root.resolve()
+        except OSError as exc:
+            raise EvalRuntimeError(
+                f"cannot resolve Codex skill root: {raw_root}: {exc}"
+            ) from exc
+        alias = match.group("alias")
+        previous = roots.get(alias)
+        if previous is not None and previous != root:
+            raise EvalRuntimeError(
+                f"Codex skill root alias has conflicting paths: {alias}"
+            )
+        roots[alias] = root
+    return roots
+
+
+def _resolve_skill_locator(locator: str, roots: dict[str, Path]) -> Path:
+    """Resolve a Codex skill locator while enforcing alias containment."""
+
+    try:
+        path = Path(locator)
+    except (TypeError, ValueError) as exc:
+        raise EvalRuntimeError(f"invalid Codex skill locator: {locator!r}") from exc
+    if path.is_absolute():
+        try:
+            return path.resolve()
+        except OSError as exc:
+            raise EvalRuntimeError(
+                f"cannot resolve Codex skill locator: {locator}: {exc}"
+            ) from exc
+
+    alias, separator, suffix = locator.partition("/")
+    if separator and alias in roots:
+        if not suffix:
+            raise EvalRuntimeError(
+                f"Codex skill locator has no path after alias: {locator}"
+            )
+        root = roots[alias]
+        try:
+            candidate = (root / suffix).resolve()
+        except OSError as exc:
+            raise EvalRuntimeError(
+                f"cannot resolve Codex skill locator: {locator}: {exc}"
+            ) from exc
+        if not _is_relative_to(candidate, root):
+            raise EvalRuntimeError(
+                f"Codex skill locator escapes its advertised root: {locator}"
+            )
+        return candidate
+
+    # Older Codex releases emit absolute paths.  Preserve the old fallback
+    # for an unmapped relative locator, which is subsequently treated as an
+    # external source by the isolation check.
+    try:
+        return path.resolve()
+    except OSError as exc:
+        raise EvalRuntimeError(
+            f"cannot resolve Codex skill locator: {locator}: {exc}"
+        ) from exc
+
+
 def _flatten_prompt_text(value: Any) -> str:
     parts: list[str] = []
 
@@ -540,11 +643,12 @@ def _prepare_runtime(
             codex_bin, runtime, "source-discovery-probe", timeout
         )
         fixture_skills = (runtime.fixture / ".agents" / "skills").resolve()
+        skill_roots = _extract_skill_roots(preliminary)
         external: set[Path] = set()
         for _name, locator_type, locator in _extract_skill_entries(preliminary):
             if locator_type != "file":
                 continue
-            candidate = Path(locator).resolve()
+            candidate = _resolve_skill_locator(locator, skill_roots)
             if not include_payload or not _is_relative_to(candidate, fixture_skills):
                 external.add(candidate)
         runtime.external_skill_paths = tuple(sorted(external))

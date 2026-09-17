@@ -25,9 +25,11 @@ from .common import (
 from .runtime import (
     _debug_prompt,
     _extract_skill_entries,
+    _extract_skill_roots,
     _flatten_prompt_text,
     _isolated_environment,
     _prepare_runtime,
+    _resolve_skill_locator,
     _run_owned_process,
 )
 from .stages import _item_error_messages, _parse_events, _summarize_event_messages
@@ -60,6 +62,12 @@ def _verify_prompt_sources(
     serialized = _flatten_prompt_text(value)
     entries = _extract_skill_entries(value)
     fixture_skills = (runtime.fixture / ".agents" / "skills").resolve()
+    skill_roots = _extract_skill_roots(value)
+    for alias, root in skill_roots.items():
+        if not _is_relative_to(root, fixture_skills):
+            raise EvalRuntimeError(
+                f"prompt contains an external skill root: {alias}={root}"
+            )
     expected_paths = {
         path.resolve()
         for path in (runtime.fixture / ".agents" / "skills").glob("*/SKILL.md")
@@ -70,7 +78,7 @@ def _verify_prompt_sources(
         if locator_type != "file":
             non_file_entries.append(f"{name}:{locator_type}:{locator}")
             continue
-        candidate = Path(locator).resolve()
+        candidate = _resolve_skill_locator(locator, skill_roots)
         if not _is_relative_to(candidate, fixture_skills):
             raise EvalRuntimeError(
                 f"prompt contains an external skill source: {candidate}"

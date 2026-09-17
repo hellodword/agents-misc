@@ -268,6 +268,7 @@ class AgentEvalsTests(unittest.TestCase):
         self.assertNotIn("must-not-leak", rendered)
         self.assertIn("shell_tool = false", rendered)
         self.assertIn('web_search = "disabled"', rendered)
+        self.assertIn("bundled = { enabled = false }", rendered)
         self.assertIn("exec_permission_approvals = false", rendered)
         rendered_features = tomllib.loads(rendered)["features"]
         for deprecated in (
@@ -281,6 +282,34 @@ class AgentEvalsTests(unittest.TestCase):
             "web_search_request",
         ):
             self.assertNotIn(deprecated, rendered_features)
+
+    def test_skill_aliases_resolve_from_codex_root_table(self) -> None:
+        skills_root = self.root / "fixture/.agents/skills"
+        prompt = [
+            {
+                "text": "\n".join(
+                    [
+                        "### Skill roots",
+                        f"- `r0` = `{skills_root}`",
+                        "### Available skills",
+                        "- example: Synthetic metadata (file: r0/example/SKILL.md)",
+                    ]
+                )
+            }
+        ]
+        roots = runtime._extract_skill_roots(prompt)
+        self.assertEqual({"r0": skills_root.resolve()}, roots)
+        self.assertEqual(
+            (skills_root / "example/SKILL.md").resolve(),
+            runtime._resolve_skill_locator("r0/example/SKILL.md", roots),
+        )
+
+    def test_skill_alias_resolution_rejects_root_traversal(self) -> None:
+        skills_root = (self.root / "fixture/.agents/skills").resolve()
+        with self.assertRaisesRegex(common.EvalRuntimeError, "escapes"):
+            runtime._resolve_skill_locator(
+                "r0/../outside/SKILL.md", {"r0": skills_root}
+            )
 
     def test_explicit_policy_overrides_config(self) -> None:
         config = self.root / "config.toml"
