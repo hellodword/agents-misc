@@ -23,11 +23,7 @@ import {
 } from "@/components/ui/tooltip";
 import { Conversation } from "@/viewer/conversation";
 import { useViewerController } from "@/viewer/controller";
-import {
-  Empty,
-  indexPercent,
-  indexStatusLabel,
-} from "@/viewer/format";
+import { Empty, indexPercent, indexStatusLabel } from "@/viewer/format";
 import { Inspector } from "@/viewer/inspector";
 import {
   INSPECTOR_MAX_WIDTH,

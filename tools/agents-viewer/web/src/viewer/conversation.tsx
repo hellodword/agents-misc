@@ -237,8 +237,7 @@ export function Conversation({
 
   useEffect(() => {
     handledSignal.current = Math.max(signals[sessionId] ?? 0, resyncSequence);
-    handledLiveStateSignal.current =
-      liveStateSignals[sessionId]?.sequence ?? 0;
+    handledLiveStateSignal.current = liveStateSignals[sessionId]?.sequence ?? 0;
   }, [sessionId]);
   const liveStateEvent = liveStateSignals[sessionId];
   const liveStateEventSequence = liveStateEvent?.sequence ?? 0;
@@ -305,8 +304,7 @@ export function Conversation({
     setLiveError("");
     void api
       .liveSync(sessionId, controller.signal, () => {
-        if (liveController.current === controller)
-          setLiveConnection("active");
+        if (liveController.current === controller) setLiveConnection("active");
       })
       .then(() => {
         if (

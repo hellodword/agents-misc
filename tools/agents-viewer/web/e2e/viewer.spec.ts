@@ -358,7 +358,9 @@ test("owns full synchronization only while its conversation route is open", asyn
   try {
     await leasePage.goto(`${baseURL}/sessions/${sessionId}`);
     await expect(
-      leasePage.getByText("Conversation content has not been synchronized yet."),
+      leasePage.getByText(
+        "Conversation content has not been synchronized yet.",
+      ),
     ).toBeVisible();
     await expect.poll(liveState).toBe("inactive");
     await leasePage.getByRole("button", { name: "Start live sync" }).click();

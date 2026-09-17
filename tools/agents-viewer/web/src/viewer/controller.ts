@@ -253,10 +253,7 @@ export function useViewerController() {
             scheduleSessionRefresh();
             return;
           }
-          if (
-            event.type === "liveSyncStateChanged" &&
-            event.data.sessionId
-          ) {
+          if (event.type === "liveSyncStateChanged" && event.data.sessionId) {
             const sequence = ++liveSequence.current;
             setLiveStateSignals((current) => ({
               ...current,

@@ -1531,10 +1531,13 @@ describe("Agents Viewer UI", () => {
         }
         if (url.endsWith("/sessions/s1"))
           return Promise.resolve(
-            new Response(JSON.stringify({ summary: uncached, diagnostics: [] }), {
-              status: 200,
-              headers: { "content-type": "application/json" },
-            }),
+            new Response(
+              JSON.stringify({ summary: uncached, diagnostics: [] }),
+              {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              },
+            ),
           );
         if (url.includes("/sessions/s1/entries"))
           return Promise.resolve(
@@ -1554,7 +1557,9 @@ describe("Agents Viewer UI", () => {
       </MemoryRouter>,
     );
     expect(
-      await screen.findByText("Conversation content has not been synchronized yet."),
+      await screen.findByText(
+        "Conversation content has not been synchronized yet.",
+      ),
     ).toBeInTheDocument();
     expect(screen.getByText("Hello **world**")).toBeInTheDocument();
     expect(

@@ -97,20 +97,20 @@ The viewer reads only:
 
 The compatibility promise is for Codex CLI rollout records. Source metadata produced inside the Codex ecosystem is also classified as interactive CLI, VS Code, `codex exec`, review, subagent, app-server/integration, or unknown so mixed Codex homes remain understandable. This classification is not a compatibility promise for unrelated agent products.
 
-| Persisted concept                                    | Viewer behavior                                                                                    |
-| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `session_meta`                                       | Stable session ID, source, cwd, parent/fork, version, provider, Git, and paginated-history data    |
-| `turn_context`, `world_state`, `security_risk_score` | Collapsed technical context, excluded from default search                                          |
-| `event_msg.item_completed`                           | Codex turn-item families through 0.154.0, including asynchronous questions and function output     |
-| other known `event_msg` payloads                     | Messages, reasoning, tool lifecycle, plans, settings, and diagnostics                              |
+| Persisted concept                                    | Viewer behavior                                                                                                           |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `session_meta`                                       | Stable session ID, source, cwd, parent/fork, version, provider, Git, and paginated-history data                           |
+| `turn_context`, `world_state`, `security_risk_score` | Collapsed technical context, excluded from default search                                                                 |
+| `event_msg.item_completed`                           | Codex turn-item families through 0.154.0, including asynchronous questions and function output                            |
+| other known `event_msg` payloads                     | Messages, reasoning, tool lifecycle, plans, settings, and diagnostics                                                     |
 | known `response_item` payloads                       | Messages, configuration updates, assistant plan blocks, reasoning summaries, inter-agent messages, tools, and attachments |
-| `realtime_item`                                      | Session lifecycle markers plus normalized user/assistant transcript segments                       |
-| inter-agent communication and delivery metadata      | One collapsed technical message with merged delivery metadata                                      |
-| compacted history                                    | Ordered technical/context entry with raw provenance                                                |
-| `retained_context`                                   | Collapsed, non-searchable host-verified context with raw provenance                                |
-| unknown envelope or payload                          | Browsable raw reference plus diagnostic; the session continues                                     |
-| malformed JSON, invalid UTF-8, incomplete tail       | Partial-session diagnostic while stable records remain available                                   |
-| oversized complete record                            | Bounded metadata/raw reference; the content API refuses an oversized read                          |
+| `realtime_item`                                      | Session lifecycle markers plus normalized user/assistant transcript segments                                              |
+| inter-agent communication and delivery metadata      | One collapsed technical message with merged delivery metadata                                                             |
+| compacted history                                    | Ordered technical/context entry with raw provenance                                                                       |
+| `retained_context`                                   | Collapsed, non-searchable host-verified context with raw provenance                                                       |
+| unknown envelope or payload                          | Browsable raw reference plus diagnostic; the session continues                                                            |
+| malformed JSON, invalid UTF-8, incomplete tail       | Partial-session diagnostic while stable records remain available                                                          |
+| oversized complete record                            | Bounded metadata/raw reference; the content API refuses an oversized read                                                 |
 
 For paginated subagent rollouts, records before `subagent_history_start_ordinal` remain available as raw records with the `inherited` status but are not projected into the child's conversation. Ordinal gaps are valid. A non-null `history_base` points at content outside the current rollout, so the viewer marks that session partial instead of pretending the referenced prefix was indexed.
 
