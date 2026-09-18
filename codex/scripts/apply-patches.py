@@ -13,6 +13,8 @@ from common import (
     main_wrapper,
     patch_paths,
     require_git_worktree,
+    validate_binary_patches,
+    validate_patch_directory,
 )
 
 
@@ -27,7 +29,9 @@ def main() -> int:
     ensure_clean(src)
     ensure_real_index_clean(src)
     ensure_pinned_head(src, manifest.upstream)
+    validate_patch_directory(manifest)
     patches = patch_paths(manifest)
+    binary_patches = validate_binary_patches(src, patches)
     apply_patches(src, patches, check_only=args.check)
     json_stdout(
         {
@@ -36,6 +40,7 @@ def main() -> int:
             "mode": "check" if args.check else "apply",
             "worktree": str(src),
             "patches": [patch.name for patch in patches],
+            "binaryPatches": list(binary_patches),
         }
     )
     return 0

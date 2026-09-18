@@ -3,7 +3,6 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
-import os
 import subprocess
 import tempfile
 import textwrap
@@ -21,6 +20,11 @@ from codex.scripts.common import (
     load_manifest,
     patch_paths,
     refresh_patches,
+    run_generation_sequence,
+    terminal_marker_hits,
+    validate_binary_patches,
+    validate_patch_directory,
+    audit_overload_producer_coverage,
 )
 
 
@@ -378,6 +382,81 @@ class PatchWorkflowTests(unittest.TestCase):
         paths, digest = changed_tree_digest(self.manifest.worktree)
         self.assertIn("generated/new-schema.json", paths)
         self.assertNotEqual(before[1], digest)
+
+    def test_stale_patch_file_is_rejected_before_refresh_or_apply(self) -> None:
+        refresh_patches(self.manifest, dry_run=False)
+        stale = self.manifest.patch_dir / "0099-stale.patch"
+        stale.write_text("stale\n")
+        with self.assertRaisesRegex(PatchError, "not listed"):
+            validate_patch_directory(self.manifest)
+        stale.unlink()
+
+    def test_generator_second_run_drift_is_rejected(self) -> None:
+        counter = self.manifest.worktree / "generated" / "counter.txt"
+        drifting = MaintenanceManifest(
+            root=self.manifest.root,
+            upstream=dataclasses.replace(
+                self.manifest.upstream,
+                generate_commands=(
+                    (
+                        "python3",
+                        "-c",
+                        "from pathlib import Path; p=Path('generated/counter.txt'); "
+                        "p.write_text(str(int(p.read_text() or '0') + 1) if p.exists() else '1')",
+                    ),
+                ),
+            ),
+            patches=self.manifest.patches,
+        )
+        with self.assertRaisesRegex(PatchError, "not reproducible"):
+            run_generation_sequence(drifting, self.manifest.worktree, twice=True)
+        self.assertTrue(counter.is_file())
+
+    def test_binary_patch_is_checked_and_applied(self) -> None:
+        refresh_patches(self.manifest, dry_run=False)
+        source = self.base / "binary-source"
+        command(
+            ["git", "clone", "--quiet", "--no-hardlinks", str(self.upstream_repo), str(source)],
+            self.base,
+        )
+        command(["git", "checkout", "--quiet", "--detach", self.revision], source)
+        blob = source / "src" / "fixture.bin"
+        blob.write_bytes(b"after\x00\x00\xff\x10")
+        command(["git", "add", "--", "src/fixture.bin"], source)
+        binary_patch = self.base / "binary.patch"
+        diff = subprocess.run(
+            ["git", "diff", "--cached", "--binary", "HEAD"],
+            cwd=source,
+            check=True,
+            stdout=subprocess.PIPE,
+        )
+        binary_patch.write_bytes(diff.stdout)
+        target = self.base / "binary-target"
+        command(
+            ["git", "clone", "--quiet", "--no-hardlinks", str(source), str(target)],
+            self.base,
+        )
+        command(["git", "checkout", "--quiet", "--detach", self.revision], target)
+        self.assertEqual(validate_binary_patches(target, [binary_patch]), ("binary.patch",))
+
+    def test_terminal_marker_gate_reports_source_hits(self) -> None:
+        source = self.base / "markers"
+        source.mkdir()
+        (source / "example.rs").write_text("let _ = terminal_wait;\n")
+        hits = terminal_marker_hits(source)
+        self.assertEqual(len(hits), 1)
+        self.assertIn("terminal_wait", hits[0])
+
+    def test_overload_producer_coverage_requires_shared_adapter(self) -> None:
+        source = self.base / "producers"
+        source.mkdir()
+        (source / "sampling.rs").write_text("model_request_failure_policy();\n")
+        (source / "compact.rs").write_text("return Err(overloaded);\n")
+        with self.assertRaisesRegex(PatchError, "compact"):
+            audit_overload_producer_coverage(
+                source,
+                producer_files={"sampling": "sampling.rs", "compact": "compact.rs"},
+            )
 
     def test_wrong_tag_revision_is_rejected(self) -> None:
         wrong = MaintenanceManifest(

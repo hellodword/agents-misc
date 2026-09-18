@@ -23,6 +23,21 @@ SERIES_FILE = "series.toml"
 PATCHES_DIR = "patches"
 REVISION_RE = re.compile(r"[0-9a-f]{40}")
 PATCH_FILE_RE = re.compile(r"(?P<number>[0-9]{4})-[a-z0-9]+(?:-[a-z0-9]+)*\.patch")
+TERMINAL_MARKERS = (
+    "terminal_wait",
+    "TerminalWait",
+    "TerminalWaitDecision",
+    "terminal_wait_control",
+    "TerminalWaitToml",
+    "YieldReason",
+)
+DEFAULT_OVERLOAD_PRODUCER_MARKERS = (
+    "responses sampling",
+    "local compact",
+    "remote compact",
+    "guardian",
+    "internal model request",
+)
 UPSTREAM_FIELDS = {
     "url",
     "ref",
@@ -295,6 +310,65 @@ def load_manifest(root: Path = DEFAULT_REPO_ROOT, *, require_patch_files: bool =
     return manifest
 
 
+def validate_patch_directory(
+    manifest: MaintenanceManifest,
+    *,
+    directory: Path | None = None,
+    require_exact: bool = True,
+) -> tuple[Path, ...]:
+    """Validate that the installed patch directory matches the manifest exactly.
+
+    A stale patch is dangerous in a pure-patch workspace: Git may silently apply
+    a file that is not represented by ``series.toml`` when a caller globs the
+    directory.  Keep the check in one helper so Just, refresh, Nix, and tests
+    all enforce the same boundary.
+    """
+
+    patch_dir = (directory or manifest.patch_dir).resolve()
+    expected = tuple(patch.file for patch in manifest.patches)
+    missing = [name for name in expected if not (patch_dir / name).is_file()]
+    if missing:
+        raise PatchError(f"missing patch file(s) in {patch_dir}: {', '.join(missing)}")
+    if require_exact:
+        actual = sorted(path.name for path in patch_dir.glob("*.patch") if path.is_file())
+        stale = sorted(set(actual) - set(expected))
+        if stale:
+            raise PatchError(
+                f"patch directory contains files not listed in {CODEX_DIR}/{SERIES_FILE}: "
+                f"{', '.join(stale)}"
+            )
+    return tuple(patch_dir / name for name in expected)
+
+
+def validate_generated_only_ownership(patch: PatchSpec) -> None:
+    """Require a patch to contain generated ownership and no handwritten paths."""
+
+    if patch.source_files or patch.source_prefixes:
+        raise PatchError(
+            f"generated-only patch {patch.file} declares handwritten ownership: "
+            f"{list(patch.source_files) + list(patch.source_prefixes)}"
+        )
+    if not patch.generated_files and not patch.generated_prefixes:
+        raise PatchError(f"generated-only patch {patch.file} declares no generated ownership")
+
+
+def validate_generated_changes(manifest: MaintenanceManifest, changed: Iterable[str]) -> None:
+    """Validate that paths owned by generated-only patches are generated paths."""
+
+    changed_paths = tuple(changed)
+    for patch in manifest.patches:
+        if patch.generated_files or patch.generated_prefixes:
+            # A patch may intentionally mix source and generated ownership during
+            # a transition.  Only enforce the strict rule when it is source-free.
+            if not patch.source_files and not patch.source_prefixes:
+                validate_generated_only_ownership(patch)
+    for path in changed_paths:
+        owner = manifest.owner_for(path)
+        if not owner.source_files and not owner.source_prefixes:
+            if not (path in owner.generated_files or any(path.startswith(prefix) for prefix in owner.generated_prefixes)):
+                raise PatchError(f"generated-only patch {owner.file} owns non-generated path: {path}")
+
+
 def run(
     args: Sequence[str],
     *,
@@ -544,6 +618,151 @@ def changed_tree_digest(src: Path) -> tuple[tuple[str, ...], str]:
     return paths, _tree_digest(src, paths)
 
 
+def _iter_tree_paths(root: Path) -> Iterator[Path]:
+    """Yield deterministic file and symlink paths while ignoring VCS/build state."""
+
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if ".git" in relative.parts or "target" in relative.parts:
+            continue
+        if path.is_file() or path.is_symlink():
+            yield path
+
+
+def tree_digest(root: Path) -> str:
+    """Hash the complete generated/source tree with stable path and byte order."""
+
+    digest = hashlib.sha256()
+    for path in _iter_tree_paths(root):
+        relative = path.relative_to(root).as_posix()
+        digest.update(relative.encode())
+        digest.update(b"\0")
+        if path.is_symlink():
+            digest.update(b"link\0")
+            digest.update(os.readlink(path).encode())
+        else:
+            digest.update(b"file\0")
+            digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def run_generation_sequence(
+    manifest: MaintenanceManifest,
+    worktree: Path,
+    *,
+    twice: bool = True,
+    fault: FaultHook | None = None,
+) -> tuple[str, str | None]:
+    """Run the declared generators and optionally prove a second run is stable.
+
+    The returned pair is ``(first_digest, second_digest)``.  The digest covers
+    the whole generated checkout (excluding ``.git`` and build targets), which
+    catches both tracked changes and newly-created generated files.
+    """
+
+    fault_hook = fault or (lambda _stage: None)
+    for command in manifest.upstream.generate_commands:
+        fault_hook("generate")
+        run_upstream(manifest, command, cwd=worktree)
+    first = tree_digest(worktree)
+    if not twice:
+        return first, None
+    for command in manifest.upstream.generate_commands:
+        fault_hook("generate")
+        run_upstream(manifest, command, cwd=worktree)
+    second = tree_digest(worktree)
+    if first != second:
+        raise PatchError(
+            "generator sequence is not reproducible: the second run changed the generated tree "
+            f"({first} -> {second})"
+        )
+    return first, second
+
+
+def terminal_marker_hits(
+    root: Path,
+    *,
+    markers: Sequence[str] = TERMINAL_MARKERS,
+    allowlist: Mapping[str, Sequence[str]] | None = None,
+) -> tuple[str, ...]:
+    """Return source marker hits, excluding explicitly allowlisted path fragments."""
+
+    allowed = allowlist or {}
+    hits: list[str] = []
+    for path in _iter_tree_paths(root):
+        relative = path.relative_to(root).as_posix()
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        path_allowlist = tuple(allowed.get(relative, ()))
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            for marker in markers:
+                if marker in line and not any(token in line for token in path_allowlist):
+                    hits.append(f"{relative}:{line_number}:{marker}")
+    return tuple(sorted(set(hits)))
+
+
+def assert_terminal_markers_absent(
+    root: Path,
+    *,
+    markers: Sequence[str] = TERMINAL_MARKERS,
+    allowlist: Mapping[str, Sequence[str]] | None = None,
+) -> None:
+    hits = terminal_marker_hits(root, markers=markers, allowlist=allowlist)
+    if hits:
+        raise PatchError("terminal-only markers remain:\n" + "\n".join(hits))
+
+
+def audit_overload_producer_coverage(
+    root: Path,
+    *,
+    producer_files: Mapping[str, str],
+    adapter_markers: Sequence[str] = ("model_request_failure_policy", "FailurePolicyAdapter"),
+) -> dict[str, Any]:
+    """Audit that every declared live producer references the shared policy adapter."""
+
+    missing: list[str] = []
+    covered: list[str] = []
+    for producer, relative in sorted(producer_files.items()):
+        path = root / relative
+        if not path.is_file():
+            missing.append(f"{producer}: missing {relative}")
+            continue
+        text = path.read_text(errors="replace")
+        if any(marker in text for marker in adapter_markers):
+            covered.append(producer)
+        else:
+            missing.append(f"{producer}: {relative} has no shared overload policy adapter")
+    report = {"covered": tuple(covered), "missing": tuple(missing), "total": len(producer_files)}
+    if missing:
+        raise PatchError("overload producer coverage failed:\n" + "\n".join(missing))
+    return report
+
+
+def patch_contains_binary_data(patch: Path) -> bool:
+    return b"GIT binary patch" in patch.read_bytes()
+
+
+def validate_binary_patches(src: Path, patches: Sequence[Path]) -> tuple[str, ...]:
+    """Check binary-bearing patches in their cumulative series context."""
+
+    binary = tuple(patch for patch in patches if patch_contains_binary_data(patch))
+    if not binary:
+        return ()
+    revision = git_output(src, ["rev-parse", "HEAD"])
+    with tempfile.TemporaryDirectory(prefix="codex-binary-check-") as temporary:
+        clone = Path(temporary) / "src"
+        _clone_base(src, clone, revision)
+        for patch in patches:
+            run(["git", "apply", "--check", "--binary", str(patch)], cwd=clone)
+            run(["git", "apply", "--binary", str(patch)], cwd=clone)
+    return tuple(patch.name for patch in binary)
+
+
 def apply_patches(src: Path, patches: Sequence[Path], *, check_only: bool) -> None:
     if check_only:
         with tempfile.TemporaryDirectory(prefix="codex-apply-check-") as temporary:
@@ -551,8 +770,8 @@ def apply_patches(src: Path, patches: Sequence[Path], *, check_only: bool) -> No
             revision = git_output(src, ["rev-parse", "HEAD"])
             _clone_base(src, clone, revision)
             for patch in patches:
-                run(["git", "apply", "--check", str(patch)], cwd=clone)
-                run(["git", "apply", str(patch)], cwd=clone)
+                run(["git", "apply", "--check", "--binary", str(patch)], cwd=clone)
+                run(["git", "apply", "--binary", str(patch)], cwd=clone)
         return
 
     revision = git_output(src, ["rev-parse", "HEAD"])
@@ -567,8 +786,8 @@ def apply_patches(src: Path, patches: Sequence[Path], *, check_only: bool) -> No
         candidate.rmdir()
         _clone_base(src, candidate, revision)
         for patch in patches:
-            run(["git", "apply", "--check", str(patch)], cwd=candidate)
-            run(["git", "apply", str(patch)], cwd=candidate)
+            run(["git", "apply", "--check", "--binary", str(patch)], cwd=candidate)
+            run(["git", "apply", "--binary", str(patch)], cwd=candidate)
 
         if git_output(src, ["rev-parse", "HEAD"]) != revision:
             raise PatchError("upstream checkout HEAD changed while applying candidate patches")
@@ -603,10 +822,13 @@ def _validate_candidate(
 ) -> None:
     validation = temporary / "validation"
     _clone_base(manifest.worktree, validation, manifest.upstream.revision)
+    validate_patch_directory(manifest, directory=candidate)
     for patch in patch_paths(manifest, directory=candidate):
         fault("apply")
-        run(["git", "apply", "--check", str(patch)], cwd=validation)
-        run(["git", "apply", str(patch)], cwd=validation)
+        run(["git", "apply", "--check", "--binary", str(patch)], cwd=validation)
+        run(["git", "apply", "--binary", str(patch)], cwd=validation)
+    validate_binary_patches(manifest.worktree, patch_paths(manifest, directory=candidate))
+    validate_generated_changes(manifest, changed)
     if _tree_digest(validation, changed) != _tree_digest(expected, changed):
         raise PatchError("candidate patches do not reproduce the generated editing tree")
     fault("validate")
@@ -685,6 +907,8 @@ def refresh_patches(
     fault: FaultHook | None = None,
 ) -> dict[str, Any]:
     src = manifest.worktree
+    if manifest.patch_dir.exists():
+        validate_patch_directory(manifest)
     require_git_worktree(src)
     ensure_pinned_head(src, manifest.upstream)
     ensure_real_index_clean(src)
@@ -716,9 +940,7 @@ def refresh_patches(
         if applied.returncode != 0:
             raise PatchError(f"could not copy editing tree into refresh sandbox: {applied.stderr.strip()}")
 
-        for command in manifest.upstream.generate_commands:
-            fault_hook("generate")
-            run_upstream(manifest, command, cwd=working)
+        run_generation_sequence(manifest, working, twice=True, fault=fault_hook)
         changed = _changed_paths(working)
         if not changed:
             raise PatchError("generation produced no patchable changes")

@@ -16,7 +16,10 @@ from common import (
     patch_paths,
     require_git_worktree,
     run,
+    run_generation_sequence,
     run_upstream,
+    validate_binary_patches,
+    validate_patch_directory,
 )
 
 
@@ -44,11 +47,14 @@ def main() -> int:
             ]
         )
         run(["git", "checkout", "--quiet", "--detach", manifest.upstream.revision], cwd=validation)
+        validate_patch_directory(manifest)
         patches = patch_paths(manifest)
+        binary_patches = validate_binary_patches(validation, patches)
         apply_patches(validation, patches, check_only=False)
         before_generate = changed_tree_digest(validation)
-        for command in manifest.upstream.generate_commands:
-            run_upstream(manifest, command, cwd=validation)
+        first_generation_digest, second_generation_digest = run_generation_sequence(
+            manifest, validation, twice=True
+        )
         after_generate = changed_tree_digest(validation)
         if after_generate != before_generate:
             raise RuntimeError("tracked generated artifacts drift after applying the patch series")
@@ -71,6 +77,9 @@ def main() -> int:
             "revision": manifest.upstream.revision,
             "patches": [patch.file for patch in manifest.patches],
             "generationStable": True,
+            "generationDigest": first_generation_digest,
+            "secondGenerationDigest": second_generation_digest,
+            "binaryPatches": list(binary_patches),
             "regressionCommands": len(manifest.upstream.regression_commands),
             "targetedCommands": len(seen),
         }

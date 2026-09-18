@@ -5,7 +5,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from codex.scripts.common import PatchError, load_manifest
+from codex.scripts.common import PatchError, load_manifest, validate_generated_only_ownership, validate_patch_directory
 
 
 UPSTREAM = """
@@ -111,6 +111,19 @@ class ManifestTests(unittest.TestCase):
                 "0123456789abcdef0123456789abcdef01234567", "0123456789abcdef"
             )
         )
+
+    def test_repository_patch_directory_matches_series(self) -> None:
+        manifest = load_manifest()
+        self.assertEqual(
+            [path.name for path in validate_patch_directory(manifest)],
+            [patch.file for patch in manifest.patches],
+        )
+
+    def test_generated_only_ownership_requires_generated_paths(self) -> None:
+        manifest = load_manifest(self.make_root(), require_patch_files=False)
+        patch = manifest.patches[0]
+        with self.assertRaisesRegex(PatchError, "generated-only"):
+            validate_generated_only_ownership(patch)
 
 
 if __name__ == "__main__":
