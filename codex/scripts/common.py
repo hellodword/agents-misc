@@ -407,6 +407,9 @@ def jobs_limit() -> int:
 def upstream_build_env(manifest: MaintenanceManifest) -> dict[str, str]:
     return {
         "CARGO_TARGET_DIR": str(manifest.worktree.parent / "target"),
+        # Keep lockfile generation reproducible with the pinned Nix Rust toolchain;
+        # Cargo otherwise selects registry releases requiring a newer compiler.
+        "CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS": "fallback",
         # Match the pinned upstream Just test runner. Several deeply nested
         # integration fixtures overflow Rust's smaller default test-thread stack.
         "RUST_MIN_STACK": "8388608",
@@ -472,9 +475,19 @@ def run_upstream(
     command_cwd = cwd
     if args and args[0] == "cargo" and not (cwd / "Cargo.toml").is_file() and (cwd / "codex-rs" / "Cargo.toml").is_file():
         command_cwd = cwd / "codex-rs"
-    if len(args) >= 2 and args[0] == "cargo" and "--jobs" not in args and "-j" not in args:
+    if (
+        len(args) >= 2
+        and args[0] == "cargo"
+        and args[1] not in {"generate-lockfile", "metadata"}
+        and "--jobs" not in args
+        and "-j" not in args
+    ):
         args[2:2] = ["--jobs", str(jobs_limit())]
     environment = upstream_build_env(manifest)
+    if len(args) >= 2 and args[0] == "cargo" and args[1] == "generate-lockfile":
+        # Resolve from the Nix-provided local index/cache so a checked-in lock
+        # is reproducible even when the public registry advances between runs.
+        environment["CARGO_NET_OFFLINE"] = "true"
     environment.update(_codex_v8_env(manifest, command_cwd))
     return run(args, cwd=command_cwd, env=environment)
 
@@ -772,6 +785,7 @@ def apply_patches(src: Path, patches: Sequence[Path], *, check_only: bool) -> No
             for patch in patches:
                 run(["git", "apply", "--check", "--binary", str(patch)], cwd=clone)
                 run(["git", "apply", "--binary", str(patch)], cwd=clone)
+            assert_terminal_markers_absent(clone)
         return
 
     revision = git_output(src, ["rev-parse", "HEAD"])
@@ -788,6 +802,7 @@ def apply_patches(src: Path, patches: Sequence[Path], *, check_only: bool) -> No
         for patch in patches:
             run(["git", "apply", "--check", "--binary", str(patch)], cwd=candidate)
             run(["git", "apply", "--binary", str(patch)], cwd=candidate)
+        assert_terminal_markers_absent(candidate)
 
         if git_output(src, ["rev-parse", "HEAD"]) != revision:
             raise PatchError("upstream checkout HEAD changed while applying candidate patches")
@@ -827,6 +842,7 @@ def _validate_candidate(
         fault("apply")
         run(["git", "apply", "--check", "--binary", str(patch)], cwd=validation)
         run(["git", "apply", "--binary", str(patch)], cwd=validation)
+    assert_terminal_markers_absent(validation)
     validate_binary_patches(manifest.worktree, patch_paths(manifest, directory=candidate))
     validate_generated_changes(manifest, changed)
     if _tree_digest(validation, changed) != _tree_digest(expected, changed):

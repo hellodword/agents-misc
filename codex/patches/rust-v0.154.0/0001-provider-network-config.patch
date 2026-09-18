@@ -10,6 +10,50 @@ index 875306fdb4c8c29b53291b33af1dc0e44043704d..23d7e17d966f33bec0cdc0520eea9c71
              requires_openai_auth: false,
              supports_websockets: true,
              supports_standalone_web_search: false,
+diff --git a/codex-rs/config/scripts/generate-proto.sh b/codex-rs/config/scripts/generate-proto.sh
+index 86af22b8957c5d1bae44eaf8620e18d251db242b..3f16967ac6c90963d871c4974843775f07ddaa52 100755
+--- a/codex-rs/config/scripts/generate-proto.sh
++++ b/codex-rs/config/scripts/generate-proto.sh
+@@ -14,7 +14,7 @@ trap cleanup EXIT
+ 
+ (
+     cd "$repo_root/codex-rs"
+-    CARGO_TARGET_DIR="$tmpdir/target" cargo run \
++    CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$tmpdir/target}" cargo run \
+         -p codex-config \
+         --example generate-proto \
+         -- "$proto_dir"
+diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
+index 7bf981482f6ade394c484c5794f9bbdb42404b9b..93edcee9193924fa891a978da52aebddde16361b 100644
+--- a/codex-rs/config/src/config_toml.rs
++++ b/codex-rs/config/src/config_toml.rs
+@@ -903,10 +903,12 @@ pub fn validate_reserved_model_provider_ids(
+     let mut conflicts = model_providers
+         .keys()
+         .filter(|key| {
+-            !matches!(
+-                key.as_str(),
+-                AMAZON_BEDROCK_PROVIDER_ID | AMAZON_BEDROCK_RUNTIME_PROVIDER_ID
+-            ) && RESERVED_MODEL_PROVIDER_IDS.contains(&key.as_str())
++            key.as_str() != OPENAI_PROVIDER_ID
++                && !matches!(
++                    key.as_str(),
++                    AMAZON_BEDROCK_PROVIDER_ID | AMAZON_BEDROCK_RUNTIME_PROVIDER_ID
++                )
++                && RESERVED_MODEL_PROVIDER_IDS.contains(&key.as_str())
+         })
+         .map(|key| format!("`{key}`"))
+         .collect::<Vec<_>>();
+@@ -927,6 +929,9 @@ pub fn validate_model_providers(
+ ) -> Result<(), String> {
+     validate_reserved_model_provider_ids(model_providers)?;
+     for (key, provider) in model_providers {
++        if key == OPENAI_PROVIDER_ID {
++            continue;
++        }
+         if !matches!(
+             key.as_str(),
+             AMAZON_BEDROCK_PROVIDER_ID | AMAZON_BEDROCK_RUNTIME_PROVIDER_ID
 diff --git a/codex-rs/config/src/thread_config.rs b/codex-rs/config/src/thread_config.rs
 index 76d76fd59f0ecc575d5ad9679d09d0a7b36fba64..9f1e55afba5898cba2adfe4ea7d44f6179f76e3e 100644
 --- a/codex-rs/config/src/thread_config.rs
@@ -22,6 +66,18 @@ index 76d76fd59f0ecc575d5ad9679d09d0a7b36fba64..9f1e55afba5898cba2adfe4ea7d44f61
              requires_openai_auth: false,
              supports_websockets: true,
              supports_standalone_web_search: true,
+diff --git a/codex-rs/config/src/thread_config/proto/codex.thread_config.v1.proto b/codex-rs/config/src/thread_config/proto/codex.thread_config.v1.proto
+index 5bcff769864f6d39d8842568ffe3a01ec08bcd60..3ae0f8276418d5aa0a6510ee3a1b4a176bd0c08d 100644
+--- a/codex-rs/config/src/thread_config/proto/codex.thread_config.v1.proto
++++ b/codex-rs/config/src/thread_config/proto/codex.thread_config.v1.proto
+@@ -49,6 +49,7 @@ message ModelProvider {
+   bool requires_openai_auth = 16;
+   bool supports_websockets = 17;
+   bool supports_standalone_web_search = 18;
++  optional uint64 compact_request_timeout_ms = 19;
+ }
+ 
+ message StringMap {
 diff --git a/codex-rs/config/src/thread_config/remote.rs b/codex-rs/config/src/thread_config/remote.rs
 index 8d5b8febe4fb898f571e80c51c5dbdbbc2fc950e..37da011d0620874311ac7bad9a31260c9aa68ed3 100644
 --- a/codex-rs/config/src/thread_config/remote.rs
@@ -680,3 +736,21 @@ index 027850b78809d2f30dd9e9624c37d32dc471875a..56dcc47a5c0567a870375345d0834769
              requires_openai_auth: false,
              supports_websockets: false,
              supports_standalone_web_search: false,
+diff --git a/justfile b/justfile
+index f85f1c0338b7df5c7f87e8bbbc09e3047a634876..7aeb1f93fcc413fd7dbe718ac23e7593c3169e54 100644
+--- a/justfile
++++ b/justfile
+@@ -173,9 +173,10 @@ build-for-release:
+ write-config-schema:
+     cargo run -p codex-config-schema --bin codex-write-config-schema
+ 
+-# Regenerate vendored app-server protocol schema artifacts.
+-write-app-server-schema *args:
+-    cargo run -p codex-app-server-protocol --bin write_schema_fixtures -- {args}
++# Regenerate vendored stable and experimental app-server protocol schema artifacts.
++write-app-server-schema:
++    python3 app-server-protocol/scripts/write_schema_fixtures.py
++    python3 app-server-protocol/scripts/write_schema_fixtures.py --experimental
+ 
+ [no-cd]
+ write-hooks-schema:
