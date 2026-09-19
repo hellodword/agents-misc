@@ -39,12 +39,12 @@ generators. Do not run repository maintenance with host Python or Cargo.
 The following order mirrors `series.toml`. The manifest remains authoritative
 for exact file ownership and commands.
 
-| Order | Patch                                 | Intent and affected behavior                                                                                                                                        | Focused validation                                      |
-| ----- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
-| 1     | `0001-provider-network-config.patch`  | Make the OpenAI sampling/compact endpoint and compact timeout explicit, validated, and precedence-aware.                                                            | Provider config plus compact timeout behavior.          |
+| Order | Patch                                 | Intent and affected behavior                                                                                                                                                                       | Focused validation                                       |
+| ----- | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| 1     | `0001-provider-network-config.patch`  | Make the OpenAI sampling/compact endpoint and compact timeout explicit, validated, and precedence-aware.                                                                                           | Provider config plus compact timeout behavior.           |
 | 2     | `0002-failure-hook-contract.patch`    | Preserve typed `ServerOverloaded` and define the hook fields `operation`, `category`, `code`, `message`, `retryAfterMs`, `attempt`, `retryBudget`, `nextAction`, `terminal`, and `coalescedCount`. | HTTP, SSE, WebSocket, protocol, and hook contract tests. |
-| 3     | `0003-failure-hook-integration.patch` | Route sampling, local/remote compact, guardian, Luna, and internal requests through one cancellation-aware capped recovery policy and bounded coalescing mailbox.    | Core recovery, queue pressure, cancellation, and UI.    |
-| 4     | `0004-generated-contracts.patch`      | Exclusively own the generated Cargo lock, protobuf binding, config schema, stable/experimental app schemas, TypeScript, and hook schemas.                            | Double generation and schema fixture tests.             |
+| 3     | `0003-failure-hook-integration.patch` | Route sampling, local/remote compact, guardian, Luna, and internal requests through one cancellation-aware capped recovery policy and bounded coalescing mailbox.                                  | Core recovery, queue pressure, cancellation, and UI.     |
+| 4     | `0004-generated-contracts.patch`      | Exclusively own the generated Cargo lock, protobuf binding, config schema, stable/experimental app schemas, TypeScript, and hook schemas.                                                          | Double generation and schema fixture tests.              |
 
 The former terminal-wait and Code Mode wait-control patches are removed from
 the active series. The maintenance gates reject their source markers. This is
