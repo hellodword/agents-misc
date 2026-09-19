@@ -626,10 +626,10 @@ index 3d5ea1baad17c0b3814a59aa19c8b23feae49ed8..04335442d95df76b9c4417c3765ae518
  pub mod pre_tool_use;
 diff --git a/codex-rs/hooks/src/events/model_request.rs b/codex-rs/hooks/src/events/model_request.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..dc1bda5536256815ae512ce40e7abf44655d88e0
+index 0000000000000000000000000000000000000000..88bc486495b4a7381835950c52035f20ca7e896d
 --- /dev/null
 +++ b/codex-rs/hooks/src/events/model_request.rs
-@@ -0,0 +1,867 @@
+@@ -0,0 +1,609 @@
 +use std::path::PathBuf;
 +
 +use codex_protocol::ThreadId;
@@ -658,7 +658,7 @@ index 0000000000000000000000000000000000000000..dc1bda5536256815ae512ce40e7abf44
 +const REQUEST_ERROR_HANDLER_CONCURRENCY: usize = 4;
 +const ABNORMAL_STOP_GROUP_TIMEOUT: Duration = Duration::from_secs(30);
 +
-+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, JsonSchema)]
 +#[serde(rename_all = "camelCase")]
 +pub enum ModelRequestOperation {
 +    Sampling,
@@ -742,16 +742,16 @@ index 0000000000000000000000000000000000000000..dc1bda5536256815ae512ce40e7abf44
 +    pub error: ModelRequestError,
 +}
 +
-+#[derive(Debug, Default)]
++#[derive(Debug, Default, Clone)]
 +pub struct NotificationHookOutcome {
 +    pub hook_events: Vec<HookCompletedEvent>,
-+    pub suppress_turn_error_lifecycle: Option<bool>,
++    /// Number of request-error notifications that could not be dispatched
++    /// immediately. This is observational only and never changes recovery.
++    pub hook_dispatch_deferred: u64,
 +}
 +
 +#[derive(Debug, Default)]
-+struct NotificationHandlerData {
-+    suppress_turn_error_lifecycle: Option<bool>,
-+}
++struct NotificationHandlerData;
 +
 +pub(crate) fn preview_request_error(
 +    handlers: &[ConfiguredHandler],
@@ -785,12 +785,12 @@ index 0000000000000000000000000000000000000000..dc1bda5536256815ae512ce40e7abf44
 +        Err(error) => {
 +            let matched = select(&engine.handlers, HookEventName::RequestError);
 +            return NotificationHookOutcome {
++                hook_dispatch_deferred: 0,
 +                hook_events: common::serialization_failure_hook_events(
 +                    matched,
 +                    Some(request.turn_id),
 +                    format!("failed to serialize request error hook input: {error}"),
 +                ),
-+                suppress_turn_error_lifecycle: None,
 +            };
 +        }
 +    };
@@ -818,8 +818,6 @@ index 0000000000000000000000000000000000000000..dc1bda5536256815ae512ce40e7abf44
 +    engine: &ClaudeHooksEngine,
 +    request: AbnormalStopRequest,
 +) -> NotificationHookOutcome {
-+    let default_suppress_turn_error_lifecycle =
-+        request.goal_mode && request.error.category != ModelRequestErrorCategory::Policy;
 +    let input_json = match serde_json::to_string(&AbnormalStopCommandInput {
 +        session_id: request.session_id.to_string(),
 +        turn_id: request.turn_id.clone(),
@@ -845,16 +843,16 @@ index 0000000000000000000000000000000000000000..dc1bda5536256815ae512ce40e7abf44
 +        Err(error) => {
 +            let matched = select(&engine.handlers, HookEventName::AbnormalStop);
 +            return NotificationHookOutcome {
++                hook_dispatch_deferred: 0,
 +                hook_events: common::serialization_failure_hook_events(
 +                    matched,
 +                    Some(request.turn_id),
 +                    format!("failed to serialize abnormal stop hook input: {error}"),
 +                ),
-+                suppress_turn_error_lifecycle: Some(default_suppress_turn_error_lifecycle),
 +            };
 +        }
 +    };
-+    let mut outcome = run_notification(
++    run_notification(
 +        engine,
 +        HookEventName::AbnormalStop,
 +        input_json,
@@ -864,11 +862,7 @@ index 0000000000000000000000000000000000000000..dc1bda5536256815ae512ce40e7abf44
 +        Some(ABNORMAL_STOP_GROUP_TIMEOUT),
 +        parse_abnormal_stop_completed,
 +    )
-+    .await;
-+    if outcome.suppress_turn_error_lifecycle.is_none() {
-+        outcome.suppress_turn_error_lifecycle = Some(default_suppress_turn_error_lifecycle);
-+    }
-+    outcome
++    .await
 +}
 +
 +fn preview(handlers: &[ConfiguredHandler], event_name: HookEventName) -> Vec<HookRunSummary> {
@@ -919,28 +913,8 @@ index 0000000000000000000000000000000000000000..dc1bda5536256815ae512ce40e7abf44
 +            duration.as_secs_f64()
 +        )
 +    });
-+    let completed = results
-+        .iter()
-+        .filter_map(|result| match result {
-+            dispatcher::BoundedHandlerResult::Completed(completed) => Some(completed),
-+            dispatcher::BoundedHandlerResult::GroupTimedOut(_) => None,
-+        })
-+        .collect::<Vec<_>>();
-+
 +    NotificationHookOutcome {
-+        suppress_turn_error_lifecycle: if completed
-+            .iter()
-+            .any(|result| result.data.suppress_turn_error_lifecycle == Some(true))
-+        {
-+            Some(true)
-+        } else if completed
-+            .iter()
-+            .any(|result| result.data.suppress_turn_error_lifecycle == Some(false))
-+        {
-+            Some(false)
-+        } else {
-+            None
-+        },
++        hook_dispatch_deferred: 0,
 +        hook_events: results
 +            .into_iter()
 +            .map(|result| match result {
@@ -976,13 +950,13 @@ index 0000000000000000000000000000000000000000..dc1bda5536256815ae512ce40e7abf44
 +) -> NotificationHookOutcome {
 +    let completed_at = chrono::Utc::now().timestamp();
 +    NotificationHookOutcome {
++        hook_dispatch_deferred: 1,
 +        hook_events: handlers
 +            .into_iter()
 +            .map(|handler| {
 +                failed_hook_event_at(handler, turn_id.clone(), message.clone(), completed_at)
 +            })
 +            .collect(),
-+        suppress_turn_error_lifecycle: None,
 +    }
 +}
 +
@@ -1048,7 +1022,7 @@ index 0000000000000000000000000000000000000000..dc1bda5536256815ae512ce40e7abf44
 +) -> dispatcher::ParsedHandler<NotificationHandlerData> {
 +    let mut entries = Vec::new();
 +    let mut status = HookRunStatus::Completed;
-+    let mut data = NotificationHandlerData::default();
++    let data = NotificationHandlerData;
 +
 +    match run_result.error.as_deref() {
 +        Some(error) => {
@@ -1072,7 +1046,6 @@ index 0000000000000000000000000000000000000000..dc1bda5536256815ae512ce40e7abf44
 +                    let _ = parsed.universal.suppress_output;
 +                    let _ = parsed.universal.continue_processing;
 +                    let _ = parsed.universal.stop_reason;
-+                    data.suppress_turn_error_lifecycle = parsed.suppress_turn_error_lifecycle;
 +                    if let Some(invalid_reason) = parsed.invalid_reason {
 +                        status = HookRunStatus::Failed;
 +                        entries.push(HookOutputEntry {
@@ -1119,7 +1092,6 @@ index 0000000000000000000000000000000000000000..dc1bda5536256815ae512ce40e7abf44
 +#[cfg(test)]
 +mod tests {
 +    use std::collections::HashMap;
-+    use std::collections::HashSet;
 +    use std::sync::Arc;
 +    use std::sync::Mutex;
 +    use std::sync::atomic::AtomicUsize;
@@ -1128,23 +1100,17 @@ index 0000000000000000000000000000000000000000..dc1bda5536256815ae512ce40e7abf44
 +
 +    use codex_protocol::ThreadId;
 +    use codex_protocol::protocol::HookEventName;
-+    use codex_protocol::protocol::HookRunStatus;
 +    use codex_protocol::protocol::HookSource;
 +    use codex_utils_absolute_path::AbsolutePathBuf;
 +    use futures::FutureExt;
 +    use futures::future::BoxFuture;
 +    use serde_json::Map;
 +
-+    use super::ABNORMAL_STOP_GROUP_TIMEOUT;
-+    use super::AbnormalStopRequest;
 +    use super::ModelRequestError;
 +    use super::ModelRequestErrorCategory;
 +    use super::ModelRequestNextAction;
 +    use super::ModelRequestOperation;
 +    use super::RequestErrorRequest;
-+    use super::parse_abnormal_stop_completed;
-+    use super::run_abnormal_stop;
-+    use super::run_notification;
 +    use super::run_request_error;
 +    use crate::engine::ClaudeHooksEngine;
 +    use crate::engine::CommandShell;
@@ -1179,30 +1145,6 @@ index 0000000000000000000000000000000000000000..dc1bda5536256815ae512ce40e7abf44
 +        }
 +    }
 +
-+    struct PendingMcpExecutor;
-+
-+    impl HookMcpExecutor for PendingMcpExecutor {
-+        fn execute(&self, _call: HookMcpCall) -> BoxFuture<'_, anyhow::Result<String>> {
-+            std::future::pending().boxed()
-+        }
-+    }
-+
-+    struct MixedMcpExecutor {
-+        outputs: HashMap<String, String>,
-+        pending: HashSet<String>,
-+    }
-+
-+    impl HookMcpExecutor for MixedMcpExecutor {
-+        fn execute(&self, call: HookMcpCall) -> BoxFuture<'_, anyhow::Result<String>> {
-+            async move {
-+                if self.pending.contains(&call.tool) {
-+                    return std::future::pending().await;
-+                }
-+                Ok(self.outputs.get(&call.tool).cloned().unwrap_or_default())
-+            }
-+            .boxed()
-+        }
-+    }
 +
 +    fn cwd() -> AbsolutePathBuf {
 +        AbsolutePathBuf::current_dir().expect("current dir")
@@ -1276,33 +1218,6 @@ index 0000000000000000000000000000000000000000..dc1bda5536256815ae512ce40e7abf44
 +        }
 +    }
 +
-+    fn abnormal_stop(goal_mode: bool, category: ModelRequestErrorCategory) -> AbnormalStopRequest {
-+        AbnormalStopRequest {
-+            session_id: ThreadId::new(),
-+            turn_id: "turn-stop".to_string(),
-+            transcript_path: None,
-+            cwd: cwd(),
-+            model: "gpt-test".to_string(),
-+            provider: "openai".to_string(),
-+            goal_mode,
-+            approval_policy: "never".to_string(),
-+            sandbox_mode: "danger-full-access".to_string(),
-+            operation: ModelRequestOperation::Sampling,
-+            endpoint_path: "/responses".to_string(),
-+            attempt: 2,
-+            retry_budget: Some(2),
-+            next_action: ModelRequestNextAction::Stop,
-+            terminal: true,
-+            coalesced_count: 1,
-+            error: ModelRequestError {
-+                category,
-+                code: None,
-+                message: "stopped".to_string(),
-+                retry_after_ms: None,
-+            },
-+        }
-+    }
-+
 +    #[tokio::test]
 +    async fn request_error_runs_at_most_four_handlers_concurrently() {
 +        let executor = Arc::new(TestMcpExecutor {
@@ -1323,182 +1238,9 @@ index 0000000000000000000000000000000000000000..dc1bda5536256815ae512ce40e7abf44
 +        assert_eq!(executor.maximum.load(Ordering::SeqCst), 4);
 +    }
 +
-+    #[tokio::test]
-+    async fn abnormal_stop_any_true_wins_and_invalid_output_has_no_opinion() {
-+        let executor = Arc::new(TestMcpExecutor {
-+            outputs: HashMap::from([
-+                ("false".to_string(), r#"{"suppress":false}"#.to_string()),
-+                ("invalid".to_string(), r#"{"suppress":"yes"}"#.to_string()),
-+                ("true".to_string(), r#"{"suppress":true}"#.to_string()),
-+            ]),
-+            delay: Duration::ZERO,
-+            current: AtomicUsize::new(0),
-+            maximum: AtomicUsize::new(0),
-+            calls: Mutex::new(Vec::new()),
-+        });
-+        let mut engine = engine_with_executor(executor);
-+        engine.handlers = vec![
-+            handler(HookEventName::AbnormalStop, "false", 0),
-+            handler(HookEventName::AbnormalStop, "invalid", 1),
-+            handler(HookEventName::AbnormalStop, "true", 2),
-+        ];
-+
-+        let outcome = run_abnormal_stop(
-+            &engine,
-+            abnormal_stop(false, ModelRequestErrorCategory::Server),
-+        )
-+        .await;
-+
-+        assert_eq!(outcome.suppress_turn_error_lifecycle, Some(true));
-+        assert_eq!(outcome.hook_events.len(), 3);
-+        assert!(
-+            outcome
-+                .hook_events
-+                .iter()
-+                .any(|event| event.run.status == HookRunStatus::Failed)
-+        );
-+    }
-+
-+    #[tokio::test]
-+    async fn abnormal_stop_uses_goal_and_policy_default_without_opinions() {
-+        let engine = engine_with_executor(Arc::new(TestMcpExecutor {
-+            outputs: HashMap::new(),
-+            delay: Duration::ZERO,
-+            current: AtomicUsize::new(0),
-+            maximum: AtomicUsize::new(0),
-+            calls: Mutex::new(Vec::new()),
-+        }));
-+
-+        assert_eq!(
-+            run_abnormal_stop(
-+                &engine,
-+                abnormal_stop(true, ModelRequestErrorCategory::Transport)
-+            )
-+            .await
-+            .suppress_turn_error_lifecycle,
-+            Some(true)
-+        );
-+        assert_eq!(
-+            run_abnormal_stop(
-+                &engine,
-+                abnormal_stop(true, ModelRequestErrorCategory::Policy)
-+            )
-+            .await
-+            .suppress_turn_error_lifecycle,
-+            Some(false)
-+        );
-+        assert_eq!(
-+            run_abnormal_stop(
-+                &engine,
-+                abnormal_stop(false, ModelRequestErrorCategory::Transport)
-+            )
-+            .await
-+            .suppress_turn_error_lifecycle,
-+            Some(false)
-+        );
-+    }
-+
-+    #[tokio::test]
-+    async fn abnormal_stop_group_timeout_preserves_completed_opinions_in_config_order() {
-+        assert_eq!(ABNORMAL_STOP_GROUP_TIMEOUT, Duration::from_secs(30));
-+        let mut engine = engine_with_executor(Arc::new(MixedMcpExecutor {
-+            outputs: HashMap::from([
-+                ("false".to_string(), r#"{"suppress":false}"#.to_string()),
-+                ("no-opinion".to_string(), String::new()),
-+                ("true".to_string(), r#"{"suppress":true}"#.to_string()),
-+            ]),
-+            pending: HashSet::from(["pending".to_string()]),
-+        }));
-+        engine.handlers = vec![
-+            handler(HookEventName::AbnormalStop, "false", 0),
-+            handler(HookEventName::AbnormalStop, "pending", 1),
-+            handler(HookEventName::AbnormalStop, "no-opinion", 2),
-+            handler(HookEventName::AbnormalStop, "true", 3),
-+        ];
-+
-+        let outcome = run_notification(
-+            &engine,
-+            HookEventName::AbnormalStop,
-+            "{}".to_string(),
-+            cwd(),
-+            Some("turn-timeout".to_string()),
-+            usize::MAX,
-+            Some(Duration::from_millis(10)),
-+            parse_abnormal_stop_completed,
-+        )
-+        .await;
-+
-+        assert_eq!(outcome.suppress_turn_error_lifecycle, Some(true));
-+        assert_eq!(outcome.hook_events.len(), 4);
-+        assert_eq!(
-+            outcome
-+                .hook_events
-+                .iter()
-+                .map(|event| (event.run.display_order, event.run.status))
-+                .collect::<Vec<_>>(),
-+            vec![
-+                (0, HookRunStatus::Completed),
-+                (1, HookRunStatus::Failed),
-+                (2, HookRunStatus::Completed),
-+                (3, HookRunStatus::Completed),
-+            ]
-+        );
-+        assert!(
-+            outcome.hook_events[1].run.entries[0]
-+                .text
-+                .contains("timed out")
-+        );
-+    }
-+
-+    #[tokio::test]
-+    async fn abnormal_stop_group_timeout_keeps_false_over_goal_default() {
-+        let mut engine = engine_with_executor(Arc::new(MixedMcpExecutor {
-+            outputs: HashMap::from([("false".to_string(), r#"{"suppress":false}"#.to_string())]),
-+            pending: HashSet::from(["pending".to_string()]),
-+        }));
-+        engine.handlers = vec![
-+            handler(HookEventName::AbnormalStop, "false", 0),
-+            handler(HookEventName::AbnormalStop, "pending", 1),
-+        ];
-+
-+        let mut outcome = run_notification(
-+            &engine,
-+            HookEventName::AbnormalStop,
-+            "{}".to_string(),
-+            cwd(),
-+            Some("turn-timeout".to_string()),
-+            usize::MAX,
-+            Some(Duration::from_millis(10)),
-+            parse_abnormal_stop_completed,
-+        )
-+        .await;
-+        if outcome.suppress_turn_error_lifecycle.is_none() {
-+            outcome.suppress_turn_error_lifecycle = Some(true);
-+        }
-+
-+        assert_eq!(outcome.suppress_turn_error_lifecycle, Some(false));
-+        assert_eq!(outcome.hook_events[0].run.status, HookRunStatus::Completed);
-+        assert_eq!(outcome.hook_events[1].run.status, HookRunStatus::Failed);
-+    }
-+
-+    #[tokio::test(start_paused = true)]
-+    async fn abnormal_stop_group_timeout_without_opinion_uses_goal_policy_default() {
-+        let mut engine = engine_with_executor(Arc::new(PendingMcpExecutor));
-+        engine.handlers = vec![handler(HookEventName::AbnormalStop, "pending", 0)];
-+
-+        let outcome = run_abnormal_stop(
-+            &engine,
-+            abnormal_stop(true, ModelRequestErrorCategory::Transport),
-+        )
-+        .await;
-+
-+        assert_eq!(outcome.suppress_turn_error_lifecycle, Some(true));
-+        assert_eq!(outcome.hook_events.len(), 1);
-+        assert_eq!(outcome.hook_events[0].run.status, HookRunStatus::Failed);
-+    }
 +}
 diff --git a/codex-rs/hooks/src/schema.rs b/codex-rs/hooks/src/schema.rs
-index 5558b6665bf4a05d622f7d814b984c885e98db74..473d3e87a8f50ce59f4912e69e4441adde5105c9 100644
+index 5558b6665bf4a05d622f7d814b984c885e98db74..ecb57d090f858875bec47a7b13b604f522c4722a 100644
 --- a/codex-rs/hooks/src/schema.rs
 +++ b/codex-rs/hooks/src/schema.rs
 @@ -13,6 +13,9 @@ use std::path::Path;
@@ -1533,7 +1275,7 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..473d3e87a8f50ce59f4912e69e4441ad
      #[serde(rename = "SessionStart")]
      SessionStart,
      #[serde(rename = "UserPromptSubmit")]
-@@ -183,6 +194,25 @@ pub(crate) struct PostCompactCommandOutputWire {
+@@ -183,6 +194,24 @@ pub(crate) struct PostCompactCommandOutputWire {
      pub universal: HookUniversalOutputWire,
  }
  
@@ -1553,13 +1295,12 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..473d3e87a8f50ce59f4912e69e4441ad
 +pub(crate) struct AbnormalStopCommandOutputWire {
 +    #[serde(flatten)]
 +    pub universal: HookUniversalOutputWire,
-+    pub suppress: Option<bool>,
 +}
 +
  #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
  #[serde(rename_all = "camelCase")]
  #[serde(deny_unknown_fields)]
-@@ -381,6 +411,61 @@ pub(crate) struct PostCompactCommandInput {
+@@ -381,6 +410,61 @@ pub(crate) struct PostCompactCommandInput {
      pub trigger: String,
  }
  
@@ -1621,7 +1362,7 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..473d3e87a8f50ce59f4912e69e4441ad
  #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
  #[serde(rename_all = "camelCase")]
  #[serde(deny_unknown_fields)]
-@@ -665,6 +750,22 @@ pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
+@@ -665,6 +749,22 @@ pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
          &generated_dir.join(POST_COMPACT_OUTPUT_FIXTURE),
          schema_json::<PostCompactCommandOutputWire>()?,
      )?;
@@ -1644,7 +1385,7 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..473d3e87a8f50ce59f4912e69e4441ad
      write_schema(
          &generated_dir.join(PRE_COMPACT_INPUT_FIXTURE),
          schema_json::<PreCompactCommandInput>()?,
-@@ -812,6 +913,14 @@ fn post_compact_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+@@ -812,6 +912,14 @@ fn post_compact_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
      string_const_schema("PostCompact")
  }
  
@@ -1659,7 +1400,7 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..473d3e87a8f50ce59f4912e69e4441ad
  fn pre_tool_use_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
      string_const_schema("PreToolUse")
  }
-@@ -858,6 +967,14 @@ fn compaction_trigger_schema(_gen: &mut SchemaGenerator) -> Schema {
+@@ -858,6 +966,14 @@ fn compaction_trigger_schema(_gen: &mut SchemaGenerator) -> Schema {
      string_enum_schema(&["manual", "auto"])
  }
  
@@ -1674,7 +1415,7 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..473d3e87a8f50ce59f4912e69e4441ad
  fn string_const_schema(value: &str) -> Schema {
      let mut schema = SchemaObject {
          instance_type: Some(InstanceType::String.into()),
-@@ -887,6 +1004,9 @@ fn default_continue() -> bool {
+@@ -887,6 +1003,9 @@ fn default_continue() -> bool {
  
  #[cfg(test)]
  mod tests {
@@ -1684,7 +1425,7 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..473d3e87a8f50ce59f4912e69e4441ad
      use super::INTERRUPT_INPUT_FIXTURE;
      use super::INTERRUPT_OUTPUT_FIXTURE;
      use super::InterruptCommandInput;
-@@ -909,6 +1029,9 @@ mod tests {
+@@ -909,6 +1028,9 @@ mod tests {
      use super::PreCompactCommandInput;
      use super::PreToolUseCommandInput;
      use super::PreToolUseCommandOutputWire;
@@ -1694,7 +1435,7 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..473d3e87a8f50ce59f4912e69e4441ad
      use super::SESSION_END_INPUT_FIXTURE;
      use super::SESSION_START_INPUT_FIXTURE;
      use super::SESSION_START_OUTPUT_FIXTURE;
-@@ -931,6 +1054,10 @@ mod tests {
+@@ -931,6 +1053,10 @@ mod tests {
      use super::schema_json;
      use super::write_schema_fixtures;
      use crate::events::common::SubagentHookContext;
@@ -1705,7 +1446,7 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..473d3e87a8f50ce59f4912e69e4441ad
      use pretty_assertions::assert_eq;
      use schemars::JsonSchema;
      use serde_json::Value;
-@@ -957,6 +1084,18 @@ mod tests {
+@@ -957,6 +1083,18 @@ mod tests {
              POST_COMPACT_OUTPUT_FIXTURE => {
                  include_str!("../schema/generated/post-compact.command.output.schema.json")
              }
@@ -1724,7 +1465,7 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..473d3e87a8f50ce59f4912e69e4441ad
              PRE_COMPACT_INPUT_FIXTURE => {
                  include_str!("../schema/generated/pre-compact.command.input.schema.json")
              }
-@@ -1043,6 +1182,10 @@ mod tests {
+@@ -1043,6 +1181,10 @@ mod tests {
              PERMISSION_REQUEST_OUTPUT_FIXTURE,
              POST_COMPACT_INPUT_FIXTURE,
              POST_COMPACT_OUTPUT_FIXTURE,
@@ -1735,7 +1476,7 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..473d3e87a8f50ce59f4912e69e4441ad
              PRE_COMPACT_INPUT_FIXTURE,
              PRE_COMPACT_OUTPUT_FIXTURE,
              PRE_TOOL_USE_INPUT_FIXTURE,
-@@ -1123,6 +1266,16 @@ mod tests {
+@@ -1123,6 +1265,16 @@ mod tests {
                  .expect("serialize permission request input schema"),
          )
          .expect("parse permission request input schema");
@@ -1752,7 +1493,7 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..473d3e87a8f50ce59f4912e69e4441ad
          let user_prompt_submit: Value = serde_json::from_slice(
              &schema_json::<UserPromptSubmitCommandInput>()
                  .expect("serialize user prompt submit input schema"),
-@@ -1167,6 +1320,173 @@ mod tests {
+@@ -1167,6 +1319,173 @@ mod tests {
                      .contains(&Value::String("turn_id".to_string()))
              );
          }

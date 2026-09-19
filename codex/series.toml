@@ -63,13 +63,22 @@ intent = "Emit one bounded hook event for each visible retry, fallback, and stop
 behavior = "Request failures are aggregated, dispatched without blocking model flow, and abnormal stops follow bounded suppression policy."
 source_files = [
   "codex-rs/app-server/src/request_processors/config_processor.rs",
+  "codex-rs/app-server/src/bespoke_event_handling.rs",
   "codex-rs/core/src/compact.rs",
+  "codex-rs/core/src/compact_model_fallback.rs",
   "codex-rs/core/src/compact_remote.rs",
   "codex-rs/core/src/compact_remote_v2.rs",
+  "codex-rs/core/src/compact_remote_v2_attempt.rs",
+  "codex-rs/core/src/compact_token_budget.rs",
+  "codex-rs/core/src/guardian/review.rs",
   "codex-rs/core/src/hook_runtime.rs",
+  "codex-rs/core/src/lib.rs",
+  "codex-rs/core/src/model_request_failure_policy.rs",
   "codex-rs/core/src/responses_retry.rs",
   "codex-rs/core/src/responses_retry_tests.rs",
+  "codex-rs/core/src/session/tests.rs",
   "codex-rs/core/src/session/turn.rs",
+  "codex-rs/core/src/tasks/compact.rs",
   "codex-rs/core/src/tasks/lifecycle.rs",
   "codex-rs/core/tests/suite/compact.rs",
   "codex-rs/ext/extension-api/src/lib.rs",
@@ -79,6 +88,7 @@ source_files = [
   "codex-rs/hooks/src/lib.rs",
   "codex-rs/hooks/src/registry.rs",
   "codex-rs/tui/src/bottom_pane/hooks_browser_view.rs",
+  "codex-rs/tui/src/chatwidget/turn_runtime.rs",
   "codex-rs/tui/src/history_cell/hook_cell.rs",
 ]
 source_prefixes = ["codex-rs/hooks/src/engine/"]

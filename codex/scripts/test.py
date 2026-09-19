@@ -7,6 +7,7 @@ from pathlib import Path
 from common import (
     add_repo_root_argument,
     apply_patches,
+    audit_default_overload_producer_coverage,
     changed_tree_digest,
     ensure_pinned_head,
     ensure_real_index_clean,
@@ -51,6 +52,7 @@ def main() -> int:
         patches = patch_paths(manifest)
         binary_patches = validate_binary_patches(validation, patches)
         apply_patches(validation, patches, check_only=False)
+        producer_coverage = audit_default_overload_producer_coverage(validation)
         before_generate = changed_tree_digest(validation)
         first_generation_digest, second_generation_digest = run_generation_sequence(
             manifest, validation, twice=True
@@ -82,6 +84,7 @@ def main() -> int:
             "binaryPatches": list(binary_patches),
             "regressionCommands": len(manifest.upstream.regression_commands),
             "targetedCommands": len(seen),
+            "overloadProducers": producer_coverage,
         }
     )
     return 0

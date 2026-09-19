@@ -38,6 +38,15 @@ DEFAULT_OVERLOAD_PRODUCER_MARKERS = (
     "guardian",
     "internal model request",
 )
+DEFAULT_OVERLOAD_PRODUCERS = {
+    "responses_sampling": "codex-rs/core/src/session/turn.rs",
+    "local_compact": "codex-rs/core/src/compact.rs",
+    "legacy_remote_compact": "codex-rs/core/src/compact_remote.rs",
+    "remote_compact_v2": "codex-rs/core/src/compact_remote_v2.rs",
+    "guardian_review": "codex-rs/core/src/guardian/review.rs",
+    "luna_guardian_v2": "codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs",
+    "internal_model_request": "codex-rs/core/src/hook_runtime.rs",
+}
 UPSTREAM_FIELDS = {
     "url",
     "ref",
@@ -793,6 +802,16 @@ def audit_overload_producer_coverage(
     return report
 
 
+def audit_default_overload_producer_coverage(root: Path) -> dict[str, Any]:
+    """Audit every live producer declared by the pinned four-patch contract."""
+
+    return audit_overload_producer_coverage(
+        root,
+        producer_files=DEFAULT_OVERLOAD_PRODUCERS,
+        adapter_markers=("model_request_failure_policy", "record_model_request_failure"),
+    )
+
+
 def patch_contains_binary_data(patch: Path) -> bool:
     return b"GIT binary patch" in patch.read_bytes()
 
@@ -823,6 +842,7 @@ def apply_patches(src: Path, patches: Sequence[Path], *, check_only: bool) -> No
                 run(["git", "apply", "--check", "--binary", str(patch)], cwd=clone)
                 run(["git", "apply", "--binary", str(patch)], cwd=clone)
             assert_terminal_markers_absent(clone)
+            audit_default_overload_producer_coverage(clone)
         return
 
     revision = git_output(src, ["rev-parse", "HEAD"])
@@ -840,6 +860,7 @@ def apply_patches(src: Path, patches: Sequence[Path], *, check_only: bool) -> No
             run(["git", "apply", "--check", "--binary", str(patch)], cwd=candidate)
             run(["git", "apply", "--binary", str(patch)], cwd=candidate)
         assert_terminal_markers_absent(candidate)
+        audit_default_overload_producer_coverage(candidate)
 
         if git_output(src, ["rev-parse", "HEAD"]) != revision:
             raise PatchError("upstream checkout HEAD changed while applying candidate patches")
@@ -880,6 +901,7 @@ def _validate_candidate(
         run(["git", "apply", "--check", "--binary", str(patch)], cwd=validation)
         run(["git", "apply", "--binary", str(patch)], cwd=validation)
     assert_terminal_markers_absent(validation)
+    audit_default_overload_producer_coverage(validation)
     validate_binary_patches(manifest.worktree, patch_paths(manifest, directory=candidate))
     validate_generated_changes(manifest, changed)
     if _tree_digest(validation, changed) != _tree_digest(expected, changed):

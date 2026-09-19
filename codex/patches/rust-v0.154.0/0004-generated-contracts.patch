@@ -22628,10 +22628,10 @@ index 0000000000000000000000000000000000000000..15a10fc8d7a3c7573b8f32301341fe5d
 \ No newline at end of file
 diff --git a/codex-rs/hooks/schema/generated/abnormal-stop.command.output.schema.json b/codex-rs/hooks/schema/generated/abnormal-stop.command.output.schema.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..a19249079d67ccfa1fb9737fc1efd82d1fd116bb
+index 0000000000000000000000000000000000000000..471d7a94ca3d694264031f89b1d06b0f33d4558f
 --- /dev/null
 +++ b/codex-rs/hooks/schema/generated/abnormal-stop.command.output.schema.json
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,24 @@
 +{
 +  "$schema": "http://json-schema.org/draft-07/schema#",
 +  "additionalProperties": false,
@@ -22643,9 +22643,6 @@ index 0000000000000000000000000000000000000000..a19249079d67ccfa1fb9737fc1efd82d
 +    "stopReason": {
 +      "default": null,
 +      "type": "string"
-+    },
-+    "suppress": {
-+      "type": "boolean"
 +    },
 +    "suppressOutput": {
 +      "default": false,
