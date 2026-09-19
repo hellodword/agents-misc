@@ -41,6 +41,450 @@ index b2f944e1ae88f0aa63ead7c19a4e765a0b4e6f3d..fbb19bca567ac3e390260cf656c525fd
      }
  );
  
+diff --git a/codex-rs/cli/src/doctor.rs b/codex-rs/cli/src/doctor.rs
+index e42fa9be0171c082ad088475f41fea6e63f5fae0..5c22dabe6c48f059acef49d5c2540ba8e6932abe 100644
+--- a/codex-rs/cli/src/doctor.rs
++++ b/codex-rs/cli/src/doctor.rs
+@@ -2371,7 +2371,7 @@ fn websocket_error_detail(err: &ApiError) -> String {
+         | ApiError::InvalidRequest { .. }
+         | ApiError::CyberPolicy { .. }
+         | ApiError::MisalignmentPolicyViolation { .. }
+-        | ApiError::ServerOverloaded => format!("handshake error: {err}"),
++        | ApiError::ServerOverloaded(_) => format!("handshake error: {err}"),
+     }
+ }
+ 
+diff --git a/codex-rs/codex-api/src/api_bridge.rs b/codex-rs/codex-api/src/api_bridge.rs
+index e8d7c4743c5a9e827f5f020847dbc25da58f64ac..faca830581cd74aec70b5efdd597584b2fc9e3f0 100644
+--- a/codex-rs/codex-api/src/api_bridge.rs
++++ b/codex-rs/codex-api/src/api_bridge.rs
+@@ -1,5 +1,6 @@
+ use crate::TransportError;
+ use crate::error::ApiError;
++use crate::error::parse_server_overload;
+ use crate::rate_limits::parse_promo_message;
+ use crate::rate_limits::parse_rate_limit_for_limit;
+ use crate::rate_limits::parse_rate_limit_reached_type;
+@@ -38,7 +39,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
+             }
+         }
+         ApiError::Stream(msg) => CodexErr::Stream(msg),
+-        ApiError::ServerOverloaded => CodexErr::ServerOverloaded,
++        ApiError::ServerOverloaded(info) => CodexErr::server_overloaded(info),
+         ApiError::Api { status, message } => {
+             let user_message = api_error_user_message(status, &message);
+             CodexErr::UnexpectedStatus(UnexpectedResponseError {
+@@ -72,17 +73,11 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
+             } => {
+                 let body_text = body.unwrap_or_default();
+ 
+-                if status == http::StatusCode::SERVICE_UNAVAILABLE
+-                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&body_text)
+-                    && matches!(
+-                        value
+-                            .get("error")
+-                            .and_then(|error| error.get("code"))
+-                            .and_then(serde_json::Value::as_str),
+-                        Some("server_is_overloaded" | "slow_down")
+-                    )
++                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body_text)
++                    && let Some(info) =
++                        parse_server_overload(Some(status), headers.as_ref(), &value)
+                 {
+-                    return CodexErr::ServerOverloaded;
++                    return CodexErr::server_overloaded(info);
+                 }
+ 
+                 if (status == http::StatusCode::BAD_REQUEST
+diff --git a/codex-rs/codex-api/src/api_bridge_tests.rs b/codex-rs/codex-api/src/api_bridge_tests.rs
+index 666dea886441e12479650e3839ddea7b9c56e1b6..18d00e6ad98f1792d42032fcd9249222b99709d3 100644
+--- a/codex-rs/codex-api/src/api_bridge_tests.rs
++++ b/codex-rs/codex-api/src/api_bridge_tests.rs
+@@ -1,12 +1,13 @@
+ use super::*;
+ use base64::Engine;
+ use codex_protocol::protocol::CodexErrorInfo;
++use codex_protocol::error::ServerOverloadInfo;
+ use codex_protocol::protocol::RateLimitReachedType;
+ use pretty_assertions::assert_eq;
+ 
+ #[test]
+ fn map_api_error_maps_server_overloaded() {
+-    let err = map_api_error(ApiError::ServerOverloaded);
++    let err = map_api_error(ApiError::ServerOverloaded(ServerOverloadInfo::default()));
+     assert!(matches!(err.details(), CodexErrorDetails::ServerOverloaded));
+ }
+ 
+@@ -69,6 +70,65 @@ fn map_api_error_maps_server_overloaded_from_503_body() {
+     assert!(matches!(err.details(), CodexErrorDetails::ServerOverloaded));
+ }
+ 
++#[test]
++fn map_api_error_preserves_typed_overload_code_and_retry_after_header() {
++    let mut headers = HeaderMap::new();
++    headers.insert("retry-after", http::HeaderValue::from_static("2.5"));
++    let body = serde_json::json!({
++        "error": {
++            "code": "server_is_overloaded",
++            "message": "capacity is temporarily limited",
++            "retry_after_ms": 99
++        }
++    })
++    .to_string();
++    let err = map_api_error(ApiError::Transport(TransportError::Http {
++        status: http::StatusCode::SERVICE_UNAVAILABLE,
++        url: Some("http://example.com/v1/responses".to_string()),
++        headers: Some(headers),
++        body: Some(body),
++    }));
++
++    let info = err
++        .server_overload_info()
++        .expect("typed overload metadata should be retained");
++    assert_eq!(info.code.as_deref(), Some("server_is_overloaded"));
++    assert_eq!(info.message, "capacity is temporarily limited");
++    assert_eq!(info.retry_after_ms, Some(2_500));
++    assert_eq!(err.retry_delay(), Some(std::time::Duration::from_millis(2_500)));
++    assert!(!err.is_retryable());
++}
++
++#[test]
++fn map_api_error_accepts_slow_down_body_advice_but_not_generic_503_text() {
++    let slow_down = serde_json::json!({
++        "code": "slow_down",
++        "message": "please retry",
++        "retry_after": 3
++    })
++    .to_string();
++    let err = map_api_error(ApiError::Transport(TransportError::Http {
++        status: http::StatusCode::SERVICE_UNAVAILABLE,
++        url: None,
++        headers: None,
++        body: Some(slow_down),
++    }));
++    let info = err
++        .server_overload_info()
++        .expect("slow_down should be a typed overload");
++    assert_eq!(info.code.as_deref(), Some("slow_down"));
++    assert_eq!(info.retry_after_ms, Some(3_000));
++
++    let generic = map_api_error(ApiError::Transport(TransportError::Http {
++        status: http::StatusCode::SERVICE_UNAVAILABLE,
++        url: None,
++        headers: None,
++        body: Some("server overloaded; try again later".to_string()),
++    }));
++    assert!(generic.server_overload_info().is_none());
++    assert!(!matches!(generic.details(), CodexErrorDetails::ServerOverloaded));
++}
++
+ #[test]
+ fn map_api_error_maps_cloudflare_blocked_response_to_user_message() {
+     let mut headers = HeaderMap::new();
+diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+index 95d41e0d9154de47cdbc75f93e8aafa7fcf00966..461adb6a7eba66b93f8f521301a35806917dfa30 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+@@ -6,6 +6,7 @@ use crate::common::SafetyBufferingTreatment;
+ use crate::common::WS_REQUEST_HEADER_TRACEPARENT_CLIENT_METADATA_KEY;
+ use crate::endpoint::responses::ResponsesEndpoint;
+ use crate::error::ApiError;
++use crate::error::parse_server_overload;
+ use crate::provider::Provider;
+ use crate::rate_limits::parse_rate_limit_event;
+ use crate::safety_buffering::treatment_from_headers;
+@@ -650,10 +651,17 @@ fn map_wrapped_websocket_error_event(
+         return None;
+     }
+ 
++    let mapped_headers = headers.as_ref().map(json_headers_to_http_headers);
++    if let Ok(payload) = serde_json::from_str::<Value>(&original_payload)
++        && let Some(info) = parse_server_overload(Some(status), mapped_headers.as_ref(), &payload)
++    {
++        return Some(ApiError::ServerOverloaded(info));
++    }
++
+     Some(ApiError::Transport(TransportError::Http {
+         status,
+         url: None,
+-        headers: headers.as_ref().map(json_headers_to_http_headers),
++        headers: mapped_headers,
+         body: Some(original_payload),
+     }))
+ }
+@@ -1057,6 +1065,33 @@ mod tests {
+         assert!(body.contains("The usage limit has been reached"));
+     }
+ 
++    #[test]
++    fn parse_wrapped_websocket_overload_preserves_code_and_retry_after() {
++        let payload = json!({
++            "type": "error",
++            "status": 503,
++            "error": {
++                "code": "server_is_overloaded",
++                "message": "websocket capacity is temporarily limited"
++            },
++            "headers": {
++                "Retry-After": "1.75"
++            }
++        })
++        .to_string();
++
++        let wrapped_error = parse_wrapped_websocket_error_event(&payload)
++            .expect("expected websocket overload payload to be parsed");
++        let api_error = map_wrapped_websocket_error_event(wrapped_error, payload)
++            .expect("expected websocket overload payload to map");
++        let ApiError::ServerOverloaded(info) = api_error else {
++            panic!("expected typed websocket overload");
++        };
++        assert_eq!(info.code.as_deref(), Some("server_is_overloaded"));
++        assert_eq!(info.message, "websocket capacity is temporarily limited");
++        assert_eq!(info.retry_after_ms, Some(1_750));
++    }
++
+     #[test]
+     fn parse_wrapped_websocket_error_event_ignores_non_error_payloads() {
+         let payload = json!({
+diff --git a/codex-rs/codex-api/src/error.rs b/codex-rs/codex-api/src/error.rs
+index d1d83cf401476593bce9bc918295044019a8b74d..4c9efc121342e6fba80f79b16088e3d41ca90be2 100644
+--- a/codex-rs/codex-api/src/error.rs
++++ b/codex-rs/codex-api/src/error.rs
+@@ -1,7 +1,10 @@
+ use crate::rate_limits::RateLimitError;
+ use codex_client::TransportError;
++use codex_protocol::error::ServerOverloadInfo;
+ use codex_protocol::protocol::MisalignmentErrorDetails;
++use http::HeaderMap;
+ use http::StatusCode;
++use serde_json::Value;
+ use std::time::Duration;
+ use thiserror::Error;
+ 
+@@ -41,7 +44,7 @@ pub enum ApiError {
+         misalignment: Option<MisalignmentErrorDetails>,
+     },
+     #[error("server overloaded")]
+-    ServerOverloaded,
++    ServerOverloaded(ServerOverloadInfo),
+ }
+ 
+ impl From<RateLimitError> for ApiError {
+@@ -49,3 +52,106 @@ impl From<RateLimitError> for ApiError {
+         Self::RateLimit(err.to_string())
+     }
+ }
++
++const SERVER_OVERLOADED_CODE: &str = "server_is_overloaded";
++const SLOW_DOWN_CODE: &str = "slow_down";
++const DEFAULT_OVERLOAD_MESSAGE: &str = "Selected model is at capacity. Please try a different model.";
++
++/// Parse a capacity response using machine-readable fields only.  This is
++/// shared by HTTP, SSE, and WebSocket adapters so a generic 503 never becomes
++/// an overload merely because its English message looks similar.
++pub(crate) fn parse_server_overload(
++    status: Option<StatusCode>,
++    headers: Option<&HeaderMap>,
++    payload: &Value,
++) -> Option<ServerOverloadInfo> {
++    if status.is_some_and(|status| status != StatusCode::SERVICE_UNAVAILABLE) {
++        return None;
++    }
++    let error = payload.get("error").unwrap_or(payload);
++    let code = error.get("code").and_then(Value::as_str)?;
++    if !matches!(code, SERVER_OVERLOADED_CODE | SLOW_DOWN_CODE) {
++        return None;
++    }
++
++    let message = error
++        .get("message")
++        .and_then(Value::as_str)
++        .filter(|message| !message.trim().is_empty())
++        .unwrap_or(DEFAULT_OVERLOAD_MESSAGE)
++        .to_string();
++    let retry_after_ms = headers
++        .and_then(retry_after_header_ms)
++        .or_else(|| retry_after_value_ms(error))
++        .or_else(|| retry_after_value_ms(payload));
++
++    Some(ServerOverloadInfo {
++        code: Some(code.to_string()),
++        message,
++        retry_after_ms,
++    })
++}
++
++fn retry_after_header_ms(headers: &HeaderMap) -> Option<u64> {
++    headers
++        .get("retry-after")
++        .and_then(|value| value.to_str().ok())
++        .and_then(parse_seconds_or_millis)
++}
++
++fn retry_after_value_ms(value: &Value) -> Option<u64> {
++    let headers = value
++        .get("headers")
++        .and_then(Value::as_object)
++        .and_then(|headers| {
++            headers.iter().find_map(|(name, value)| {
++                if !name.eq_ignore_ascii_case("retry-after") {
++                    return None;
++                }
++                value
++                    .as_str()
++                    .map(str::to_string)
++                    .or_else(|| Some(value.to_string()))
++            })
++        });
++    headers
++        .as_deref()
++        .and_then(parse_seconds_or_millis)
++        .or_else(|| {
++            value
++                .get("retry_after_ms")
++                .or_else(|| value.get("retryAfterMs"))
++                .and_then(value_as_millis)
++        })
++        .or_else(|| {
++            value
++                .get("retry_after")
++                .or_else(|| value.get("retryAfter"))
++                .and_then(value_as_seconds)
++        })
++}
++
++fn value_as_millis(value: &Value) -> Option<u64> {
++    value
++        .as_u64()
++        .or_else(|| value.as_str()?.parse::<u64>().ok())
++}
++
++fn value_as_seconds(value: &Value) -> Option<u64> {
++    if let Some(value) = value.as_u64() {
++        return value.checked_mul(1000);
++    }
++    parse_seconds_or_millis(value.as_str()?)
++}
++
++fn parse_seconds_or_millis(value: &str) -> Option<u64> {
++    if let Some(value) = value.strip_suffix("ms") {
++        return value.trim().parse::<u64>().ok();
++    }
++    value
++        .trim()
++        .parse::<f64>()
++        .ok()
++        .filter(|value| value.is_finite() && *value >= 0.0)
++        .map(|value| (value * 1000.0).round() as u64)
++}
+diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
+index e4f5f04d62b3834cef16cf222cb55f288ca50841..1c275957011edb408ec8f1beac3905f7c30ce2a5 100644
+--- a/codex-rs/codex-api/src/sse/responses.rs
++++ b/codex-rs/codex-api/src/sse/responses.rs
+@@ -3,6 +3,7 @@ use crate::common::ResponseStream;
+ use crate::common::SafetyBuffering;
+ use crate::common::SafetyBufferingTreatment;
+ use crate::error::ApiError;
++use crate::error::parse_server_overload;
+ use crate::rate_limits::parse_all_rate_limits;
+ use crate::safety_buffering::treatment_from_headers;
+ use crate::telemetry::SseTelemetry;
+@@ -107,6 +108,12 @@ struct Error {
+     r#type: Option<String>,
+     code: Option<String>,
+     message: Option<String>,
++    #[serde(default)]
++    retry_after_ms: Option<u64>,
++    #[serde(default)]
++    retry_after: Option<Value>,
++    #[serde(default)]
++    headers: Option<Value>,
+     plan_type: Option<String>,
+     resets_at: Option<i64>,
+     #[serde(default)]
+@@ -450,7 +457,20 @@ pub fn process_responses_event(
+                             .unwrap_or_else(|| "Invalid request.".to_string());
+                         response_error = ApiError::InvalidRequest { message };
+                     } else if is_server_overloaded_error(&error) {
+-                        response_error = ApiError::ServerOverloaded;
++                        let mut payload = serde_json::json!({
++                            "error": {
++                                "code": error.code,
++                                "message": error.message,
++                                "retry_after_ms": error.retry_after_ms,
++                                "retry_after": error.retry_after,
++                            }
++                        });
++                        if let Some(headers) = error.headers {
++                            payload["error"]["headers"] = headers;
++                        }
++                        if let Some(info) = parse_server_overload(None, None, &payload) {
++                            response_error = ApiError::ServerOverloaded(info);
++                        }
+                     } else {
+                         let delay = try_parse_retry_after(&error);
+                         let message = error.message.unwrap_or_default();
+@@ -1155,6 +1175,30 @@ mod tests {
+         }
+     }
+ 
++    #[tokio::test]
++    async fn failed_response_server_overload_preserves_typed_advice() {
++        for (code, retry_after_ms) in [("server_is_overloaded", 1_250_u64), ("slow_down", 2_000)] {
++            let event = json!({
++                "type": "response.failed",
++                "response": {
++                    "error": {
++                        "code": code,
++                        "message": "capacity is temporarily limited",
++                        "retry_after_ms": retry_after_ms
++                    }
++                }
++            });
++            let sse = format!("event: response.failed\ndata: {event}\n\n");
++            let events = collect_events(&[sse.as_bytes()]).await;
++            let [Err(ApiError::ServerOverloaded(info))] = events.as_slice() else {
++                panic!("unexpected overload events for {code}: {events:?}");
++            };
++            assert_eq!(info.code.as_deref(), Some(code));
++            assert_eq!(info.message, "capacity is temporarily limited");
++            assert_eq!(info.retry_after_ms, Some(retry_after_ms));
++        }
++    }
++
+     #[tokio::test]
+     async fn context_window_error_is_fatal() {
+         let raw_error = r#"{"type":"response.failed","sequence_number":3,"response":{"id":"resp_5c66275b97b9baef1ed95550adb3b7ec13b17aafd1d2f11b","object":"response","created_at":1759510079,"status":"failed","background":false,"error":{"code":"context_length_exceeded","message":"Your input exceeds the context window of this model. Please adjust your input and try again."},"usage":null,"user":null,"metadata":{}}}"#;
+@@ -2027,6 +2071,9 @@ mod tests {
+             plan_type: None,
+             resets_at: None,
+             misalignment: None,
++            retry_after_ms: None,
++            retry_after: None,
++            headers: None,
+         };
+ 
+         let delay = try_parse_retry_after(&err);
+@@ -2042,6 +2089,9 @@ mod tests {
+             plan_type: None,
+             resets_at: None,
+             misalignment: None,
++            retry_after_ms: None,
++            retry_after: None,
++            headers: None,
+         };
+         let delay = try_parse_retry_after(&err);
+         assert_eq!(delay, Some(Duration::from_secs_f64(1.898)));
+@@ -2056,6 +2106,9 @@ mod tests {
+             plan_type: None,
+             resets_at: None,
+             misalignment: None,
++            retry_after_ms: None,
++            retry_after: None,
++            headers: None,
+         };
+         let delay = try_parse_retry_after(&err);
+         assert_eq!(delay, Some(Duration::from_secs(35)));
 diff --git a/codex-rs/config/src/hook_config.rs b/codex-rs/config/src/hook_config.rs
 index 7575fa5fcb1042cc380812308f62b8378540ad2a..7033d34e89ffe0f179785be47a9355700dff8b64 100644
 --- a/codex-rs/config/src/hook_config.rs
@@ -138,6 +582,19 @@ index 01ed3eab47f0a5d45eeaa9a95d7240efeea633d6..59bb6a368840326a979015fcd003049d
      changed |= append_vec(&mut existing.session_start, session_start);
      changed |= append_vec(&mut existing.session_end, session_end);
      changed |= append_vec(&mut existing.user_prompt_submit, user_prompt_submit);
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs b/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs
+index 9b60a471ebb6b07c1c39c02285163e6412c39cca..57b6bc5872eefec737a6e19aed3589e993f09a00 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs
+@@ -50,7 +50,7 @@ pub(super) fn sampler_failure_reason(error: &LunaSamplerError) -> &'static str {
+             ApiError::CyberPolicy { .. } | ApiError::MisalignmentPolicyViolation { .. } => {
+                 "policy_error"
+             }
+-            ApiError::ServerOverloaded => "server_overloaded",
++            ApiError::ServerOverloaded(_) => "server_overloaded",
+         },
+     }
+ }
 diff --git a/codex-rs/hooks/src/events/common.rs b/codex-rs/hooks/src/events/common.rs
 index 7b4c4dcab31e9e5747594c39ec582fb0c49f4095..48fb7e21bebe60809f0c584a0b57c0c441cd9b6a 100644
 --- a/codex-rs/hooks/src/events/common.rs
@@ -169,10 +626,10 @@ index 3d5ea1baad17c0b3814a59aa19c8b23feae49ed8..04335442d95df76b9c4417c3765ae518
  pub mod pre_tool_use;
 diff --git a/codex-rs/hooks/src/events/model_request.rs b/codex-rs/hooks/src/events/model_request.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..e3b7cf894ce40bf5cd8b6f3312b8d3dd890ad693
+index 0000000000000000000000000000000000000000..dc1bda5536256815ae512ce40e7abf44655d88e0
 --- /dev/null
 +++ b/codex-rs/hooks/src/events/model_request.rs
-@@ -0,0 +1,839 @@
+@@ -0,0 +1,867 @@
 +use std::path::PathBuf;
 +
 +use codex_protocol::ThreadId;
@@ -207,6 +664,8 @@ index 0000000000000000000000000000000000000000..e3b7cf894ce40bf5cd8b6f3312b8d3dd
 +    Sampling,
 +    LocalCompact,
 +    RemoteCompact,
++    GuardianReview,
++    InternalModelRequest,
 +}
 +
 +#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
@@ -214,6 +673,7 @@ index 0000000000000000000000000000000000000000..e3b7cf894ce40bf5cd8b6f3312b8d3dd
 +pub enum ModelRequestNextAction {
 +    Retry,
 +    Fallback,
++    Defer,
 +    Stop,
 +}
 +
@@ -229,6 +689,7 @@ index 0000000000000000000000000000000000000000..e3b7cf894ce40bf5cd8b6f3312b8d3dd
 +    Sandbox,
 +    InvalidRequest,
 +    Server,
++    ServerOverloaded,
 +    Internal,
 +    Other,
 +}
@@ -237,7 +698,9 @@ index 0000000000000000000000000000000000000000..e3b7cf894ce40bf5cd8b6f3312b8d3dd
 +#[serde(rename_all = "camelCase")]
 +pub struct ModelRequestError {
 +    pub category: ModelRequestErrorCategory,
++    pub code: Option<String>,
 +    pub message: String,
++    pub retry_after_ms: Option<u64>,
 +}
 +
 +#[derive(Debug, Clone)]
@@ -251,7 +714,10 @@ index 0000000000000000000000000000000000000000..e3b7cf894ce40bf5cd8b6f3312b8d3dd
 +    pub operation: ModelRequestOperation,
 +    pub endpoint_path: String,
 +    pub attempt: u64,
++    pub retry_budget: Option<u64>,
 +    pub next_action: ModelRequestNextAction,
++    pub terminal: bool,
++    pub coalesced_count: u64,
 +    pub error: ModelRequestError,
 +}
 +
@@ -269,7 +735,10 @@ index 0000000000000000000000000000000000000000..e3b7cf894ce40bf5cd8b6f3312b8d3dd
 +    pub operation: ModelRequestOperation,
 +    pub endpoint_path: String,
 +    pub attempt: u64,
++    pub retry_budget: Option<u64>,
 +    pub next_action: ModelRequestNextAction,
++    pub terminal: bool,
++    pub coalesced_count: u64,
 +    pub error: ModelRequestError,
 +}
 +
@@ -306,7 +775,10 @@ index 0000000000000000000000000000000000000000..e3b7cf894ce40bf5cd8b6f3312b8d3dd
 +        operation: request.operation,
 +        endpoint_path: request.endpoint_path,
 +        attempt: request.attempt,
++        retry_budget: request.retry_budget,
 +        next_action: request.next_action,
++        terminal: request.terminal,
++        coalesced_count: request.coalesced_count,
 +        error: request.error,
 +    }) {
 +        Ok(input_json) => input_json,
@@ -363,7 +835,10 @@ index 0000000000000000000000000000000000000000..e3b7cf894ce40bf5cd8b6f3312b8d3dd
 +        operation: request.operation,
 +        endpoint_path: request.endpoint_path,
 +        attempt: request.attempt,
++        retry_budget: request.retry_budget,
 +        next_action: request.next_action,
++        terminal: request.terminal,
++        coalesced_count: request.coalesced_count,
 +        error: request.error,
 +    }) {
 +        Ok(input_json) => input_json,
@@ -788,10 +1263,15 @@ index 0000000000000000000000000000000000000000..e3b7cf894ce40bf5cd8b6f3312b8d3dd
 +            operation: ModelRequestOperation::Sampling,
 +            endpoint_path: "/responses".to_string(),
 +            attempt,
++            retry_budget: None,
 +            next_action: ModelRequestNextAction::Retry,
++            terminal: false,
++            coalesced_count: 1,
 +            error: ModelRequestError {
 +                category: ModelRequestErrorCategory::Transport,
++                code: None,
 +                message: "disconnected".to_string(),
++                retry_after_ms: None,
 +            },
 +        }
 +    }
@@ -810,10 +1290,15 @@ index 0000000000000000000000000000000000000000..e3b7cf894ce40bf5cd8b6f3312b8d3dd
 +            operation: ModelRequestOperation::Sampling,
 +            endpoint_path: "/responses".to_string(),
 +            attempt: 2,
++            retry_budget: Some(2),
 +            next_action: ModelRequestNextAction::Stop,
++            terminal: true,
++            coalesced_count: 1,
 +            error: ModelRequestError {
 +                category,
++                code: None,
 +                message: "stopped".to_string(),
++                retry_after_ms: None,
 +            },
 +        }
 +    }
@@ -1013,7 +1498,7 @@ index 0000000000000000000000000000000000000000..e3b7cf894ce40bf5cd8b6f3312b8d3dd
 +    }
 +}
 diff --git a/codex-rs/hooks/src/schema.rs b/codex-rs/hooks/src/schema.rs
-index 5558b6665bf4a05d622f7d814b984c885e98db74..b3d9376b910ebd3ff053bd9cd1b3884a23ff90a1 100644
+index 5558b6665bf4a05d622f7d814b984c885e98db74..473d3e87a8f50ce59f4912e69e4441adde5105c9 100644
 --- a/codex-rs/hooks/src/schema.rs
 +++ b/codex-rs/hooks/src/schema.rs
 @@ -13,6 +13,9 @@ use std::path::Path;
@@ -1074,7 +1559,7 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..b3d9376b910ebd3ff053bd9cd1b3884a
  #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
  #[serde(rename_all = "camelCase")]
  #[serde(deny_unknown_fields)]
-@@ -381,6 +411,55 @@ pub(crate) struct PostCompactCommandInput {
+@@ -381,6 +411,61 @@ pub(crate) struct PostCompactCommandInput {
      pub trigger: String,
  }
  
@@ -1096,7 +1581,10 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..b3d9376b910ebd3ff053bd9cd1b3884a
 +    #[schemars(schema_with = "model_request_endpoint_schema")]
 +    pub endpoint_path: String,
 +    pub attempt: u64,
++    pub retry_budget: Option<u64>,
 +    pub next_action: ModelRequestNextAction,
++    pub terminal: bool,
++    pub coalesced_count: u64,
 +    pub error: ModelRequestError,
 +}
 +
@@ -1123,14 +1611,17 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..b3d9376b910ebd3ff053bd9cd1b3884a
 +    #[schemars(schema_with = "model_request_endpoint_schema")]
 +    pub endpoint_path: String,
 +    pub attempt: u64,
++    pub retry_budget: Option<u64>,
 +    pub next_action: ModelRequestNextAction,
++    pub terminal: bool,
++    pub coalesced_count: u64,
 +    pub error: ModelRequestError,
 +}
 +
  #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
  #[serde(rename_all = "camelCase")]
  #[serde(deny_unknown_fields)]
-@@ -665,6 +744,22 @@ pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
+@@ -665,6 +750,22 @@ pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
          &generated_dir.join(POST_COMPACT_OUTPUT_FIXTURE),
          schema_json::<PostCompactCommandOutputWire>()?,
      )?;
@@ -1153,7 +1644,7 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..b3d9376b910ebd3ff053bd9cd1b3884a
      write_schema(
          &generated_dir.join(PRE_COMPACT_INPUT_FIXTURE),
          schema_json::<PreCompactCommandInput>()?,
-@@ -812,6 +907,14 @@ fn post_compact_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+@@ -812,6 +913,14 @@ fn post_compact_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
      string_const_schema("PostCompact")
  }
  
@@ -1168,7 +1659,7 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..b3d9376b910ebd3ff053bd9cd1b3884a
  fn pre_tool_use_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
      string_const_schema("PreToolUse")
  }
-@@ -858,6 +961,14 @@ fn compaction_trigger_schema(_gen: &mut SchemaGenerator) -> Schema {
+@@ -858,6 +967,14 @@ fn compaction_trigger_schema(_gen: &mut SchemaGenerator) -> Schema {
      string_enum_schema(&["manual", "auto"])
  }
  
@@ -1183,7 +1674,7 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..b3d9376b910ebd3ff053bd9cd1b3884a
  fn string_const_schema(value: &str) -> Schema {
      let mut schema = SchemaObject {
          instance_type: Some(InstanceType::String.into()),
-@@ -887,6 +998,9 @@ fn default_continue() -> bool {
+@@ -887,6 +1004,9 @@ fn default_continue() -> bool {
  
  #[cfg(test)]
  mod tests {
@@ -1193,7 +1684,7 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..b3d9376b910ebd3ff053bd9cd1b3884a
      use super::INTERRUPT_INPUT_FIXTURE;
      use super::INTERRUPT_OUTPUT_FIXTURE;
      use super::InterruptCommandInput;
-@@ -909,6 +1023,9 @@ mod tests {
+@@ -909,6 +1029,9 @@ mod tests {
      use super::PreCompactCommandInput;
      use super::PreToolUseCommandInput;
      use super::PreToolUseCommandOutputWire;
@@ -1203,7 +1694,7 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..b3d9376b910ebd3ff053bd9cd1b3884a
      use super::SESSION_END_INPUT_FIXTURE;
      use super::SESSION_START_INPUT_FIXTURE;
      use super::SESSION_START_OUTPUT_FIXTURE;
-@@ -931,6 +1048,10 @@ mod tests {
+@@ -931,6 +1054,10 @@ mod tests {
      use super::schema_json;
      use super::write_schema_fixtures;
      use crate::events::common::SubagentHookContext;
@@ -1214,7 +1705,7 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..b3d9376b910ebd3ff053bd9cd1b3884a
      use pretty_assertions::assert_eq;
      use schemars::JsonSchema;
      use serde_json::Value;
-@@ -957,6 +1078,18 @@ mod tests {
+@@ -957,6 +1084,18 @@ mod tests {
              POST_COMPACT_OUTPUT_FIXTURE => {
                  include_str!("../schema/generated/post-compact.command.output.schema.json")
              }
@@ -1233,7 +1724,7 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..b3d9376b910ebd3ff053bd9cd1b3884a
              PRE_COMPACT_INPUT_FIXTURE => {
                  include_str!("../schema/generated/pre-compact.command.input.schema.json")
              }
-@@ -1043,6 +1176,10 @@ mod tests {
+@@ -1043,6 +1182,10 @@ mod tests {
              PERMISSION_REQUEST_OUTPUT_FIXTURE,
              POST_COMPACT_INPUT_FIXTURE,
              POST_COMPACT_OUTPUT_FIXTURE,
@@ -1244,7 +1735,7 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..b3d9376b910ebd3ff053bd9cd1b3884a
              PRE_COMPACT_INPUT_FIXTURE,
              PRE_COMPACT_OUTPUT_FIXTURE,
              PRE_TOOL_USE_INPUT_FIXTURE,
-@@ -1123,6 +1260,16 @@ mod tests {
+@@ -1123,6 +1266,16 @@ mod tests {
                  .expect("serialize permission request input schema"),
          )
          .expect("parse permission request input schema");
@@ -1261,7 +1752,7 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..b3d9376b910ebd3ff053bd9cd1b3884a
          let user_prompt_submit: Value = serde_json::from_slice(
              &schema_json::<UserPromptSubmitCommandInput>()
                  .expect("serialize user prompt submit input schema"),
-@@ -1167,6 +1314,162 @@ mod tests {
+@@ -1167,6 +1320,173 @@ mod tests {
                      .contains(&Value::String("turn_id".to_string()))
              );
          }
@@ -1358,7 +1849,9 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..b3d9376b910ebd3ff053bd9cd1b3884a
 +    fn model_request_failure_payloads_serialize_with_stable_values() {
 +        let error = ModelRequestError {
 +            category: ModelRequestErrorCategory::RateLimit,
++            code: Some("rate_limit_exceeded".to_string()),
 +            message: "slow down".to_string(),
++            retry_after_ms: Some(2_000),
 +        };
 +        let request_error = RequestErrorCommandInput {
 +            session_id: "session-1".to_string(),
@@ -1371,7 +1864,10 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..b3d9376b910ebd3ff053bd9cd1b3884a
 +            operation: ModelRequestOperation::RemoteCompact,
 +            endpoint_path: "/responses/compact".to_string(),
 +            attempt: 3,
++            retry_budget: Some(2),
 +            next_action: ModelRequestNextAction::Fallback,
++            terminal: false,
++            coalesced_count: 2,
 +            error: error.clone(),
 +        };
 +        assert_eq!(
@@ -1387,8 +1883,11 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..b3d9376b910ebd3ff053bd9cd1b3884a
 +                "operation": "remoteCompact",
 +                "endpointPath": "/responses/compact",
 +                "attempt": 3,
++                "retryBudget": 2,
 +                "nextAction": "fallback",
-+                "error": { "category": "rateLimit", "message": "slow down" },
++                "terminal": false,
++                "coalescedCount": 2,
++                "error": { "category": "rateLimit", "code": "rate_limit_exceeded", "message": "slow down", "retryAfterMs": 2000 },
 +            })
 +        );
 +
@@ -1407,7 +1906,10 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..b3d9376b910ebd3ff053bd9cd1b3884a
 +            operation: ModelRequestOperation::RemoteCompact,
 +            endpoint_path: "/responses/compact".to_string(),
 +            attempt: 4,
++            retry_budget: None,
 +            next_action: ModelRequestNextAction::Stop,
++            terminal: true,
++            coalesced_count: 1,
 +            error,
 +        };
 +        let abnormal_stop = serde_json::to_value(abnormal_stop).expect("serialize abnormal stop");
@@ -1424,6 +1926,126 @@ index 5558b6665bf4a05d622f7d814b984c885e98db74..b3d9376b910ebd3ff053bd9cd1b3884a
      }
  
      #[test]
+diff --git a/codex-rs/protocol/src/error.rs b/codex-rs/protocol/src/error.rs
+index be0192f61aa580ea6660084d0464504900da24ef..af93e8518570a296f3afb6dab7b446b10ef0d41b 100644
+--- a/codex-rs/protocol/src/error.rs
++++ b/codex-rs/protocol/src/error.rs
+@@ -21,6 +21,7 @@ use codex_utils_string::truncate_middle_chars;
+ use codex_utils_string::truncate_middle_with_token_budget;
+ use http::StatusCode;
+ use serde_json;
++use serde::{Deserialize, Serialize};
+ use std::fmt;
+ use std::io;
+ use std::time::Duration;
+@@ -30,6 +31,26 @@ use tokio::task::JoinError;
+ 
+ pub type Result<T> = std::result::Result<T, CodexErr>;
+ 
++/// Structured advice attached to a capacity response.  The semantic
++/// `ServerOverloaded` error remains payload-free so existing category and
++/// retryability consumers do not have to pattern-match wire diagnostics.
++#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct ServerOverloadInfo {
++    /// The provider's machine-readable overload code, when supplied.
++    pub code: Option<String>,
++    /// The provider's diagnostic message (never inferred from text).
++    pub message: String,
++    /// Server advice from `Retry-After` or the response body, in milliseconds.
++    pub retry_after_ms: Option<u64>,
++}
++
++impl ServerOverloadInfo {
++    pub fn retry_delay(&self) -> Option<Duration> {
++        self.retry_after_ms.map(Duration::from_millis)
++    }
++}
++
+ /// Limit UI error messages to a reasonable size while keeping useful context.
+ const ERROR_MESSAGE_UI_MAX_BYTES: usize = 2 * 1024;
+ 
+@@ -71,6 +92,7 @@ pub enum SandboxErr {
+ pub struct CodexErr {
+     details: CodexErrorDetails,
+     retry_delay: Option<Duration>,
++    server_overload: Option<ServerOverloadInfo>,
+ }
+ 
+ /// The semantic category and diagnostic payload for a [`CodexErr`].
+@@ -225,6 +247,7 @@ impl From<CodexErrorDetails> for CodexErr {
+         Self {
+             details,
+             retry_delay: None,
++            server_overload: None,
+         }
+     }
+ }
+@@ -289,6 +312,7 @@ macro_rules! codex_err_unit_constructors {
+             pub const $variant: Self = Self {
+                 details: CodexErrorDetails::$variant,
+                 retry_delay: None,
++                server_overload: None,
+             };
+         )*
+     };
+@@ -363,11 +387,27 @@ impl CodexErr {
+         details.into()
+     }
+ 
++    /// Construct the payload-free semantic category with typed provider advice.
++    pub fn server_overloaded(info: ServerOverloadInfo) -> Self {
++        let retry_delay = info.retry_delay();
++        Self {
++            details: CodexErrorDetails::ServerOverloaded,
++            retry_delay,
++            server_overload: Some(info),
++        }
++    }
++
+     /// Returns the semantic failure and its diagnostic payload.
+     pub fn details(&self) -> &CodexErrorDetails {
+         &self.details
+     }
+ 
++    /// Return typed overload metadata, if this error came from a capacity
++    /// response.  Generic 503s and text-only errors intentionally return None.
++    pub fn server_overload_info(&self) -> Option<&ServerOverloadInfo> {
++        self.server_overload.as_ref()
++    }
++
+     pub fn is_retryable(&self) -> bool {
+         match self.details() {
+             CodexErrorDetails::TurnAborted
+diff --git a/codex-rs/protocol/src/error_tests.rs b/codex-rs/protocol/src/error_tests.rs
+index ca0b7b2cff5f31e77f8a64b7c3feb982746c5d6c..61a158dfd1be8d280abe3863a2b64c1a7a49da5e 100644
+--- a/codex-rs/protocol/src/error_tests.rs
++++ b/codex-rs/protocol/src/error_tests.rs
+@@ -178,6 +178,24 @@ fn server_overloaded_maps_to_protocol() {
+     );
+ }
+ 
++#[test]
++fn typed_server_overload_preserves_advice_without_changing_retryability() {
++    let info = ServerOverloadInfo {
++        code: Some("slow_down".to_string()),
++        message: "capacity is temporarily limited".to_string(),
++        retry_after_ms: Some(1_250),
++    };
++    let err = CodexErr::server_overloaded(info.clone());
++
++    assert!(matches!(
++        err.details(),
++        CodexErrorDetails::ServerOverloaded
++    ));
++    assert_eq!(err.server_overload_info(), Some(&info));
++    assert_eq!(err.retry_delay(), Some(Duration::from_millis(1_250)));
++    assert!(!err.is_retryable());
++}
++
+ #[test]
+ fn sandbox_denied_uses_aggregated_output_when_stderr_empty() {
+     let output = ExecToolCallOutput {
 diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
 index 66e431551ddfda9e61b19ee6b8ae61ea046a2817..b6693af5f1213f8d6aa5e8d8a846ce885da2dfde 100644
 --- a/codex-rs/protocol/src/protocol.rs
@@ -1437,3 +2059,15 @@ index 66e431551ddfda9e61b19ee6b8ae61ea046a2817..b6693af5f1213f8d6aa5e8d8a846ce88
      SessionStart,
      SessionEnd,
      UserPromptSubmit,
+diff --git a/codex-rs/response-debug-context/src/lib.rs b/codex-rs/response-debug-context/src/lib.rs
+index 42825a7c986ddacc71eb01c74c209840043988da..18a45696abbb3418b853b1d06ddae5dd3f63532c 100644
+--- a/codex-rs/response-debug-context/src/lib.rs
++++ b/codex-rs/response-debug-context/src/lib.rs
+@@ -85,6 +85,6 @@ pub fn telemetry_api_error_message(error: &ApiError) -> String {
+         ApiError::InvalidRequest { .. } => "invalid request".to_string(),
+         ApiError::CyberPolicy { .. } => "cyber policy".to_string(),
+         ApiError::MisalignmentPolicyViolation { .. } => "misalignment policy violation".to_string(),
+-        ApiError::ServerOverloaded => "server overloaded".to_string(),
++        ApiError::ServerOverloaded(_) => "server overloaded".to_string(),
+     }
+ }

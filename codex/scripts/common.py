@@ -131,6 +131,10 @@ class MaintenanceManifest:
 
 FaultHook = Callable[[str], None]
 _V8_ENV_CACHE: dict[tuple[Path, str], dict[str, str]] = {}
+_HUNK_HEADER_RE = re.compile(
+    r"^(?P<prefix>@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? "
+    r"\+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@)(?P<suffix>.*\n?)$"
+)
 
 
 def eprint(message: str) -> None:
@@ -594,6 +598,39 @@ def _changed_paths(src: Path) -> list[str]:
     return paths
 
 
+def _normalize_generated_diff(diff: str) -> str:
+    """Remove Git's synthetic EOF context while preserving hunk counts."""
+
+    lines = diff.splitlines(keepends=True)
+    removed = 0
+    while lines and lines[-1] == " \n":
+        lines.pop()
+        removed += 1
+    if not removed:
+        return diff
+
+    for index in range(len(lines) - 1, -1, -1):
+        match = _HUNK_HEADER_RE.match(lines[index])
+        if match is None:
+            continue
+        old_count = int(match.group("old_count") or "1") - removed
+        new_count = int(match.group("new_count") or "1") - removed
+        if old_count < 0 or new_count < 0:
+            raise PatchError("generated diff has an invalid synthetic EOF context")
+
+        def format_range(start: str, count: int) -> str:
+            return start if count == 1 else f"{start},{count}"
+
+        lines[index] = (
+            f"@@ -{format_range(match.group('old_start'), old_count)} "
+            f"+{format_range(match.group('new_start'), new_count)} @@"
+            f"{match.group('suffix')}"
+        )
+        return "".join(lines)
+
+    raise PatchError("generated diff ended with context but contained no hunk header")
+
+
 def _temporary_index_diff(src: Path, paths: Sequence[str], index: Path, *, selected: Sequence[str] | None = None) -> str:
     env = {"GIT_INDEX_FILE": str(index)}
     run(["git", "read-tree", "HEAD"], cwd=src, env=env)
@@ -602,7 +639,7 @@ def _temporary_index_diff(src: Path, paths: Sequence[str], index: Path, *, selec
     command = ["git", "diff", "--cached", "--binary", "--full-index", "--no-renames", "HEAD"]
     if selected is not None:
         command.extend(["--", *selected])
-    return run(command, cwd=src, capture=True, env=env).stdout
+    return _normalize_generated_diff(run(command, cwd=src, capture=True, env=env).stdout)
 
 
 def _tree_digest(src: Path, paths: Iterable[str]) -> str:

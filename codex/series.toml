@@ -33,15 +33,29 @@ source_files = [
   "codex-rs/analytics/src/events.rs",
   "codex-rs/app-server-protocol/src/protocol/v2/config.rs",
   "codex-rs/app-server-protocol/src/protocol/v2/hook.rs",
+  "codex-rs/cli/src/doctor.rs",
+  "codex-rs/codex-api/src/api_bridge.rs",
+  "codex-rs/codex-api/src/api_bridge_tests.rs",
+  "codex-rs/codex-api/src/endpoint/responses_websocket.rs",
+  "codex-rs/codex-api/src/error.rs",
+  "codex-rs/codex-api/src/sse/responses.rs",
   "codex-rs/config/src/hook_config.rs",
   "codex-rs/config/src/requirements_layers/hooks.rs",
+  "codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs",
   "codex-rs/hooks/src/schema.rs",
+  "codex-rs/protocol/src/error.rs",
+  "codex-rs/protocol/src/error_tests.rs",
   "codex-rs/protocol/src/protocol.rs",
+  "codex-rs/response-debug-context/src/lib.rs",
 ]
 source_prefixes = ["codex-rs/hooks/src/events/"]
 generated_files = []
 generated_prefixes = []
-tests = [["cargo", "test", "-p", "codex-hooks", "events"]]
+tests = [
+  ["cargo", "test", "-p", "codex-hooks", "events"],
+  ["cargo", "test", "-p", "codex-api"],
+  ["cargo", "test", "-p", "codex-protocol", "typed_server_overload"],
+]
 
 [[patch]]
 file = "0003-failure-hook-integration.patch"
@@ -61,6 +75,7 @@ source_files = [
   "codex-rs/ext/extension-api/src/lib.rs",
   "codex-rs/ext/extension-api/src/state.rs",
   "codex-rs/ext/goal/src/extension.rs",
+  "codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs",
   "codex-rs/hooks/src/lib.rs",
   "codex-rs/hooks/src/registry.rs",
   "codex-rs/tui/src/bottom_pane/hooks_browser_view.rs",

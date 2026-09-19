@@ -22456,10 +22456,10 @@ index 2d5d268a678f81a5f59890bd1526a2da26287427..2a34bf1f883b08a8c353a658049f3704
              "type": "string"
 diff --git a/codex-rs/hooks/schema/generated/abnormal-stop.command.input.schema.json b/codex-rs/hooks/schema/generated/abnormal-stop.command.input.schema.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..d7a754dc5f465f2db083a98b28540935b1389640
+index 0000000000000000000000000000000000000000..15a10fc8d7a3c7573b8f32301341fe5d6e2793b3
 --- /dev/null
 +++ b/codex-rs/hooks/schema/generated/abnormal-stop.command.input.schema.json
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,165 @@
 +{
 +  "$schema": "http://json-schema.org/draft-07/schema#",
 +  "additionalProperties": false,
@@ -22469,8 +22469,16 @@ index 0000000000000000000000000000000000000000..d7a754dc5f465f2db083a98b28540935
 +        "category": {
 +          "$ref": "#/definitions/ModelRequestErrorCategory"
 +        },
++        "code": {
++          "type": "string"
++        },
 +        "message": {
 +          "type": "string"
++        },
++        "retryAfterMs": {
++          "format": "uint64",
++          "minimum": 0.0,
++          "type": "integer"
 +        }
 +      },
 +      "required": [
@@ -22490,6 +22498,7 @@ index 0000000000000000000000000000000000000000..d7a754dc5f465f2db083a98b28540935
 +        "sandbox",
 +        "invalidRequest",
 +        "server",
++        "serverOverloaded",
 +        "internal",
 +        "other"
 +      ],
@@ -22499,6 +22508,7 @@ index 0000000000000000000000000000000000000000..d7a754dc5f465f2db083a98b28540935
 +      "enum": [
 +        "retry",
 +        "fallback",
++        "defer",
 +        "stop"
 +      ],
 +      "type": "string"
@@ -22507,7 +22517,9 @@ index 0000000000000000000000000000000000000000..d7a754dc5f465f2db083a98b28540935
 +      "enum": [
 +        "sampling",
 +        "localCompact",
-+        "remoteCompact"
++        "remoteCompact",
++        "guardianReview",
++        "internalModelRequest"
 +      ],
 +      "type": "string"
 +    },
@@ -22523,6 +22535,11 @@ index 0000000000000000000000000000000000000000..d7a754dc5f465f2db083a98b28540935
 +      "type": "string"
 +    },
 +    "attempt": {
++      "format": "uint64",
++      "minimum": 0.0,
++      "type": "integer"
++    },
++    "coalescedCount": {
 +      "format": "uint64",
 +      "minimum": 0.0,
 +      "type": "integer"
@@ -22563,11 +22580,19 @@ index 0000000000000000000000000000000000000000..d7a754dc5f465f2db083a98b28540935
 +      "const": "requestError",
 +      "type": "string"
 +    },
++    "retryBudget": {
++      "format": "uint64",
++      "minimum": 0.0,
++      "type": "integer"
++    },
 +    "sandboxMode": {
 +      "type": "string"
 +    },
 +    "sessionId": {
 +      "type": "string"
++    },
++    "terminal": {
++      "type": "boolean"
 +    },
 +    "transcriptPath": {
 +      "$ref": "#/definitions/NullableString"
@@ -22580,6 +22605,7 @@ index 0000000000000000000000000000000000000000..d7a754dc5f465f2db083a98b28540935
 +  "required": [
 +    "approvalPolicy",
 +    "attempt",
++    "coalescedCount",
 +    "cwd",
 +    "endpointPath",
 +    "error",
@@ -22592,6 +22618,7 @@ index 0000000000000000000000000000000000000000..d7a754dc5f465f2db083a98b28540935
 +    "reason",
 +    "sandboxMode",
 +    "sessionId",
++    "terminal",
 +    "transcriptPath",
 +    "turnId"
 +  ],
@@ -22635,10 +22662,10 @@ index 0000000000000000000000000000000000000000..a19249079d67ccfa1fb9737fc1efd82d
 \ No newline at end of file
 diff --git a/codex-rs/hooks/schema/generated/request-error.command.input.schema.json b/codex-rs/hooks/schema/generated/request-error.command.input.schema.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..afb1295096c8471d58e1cb87731d553be832ffbc
+index 0000000000000000000000000000000000000000..e4e850c60db0304c11798bd493edf90b3a0d949b
 --- /dev/null
 +++ b/codex-rs/hooks/schema/generated/request-error.command.input.schema.json
-@@ -0,0 +1,121 @@
+@@ -0,0 +1,148 @@
 +{
 +  "$schema": "http://json-schema.org/draft-07/schema#",
 +  "additionalProperties": false,
@@ -22648,8 +22675,16 @@ index 0000000000000000000000000000000000000000..afb1295096c8471d58e1cb87731d553b
 +        "category": {
 +          "$ref": "#/definitions/ModelRequestErrorCategory"
 +        },
++        "code": {
++          "type": "string"
++        },
 +        "message": {
 +          "type": "string"
++        },
++        "retryAfterMs": {
++          "format": "uint64",
++          "minimum": 0.0,
++          "type": "integer"
 +        }
 +      },
 +      "required": [
@@ -22669,6 +22704,7 @@ index 0000000000000000000000000000000000000000..afb1295096c8471d58e1cb87731d553b
 +        "sandbox",
 +        "invalidRequest",
 +        "server",
++        "serverOverloaded",
 +        "internal",
 +        "other"
 +      ],
@@ -22678,6 +22714,7 @@ index 0000000000000000000000000000000000000000..afb1295096c8471d58e1cb87731d553b
 +      "enum": [
 +        "retry",
 +        "fallback",
++        "defer",
 +        "stop"
 +      ],
 +      "type": "string"
@@ -22686,7 +22723,9 @@ index 0000000000000000000000000000000000000000..afb1295096c8471d58e1cb87731d553b
 +      "enum": [
 +        "sampling",
 +        "localCompact",
-+        "remoteCompact"
++        "remoteCompact",
++        "guardianReview",
++        "internalModelRequest"
 +      ],
 +      "type": "string"
 +    },
@@ -22699,6 +22738,11 @@ index 0000000000000000000000000000000000000000..afb1295096c8471d58e1cb87731d553b
 +  },
 +  "properties": {
 +    "attempt": {
++      "format": "uint64",
++      "minimum": 0.0,
++      "type": "integer"
++    },
++    "coalescedCount": {
 +      "format": "uint64",
 +      "minimum": 0.0,
 +      "type": "integer"
@@ -22732,8 +22776,16 @@ index 0000000000000000000000000000000000000000..afb1295096c8471d58e1cb87731d553b
 +    "provider": {
 +      "type": "string"
 +    },
++    "retryBudget": {
++      "format": "uint64",
++      "minimum": 0.0,
++      "type": "integer"
++    },
 +    "sessionId": {
 +      "type": "string"
++    },
++    "terminal": {
++      "type": "boolean"
 +    },
 +    "transcriptPath": {
 +      "$ref": "#/definitions/NullableString"
@@ -22745,6 +22797,7 @@ index 0000000000000000000000000000000000000000..afb1295096c8471d58e1cb87731d553b
 +  },
 +  "required": [
 +    "attempt",
++    "coalescedCount",
 +    "cwd",
 +    "endpointPath",
 +    "error",
@@ -22754,6 +22807,7 @@ index 0000000000000000000000000000000000000000..afb1295096c8471d58e1cb87731d553b
 +    "operation",
 +    "provider",
 +    "sessionId",
++    "terminal",
 +    "transcriptPath",
 +    "turnId"
 +  ],

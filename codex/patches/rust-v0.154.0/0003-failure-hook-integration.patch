@@ -333,7 +333,7 @@ index f02e2db678e6266204660a0e72a444047a0db626..53710f037124bb2a3391771cd4dde172
          }
      }
 diff --git a/codex-rs/core/src/hook_runtime.rs b/codex-rs/core/src/hook_runtime.rs
-index e17f1508e7ffdb313af4c444d36dc4248e4d680b..2ea9672745cd2fa472e997d21d243bd73d022874 100644
+index e17f1508e7ffdb313af4c444d36dc4248e4d680b..3d4cf0977a2642a82a32555048a025508380344c 100644
 --- a/codex-rs/core/src/hook_runtime.rs
 +++ b/codex-rs/core/src/hook_runtime.rs
 @@ -29,6 +29,8 @@ use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
@@ -345,7 +345,7 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..2ea9672745cd2fa472e997d21d243bd7
  use codex_protocol::items::FunctionCallOutputItem;
  use codex_protocol::items::TurnItem;
  use codex_protocol::items::UserMessageItem;
-@@ -79,6 +81,72 @@ pub(crate) enum PreToolUseHookResult {
+@@ -79,6 +81,75 @@ pub(crate) enum PreToolUseHookResult {
      Blocked(String),
  }
  
@@ -392,7 +392,10 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..2ea9672745cd2fa472e997d21d243bd7
 +pub(crate) struct ModelRequestFailure {
 +    context: ModelRequestHookContext,
 +    attempt: u64,
++    retry_budget: Option<u64>,
 +    next_action: codex_hooks::ModelRequestNextAction,
++    terminal: bool,
++    coalesced_count: u64,
 +    error: codex_hooks::ModelRequestError,
 +}
 +
@@ -405,12 +408,12 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..2ea9672745cd2fa472e997d21d243bd7
 +    ) -> Self {
 +        Self {
 +            context,
-+            attempt,
++            attempt: attempt.max(1),
++            retry_budget: None,
 +            next_action,
-+            error: codex_hooks::ModelRequestError {
-+                category: model_request_error_category(error),
-+                message: error.to_string(),
-+            },
++            terminal: next_action == codex_hooks::ModelRequestNextAction::Stop,
++            coalesced_count: 1,
++            error: model_request_error_payload(error),
 +        }
 +    }
 +}
@@ -418,7 +421,7 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..2ea9672745cd2fa472e997d21d243bd7
  struct ContextInjectingHookOutcome {
      hook_events: Vec<HookCompletedEvent>,
      outcome: HookRuntimeOutcome,
-@@ -589,6 +657,92 @@ pub(crate) async fn run_post_compact_hooks(
+@@ -589,6 +660,98 @@ pub(crate) async fn run_post_compact_hooks(
      }
  }
  
@@ -438,7 +441,10 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..2ea9672745cd2fa472e997d21d243bd7
 +        operation: failure.context.operation,
 +        endpoint_path: failure.context.endpoint_path.to_string(),
 +        attempt: failure.attempt,
++        retry_budget: failure.retry_budget,
 +        next_action: failure.next_action,
++        terminal: failure.terminal,
++        coalesced_count: failure.coalesced_count,
 +        error: failure.error,
 +    };
 +    let hooks = sess.hooks();
@@ -487,7 +493,10 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..2ea9672745cd2fa472e997d21d243bd7
 +        operation: failure.context.operation,
 +        endpoint_path: failure.context.endpoint_path.to_string(),
 +        attempt: failure.attempt,
++        retry_budget: failure.retry_budget,
 +        next_action: failure.next_action,
++        terminal: failure.terminal,
++        coalesced_count: failure.coalesced_count,
 +        error: failure.error,
 +    };
 +    let hooks = sess.hooks();
@@ -511,7 +520,7 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..2ea9672745cd2fa472e997d21d243bd7
  #[instrument(level = "trace", skip_all)]
  pub(crate) async fn run_legacy_after_agent_hook(
      sess: &Arc<Session>,
-@@ -965,6 +1119,8 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str);
+@@ -965,6 +1128,8 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str);
          HookEventName::PostToolUse => "PostToolUse",
          HookEventName::PreCompact => "PreCompact",
          HookEventName::PostCompact => "PostCompact",
@@ -520,7 +529,7 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..2ea9672745cd2fa472e997d21d243bd7
          HookEventName::SessionStart => "SessionStart",
          HookEventName::SessionEnd => "SessionEnd",
          HookEventName::UserPromptSubmit => "UserPromptSubmit",
-@@ -1005,6 +1161,64 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str);
+@@ -1005,6 +1170,75 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str);
      ]
  }
  
@@ -565,9 +574,8 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..2ea9672745cd2fa472e997d21d243bd7
 +        | CodexErrorDetails::UnsupportedOperation(_)
 +        | CodexErrorDetails::RefreshTokenFailed(_)
 +        | CodexErrorDetails::ToolCollision(_) => Category::InvalidRequest,
-+        CodexErrorDetails::ServerOverloaded | CodexErrorDetails::InternalServerError => {
-+            Category::Server
-+        }
++        CodexErrorDetails::ServerOverloaded => Category::ServerOverloaded,
++        CodexErrorDetails::InternalServerError => Category::Server,
 +        CodexErrorDetails::SessionConfiguredNotFirstEvent
 +        | CodexErrorDetails::InternalAgentDied
 +        | CodexErrorDetails::Fatal(_)
@@ -582,10 +590,22 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..2ea9672745cd2fa472e997d21d243bd7
 +    }
 +}
 +
++fn model_request_error_payload(error: &CodexErr) -> codex_hooks::ModelRequestError {
++    let overload = error.server_overload_info();
++    codex_hooks::ModelRequestError {
++        category: model_request_error_category(error),
++        code: overload.and_then(|info| info.code.clone()),
++        message: overload
++            .map(|info| info.message.clone())
++            .unwrap_or_else(|| error.to_string()),
++        retry_after_ms: overload.and_then(|info| info.retry_after_ms),
++    }
++}
++
  fn hook_permission_mode(turn_context: &TurnContext) -> String {
      match turn_context.approval_policy() {
          AskForApproval::Never => "bypassPermissions",
-@@ -1047,10 +1261,14 @@ fn compaction_trigger_label(value: CompactionTrigger) -> &'static str {
+@@ -1047,10 +1281,14 @@ fn compaction_trigger_label(value: CompactionTrigger) -> &'static str {
  mod tests {
      use std::sync::Arc;
  
@@ -600,7 +620,7 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..2ea9672745cd2fa472e997d21d243bd7
      use codex_protocol::models::ContentItem;
      use codex_protocol::protocol::HookEventName;
      use codex_protocol::protocol::HookExecutionMode;
-@@ -1070,12 +1288,73 @@ mod tests {
+@@ -1070,12 +1308,73 @@ mod tests {
      use super::emit_hook_started_events;
      use super::hook_run_analytics_payload;
      use super::hook_run_metric_tags;
@@ -1475,6 +1495,19 @@ index 89848996fa8287503980d9ecd0d426861f803c44..e01802bcb8fc9894254ea38352fe20eb
              }
          })
      }
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
+index 993e2d48d7322b3b37d981b45e8fa57f3ba3470b..95a8a4787f0500950e141984210ad01acb567f12 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
+@@ -208,7 +208,7 @@ impl LunaSampler {
+                 ApiError::Retryable { .. }
+                 | ApiError::RateLimitExceeded { .. }
+                 | ApiError::Stream(_)
+-                | ApiError::ServerOverloaded,
++                | ApiError::ServerOverloaded(_),
+             )
+             | LunaSamplerError::Api(ApiError::Transport(
+                 TransportError::RetryLimit
 diff --git a/codex-rs/hooks/src/engine/dispatcher.rs b/codex-rs/hooks/src/engine/dispatcher.rs
 index c5ee0d2ce1da03ec07b08f9ba692088142673e99..f1a0d32d5c4043fd96e8ff48ab9c89c674ea3f09 100644
 --- a/codex-rs/hooks/src/engine/dispatcher.rs
@@ -1867,7 +1900,7 @@ index 6abc173535b23b5ee6bd057fd3f49d9b82ea7fe0..9735627a0d7bcd8db4f095ce8b136d42
          HookEventName::SessionEnd => "session_end",
          HookEventName::UserPromptSubmit => "user_prompt_submit",
 diff --git a/codex-rs/hooks/src/registry.rs b/codex-rs/hooks/src/registry.rs
-index 5a033f9c64dacaf031719e60c3c42d52b2d9eb07..363e0d383272985c82a7417fd18841ac68f0a762 100644
+index 5a033f9c64dacaf031719e60c3c42d52b2d9eb07..a30d444d4a29b138b5fb67eeb5d5f9d9d214d411 100644
 --- a/codex-rs/hooks/src/registry.rs
 +++ b/codex-rs/hooks/src/registry.rs
 @@ -8,6 +8,9 @@ use crate::events::compact::PreCompactRequest;
@@ -2029,7 +2062,7 @@ index 5a033f9c64dacaf031719e60c3c42d52b2d9eb07..363e0d383272985c82a7417fd18841ac
      pub fn preview_user_prompt_submit(
          &self,
          request: &UserPromptSubmitRequest,
-@@ -334,3 +449,213 @@ pub(crate) fn command_from_argv(
+@@ -334,3 +449,218 @@ pub(crate) fn command_from_argv(
      scrub_non_inheritable_env_vars(command.as_std_mut());
      Some(command)
  }
@@ -2157,10 +2190,15 @@ index 5a033f9c64dacaf031719e60c3c42d52b2d9eb07..363e0d383272985c82a7417fd18841ac
 +            operation: ModelRequestOperation::Sampling,
 +            endpoint_path: "/responses".to_string(),
 +            attempt,
++            retry_budget: None,
 +            next_action: ModelRequestNextAction::Retry,
++            terminal: false,
++            coalesced_count: 1,
 +            error: ModelRequestError {
 +                category: ModelRequestErrorCategory::Transport,
++                code: None,
 +                message: "disconnected".to_string(),
++                retry_after_ms: None,
 +            },
 +        }
 +    }
