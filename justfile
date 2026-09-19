@@ -123,7 +123,7 @@ _codex-apply:
   @test "${AGENTS_MISC_SHELL:-}" = "codex" || { echo "error: run 'just codex-apply' to enter nix develop .#codex" >&2; exit 2; }
   python3 codex/scripts/apply-patches.py
 
-# Run generators twice, compare patchSha256, and validate candidates without replacing patches.
+# Upgrade gate: run twice before refresh and compare patchSha256 without replacing patches.
 codex-refresh-dry-run:
   {{codex_nix}} just _codex-refresh-dry-run
 
@@ -141,7 +141,7 @@ _codex-refresh:
   @test "${AGENTS_MISC_SHELL:-}" = "codex" || { echo "error: run 'just codex-refresh' to enter nix develop .#codex" >&2; exit 2; }
   python3 codex/scripts/refresh-patches.py
 
-# Run cumulative apply, double-generation drift, producer/marker gates, Cargo, and regressions.
+# Primary gate: binary apply, double generation, negative/producer audits, Cargo, and regressions.
 codex-test:
   {{codex_nix}} just _codex-test
 

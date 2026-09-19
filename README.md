@@ -16,11 +16,11 @@ has one authoritative input boundary and one primary verification entrypoint:
 | [Agents Viewer](tools/agents-viewer/README.md)           | Read-only local rollout index, API, and Web reader                           | rollout fixtures, Rust DTOs, Rust/Web source                    | `just agents-viewer-verify`                                          |
 | [Agent behavior evals](tests/evals/README.md)            | Deterministic corpus validation and optional isolated live Codex diagnostics | eval JSONL, hidden oracles, schemas, and runtime contract       | `nix build --no-link .#checks.x86_64-linux.agent-evals`              |
 
-Generated ownership is explicit. Codex generated contracts live inside the
-sixth patch in `codex/series.toml`; Atlas data and site trees are Nix outputs;
-Viewer's `web/src/generated/api.ts` is the only checked-in Rust-to-TypeScript
-binding; eval run artifacts remain below ignored `tmp/agent/evals/`. No other
-generated tree is a durable source input.
+Generated ownership is explicit. Codex generated contracts live exclusively
+inside the fourth patch in `codex/series.toml`; Atlas data and site trees are
+Nix outputs; Viewer's `web/src/generated/api.ts` is the only checked-in
+Rust-to-TypeScript binding; eval run artifacts remain below ignored
+`tmp/agent/evals/`. No other generated tree is a durable source input.
 
 ## Distribution boundary
 
