@@ -7,13 +7,13 @@ from common import add_repo_root_argument, json_stdout, load_manifest, main_wrap
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Regenerate and atomically refresh the pinned Codex patch series"
+        description="Run the pinned generators twice and atomically refresh the four-patch Codex series"
     )
     add_repo_root_argument(parser)
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Generate and fully validate candidates without replacing checked-in patches",
+        help="Generate, apply, and validate candidates without replacing checked-in patches",
     )
     args = parser.parse_args()
     manifest = load_manifest(args.repo_root, require_patch_files=False)

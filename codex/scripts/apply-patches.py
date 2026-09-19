@@ -19,9 +19,15 @@ from common import (
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Apply or check the pinned Codex patch series")
+    parser = argparse.ArgumentParser(
+        description="Apply or check the four-patch Codex series from the pinned upstream HEAD"
+    )
     add_repo_root_argument(parser)
-    parser.add_argument("--check", action="store_true", help="Check cumulative applicability without changing files")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Check cumulative binary applicability and ownership gates without changing files",
+    )
     args = parser.parse_args()
     manifest = load_manifest(args.repo_root)
     src = manifest.worktree

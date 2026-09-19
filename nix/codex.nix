@@ -34,6 +34,13 @@ let
     "source_prefixes"
     "tests"
   ];
+  expectedPatchCount = 4;
+  expectedPatchOrder = [
+    "0001-provider-network-config.patch"
+    "0002-failure-hook-contract.patch"
+    "0003-failure-hook-integration.patch"
+    "0004-generated-contracts.patch"
+  ];
   unknownUpstreamFields = lib.subtractLists expectedUpstreamFields (builtins.attrNames upstream);
   missingUpstreamFields = lib.subtractLists (builtins.attrNames upstream) expectedUpstreamFields;
   patches = series.patch or (throw "agents-misc: codex/series.toml must define [[patch]] entries");
@@ -56,6 +63,17 @@ let
   patchOrder = map (patch: patch.file) validatedPatches;
   targetedTests = lib.unique (lib.concatMap (patch: patch.tests) validatedPatches);
   patchDir = ../codex/patches + "/${upstream.ref}";
+  patchDirectoryEntries = if builtins.pathExists patchDir then builtins.readDir patchDir else { };
+  actualPatchFiles = lib.sort (a: b: a < b) (
+    lib.filter (name: lib.hasSuffix ".patch" name) (builtins.attrNames patchDirectoryEntries)
+  );
+  generatedOnlyPatchValid =
+    if lib.length validatedPatches != expectedPatchCount then
+      false
+    else
+      let generatedPatch = builtins.elemAt validatedPatches 3;
+      in generatedPatch.source_files == [ ] && generatedPatch.source_prefixes == [ ]
+        && (generatedPatch.generated_files != [ ] || generatedPatch.generated_prefixes != [ ]);
   patchPaths = map (
     filename:
     let
@@ -88,6 +106,14 @@ let
         throw "agents-misc: unknown field(s) in codex/upstream.toml: ${lib.concatStringsSep ", " unknownUpstreamFields}"
       else if missingUpstreamFields != [ ] then
         throw "agents-misc: missing field(s) in codex/upstream.toml: ${lib.concatStringsSep ", " missingUpstreamFields}"
+      else if lib.length patches != expectedPatchCount then
+        throw "agents-misc: expected exactly ${toString expectedPatchCount} active Codex patches"
+      else if patchOrder != expectedPatchOrder then
+        throw "agents-misc: active Codex patch order must be 0001..0004 with generated contracts in 0004"
+      else if actualPatchFiles != expectedPatchOrder then
+        throw "agents-misc: codex patch directory contains stale or missing patch files"
+      else if !generatedOnlyPatchValid then
+        throw "agents-misc: 0004-generated-contracts.patch must have generated-only ownership"
       else if packageRef != upstream.ref then
         throw "agents-misc: llm-agents Codex ${packageRef} does not match pinned ${upstream.ref}"
       else if patchPaths == [ ] then
@@ -101,7 +127,7 @@ let
             patches = (old.patches or [ ]) ++ patchPaths;
             nativeBuildInputs = [ pkgs.gitMinimal ];
             patchPhase = gitPatchPhase;
-            hash = "sha256-sIZOl8Jp/Elx9qtzHde+a398rPDdEAxpx2WBqUR4cxs=";
+            hash = "sha256-5kwpOFDCVeurNtaZhH6FWz3rtl2QqGyR1N2c5suIL1M=";
           };
           patches = (old.patches or [ ]) ++ patchPaths;
 
@@ -138,7 +164,14 @@ let
     let
       pkgs = import nixpkgs { inherit system; };
       codex = codexFor system;
+      renderGeneratorCommand = command:
+        if command != [ ] && builtins.head command == "cargo" then
+          "run_cargo_generator ${lib.escapeShellArgs (builtins.tail command)}"
+        else
+          lib.escapeShellArgs command;
+      renderGeneratorCommands = commands: lib.concatMapStringsSep "\n" renderGeneratorCommand commands;
       renderCommands = commands: lib.concatMapStringsSep "\n" lib.escapeShellArgs commands;
+      patchPathsForShell = lib.concatMapStringsSep " " lib.escapeShellArg patchPaths;
     in
     codex.overrideAttrs (old: {
       pname = "check-codex-maintenance";
@@ -147,9 +180,12 @@ let
         pkgs.cacert
         pkgs.gitMinimal
         pkgs.just
+        pkgs.jq
         pkgs.protobuf
         pkgs.python3
+        pkgs.ripgrep
         pkgs.rustfmt
+        pkgs.zstd
       ];
 
       doCheck = false;
@@ -170,23 +206,112 @@ let
 
         export HOME="$TMPDIR/home"
         export RUST_MIN_STACK=8388608
+        export CODEX_CARGO_JOBS=7
+        export CARGO_BUILD_JOBS=7
+        export CARGO_TARGET_DIR="$TMPDIR/cargo-target"
         mkdir -p "$HOME"
 
         repo_root="$PWD/.."
-        git -C "$repo_root" init --quiet
-        git -C "$repo_root" config user.email codex-check@example.invalid
-        git -C "$repo_root" config user.name codex-check
-        git -C "$repo_root" add -A
-        git -C "$repo_root" commit --quiet -m baseline
+        pinned_root="$TMPDIR/codex-pinned"
+        mkdir -p "$pinned_root"
+        cp -a ${pinnedSource}/. "$pinned_root/"
+        chmod -R u+w "$pinned_root"
 
-        cd "$repo_root"
-        ${renderCommands upstream.generate_commands}
-        if test -n "$(git status --short)"; then
-          git status --short
-          git diff --stat
-          echo "error: tracked Codex generated artifacts drifted" >&2
+        # Prove that the complete four-patch series applies from the pinned
+        # upstream revision, including the binary generated-contract patch.
+        for patch in ${patchPathsForShell}; do
+          git -C "$pinned_root" apply --check --binary "$patch"
+          git -C "$pinned_root" apply --binary "$patch"
+        done
+
+        # Negative terminal marker gate and static live-producer coverage.
+        if rg -n --hidden --glob '!.git/**' --glob '!target/**' \
+          'terminal_wait|TerminalWait|TerminalWaitDecision|terminal_wait_control|TerminalWaitToml|YieldReason' \
+          "$pinned_root"; then
+          echo "error: terminal-only marker found in patched pinned source" >&2
           exit 1
         fi
+        for producer in \
+          codex-rs/core/src/session/turn.rs \
+          codex-rs/core/src/compact.rs \
+          codex-rs/core/src/compact_remote.rs \
+          codex-rs/core/src/compact_remote_v2.rs \
+          codex-rs/core/src/guardian/review.rs \
+          codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs \
+          codex-rs/core/src/hook_runtime.rs; do
+          test -f "$pinned_root/$producer"
+          rg -q 'model_request_failure_policy|record_model_request_failure' "$pinned_root/$producer"
+        done
+
+        for fixture in \
+          codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst \
+          codex-rs/app-server-protocol/schema/precomputed/app-server-exports-experimental.json.zst; do
+          test -f "$pinned_root/$fixture"
+          zstd --quiet --decompress --stdout "$pinned_root/$fixture" | jq empty
+        done
+        test -f "$pinned_root/codex-rs/Cargo.lock"
+        test -f "$pinned_root/codex-rs/core/config.schema.json"
+        test -d "$pinned_root/codex-rs/hooks/schema/generated"
+
+        generation_digest() {
+          local root="$1"
+          (
+            cd "$root"
+            find . -type f -o -type l \
+              | sed '/^\.\/\.git\//d; /^\.\/target\//d' \
+              | sort \
+              | while IFS= read -r path; do
+                  if test -L "$path"; then
+                    printf '%s\\0%s\\0' "$path" "$(readlink "$path")"
+                  else
+                    printf '%s\\0' "$path"
+                    sha256sum "$path"
+                  fi
+                done
+          ) | sha256sum | cut -d' ' -f1
+        }
+
+        generation_baseline="$TMPDIR/codex-generation-baseline"
+        cp -a "$repo_root/." "$generation_baseline"
+        before_generation="$(generation_digest "$repo_root")"
+
+        cd "$repo_root"
+        run_cargo_generator() (
+          # Nix's cargo vendor hook supplies pinned git sources and deliberately
+          # rejects `cargo generate-lockfile` until a lockfile already exists.
+          # The lockfile itself is generated by the declared command in the
+          # codex shell; here metadata --locked proves that exact generated
+          # lockfile is consumable without network access.
+          if test "''${1-}" = generate-lockfile; then
+            (cd "$repo_root/codex-rs" && cargo metadata --locked --offline --no-deps --format-version 1 >/dev/null)
+          else
+            (cd "$repo_root/codex-rs" && cargo "$@")
+          fi
+        )
+        run_generators() {
+          ${renderGeneratorCommands upstream.generate_commands}
+        }
+        run_generators
+        first_generation="$(generation_digest "$repo_root")"
+        run_generators
+        second_generation="$(generation_digest "$repo_root")"
+        test "$first_generation" = "$second_generation" || {
+          echo "error: generator sequence is not byte-reproducible" >&2
+          exit 1
+        }
+        test "$before_generation" = "$first_generation" || {
+          echo "error: generators changed tracked or source-owned files" >&2
+          diff -qr --exclude=.git --exclude=target "$generation_baseline" "$repo_root" || true
+          exit 1
+        }
+        for fixture in $(find "$repo_root" -type f -name '*.json.zst' | sort); do
+          relative="''${fixture#"$repo_root/"}"
+          baseline_fixture="$generation_baseline/$relative"
+          test -f "$baseline_fixture"
+          diff -u \
+            <(zstd --quiet --decompress --stdout "$baseline_fixture" | jq -S .) \
+            <(zstd --quiet --decompress --stdout "$fixture" | jq -S .)
+        done
         touch "$TMPDIR/generation-ok"
 
         cd codex-rs

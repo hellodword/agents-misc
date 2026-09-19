@@ -18,9 +18,10 @@ from common import (
     require_git_worktree,
     run,
     run_generation_sequence,
-    run_upstream,
+    run_manifest_validation,
     validate_binary_patches,
     validate_patch_directory,
+    validate_zstd_fixture_tree,
 )
 
 
@@ -60,19 +61,8 @@ def main() -> int:
         after_generate = changed_tree_digest(validation)
         if after_generate != before_generate:
             raise RuntimeError("tracked generated artifacts drift after applying the patch series")
-        run_upstream(manifest, manifest.upstream.validation_command, cwd=validation)
-        seen: set[tuple[str, ...]] = set()
-        for patch in manifest.patches:
-            for command in patch.tests:
-                if command in seen:
-                    continue
-                seen.add(command)
-                run_upstream(manifest, command, cwd=validation)
-        for command in manifest.upstream.regression_commands:
-            if command in seen:
-                continue
-            seen.add(command)
-            run_upstream(manifest, command, cwd=validation)
+        validate_zstd_fixture_tree(validation)
+        seen = run_manifest_validation(manifest, validation)
     json_stdout(
         {
             "ref": manifest.upstream.ref,

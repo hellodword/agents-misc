@@ -9,18 +9,20 @@ from common import (
     load_manifest,
     main_wrapper,
     require_git_worktree,
-    run_upstream,
+    run_manifest_validation,
 )
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run the manifest-defined Codex validation command")
+    parser = argparse.ArgumentParser(
+        description="Run the manifest-defined pinned Codex validation and regression commands"
+    )
     add_repo_root_argument(parser)
     args = parser.parse_args()
     manifest = load_manifest(args.repo_root)
     require_git_worktree(manifest.worktree)
     ensure_pinned_head(manifest.worktree, manifest.upstream)
-    run_upstream(manifest, manifest.upstream.validation_command, cwd=manifest.worktree)
+    run_manifest_validation(manifest, manifest.worktree, include_patch_tests=False)
     json_stdout(
         {
             "ref": manifest.upstream.ref,

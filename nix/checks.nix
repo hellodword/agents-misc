@@ -28,6 +28,7 @@ lib.genAttrs supportedSystems (
             pkgs.coreutils
             pkgs.gitMinimal
             pkgs.python3
+            pkgs.zstd
           ];
         }
         ''

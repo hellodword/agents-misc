@@ -39,9 +39,11 @@ lib.genAttrs supportedSystems (
         pkg-config
         protobuf
         python3
+        ripgrep
         ruff
         rustc
         rustfmt
+        zstd
       ];
 
       AGENTS_MISC_SHELL = "codex";

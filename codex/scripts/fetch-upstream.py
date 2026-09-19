@@ -6,7 +6,9 @@ from common import add_repo_root_argument, fetch_upstream, json_stdout, load_man
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Fetch the one pinned Codex upstream revision")
+    parser = argparse.ArgumentParser(
+        description="Fetch the one pinned Codex revision used by the four-patch maintenance workflow"
+    )
     add_repo_root_argument(parser)
     args = parser.parse_args()
     manifest = load_manifest(args.repo_root)

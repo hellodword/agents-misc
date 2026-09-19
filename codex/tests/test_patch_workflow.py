@@ -23,6 +23,8 @@ from codex.scripts.common import (
     run_generation_sequence,
     terminal_marker_hits,
     validate_binary_patches,
+    validate_zstd_fixture_tree,
+    zstd_semantic_diff,
     validate_patch_directory,
     audit_overload_producer_coverage,
 )
@@ -168,6 +170,23 @@ class PatchWorkflowTests(unittest.TestCase):
         refresh_patches(self.manifest, dry_run=True)
         self.assertEqual(before, command(["git", "status", "--porcelain=v1"], self.root, capture=True))
         self.assertEqual(hashes, file_hashes(self.manifest.patch_dir))
+
+    def test_shell_wrapped_cargo_regression_uses_workspace_cwd(self) -> None:
+        repository = self.base / "codex-source"
+        workspace = repository / "codex-rs"
+        workspace.mkdir(parents=True)
+        (workspace / "Cargo.toml").write_text("[workspace]\n")
+        completed = subprocess.CompletedProcess(["bash", "-c", "cargo test"], 0)
+
+        with patch.object(common, "run", return_value=completed) as run_mock:
+            result = common.run_upstream(
+                self.manifest,
+                ("bash", "-c", "cargo test"),
+                cwd=repository,
+            )
+
+        self.assertIs(result, completed)
+        self.assertEqual(run_mock.call_args.kwargs["cwd"], workspace)
 
     def test_clean_apply_reproduces_edited_and_generated_tree(self) -> None:
         refresh_patches(self.manifest, dry_run=False)
@@ -446,6 +465,29 @@ class PatchWorkflowTests(unittest.TestCase):
         hits = terminal_marker_hits(source)
         self.assertEqual(len(hits), 1)
         self.assertIn("terminal_wait", hits[0])
+
+    def test_zstd_fixture_semantic_review_ignores_json_key_order(self) -> None:
+        expected = self.base / "expected.json.zst"
+        actual = self.base / "actual.json.zst"
+        expected_json = self.base / "expected.json"
+        actual_json = self.base / "actual.json"
+        expected_json.write_text('{"b": [1, 2], "a": {"z": true}}\n')
+        actual_json.write_text('{"a": {"z": true}, "b": [1, 2]}\n')
+        command(["zstd", "--quiet", "--force", str(expected_json), "-o", str(expected)], self.base)
+        command(["zstd", "--quiet", "--force", str(actual_json), "-o", str(actual)], self.base)
+        self.assertEqual(zstd_semantic_diff(expected, actual), ())
+        self.assertEqual(validate_zstd_fixture_tree(self.base), ("actual.json.zst", "expected.json.zst"))
+
+    def test_zstd_fixture_semantic_review_reports_value_changes(self) -> None:
+        expected = self.base / "expected.json.zst"
+        actual = self.base / "actual.json.zst"
+        expected_json = self.base / "expected.json"
+        actual_json = self.base / "actual.json"
+        expected_json.write_text('{"value": 1}\n')
+        actual_json.write_text('{"value": 2}\n')
+        command(["zstd", "--quiet", "--force", str(expected_json), "-o", str(expected)], self.base)
+        command(["zstd", "--quiet", "--force", str(actual_json), "-o", str(actual)], self.base)
+        self.assertTrue(zstd_semantic_diff(expected, actual))
 
     def test_overload_producer_coverage_requires_shared_adapter(self) -> None:
         source = self.base / "producers"

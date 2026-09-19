@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import hashlib
 import json
 import os
@@ -414,7 +415,17 @@ def run(
 
 
 def jobs_limit() -> int:
-    return max(1, (os.cpu_count() or 2) - 1)
+    available = max(1, (os.cpu_count() or 2) - 1)
+    configured = os.environ.get("CODEX_CARGO_JOBS")
+    if configured is None:
+        return min(7, available)
+    try:
+        requested = int(configured)
+    except ValueError as exc:
+        raise PatchError("CODEX_CARGO_JOBS must be an integer") from exc
+    if requested < 1:
+        raise PatchError("CODEX_CARGO_JOBS must be at least 1")
+    return min(requested, available)
 
 
 def upstream_build_env(manifest: MaintenanceManifest) -> dict[str, str]:
@@ -486,7 +497,22 @@ def run_upstream(
 ) -> subprocess.CompletedProcess[str]:
     args = list(command)
     command_cwd = cwd
-    if args and args[0] == "cargo" and not (cwd / "Cargo.toml").is_file() and (cwd / "codex-rs" / "Cargo.toml").is_file():
+    if (
+        args
+        and args[0] == "cargo"
+        and not (cwd / "Cargo.toml").is_file()
+        and (cwd / "codex-rs" / "Cargo.toml").is_file()
+    ):
+        command_cwd = cwd / "codex-rs"
+    if (
+        len(args) >= 2
+        and args[0] in {"bash", "sh"}
+        and args[1] == "-c"
+        and not (cwd / "Cargo.toml").is_file()
+        and (cwd / "codex-rs" / "Cargo.toml").is_file()
+    ):
+        # Shell-wrapped regressions use the same crate-root convention as
+        # direct Cargo commands when the caller supplied the repository root.
         command_cwd = cwd / "codex-rs"
     if (
         len(args) >= 2
@@ -739,6 +765,112 @@ def run_generation_sequence(
     return first, second
 
 
+def _canonical_json(value: Any) -> Any:
+    """Return a recursively key-sorted JSON value for semantic comparisons."""
+
+    if isinstance(value, dict):
+        return {key: _canonical_json(value[key]) for key in sorted(value)}
+    if isinstance(value, list):
+        return [_canonical_json(item) for item in value]
+    return value
+
+
+def _read_zstd_json(path: Path) -> Any:
+    if not path.is_file():
+        raise PatchError(f"missing zstd fixture: {path}")
+    result = run(["zstd", "--quiet", "--decompress", "--stdout", str(path)], capture=True)
+    try:
+        return _canonical_json(json.loads(result.stdout))
+    except json.JSONDecodeError as exc:
+        raise PatchError(f"zstd fixture is not valid JSON: {path}") from exc
+
+
+def zstd_semantic_diff(expected: Path, actual: Path) -> tuple[str, ...]:
+    """Compare two zstd-compressed JSON fixtures after decompression.
+
+    Byte identity is still required for generated trees. This helper gives the
+    maintenance and Nix gates a stable semantic review for binary schema hunks.
+    """
+
+    expected_json = json.dumps(_read_zstd_json(expected), sort_keys=True, indent=2).splitlines()
+    actual_json = json.dumps(_read_zstd_json(actual), sort_keys=True, indent=2).splitlines()
+    return tuple(
+        difflib.unified_diff(
+            expected_json,
+            actual_json,
+            fromfile=str(expected),
+            tofile=str(actual),
+            lineterm="",
+        )
+    )
+
+
+def assert_zstd_semantically_equal(expected: Path, actual: Path) -> None:
+    diff = zstd_semantic_diff(expected, actual)
+    if diff:
+        raise PatchError("zstd JSON semantic diff detected:\n" + "\n".join(diff))
+
+
+def assert_zstd_fixture_trees_semantically_equal(expected_root: Path, actual_root: Path) -> None:
+    """Compare every matching ``*.json.zst`` fixture in two trees."""
+
+    expected_paths = {
+        path.relative_to(expected_root).as_posix(): path
+        for path in _iter_tree_paths(expected_root)
+        if path.name.endswith(".json.zst")
+    }
+    actual_paths = {
+        path.relative_to(actual_root).as_posix(): path
+        for path in _iter_tree_paths(actual_root)
+        if path.name.endswith(".json.zst")
+    }
+    if set(expected_paths) != set(actual_paths):
+        raise PatchError(
+            "zstd fixture path set differs: "
+            f"expected={sorted(expected_paths)} actual={sorted(actual_paths)}"
+        )
+    for relative in sorted(expected_paths):
+        assert_zstd_semantically_equal(expected_paths[relative], actual_paths[relative])
+
+
+def validate_zstd_fixture_tree(root: Path) -> tuple[str, ...]:
+    """Decompress and validate every JSON zstd fixture in ``root``."""
+
+    paths = tuple(
+        path.relative_to(root).as_posix()
+        for path in _iter_tree_paths(root)
+        if path.name.endswith(".json.zst")
+    )
+    for relative in paths:
+        _read_zstd_json(root / relative)
+    return paths
+
+
+def run_manifest_validation(
+    manifest: MaintenanceManifest,
+    worktree: Path,
+    *,
+    include_patch_tests: bool = True,
+) -> tuple[tuple[str, ...], ...]:
+    """Run validation, focused patch tests, and manifest regressions once each."""
+
+    run_upstream(manifest, manifest.upstream.validation_command, cwd=worktree)
+    seen: set[tuple[str, ...]] = set()
+    if include_patch_tests:
+        for patch in manifest.patches:
+            for command in patch.tests:
+                if command in seen:
+                    continue
+                seen.add(command)
+                run_upstream(manifest, command, cwd=worktree)
+    for command in manifest.upstream.regression_commands:
+        if command in seen:
+            continue
+        seen.add(command)
+        run_upstream(manifest, command, cwd=worktree)
+    return tuple(sorted(seen))
+
+
 def terminal_marker_hits(
     root: Path,
     *,
@@ -812,6 +944,20 @@ def audit_default_overload_producer_coverage(root: Path) -> dict[str, Any]:
     )
 
 
+def audit_default_overload_producer_coverage_if_codex_tree(root: Path) -> dict[str, Any]:
+    """Run the production producer audit when validating a Codex source tree.
+
+    The maintenance workflow tests also exercise the patch engine with tiny
+    synthetic repositories. Those fixtures intentionally do not contain the
+    pinned Codex source layout, so they must not be treated as a partial
+    production checkout.
+    """
+
+    if not (root / "codex-rs").is_dir():
+        return {"covered": (), "missing": (), "total": 0, "skipped": True}
+    return audit_default_overload_producer_coverage(root)
+
+
 def patch_contains_binary_data(patch: Path) -> bool:
     return b"GIT binary patch" in patch.read_bytes()
 
@@ -842,7 +988,7 @@ def apply_patches(src: Path, patches: Sequence[Path], *, check_only: bool) -> No
                 run(["git", "apply", "--check", "--binary", str(patch)], cwd=clone)
                 run(["git", "apply", "--binary", str(patch)], cwd=clone)
             assert_terminal_markers_absent(clone)
-            audit_default_overload_producer_coverage(clone)
+            audit_default_overload_producer_coverage_if_codex_tree(clone)
         return
 
     revision = git_output(src, ["rev-parse", "HEAD"])
@@ -860,7 +1006,7 @@ def apply_patches(src: Path, patches: Sequence[Path], *, check_only: bool) -> No
             run(["git", "apply", "--check", "--binary", str(patch)], cwd=candidate)
             run(["git", "apply", "--binary", str(patch)], cwd=candidate)
         assert_terminal_markers_absent(candidate)
-        audit_default_overload_producer_coverage(candidate)
+        audit_default_overload_producer_coverage_if_codex_tree(candidate)
 
         if git_output(src, ["rev-parse", "HEAD"]) != revision:
             raise PatchError("upstream checkout HEAD changed while applying candidate patches")
@@ -901,25 +1047,14 @@ def _validate_candidate(
         run(["git", "apply", "--check", "--binary", str(patch)], cwd=validation)
         run(["git", "apply", "--binary", str(patch)], cwd=validation)
     assert_terminal_markers_absent(validation)
-    audit_default_overload_producer_coverage(validation)
+    audit_default_overload_producer_coverage_if_codex_tree(validation)
     validate_binary_patches(manifest.worktree, patch_paths(manifest, directory=candidate))
     validate_generated_changes(manifest, changed)
     if _tree_digest(validation, changed) != _tree_digest(expected, changed):
         raise PatchError("candidate patches do not reproduce the generated editing tree")
+    assert_zstd_fixture_trees_semantically_equal(expected, validation)
     fault("validate")
-    run_upstream(manifest, manifest.upstream.validation_command, cwd=validation)
-    seen: set[tuple[str, ...]] = set()
-    for patch in manifest.patches:
-        for command in patch.tests:
-            if command in seen:
-                continue
-            seen.add(command)
-            run_upstream(manifest, command, cwd=validation)
-    for command in manifest.upstream.regression_commands:
-        if command in seen:
-            continue
-        seen.add(command)
-        run_upstream(manifest, command, cwd=validation)
+    run_manifest_validation(manifest, validation)
 
 
 def _exchange_directories(candidate: Path, target: Path) -> None:

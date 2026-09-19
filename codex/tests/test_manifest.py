@@ -119,6 +119,24 @@ class ManifestTests(unittest.TestCase):
             [patch.file for patch in manifest.patches],
         )
 
+    def test_pinned_manifest_declares_explicit_reproducible_generators(self) -> None:
+        manifest = load_manifest()
+        self.assertEqual(
+            manifest.upstream.generate_commands,
+            (
+                ("cargo", "generate-lockfile"),
+                ("bash", "codex-rs/config/scripts/generate-proto.sh"),
+                ("just", "write-config-schema"),
+                ("python3", "codex-rs/app-server-protocol/scripts/write_schema_fixtures.py"),
+                (
+                    "python3",
+                    "codex-rs/app-server-protocol/scripts/write_schema_fixtures.py",
+                    "--experimental",
+                ),
+                ("just", "write-hooks-schema"),
+            ),
+        )
+
     def test_generated_only_ownership_requires_generated_paths(self) -> None:
         manifest = load_manifest(self.make_root(), require_patch_files=False)
         patch = manifest.patches[0]
