@@ -71,9 +71,12 @@ let
     if lib.length validatedPatches != expectedPatchCount then
       false
     else
-      let generatedPatch = builtins.elemAt validatedPatches 3;
-      in generatedPatch.source_files == [ ] && generatedPatch.source_prefixes == [ ]
-        && (generatedPatch.generated_files != [ ] || generatedPatch.generated_prefixes != [ ]);
+      let
+        generatedPatch = builtins.elemAt validatedPatches 3;
+      in
+      generatedPatch.source_files == [ ]
+      && generatedPatch.source_prefixes == [ ]
+      && (generatedPatch.generated_files != [ ] || generatedPatch.generated_prefixes != [ ]);
   patchPaths = map (
     filename:
     let
@@ -164,7 +167,8 @@ let
     let
       pkgs = import nixpkgs { inherit system; };
       codex = codexFor system;
-      renderGeneratorCommand = command:
+      renderGeneratorCommand =
+        command:
         if command != [ ] && builtins.head command == "cargo" then
           "run_cargo_generator ${lib.escapeShellArgs (builtins.tail command)}"
         else
