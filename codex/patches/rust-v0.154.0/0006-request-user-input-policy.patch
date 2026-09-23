@@ -44,32 +44,10 @@ index e42fa9be0171c082ad088475f41fea6e63f5fae0..9cf94b18a645d24cf2a7031aeba54584
      fn redacted_json_report_structures_and_sanitizes_details() {
          let report = DoctorReport {
 diff --git a/codex-rs/core/src/mcp_skill_dependencies.rs b/codex-rs/core/src/mcp_skill_dependencies.rs
-index 6a9898c562c452259514b1082a3d64733e4ddde4..cb09e726c3075959d499bb3e20725c3a5fef2eaa 100644
+index 6a9898c562c452259514b1082a3d64733e4ddde4..9426fd97d20bfee9f97ad9ab7f05128c96b8a30c 100644
 --- a/codex-rs/core/src/mcp_skill_dependencies.rs
 +++ b/codex-rs/core/src/mcp_skill_dependencies.rs
-@@ -259,6 +259,10 @@ async fn should_install_mcp_dependencies(
-     missing: &HashMap<String, McpServerConfig>,
-     cancellation_token: &CancellationToken,
- ) -> bool {
-+    if turn_context.approval_policy() == AskForApproval::Never {
-+        return false;
-+    }
-+
-     if mcp_permission_prompt_is_auto_approved(
-         turn_context.approval_policy(),
-         &turn_context.permission_profile(),
-@@ -267,10 +271,6 @@ async fn should_install_mcp_dependencies(
-         return true;
-     }
- 
--    if turn_context.approval_policy() == AskForApproval::Never {
--        return false;
--    }
--
-     let server_list = format_missing_mcp_dependencies(missing);
-     let question = RequestUserInputQuestion {
-         id: SKILL_MCP_DEPENDENCY_PROMPT_ID.to_string(),
-@@ -528,3 +528,108 @@ fn collect_missing_mcp_dependencies(
+@@ -528,3 +528,72 @@ fn collect_missing_mcp_dependencies(
  
      missing
  }
@@ -81,7 +59,6 @@ index 6a9898c562c452259514b1082a3d64733e4ddde4..cb09e726c3075959d499bb3e20725c3a
 +    use crate::state::ActiveTurn;
 +    use codex_config::config_toml::RequestUserInputPolicy;
 +    use codex_login::CodexAuth;
-+    use codex_protocol::models::PermissionProfile;
 +    use codex_protocol::protocol::EventMsg;
 +    use std::sync::Arc;
 +
@@ -142,44 +119,9 @@ index 6a9898c562c452259514b1082a3d64733e4ddde4..cb09e726c3075959d499bb3e20725c3a
 +            .await;
 +        assert!(!request.await.expect("skill dependency prompt task"));
 +    }
-+
-+    #[tokio::test]
-+    async fn request_user_input_policy_yolo_skill_dependency_returns_false_without_prompting() {
-+        let (session, turn_context, events) = make_session_and_context_with_auth_and_config_and_rx(
-+            CodexAuth::from_api_key("Test API Key"),
-+            Vec::new(),
-+            |config| {
-+                config
-+                    .permissions
-+                    .approval_policy
-+                    .set(AskForApproval::Never)
-+                    .expect("test policy should allow yolo approval mode");
-+                config
-+                    .permissions
-+                    .set_permission_profile(PermissionProfile::Disabled)
-+                    .expect("test policy should allow full access");
-+            },
-+        )
-+        .await;
-+
-+        assert!(
-+            !should_install_mcp_dependencies(
-+                &session,
-+                &turn_context,
-+                &missing_dependency(),
-+                &CancellationToken::new(),
-+            )
-+            .await
-+        );
-+        assert!(
-+            !std::iter::from_fn(|| events.try_recv().ok())
-+                .any(|event| matches!(event.msg, EventMsg::RequestUserInput(_))),
-+            "yolo must not emit a skill dependency prompt"
-+        );
-+    }
 +}
 diff --git a/codex-rs/core/src/mcp_tool_call_tests.rs b/codex-rs/core/src/mcp_tool_call_tests.rs
-index 3b44bafecd5f5a057d598ea0fbd6a63476461151..b35dc3eeb46f46c34f85f4a33673d75e244af280 100644
+index 3b44bafecd5f5a057d598ea0fbd6a63476461151..4b9c8d14e055f49ec106b5f15811a0fb23b624cc 100644
 --- a/codex-rs/core/src/mcp_tool_call_tests.rs
 +++ b/codex-rs/core/src/mcp_tool_call_tests.rs
 @@ -6,6 +6,7 @@ use crate::environment_selection::EnvironmentConfigOrigin;
@@ -198,13 +140,11 @@ index 3b44bafecd5f5a057d598ea0fbd6a63476461151..b35dc3eeb46f46c34f85f4a33673d75e
  use codex_config::types::AppConfig;
  use codex_config::types::AppToolConfig;
  use codex_config::types::AppToolsConfig;
-@@ -3007,6 +3009,98 @@ async fn session_approval_preserves_mcp_always_persistence_choice() {
+@@ -3007,6 +3009,77 @@ async fn session_approval_preserves_mcp_always_persistence_choice() {
      .await;
  }
  
-+fn request_user_input_policy_mcp_approval_action(
-+    approval_policy: AskForApproval,
-+) -> ApprovalAction {
++fn request_user_input_policy_mcp_approval_action() -> ApprovalAction {
 +    ApprovalAction::McpToolCall {
 +        id: "call-mcp-policy".to_string(),
 +        server: "example".to_string(),
@@ -218,7 +158,7 @@ index 3b44bafecd5f5a057d598ea0fbd6a63476461151..b35dc3eeb46f46c34f85f4a33673d75e
 +        tool_description: None,
 +        annotations: None,
 +        hook_tool_name: HookToolName::new("mcp__example__dangerous"),
-+        approval_policy,
++        approval_policy: AskForApproval::OnRequest,
 +        reviewer: ApprovalsReviewer::User,
 +        approval_mode: AppToolApproval::Prompt,
 +        allow_session_remember: false,
@@ -250,7 +190,7 @@ index 3b44bafecd5f5a057d598ea0fbd6a63476461151..b35dc3eeb46f46c34f85f4a33673d75e
 +                &session,
 +                &turn_context,
 +                "call-mcp-policy",
-+                &request_user_input_policy_mcp_approval_action(AskForApproval::OnRequest),
++                &request_user_input_policy_mcp_approval_action(),
 +            )
 +            .await
 +        }
@@ -272,25 +212,6 @@ index 3b44bafecd5f5a057d598ea0fbd6a63476461151..b35dc3eeb46f46c34f85f4a33673d75e
 +    assert_eq!(
 +        approval.await.expect("MCP approval fallback task"),
 +        ReviewDecision::Abort
-+    );
-+}
-+
-+#[tokio::test]
-+async fn request_user_input_policy_yolo_mcp_tool_approval_denies_without_prompting() {
-+    let (session, turn_context, events) = make_session_and_context_with_rx().await;
-+    assert_eq!(
-+        request_mcp_tool_user_approval(
-+            &session,
-+            &turn_context,
-+            "call-mcp-policy",
-+            &request_user_input_policy_mcp_approval_action(AskForApproval::Never),
-+        )
-+        .await,
-+        ReviewDecision::denied("MCP tool call requires approval, but approval policy is never")
-+    );
-+    assert!(
-+        events.try_recv().is_err(),
-+        "yolo must not emit an MCP prompt"
 +    );
 +}
 +
@@ -400,136 +321,6 @@ index 2f85db1eecfbd9e883d4be4674e8ca46eb71d7e4..4774e0382da2188f5f3d5dbc062fcafb
 +    )
 +    .await;
 +}
-diff --git a/codex-rs/core/src/session/mcp_tests.rs b/codex-rs/core/src/session/mcp_tests.rs
-index 120789bc354162668154d3adddd7067c610e30c2..4e6489ee7ed9d177e7354dfe869eeafbdf6b8732 100644
---- a/codex-rs/core/src/session/mcp_tests.rs
-+++ b/codex-rs/core/src/session/mcp_tests.rs
-@@ -1,8 +1,44 @@
- use super::*;
-+use crate::session::TurnInput;
-+use crate::session::tests::make_session_and_context_with_auth_and_config_and_rx;
-+use crate::state::TaskKind;
-+use crate::tasks::SessionTask;
-+use crate::tasks::SessionTaskResult;
-+use codex_login::CodexAuth;
-+use codex_protocol::models::PermissionProfile;
-+use codex_protocol::protocol::AskForApproval;
-+use codex_protocol::protocol::EventMsg;
-+use codex_protocol::protocol::TurnAbortReason;
- use rmcp::model::BooleanSchema;
- use rmcp::model::ElicitationSchema;
- use rmcp::model::PrimitiveSchemaDefinition;
- use serde_json::json;
-+use std::sync::Arc;
-+use tokio_util::sync::CancellationToken;
-+
-+#[derive(Clone, Copy)]
-+struct RequestUserInputPolicyPendingTask;
-+
-+impl SessionTask for RequestUserInputPolicyPendingTask {
-+    fn kind(&self) -> TaskKind {
-+        TaskKind::Regular
-+    }
-+
-+    fn span_name(&self) -> &'static str {
-+        "session_task.request_user_input_policy_pending"
-+    }
-+
-+    async fn run(
-+        self: Arc<Self>,
-+        _session: Arc<Session>,
-+        _ctx: Arc<TurnContext>,
-+        _input: Vec<TurnInput>,
-+        cancellation_token: CancellationToken,
-+    ) -> SessionTaskResult {
-+        cancellation_token.cancelled().await;
-+        Ok(None)
-+    }
-+}
- 
- fn meta(value: Value) -> Option<RequestMetaObject> {
-     let Value::Object(map) = value else {
-@@ -221,6 +257,80 @@ fn guardian_elicitation_review_request_declines_unsupported_opt_in_shapes() {
-     ));
- }
- 
-+#[tokio::test]
-+async fn request_user_input_policy_yolo_mcp_elicitation_declines_except_safe_empty_schema() {
-+    let (session, turn_context, events) = make_session_and_context_with_auth_and_config_and_rx(
-+        CodexAuth::from_api_key("Test API Key"),
-+        Vec::new(),
-+        |config| {
-+            config
-+                .permissions
-+                .approval_policy
-+                .set(AskForApproval::Never)
-+                .expect("test policy should allow yolo approval mode");
-+            config
-+                .permissions
-+                .set_permission_profile(PermissionProfile::Disabled)
-+                .expect("test policy should allow full access");
-+            config
-+                .mcp_servers
-+                .set(
-+                    serde_json::from_value(json!({
-+                        "browser-use": { "command": "missing-test-mcp-server" }
-+                    }))
-+                    .expect("test MCP server configuration should deserialize"),
-+                )
-+                .expect("test MCP server should be configurable");
-+        },
-+    )
-+    .await;
-+    session
-+        .spawn_task(
-+            Arc::clone(&turn_context),
-+            Vec::new(),
-+            RequestUserInputPolicyPendingTask,
-+        )
-+        .await;
-+    session.mark_mcp_runtime_dirty();
-+    session.refresh_mcp_if_dirty().await;
-+
-+    let safe = review_guardian_mcp_elicitation(Arc::clone(&session), form_request(/*meta*/ None))
-+        .await
-+        .expect("safe elicitation review should succeed")
-+        .expect("safe empty-schema elicitation should resolve automatically");
-+    assert_eq!(safe.action, ElicitationAction::Accept);
-+    assert_eq!(safe.content, Some(json!({})));
-+
-+    let unsafe_request = ElicitationReviewRequest {
-+        server_name: "browser-use".to_string(),
-+        request_id: rmcp::model::NumberOrString::Number(8),
-+        elicitation: Elicitation::Mcp(rmcp::model::ElicitRequestParams::FormElicitationParams {
-+            meta: None,
-+            message: "Provide confirmation".to_string(),
-+            requested_schema: ElicitationSchema::builder()
-+                .required_property(
-+                    "confirmed",
-+                    PrimitiveSchemaDefinition::Boolean(BooleanSchema::new()),
-+                )
-+                .build()
-+                .expect("schema should build"),
-+        }),
-+    };
-+    let declined = review_guardian_mcp_elicitation(Arc::clone(&session), unsafe_request)
-+        .await
-+        .expect("unsafe elicitation review should succeed")
-+        .expect("yolo should resolve unsafe elicitation without prompting");
-+    assert_eq!(declined.action, ElicitationAction::Decline);
-+    assert!(declined.content.is_none());
-+    assert!(
-+        !std::iter::from_fn(|| events.try_recv().ok())
-+            .any(|event| matches!(event.msg, EventMsg::ElicitationRequest(_))),
-+        "yolo MCP elicitation must not prompt"
-+    );
-+
-+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
-+}
-+
- #[test]
- fn guardian_decisions_map_to_elicitation_responses_without_session_state() {
-     let model = codex_models_manager::model_info::model_info_from_slug("acting-model");
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
 index 8ffc144d028b4f339d0ff323bbc804659406bada..ddadb37bcd6b92bddc1719cfb6d10882766c563b 100644
 --- a/codex-rs/core/src/session/mod.rs

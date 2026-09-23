@@ -151,13 +151,12 @@ tests = [
 [[patch]]
 file = "0006-request-user-input-policy.patch"
 intent = "Enforce request-user-input blocking policy once at the Session emission boundary."
-behavior = "Missing policy blocks by default, PreserveSource retains producer intent, and yolo never bypasses tool exposure or approval rejection."
+behavior = "Missing policy blocks by default, PreserveSource retains producer intent, and yolo leaves the independent request-user-input policy unchanged."
 source_files = [
   "codex-rs/cli/src/doctor.rs",
   "codex-rs/core/src/mcp_skill_dependencies.rs",
   "codex-rs/core/src/mcp_tool_call_tests.rs",
   "codex-rs/core/src/session/elicitation_holders_tests.rs",
-  "codex-rs/core/src/session/mcp_tests.rs",
   "codex-rs/core/src/session/mod.rs",
   "codex-rs/core/src/tools/handlers/request_user_input_tests.rs",
   "codex-rs/core/tests/suite/request_user_input.rs",
