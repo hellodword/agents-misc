@@ -38,7 +38,9 @@ class CliTests(unittest.TestCase):
 
     def test_error_includes_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            result = self.run_script("apply-patches.py", "--repo-root", temporary, "--check")
+            result = self.run_script(
+                "apply-patches.py", "--repo-root", temporary, "--check"
+            )
         self.assertEqual(result.returncode, 1)
         self.assertIn("error:", result.stderr)
         self.assertIn("recovery:", result.stderr)

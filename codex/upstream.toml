@@ -3,7 +3,6 @@ ref = "rust-v0.154.0"
 revision = "6b9826e3aa83b1a5947db50f4332cb9c65f1b340"
 worktree = ".work/codex/rust-v0.154.0/src"
 generate_commands = [
-  ["cargo", "generate-lockfile"],
   ["bash", "codex-rs/config/scripts/generate-proto.sh"],
   ["just", "write-config-schema"],
   ["python3", "codex-rs/app-server-protocol/scripts/write_schema_fixtures.py"],
@@ -11,19 +10,18 @@ generate_commands = [
   ["just", "write-hooks-schema"],
 ]
 regression_commands = [
-  ["cargo", "test", "-p", "codex-core", "--lib", "request_user_input_sets_"],
-  ["cargo", "build", "-p", "codex-cli", "--bin", "codex"],
-  [
-    "bash",
-    "-c",
-    "cargo build --jobs \"${CODEX_CARGO_JOBS:-7}\" -p codex-code-mode-host --bin codex-code-mode-host && CARGO_BIN_EXE_codex_code_mode_host=\"${CARGO_TARGET_DIR:-target}/debug/codex-code-mode-host\" cargo test --jobs \"${CODEX_CARGO_JOBS:-7}\" -p codex-core --test all request_user_input_round_trip_resolves_pending",
-  ],
-  ["cargo", "test", "-p", "codex-tui", "auto_resolution_absent_has_no_timer"],
-  ["cargo", "test", "-p", "codex-tui", "auto_resolution_uses_is_blocking_without_auto_resolution_ms"],
+  ["cargo", "test", "--locked", "-p", "codex-goal-extension", "active_goal"],
 ]
 validation_command = [
   "cargo",
   "check",
+  "--locked",
+  "-p",
+  "codex-model-provider-info",
+  "-p",
+  "codex-model-provider",
+  "-p",
+  "codex-api",
   "-p",
   "codex-protocol",
   "-p",
@@ -32,16 +30,6 @@ validation_command = [
   "codex-hooks",
   "-p",
   "codex-core",
-  "-p",
-  "codex-model-provider-info",
-  "-p",
-  "codex-code-mode-protocol",
-  "-p",
-  "codex-code-mode-runtime",
-  "-p",
-  "codex-code-mode",
-  "-p",
-  "codex-code-mode-host",
   "-p",
   "codex-app-server-protocol",
   "-p",

@@ -1,0 +1,2335 @@
+diff --git a/codex-rs/app-server/src/bespoke_event_handling.rs b/codex-rs/app-server/src/bespoke_event_handling.rs
+index 2d3ff975f3069962544e343ff82771bd1548362d..900d8f82af522c5d93802478eea6b619f7f65649 100644
+--- a/codex-rs/app-server/src/bespoke_event_handling.rs
++++ b/codex-rs/app-server/src/bespoke_event_handling.rs
+@@ -1055,6 +1055,26 @@ pub(crate) async fn apply_bespoke_event_handling(
+                 .await;
+             };
+ 
++            // A typed overload is an in-flight recovery state, not a failed
++            // turn. Keep the app-server turn pending and expose retry intent
++            // without emitting a terminal Error/TurnComplete transition.
++            if matches!(codex_error_info, Some(CoreCodexErrorInfo::ServerOverloaded)) {
++                outgoing
++                    .send_server_notification(ServerNotification::Error(ErrorNotification {
++                        error: TurnError {
++                            misalignment: None,
++                            message,
++                            codex_error_info: Some(V2CodexErrorInfo::ServerOverloaded),
++                            additional_details: None,
++                        },
++                        will_retry: true,
++                        thread_id: conversation_id.to_string(),
++                        turn_id: event_turn_id.clone(),
++                    }))
++                    .await;
++                return;
++            }
++
+             if !ev.affects_turn_status() {
+                 return;
+             }
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_resume.rs b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
+index c70eda9e6686dda958d31f079b4d2dc76f9aabd4..b54b334e13855424072319d21d3ca694526c1621 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_resume.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
+@@ -122,6 +122,7 @@ use codex_utils_absolute_path::AbsolutePathBuf;
+ use codex_utils_absolute_path::test_support::PathExt;
+ use codex_utils_path_uri::LegacyAppPathString;
+ use core_test_support::responses;
++use core_test_support::skip_if_host_windows;
+ use core_test_support::skip_if_no_network;
+ use core_test_support::skip_if_remote;
+ use core_test_support::skip_if_wine_exec;
+@@ -3289,6 +3290,179 @@ fn ungated_goal_response(body: String) -> Vec<StreamingSseChunk> {
+     vec![StreamingSseChunk { gate: None, body }]
+ }
+ 
++#[tokio::test]
++async fn active_goal_abnormal_stop_suppression_persists_and_starts_continuation() -> Result<()> {
++    skip_if_host_windows!(Ok(()));
++    skip_if_remote!(Ok(()), "command hook uses host-local script and log paths");
++
++    let (release_continuation, continuation_gate) = oneshot::channel();
++    let (server, _response_completions) = start_streaming_sse_server(vec![
++        ungated_goal_response(responses::sse_completed("materialize-thread")),
++        ungated_goal_response(responses::sse_failed(
++            "failed-goal-turn",
++            "server_error",
++            "terminal goal turn failure",
++        )),
++        vec![StreamingSseChunk {
++            gate: Some(continuation_gate),
++            body: responses::sse_completed("continued-goal-turn"),
++        }],
++    ])
++    .await;
++    let codex_home = TempDir::new()?;
++    let hook_script_path = codex_home.path().join("abnormal_stop_hook.py");
++    let hook_log_path = codex_home.path().join("abnormal_stop_hook.jsonl");
++    std::fs::write(
++        &hook_script_path,
++        format!(
++            r#"import json
++from pathlib import Path
++import sys
++
++payload = json.load(sys.stdin)
++with Path(r"{hook_log_path}").open("a", encoding="utf-8") as handle:
++    handle.write(json.dumps(payload) + "\n")
++print("{{}}")
++"#,
++            hook_log_path = hook_log_path.display(),
++        ),
++    )?;
++    MockResponsesConfig::new(server.uri())
++        .enable_feature(Feature::Goals)
++        .enable_feature(Feature::CodexHooks)
++        .with_extra_config(&format!(
++            r#"[hooks]
++
++[[hooks.AbnormalStop]]
++
++[[hooks.AbnormalStop.hooks]]
++type = "command"
++command = 'python3 "{}"'
++"#,
++            hook_script_path.display(),
++        ))
++        .write(codex_home.path())?;
++    let mut mcp = TestAppServer::builder()
++        .with_codex_home(codex_home.path())
++        .without_managed_config()
++        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT.saturating_mul(2))
++        .await?;
++
++    let start_id = mcp
++        .send_thread_start_request_with_auto_env(ThreadStartParams {
++            model: Some("mock-model".to_string()),
++            config: Some(std::collections::HashMap::from([(
++                "bypass_hook_trust".to_string(),
++                json!(true),
++            )])),
++            ..Default::default()
++        })
++        .await?;
++    let ThreadStartResponse { thread, .. } =
++        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(start_id)).await??;
++    let turn_id = mcp
++        .send_turn_start_request(TurnStartParams {
++            thread_id: thread.id.clone(),
++            input: vec![UserInput::Text {
++                text: "materialize this thread".to_string(),
++                text_elements: Vec::new(),
++            }],
++            ..Default::default()
++        })
++        .await?;
++    let _: TurnStartResponse = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(turn_id)).await??;
++    timeout(
++        DEFAULT_READ_TIMEOUT,
++        mcp.read_stream_until_notification_message("turn/completed"),
++    )
++    .await??;
++
++    let goal_id = mcp
++        .send_raw_request(
++            "thread/goal/set",
++            Some(json!({
++                "threadId": thread.id,
++                "objective": "continue after a terminal model failure",
++                "status": "active",
++            })),
++        )
++        .await?;
++    let goal: ThreadGoalSetResponse =
++        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(goal_id)).await??;
++    assert_eq!(goal.goal.status, ThreadGoalStatus::Active);
++    timeout(DEFAULT_READ_TIMEOUT, server.wait_for_request_count(3)).await?;
++
++    let get_id = mcp
++        .send_raw_request("thread/goal/get", Some(json!({ "threadId": thread.id })))
++        .await?;
++    let persisted: ThreadGoalGetResponse =
++        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(get_id)).await??;
++    assert_eq!(
++        persisted
++            .goal
++            .as_ref()
++            .map(|persisted_goal| persisted_goal.status),
++        Some(ThreadGoalStatus::Active),
++        "suppressed turn-error lifecycle must leave the durable goal active"
++    );
++
++    let requests = server.requests().await;
++    assert_eq!(requests.len(), 3);
++    let failed_goal_request = serde_json::from_slice::<serde_json::Value>(&requests[1])?;
++    let continuation_request = serde_json::from_slice::<serde_json::Value>(&requests[2])?;
++    for request in [&failed_goal_request, &continuation_request] {
++        let request_body = request.to_string();
++        assert!(
++            request_body.contains("Continue working toward the active thread goal")
++                && request_body.contains("continue after a terminal model failure"),
++            "both requests must contain the persisted goal continuation input: {request_body}"
++        );
++    }
++    assert_ne!(
++        failed_goal_request["client_metadata"]["turn_id"],
++        continuation_request["client_metadata"]["turn_id"],
++        "suppression must produce a subsequent goal turn, not retry the same turn"
++    );
++
++    let hook_inputs = std::fs::read_to_string(&hook_log_path)?
++        .lines()
++        .map(serde_json::from_str::<serde_json::Value>)
++        .collect::<Result<Vec<_>, _>>()?;
++    assert_eq!(hook_inputs.len(), 1);
++    assert_eq!(hook_inputs[0]["hookEventName"], "AbnormalStop");
++    assert_eq!(hook_inputs[0]["goalMode"], true);
++    assert_ne!(hook_inputs[0]["error"]["category"], "policy");
++    assert!(
++        hook_inputs[0].get("nextAction").is_none(),
++        "AbnormalStop must use its strict event-specific schema"
++    );
++
++    let clear_id = mcp
++        .send_raw_request(
++            "thread/goal/clear",
++            Some(json!({
++                "threadId": thread.id,
++            })),
++        )
++        .await?;
++    let cleared: ThreadGoalClearResponse =
++        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(clear_id)).await??;
++    assert!(cleared.cleared);
++    release_continuation
++        .send(())
++        .expect("continuation response gate should remain open");
++    for _ in 0..2 {
++        timeout(
++            DEFAULT_READ_TIMEOUT,
++            mcp.read_stream_until_notification_message("turn/completed"),
++        )
++        .await??;
++    }
++    assert_eq!(server.requests().await.len(), 3);
++    server.shutdown().await;
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Result<()> {
+     let server = create_mock_responses_server_sequence_unchecked(vec![
+diff --git a/codex-rs/core/src/hook_runtime.rs b/codex-rs/core/src/hook_runtime.rs
+index e17f1508e7ffdb313af4c444d36dc4248e4d680b..552e5317ebc8db04fed6e33b7e73c4df7344889c 100644
+--- a/codex-rs/core/src/hook_runtime.rs
++++ b/codex-rs/core/src/hook_runtime.rs
+@@ -29,6 +29,8 @@ use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
+ use codex_otel::HOOK_RUN_DURATION_METRIC;
+ use codex_otel::HOOK_RUN_METRIC;
+ use codex_plugin::ExecutorPluginHookSource;
++use codex_protocol::error::CodexErr;
++use codex_protocol::error::CodexErrorDetails;
+ use codex_protocol::items::FunctionCallOutputItem;
+ use codex_protocol::items::TurnItem;
+ use codex_protocol::items::UserMessageItem;
+@@ -60,6 +62,7 @@ use tracing::instrument;
+ use crate::context::ContextualUserFragment;
+ use crate::context::HookAdditionalContext;
+ use crate::event_mapping::parse_turn_item;
++use crate::model_request_failure_policy::RecoveryDecision;
+ use crate::session::TurnInput;
+ use crate::session::session::Session;
+ use crate::session::step_context::StepContext;
+@@ -79,6 +82,91 @@ pub(crate) enum PreToolUseHookResult {
+     Blocked(String),
+ }
+ 
++#[derive(Debug, Clone, Copy)]
++pub(crate) struct ModelRequestHookContext {
++    operation: codex_hooks::ModelRequestOperation,
++    endpoint_path: &'static str,
++}
++
++impl ModelRequestHookContext {
++    pub(crate) fn sampling() -> Self {
++        Self {
++            operation: codex_hooks::ModelRequestOperation::Sampling,
++            endpoint_path: "/responses",
++        }
++    }
++
++    pub(crate) fn local_compact() -> Self {
++        Self {
++            operation: codex_hooks::ModelRequestOperation::LocalCompact,
++            endpoint_path: "/responses",
++        }
++    }
++
++    pub(crate) fn remote_compact() -> Self {
++        Self {
++            operation: codex_hooks::ModelRequestOperation::RemoteCompact,
++            endpoint_path: "/responses/compact",
++        }
++    }
++
++    pub(crate) fn remote_compaction_v2() -> Self {
++        Self {
++            operation: codex_hooks::ModelRequestOperation::RemoteCompact,
++            endpoint_path: "/responses",
++        }
++    }
++}
++
++#[derive(Debug, Clone)]
++pub(crate) struct ModelRequestFailure {
++    context: ModelRequestHookContext,
++    attempt: u64,
++    retry_budget: Option<u64>,
++    next_action: codex_hooks::ModelRequestNextAction,
++    coalesced_count: u64,
++    error: codex_hooks::ModelRequestError,
++}
++
++impl ModelRequestFailure {
++    pub(crate) fn new(
++        context: ModelRequestHookContext,
++        attempt: u64,
++        next_action: codex_hooks::ModelRequestNextAction,
++        error: &CodexErr,
++    ) -> Self {
++        Self {
++            context,
++            attempt: attempt.max(1),
++            retry_budget: None,
++            next_action,
++            coalesced_count: 1,
++            error: model_request_error_payload(error),
++        }
++    }
++
++    pub(crate) fn from_policy(
++        context: ModelRequestHookContext,
++        attempt: u64,
++        decision: RecoveryDecision,
++        error: &CodexErr,
++    ) -> Self {
++        Self {
++            context,
++            attempt: attempt.max(1),
++            retry_budget: decision.retry_budget,
++            next_action: decision.next_action,
++            coalesced_count: 1,
++            error: model_request_error_payload(error),
++        }
++    }
++
++    pub(crate) fn with_coalesced_count(mut self, count: u64) -> Self {
++        self.coalesced_count = count.max(1);
++        self
++    }
++}
++
+ struct ContextInjectingHookOutcome {
+     hook_events: Vec<HookCompletedEvent>,
+     outcome: HookRuntimeOutcome,
+@@ -589,6 +677,106 @@ pub(crate) async fn run_post_compact_hooks(
+     }
+ }
+ 
++pub(crate) async fn run_request_error_hooks(
++    sess: &Arc<Session>,
++    turn_context: &Arc<TurnContext>,
++    failure: ModelRequestFailure,
++) {
++    let request = codex_hooks::RequestErrorRequest {
++        session_id: sess.session_id().into(),
++        turn_id: turn_context.sub_id.clone(),
++        transcript_path: sess.hook_transcript_path().await,
++        #[allow(deprecated)]
++        cwd: turn_context.cwd.clone(),
++        model: turn_context.model_info().slug.clone(),
++        provider: turn_context.config.model_provider_id.clone(),
++        operation: failure.context.operation,
++        endpoint_path: failure.context.endpoint_path.to_string(),
++        attempt: failure.attempt,
++        retry_budget: failure.retry_budget,
++        next_action: failure.next_action,
++        coalesced_count: failure.coalesced_count,
++        error: failure.error,
++    };
++    let hooks = sess.hooks();
++    let preview_runs = hooks.preview_request_error(&request);
++    if preview_runs.is_empty() {
++        return;
++    }
++
++    match hooks.enqueue_request_error(request) {
++        codex_hooks::RequestErrorDispatch::Queued {
++            receiver: _outcome_receiver,
++            start,
++        } => {
++            emit_hook_started_events(sess, turn_context, preview_runs).await;
++            start.start();
++        }
++        codex_hooks::RequestErrorDispatch::Coalesced(_outcome_receiver) => {}
++        codex_hooks::RequestErrorDispatch::Rejected { outcome, reason } => {
++            if outcome.hook_dispatch_rejected > 0 {
++                sess.send_event(
++                    turn_context,
++                    EventMsg::Warning(WarningEvent {
++                        message: format!(
++                            "RequestError hook dispatch rejected (count={}): {reason}.",
++                            outcome.hook_dispatch_rejected
++                        ),
++                    }),
++                )
++                .await;
++            }
++        }
++    }
++}
++
++pub(crate) async fn run_abnormal_stop_hooks(
++    sess: &Arc<Session>,
++    turn_context: &Arc<TurnContext>,
++    failure: ModelRequestFailure,
++) {
++    if failure.next_action != codex_hooks::ModelRequestNextAction::Stop {
++        return;
++    }
++    let sandbox_policy = turn_context.sandbox_policy();
++    let request = codex_hooks::AbnormalStopRequest {
++        session_id: sess.session_id().into(),
++        turn_id: turn_context.sub_id.clone(),
++        transcript_path: sess.hook_transcript_path().await,
++        #[allow(deprecated)]
++        cwd: turn_context.cwd.clone(),
++        model: turn_context.model_info().slug.clone(),
++        provider: turn_context.config.model_provider_id.clone(),
++        goal_mode: turn_context
++            .extension_data
++            .get::<codex_extension_api::ActiveGoalTurn>()
++            .is_some(),
++        approval_policy: turn_context.approval_policy().to_string(),
++        sandbox_mode: sandbox_policy.to_string(),
++        operation: failure.context.operation,
++        endpoint_path: failure.context.endpoint_path.to_string(),
++        attempt: failure.attempt,
++        retry_budget: failure.retry_budget,
++        error: failure.error,
++    };
++    let hooks = sess.hooks();
++    let preview_runs = hooks.preview_abnormal_stop(&request);
++    if !preview_runs.is_empty() {
++        emit_hook_started_events(sess, turn_context, preview_runs).await;
++    }
++
++    let mut outcome = hooks.run_abnormal_stop(request).await;
++    if outcome.suppress {
++        turn_context
++            .extension_data
++            .insert(codex_extension_api::SuppressTurnErrorLifecycle);
++    }
++    if !outcome.hook_events.is_empty() {
++        emit_hook_completed_events(sess, turn_context, std::mem::take(&mut outcome.hook_events))
++            .await;
++    }
++}
++
+ #[instrument(level = "trace", skip_all)]
+ pub(crate) async fn run_legacy_after_agent_hook(
+     sess: &Arc<Session>,
+@@ -965,6 +1153,8 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str);
+         HookEventName::PostToolUse => "PostToolUse",
+         HookEventName::PreCompact => "PreCompact",
+         HookEventName::PostCompact => "PostCompact",
++        HookEventName::RequestError => "RequestError",
++        HookEventName::AbnormalStop => "AbnormalStop",
+         HookEventName::SessionStart => "SessionStart",
+         HookEventName::SessionEnd => "SessionEnd",
+         HookEventName::UserPromptSubmit => "UserPromptSubmit",
+@@ -1005,6 +1195,75 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str);
+     ]
+ }
+ 
++fn model_request_error_category(error: &CodexErr) -> codex_hooks::ModelRequestErrorCategory {
++    use codex_hooks::ModelRequestErrorCategory as Category;
++
++    match error.details() {
++        CodexErrorDetails::Stream(_)
++        | CodexErrorDetails::ResponseStreamFailed(_)
++        | CodexErrorDetails::ConnectionFailed(_)
++        | CodexErrorDetails::Io(_) => Category::Transport,
++        CodexErrorDetails::Timeout | CodexErrorDetails::RequestTimeout => Category::Timeout,
++        CodexErrorDetails::UnexpectedStatus(response) => match response.status.as_u16() {
++            408 => Category::Timeout,
++            429 => Category::RateLimit,
++            500..=599 => Category::Server,
++            _ => Category::InvalidRequest,
++        },
++        CodexErrorDetails::RetryLimit(error) => match error.status.as_u16() {
++            408 => Category::Timeout,
++            429 => Category::RateLimit,
++            500..=599 => Category::Server,
++            _ => Category::Other,
++        },
++        CodexErrorDetails::RateLimitExceeded(_) => Category::RateLimit,
++        CodexErrorDetails::SessionBudgetExceeded
++        | CodexErrorDetails::UsageLimitReached(_)
++        | CodexErrorDetails::QuotaExceeded
++        | CodexErrorDetails::UsageNotIncluded => Category::UsageLimit,
++        CodexErrorDetails::ContextWindowExceeded => Category::ContextWindow,
++        CodexErrorDetails::CyberPolicy { .. }
++        | CodexErrorDetails::MisalignmentPolicyViolation { .. } => Category::Policy,
++        CodexErrorDetails::Sandbox(_) | CodexErrorDetails::LandlockSandboxExecutableNotProvided => {
++            Category::Sandbox
++        }
++        #[cfg(target_os = "linux")]
++        CodexErrorDetails::LandlockRuleset(_) | CodexErrorDetails::LandlockPathFd(_) => {
++            Category::Sandbox
++        }
++        CodexErrorDetails::InvalidRequest(_)
++        | CodexErrorDetails::InvalidImageRequest()
++        | CodexErrorDetails::UnsupportedOperation(_)
++        | CodexErrorDetails::RefreshTokenFailed(_)
++        | CodexErrorDetails::ToolCollision(_) => Category::InvalidRequest,
++        CodexErrorDetails::ServerOverloaded => Category::ServerOverloaded,
++        CodexErrorDetails::InternalServerError => Category::Server,
++        CodexErrorDetails::SessionConfiguredNotFirstEvent
++        | CodexErrorDetails::InternalAgentDied
++        | CodexErrorDetails::Fatal(_)
++        | CodexErrorDetails::Json(_)
++        | CodexErrorDetails::TokioJoin(_)
++        | CodexErrorDetails::EnvVar(_) => Category::Internal,
++        CodexErrorDetails::TurnAborted
++        | CodexErrorDetails::ThreadNotFound(_)
++        | CodexErrorDetails::AgentLimitReached { .. }
++        | CodexErrorDetails::Spawn
++        | CodexErrorDetails::Interrupted => Category::Other,
++    }
++}
++
++fn model_request_error_payload(error: &CodexErr) -> codex_hooks::ModelRequestError {
++    let overload = error.server_overload_info();
++    codex_hooks::ModelRequestError {
++        category: model_request_error_category(error),
++        code: overload.and_then(|info| info.code.clone()),
++        message: overload
++            .map(|info| info.message.clone())
++            .unwrap_or_else(|| error.to_string()),
++        retry_after_ms: overload.and_then(|info| info.retry_after_ms),
++    }
++}
++
+ fn hook_permission_mode(turn_context: &TurnContext) -> String {
+     match turn_context.approval_policy() {
+         AskForApproval::Never => "bypassPermissions",
+@@ -1047,10 +1306,14 @@ fn compaction_trigger_label(value: CompactionTrigger) -> &'static str {
+ mod tests {
+     use std::sync::Arc;
+ 
++    use codex_hooks::ModelRequestErrorCategory;
+     use codex_otel::HOOK_RUN_DURATION_METRIC;
+     use codex_otel::HOOK_RUN_METRIC;
+     use codex_otel::MetricsClient;
+     use codex_otel::MetricsConfig;
++    use codex_protocol::error::CodexErr;
++    use codex_protocol::error::CodexErrorDetails;
++    use codex_protocol::error::UnexpectedResponseError;
+     use codex_protocol::models::ContentItem;
+     use codex_protocol::protocol::HookEventName;
+     use codex_protocol::protocol::HookExecutionMode;
+@@ -1070,12 +1333,73 @@ mod tests {
+     use super::emit_hook_started_events;
+     use super::hook_run_analytics_payload;
+     use super::hook_run_metric_tags;
++    use super::model_request_error_category;
+     use crate::session::tests::make_session_and_context;
+     use crate::session::tests::make_session_and_context_with_rx;
+     use codex_protocol::protocol::HookCompletedEvent;
+     use codex_protocol::protocol::HookRunSummary;
+     use codex_utils_absolute_path::test_support::PathBufExt;
+     use codex_utils_absolute_path::test_support::test_path_buf;
++    use http::StatusCode;
++
++    fn unexpected_status(status: StatusCode) -> CodexErr {
++        CodexErrorDetails::UnexpectedStatus(UnexpectedResponseError {
++            status,
++            body: String::new(),
++            user_message: None,
++            url: None,
++            cf_ray: None,
++            request_id: None,
++            identity_authorization_error: None,
++            identity_error_code: None,
++        })
++        .into()
++    }
++
++    #[test]
++    fn model_request_errors_map_to_stable_categories() {
++        for (error, category) in [
++            (
++                CodexErr::Stream("disconnected".to_string()),
++                ModelRequestErrorCategory::Transport,
++            ),
++            (CodexErr::RequestTimeout, ModelRequestErrorCategory::Timeout),
++            (
++                unexpected_status(StatusCode::TOO_MANY_REQUESTS),
++                ModelRequestErrorCategory::RateLimit,
++            ),
++            (
++                CodexErr::QuotaExceeded,
++                ModelRequestErrorCategory::UsageLimit,
++            ),
++            (
++                CodexErr::ContextWindowExceeded,
++                ModelRequestErrorCategory::ContextWindow,
++            ),
++            (
++                CodexErrorDetails::CyberPolicy {
++                    message: "blocked".to_string(),
++                }
++                .into(),
++                ModelRequestErrorCategory::Policy,
++            ),
++            (
++                CodexErr::InvalidRequest("bad input".to_string()),
++                ModelRequestErrorCategory::InvalidRequest,
++            ),
++            (
++                unexpected_status(StatusCode::SERVICE_UNAVAILABLE),
++                ModelRequestErrorCategory::Server,
++            ),
++            (
++                CodexErr::InternalAgentDied,
++                ModelRequestErrorCategory::Internal,
++            ),
++            (CodexErr::TurnAborted, ModelRequestErrorCategory::Other),
++        ] {
++            assert_eq!(model_request_error_category(&error), category);
++        }
++    }
+ 
+     #[test]
+     fn additional_context_messages_stay_separate_and_ordered() {
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 116e450033713479bba7cb76546066f4e662faab..5690b52ec51a4d5be2535c1b211432541afb5f90 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -3317,6 +3317,62 @@ async fn turn_error_lifecycle_exposes_error_and_stores() {
+     assert_eq!(vec![expected], actual);
+ }
+ 
++#[tokio::test]
++async fn active_goal_turn_error_suppression_is_one_shot() {
++    struct TurnErrorCounter {
++        calls: Arc<std::sync::atomic::AtomicUsize>,
++    }
++
++    impl codex_extension_api::TurnLifecycleContributor for TurnErrorCounter {
++        fn on_turn_error<'a>(
++            &'a self,
++            _input: codex_extension_api::TurnErrorInput<'a>,
++        ) -> codex_extension_api::ExtensionFuture<'a, ()> {
++            Box::pin(async move {
++                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++            })
++        }
++    }
++
++    let (mut session, turn_context) = make_session_and_context().await;
++    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
++    let mut builder = codex_extension_api::ExtensionRegistryBuilder::<crate::config::Config>::new();
++    builder.turn_lifecycle_contributor(Arc::new(TurnErrorCounter {
++        calls: Arc::clone(&calls),
++    }));
++    session.services.extensions = Arc::new(builder.build());
++    turn_context
++        .extension_data
++        .insert(codex_extension_api::ActiveGoalTurn);
++    turn_context
++        .extension_data
++        .insert(codex_extension_api::SuppressTurnErrorLifecycle);
++
++    session
++        .emit_turn_error_lifecycle(&turn_context, CodexErrorInfo::Other)
++        .await;
++    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
++    assert!(
++        turn_context
++            .extension_data
++            .get::<codex_extension_api::SuppressTurnErrorLifecycle>()
++            .is_none(),
++        "suppression marker must be consumed atomically"
++    );
++    assert!(
++        turn_context
++            .extension_data
++            .get::<codex_extension_api::ActiveGoalTurn>()
++            .is_some(),
++        "suppressing turn-error lifecycle must not erase active-goal identity"
++    );
++
++    session
++        .emit_turn_error_lifecycle(&turn_context, CodexErrorInfo::Other)
++        .await;
++    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
++}
++
+ #[tokio::test]
+ async fn config_change_contributor_observes_effective_config_changes() {
+     struct SessionConfigMarker;
+@@ -11320,6 +11376,7 @@ async fn legacy_compaction_retains_only_the_selected_step(first_attempt: FirstAt
+         InitialContextInjection::DoNotInject,
+         CompactionReason::ModelDownshift,
+         CompactionPhase::PreTurn,
++        &CancellationToken::new(),
+     )
+     .await
+     .expect("compaction succeeds");
+diff --git a/codex-rs/core/src/tasks/lifecycle.rs b/codex-rs/core/src/tasks/lifecycle.rs
+index cde3fc7d728e1447678f7a4e1214f72759f789ce..ff9e16e7eb900ec47af8b74a3640901ebc0d917e 100644
+--- a/codex-rs/core/src/tasks/lifecycle.rs
++++ b/codex-rs/core/src/tasks/lifecycle.rs
+@@ -89,6 +89,13 @@ impl Session {
+         turn_context: &TurnContext,
+         error: CodexErrorInfo,
+     ) {
++        if turn_context
++            .extension_data
++            .remove::<codex_extension_api::SuppressTurnErrorLifecycle>()
++            .is_some()
++        {
++            return;
++        }
+         for contributor in self.services.extensions.turn_lifecycle_contributors() {
+             contributor
+                 .on_turn_error(codex_extension_api::TurnErrorInput {
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 84f2ac0b8e024f68e4b1f477cbdcdf850aa423cf..84f14754bc7fec2deec1f31374a43684adfc70fd 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -95,8 +95,10 @@ pub use contributors::WorldStateSectionContribution;
+ pub use registry::ExtensionRegistry;
+ pub use registry::ExtensionRegistryBuilder;
+ pub use registry::empty_extension_registry;
++pub use state::ActiveGoalTurn;
+ pub use state::ExtensionData;
+ pub use state::ExtensionDataInit;
++pub use state::SuppressTurnErrorLifecycle;
+ pub use user_instructions::Instructions;
+ pub use user_instructions::LoadUserInstructionsFuture;
+ pub use user_instructions::LoadedUserInstructions;
+diff --git a/codex-rs/ext/extension-api/src/state.rs b/codex-rs/ext/extension-api/src/state.rs
+index 7d6e79dc5872968147c1aba00b4aa08d1efdae4c..da3a4ec96ae3b6bf784a17b8d11fadf61753ecd5 100644
+--- a/codex-rs/ext/extension-api/src/state.rs
++++ b/codex-rs/ext/extension-api/src/state.rs
+@@ -7,6 +7,16 @@ use std::sync::PoisonError;
+ 
+ type ErasedData = Arc<dyn Any + Send + Sync>;
+ 
++/// Marker attached to a turn store when the turn is executing the active thread goal.
++#[derive(Clone, Copy, Debug, Default)]
++pub struct ActiveGoalTurn;
++
++/// One-shot marker consumed when a terminal model error should not notify turn
++/// error lifecycle contributors. This keeps an active goal available for the
++/// next continuation without changing the user-visible turn error itself.
++#[derive(Clone, Copy, Debug, Default)]
++pub struct SuppressTurnErrorLifecycle;
++
+ /// Typed values supplied before an [`ExtensionData`] scope is created.
+ ///
+ /// Hosts may retain a clone when later operations must use the same initial
+diff --git a/codex-rs/ext/goal/src/extension.rs b/codex-rs/ext/goal/src/extension.rs
+index 89848996fa8287503980d9ecd0d426861f803c44..e01802bcb8fc9894254ea38352fe20ebfd8f4794 100644
+--- a/codex-rs/ext/goal/src/extension.rs
++++ b/codex-rs/ext/goal/src/extension.rs
+@@ -267,6 +267,7 @@ where
+                 )
+             {
+                 accounting.mark_turn_goal_active(input.turn_id, goal.goal_id);
++                input.turn_store.insert(codex_extension_api::ActiveGoalTurn);
+             }
+         })
+     }
+diff --git a/codex-rs/ext/goal/tests/goal_extension_backend.rs b/codex-rs/ext/goal/tests/goal_extension_backend.rs
+index 2612414262477b6f50fed6cc056307e47f3378e3..05a8847a601806803e0dfe7e48a911f699eae09c 100644
+--- a/codex-rs/ext/goal/tests/goal_extension_backend.rs
++++ b/codex-rs/ext/goal/tests/goal_extension_backend.rs
+@@ -835,6 +835,73 @@ async fn turn_error_blocks_goal() -> anyhow::Result<()> {
+     Ok(())
+ }
+ 
++#[tokio::test]
++async fn active_goal_turn_marker_reads_persisted_active_and_budget_limited_states()
++-> anyhow::Result<()> {
++    let runtime = test_runtime().await?;
++    let thread_id = test_thread_id()?;
++    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
++    let harness = GoalExtensionHarness::new(runtime.clone(), thread_id).await?;
++
++    let tools = harness.tools();
++    tool_by_name(&tools, "create_goal")
++        .handle(tool_call(
++            "create_goal",
++            "call-create-goal",
++            json!({
++                "objective": "continue after a suppressible terminal error",
++                "token_budget": 1,
++            }),
++        ))
++        .await?;
++
++    let active_turn = harness
++        .start_turn("active-turn", &TokenUsage::default())
++        .await;
++    assert!(
++        active_turn
++            .get::<codex_extension_api::ActiveGoalTurn>()
++            .is_some(),
++        "persisted active goal must mark the following turn"
++    );
++
++    let goal = runtime
++        .thread_goals()
++        .get_thread_goal(thread_id)
++        .await?
++        .ok_or_else(|| anyhow::anyhow!("goal should exist"))?;
++    runtime
++        .thread_goals()
++        .account_thread_goal_usage(
++            thread_id,
++            /*time_delta_seconds*/ 0,
++            /*token_delta*/ 1,
++            codex_state::GoalAccountingMode::ActiveOnly,
++            Some(goal.goal_id.as_str()),
++        )
++        .await?;
++    let persisted = runtime
++        .thread_goals()
++        .get_thread_goal(thread_id)
++        .await?
++        .ok_or_else(|| anyhow::anyhow!("budget-limited goal should remain persisted"))?;
++    assert_eq!(
++        codex_state::ThreadGoalStatus::BudgetLimited,
++        persisted.status
++    );
++
++    let budget_limited_turn = harness
++        .start_turn("budget-limited-turn", &TokenUsage::default())
++        .await;
++    assert!(
++        budget_limited_turn
++            .get::<codex_extension_api::ActiveGoalTurn>()
++            .is_some(),
++        "persisted budget-limited goal must mark the following turn"
++    );
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn failed_execution_turns_block_goal_unless_a_tool_succeeds() -> anyhow::Result<()> {
+     for (recovery_turn, status_only_turn, blocking_turn) in
+@@ -1657,12 +1724,17 @@ impl GoalExtensionHarness {
+             .collect()
+     }
+ 
+-    async fn start_turn(&self, turn_id: &str, usage: &TokenUsage) {
++    async fn start_turn(&self, turn_id: &str, usage: &TokenUsage) -> ExtensionData {
+         self.start_turn_with_mode(turn_id, ModeKind::Default, usage)
+-            .await;
++            .await
+     }
+ 
+-    async fn start_turn_with_mode(&self, turn_id: &str, mode: ModeKind, usage: &TokenUsage) {
++    async fn start_turn_with_mode(
++        &self,
++        turn_id: &str,
++        mode: ModeKind,
++        usage: &TokenUsage,
++    ) -> ExtensionData {
+         let turn_store = ExtensionData::new(turn_id);
+         let mut collaboration_mode = default_collaboration_mode();
+         collaboration_mode.mode = mode;
+@@ -1678,6 +1750,7 @@ impl GoalExtensionHarness {
+                 })
+                 .await;
+         }
++        turn_store
+     }
+ 
+     async fn stop_turn(&self, turn_id: &str) {
+diff --git a/codex-rs/hooks/src/engine/command_runner.rs b/codex-rs/hooks/src/engine/command_runner.rs
+index b68474f0cfa9c4e5a208bfd0de4ae9fddd5821b6..2a04599bcb156f233166f913ab9843791be6e5db 100644
+--- a/codex-rs/hooks/src/engine/command_runner.rs
++++ b/codex-rs/hooks/src/engine/command_runner.rs
+@@ -176,6 +176,33 @@ impl CommandHookRuntime {
+         });
+     }
+ 
++    /// Track session-owned work that manages its own concurrency.
++    ///
++    /// Unlike individual async hooks, an owner task must not hold one of the
++    /// async-hook permits for its whole lifetime. It still lives in the same
++    /// `JoinSet`, so session shutdown can join or abort it with the rest of the
++    /// hook runtime.
++    pub(crate) fn schedule_owned_task(
++        &self,
++        task: impl Future<Output = ()> + Send + 'static,
++    ) -> bool {
++        if tokio::runtime::Handle::try_current().is_err() {
++            return false;
++        }
++        let mut state = self.lock_state();
++        if state.concurrency_limit.is_closed() {
++            return false;
++        }
++
++        while state.tasks.try_join_next().is_some() {}
++        state.tasks.spawn(task);
++        true
++    }
++
++    pub(crate) fn publish_completed(&self, completed: HookCompletedEvent) {
++        let _ = self.result_sender.try_send(completed);
++    }
++
+     pub(crate) async fn shutdown(&self) {
+         let mut tasks = {
+             let mut state = self.lock_state();
+diff --git a/codex-rs/hooks/src/engine/dispatcher.rs b/codex-rs/hooks/src/engine/dispatcher.rs
+index c5ee0d2ce1da03ec07b08f9ba692088142673e99..f1a0d32d5c4043fd96e8ff48ab9c89c674ea3f09 100644
+--- a/codex-rs/hooks/src/engine/dispatcher.rs
++++ b/codex-rs/hooks/src/engine/dispatcher.rs
+@@ -1,4 +1,5 @@
+ use std::path::Path;
++use std::time::Duration;
+ 
+ use futures::StreamExt;
+ use futures::stream::FuturesUnordered;
+@@ -29,6 +30,12 @@ pub(crate) struct ParsedHandler<T> {
+     pub completion_order: usize,
+ }
+ 
++#[derive(Debug)]
++pub(crate) enum BoundedHandlerResult<T> {
++    Completed(ParsedHandler<T>),
++    GroupTimedOut(ConfiguredHandler),
++}
++
+ pub(crate) fn select_handlers(
+     handlers: &[ConfiguredHandler],
+     event_name: HookEventName,
+@@ -67,9 +74,11 @@ pub(crate) fn select_handlers_for_matcher_inputs(
+                         .any(|input| matches_matcher(handler.matcher.as_deref(), Some(input)))
+                 }
+             }
+-            HookEventName::UserPromptSubmit | HookEventName::Stop | HookEventName::Interrupt => {
+-                true
+-            }
++            HookEventName::UserPromptSubmit
++            | HookEventName::RequestError
++            | HookEventName::AbnormalStop
++            | HookEventName::Stop
++            | HookEventName::Interrupt => true,
+         })
+         .cloned()
+         .collect()
+@@ -225,6 +234,81 @@ async fn execute_handler(
+     }
+ }
+ 
++/// Execute every selected handler directly with a fixed concurrency bound.
++///
++/// Notification events use this path even for handlers configured as async:
++/// the notification itself is already detached from the model flow, and
++/// awaiting the handler here is what makes the per-event concurrency limit
++/// authoritative.
++pub(crate) async fn execute_handlers_bounded<T: 'static>(
++    engine: &ClaudeHooksEngine,
++    handlers: Vec<ConfiguredHandler>,
++    input_json: String,
++    cwd: &Path,
++    turn_id: Option<String>,
++    max_concurrency: usize,
++    group_timeout: Option<Duration>,
++    parse: fn(&ConfiguredHandler, HandlerRunResult, Option<String>) -> ParsedHandler<T>,
++) -> Vec<BoundedHandlerResult<T>> {
++    assert!(max_concurrency > 0, "handler concurrency must be non-zero");
++
++    let configured_handlers = handlers.clone();
++    let mut remaining = handlers.into_iter().enumerate();
++    let mut pending = FuturesUnordered::new();
++    let mut completed = std::iter::repeat_with(|| None)
++        .take(configured_handlers.len())
++        .collect::<Vec<_>>();
++    let mut completion_order = 0;
++    let deadline = group_timeout.map(|duration| tokio::time::Instant::now() + duration);
++    let mut group_timed_out = false;
++
++    loop {
++        while pending.len() < max_concurrency {
++            let Some((configured_order, handler)) = remaining.next() else {
++                break;
++            };
++            let input_json = input_json.clone();
++            let turn_id = turn_id.clone();
++            pending.push(async move {
++                let result =
++                    execute_handler(engine, &handler, &input_json, cwd, /*metadata*/ None).await;
++                (configured_order, parse(&handler, result, turn_id))
++            });
++        }
++
++        let next = match deadline {
++            Some(deadline) => match tokio::time::timeout_at(deadline, pending.next()).await {
++                Ok(result) => result,
++                Err(_) => {
++                    group_timed_out = true;
++                    break;
++                }
++            },
++            None => pending.next().await,
++        };
++        let Some((configured_order, mut parsed)) = next else {
++            break;
++        };
++        parsed.completion_order = completion_order;
++        completion_order += 1;
++        completed[configured_order] = Some(parsed);
++    }
++
++    configured_handlers
++        .into_iter()
++        .enumerate()
++        .filter_map(|(configured_order, handler)| {
++            if let Some(parsed) = completed[configured_order].take() {
++                Some(BoundedHandlerResult::Completed(parsed))
++            } else if group_timed_out {
++                Some(BoundedHandlerResult::GroupTimedOut(handler))
++            } else {
++                None
++            }
++        })
++        .collect()
++}
++
+ pub(crate) fn completed_summary(
+     handler: &ConfiguredHandler,
+     run_result: &HandlerRunResult,
+@@ -263,6 +347,8 @@ pub(crate) fn scope_for_event(event_name: HookEventName) -> HookScope {
+         | HookEventName::PostToolUse
+         | HookEventName::PreCompact
+         | HookEventName::PostCompact
++        | HookEventName::RequestError
++        | HookEventName::AbnormalStop
+         | HookEventName::UserPromptSubmit
+         | HookEventName::SubagentStop
+         | HookEventName::Stop
+@@ -280,6 +366,8 @@ pub(crate) fn hook_event_name_label(event_name: HookEventName) -> &'static str {
+         HookEventName::SessionStart => "SessionStart",
+         HookEventName::SessionEnd => "SessionEnd",
+         HookEventName::UserPromptSubmit => "UserPromptSubmit",
++        HookEventName::RequestError => "RequestError",
++        HookEventName::AbnormalStop => "AbnormalStop",
+         HookEventName::SubagentStart => "SubagentStart",
+         HookEventName::SubagentStop => "SubagentStop",
+         HookEventName::Stop => "Stop",
+diff --git a/codex-rs/hooks/src/engine/mod.rs b/codex-rs/hooks/src/engine/mod.rs
+index deaf29679a8ce5b35af474d4309b52a8a3a72ff7..bcc4496d587dafa55ff9618de43a4d051f52d440 100644
+--- a/codex-rs/hooks/src/engine/mod.rs
++++ b/codex-rs/hooks/src/engine/mod.rs
+@@ -11,6 +11,10 @@ use crate::events::compact::PreCompactRequest;
+ use crate::events::compact::StatelessHookOutcome;
+ use crate::events::interrupt::InterruptOutcome;
+ use crate::events::interrupt::InterruptRequest;
++use crate::events::model_request::AbnormalStopOutcome;
++use crate::events::model_request::AbnormalStopRequest;
++use crate::events::model_request::NotificationHookOutcome;
++use crate::events::model_request::RequestErrorRequest;
+ use crate::events::permission_request::PermissionRequestOutcome;
+ use crate::events::permission_request::PermissionRequestRequest;
+ use crate::events::post_tool_use::PostToolUseOutcome;
+@@ -171,6 +175,8 @@ impl ConfiguredHandler {
+             codex_protocol::protocol::HookEventName::PostToolUse => "post-tool-use",
+             codex_protocol::protocol::HookEventName::PreCompact => "pre-compact",
+             codex_protocol::protocol::HookEventName::PostCompact => "post-compact",
++            codex_protocol::protocol::HookEventName::RequestError => "request-error",
++            codex_protocol::protocol::HookEventName::AbnormalStop => "abnormal-stop",
+             codex_protocol::protocol::HookEventName::SessionStart => "session-start",
+             codex_protocol::protocol::HookEventName::SessionEnd => "session-end",
+             codex_protocol::protocol::HookEventName::UserPromptSubmit => "user-prompt-submit",
+@@ -442,6 +448,34 @@ impl ClaudeHooksEngine {
+         crate::events::compact::run_post(self, request).await
+     }
+ 
++    pub(crate) fn preview_request_error(
++        &self,
++        request: &RequestErrorRequest,
++    ) -> Vec<HookRunSummary> {
++        crate::events::model_request::preview_request_error(&self.handlers, request)
++    }
++
++    pub(crate) async fn run_request_error(
++        &self,
++        request: RequestErrorRequest,
++    ) -> NotificationHookOutcome {
++        crate::events::model_request::run_request_error(self, request).await
++    }
++
++    pub(crate) fn preview_abnormal_stop(
++        &self,
++        request: &AbnormalStopRequest,
++    ) -> Vec<HookRunSummary> {
++        crate::events::model_request::preview_abnormal_stop(&self.handlers, request)
++    }
++
++    pub(crate) async fn run_abnormal_stop(
++        &self,
++        request: AbnormalStopRequest,
++    ) -> AbnormalStopOutcome {
++        crate::events::model_request::run_abnormal_stop(self, request).await
++    }
++
+     pub(crate) fn preview_user_prompt_submit(
+         &self,
+         request: &UserPromptSubmitRequest,
+diff --git a/codex-rs/hooks/src/lib.rs b/codex-rs/hooks/src/lib.rs
+index 6abc173535b23b5ee6bd057fd3f49d9b82ea7fe0..4b620e7701a0cf04dc149181fc82ef3c4c4a48e8 100644
+--- a/codex-rs/hooks/src/lib.rs
++++ b/codex-rs/hooks/src/lib.rs
+@@ -20,12 +20,14 @@ pub use engine::dispatcher::hook_execution_mode_label;
+ pub use engine::dispatcher::hook_handler_type_label;
+ pub use events::common::SubagentHookContext;
+ /// Hook event names as they appear in hooks JSON and config files.
+-pub const HOOK_EVENT_NAMES: [&str; 12] = [
++pub const HOOK_EVENT_NAMES: [&str; 14] = [
+     "PreToolUse",
+     "PermissionRequest",
+     "PostToolUse",
+     "PreCompact",
+     "PostCompact",
++    "RequestError",
++    "AbnormalStop",
+     "SessionStart",
+     "SessionEnd",
+     "UserPromptSubmit",
+@@ -58,6 +60,14 @@ pub use events::compact::PreCompactRequest;
+ pub use events::compact::StatelessHookOutcome;
+ pub use events::interrupt::InterruptOutcome;
+ pub use events::interrupt::InterruptRequest;
++pub use events::model_request::AbnormalStopOutcome;
++pub use events::model_request::AbnormalStopRequest;
++pub use events::model_request::ModelRequestError;
++pub use events::model_request::ModelRequestErrorCategory;
++pub use events::model_request::ModelRequestNextAction;
++pub use events::model_request::ModelRequestOperation;
++pub use events::model_request::NotificationHookOutcome;
++pub use events::model_request::RequestErrorRequest;
+ pub use events::permission_request::PermissionRequestDecision;
+ pub use events::permission_request::PermissionRequestOutcome;
+ pub use events::permission_request::PermissionRequestRequest;
+@@ -82,6 +92,8 @@ pub use mcp::HookMcpExecutor;
+ pub use registry::HookListOutcome;
+ pub use registry::Hooks;
+ pub use registry::HooksConfig;
++pub use registry::RequestErrorDispatch;
++pub use registry::RequestErrorStart;
+ pub use registry::list_hooks;
+ pub use schema::write_schema_fixtures;
+ pub use types::Hook;
+@@ -99,6 +111,8 @@ pub fn hook_event_key_label(event_name: HookEventName) -> &'static str {
+         HookEventName::PostToolUse => "post_tool_use",
+         HookEventName::PreCompact => "pre_compact",
+         HookEventName::PostCompact => "post_compact",
++        HookEventName::RequestError => "request_error",
++        HookEventName::AbnormalStop => "abnormal_stop",
+         HookEventName::SessionStart => "session_start",
+         HookEventName::SessionEnd => "session_end",
+         HookEventName::UserPromptSubmit => "user_prompt_submit",
+diff --git a/codex-rs/hooks/src/registry.rs b/codex-rs/hooks/src/registry.rs
+index 5a033f9c64dacaf031719e60c3c42d52b2d9eb07..3d23dd140718b280ef4bee484ad3239c9b213e3a 100644
+--- a/codex-rs/hooks/src/registry.rs
++++ b/codex-rs/hooks/src/registry.rs
+@@ -8,6 +8,10 @@ use crate::events::compact::PreCompactRequest;
+ use crate::events::compact::StatelessHookOutcome;
+ use crate::events::interrupt::InterruptOutcome;
+ use crate::events::interrupt::InterruptRequest;
++use crate::events::model_request::AbnormalStopOutcome;
++use crate::events::model_request::AbnormalStopRequest;
++use crate::events::model_request::NotificationHookOutcome;
++use crate::events::model_request::RequestErrorRequest;
+ use crate::events::permission_request::PermissionRequestOutcome;
+ use crate::events::permission_request::PermissionRequestRequest;
+ use crate::events::post_tool_use::PostToolUseOutcome;
+@@ -33,10 +37,440 @@ use codex_plugin::ExecutorPluginHookSource;
+ use codex_plugin::PluginHookSource;
+ use codex_protocol::ThreadId;
+ use codex_protocol::shell_environment::scrub_non_inheritable_env_vars;
++use futures::FutureExt;
++use std::collections::HashMap;
++use std::collections::VecDeque;
+ use std::ffi::OsString;
++use std::panic::AssertUnwindSafe;
+ use std::sync::Arc;
++use std::sync::Mutex;
+ use std::time::Duration;
+ use tokio::process::Command;
++use tokio::sync::Notify;
++use tokio::sync::oneshot;
++
++use crate::events::model_request::REQUEST_ERROR_QUEUE_CAPACITY;
++
++#[derive(Debug, Clone, PartialEq, Eq, Hash)]
++struct RequestErrorKey {
++    turn_id: String,
++    operation: crate::events::model_request::ModelRequestOperation,
++    endpoint_path: String,
++    category: crate::events::model_request::ModelRequestErrorCategory,
++    code: Option<String>,
++    next_action: crate::events::model_request::ModelRequestNextAction,
++}
++
++struct PendingRequestError {
++    engine: ClaudeHooksEngine,
++    request: RequestErrorRequest,
++    outcome_senders: Vec<oneshot::Sender<NotificationHookOutcome>>,
++    ready: bool,
++}
++
++struct RequestErrorActorState {
++    queue: VecDeque<u64>,
++    queued_by_key: HashMap<RequestErrorKey, u64>,
++    jobs: HashMap<u64, PendingRequestError>,
++    next_job_id: u64,
++    unstarted_jobs: usize,
++    accepting: bool,
++    finished: bool,
++    actor_started: bool,
++}
++
++struct RequestErrorActorInner {
++    state: Mutex<RequestErrorActorState>,
++    queue_notify: Notify,
++    finished_notify: Notify,
++}
++
++struct RequestErrorActorCancellation {
++    inner: Arc<RequestErrorActorInner>,
++    armed: bool,
++}
++
++impl RequestErrorActorCancellation {
++    fn new(inner: Arc<RequestErrorActorInner>) -> Self {
++        Self { inner, armed: true }
++    }
++
++    fn disarm(&mut self) {
++        self.armed = false;
++    }
++}
++
++impl Drop for RequestErrorActorCancellation {
++    fn drop(&mut self) {
++        if !self.armed {
++            return;
++        }
++
++        let jobs = {
++            let mut state = self
++                .inner
++                .state
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner);
++            state.accepting = false;
++            state.finished = true;
++            state.actor_started = false;
++            RequestErrorDispatcher::take_all_jobs(&mut state)
++        };
++        for job in jobs {
++            RequestErrorDispatcher::complete_job(
++                job,
++                "RequestError hook dispatch cancelled during forced runtime shutdown",
++            );
++        }
++        self.inner.queue_notify.notify_waiters();
++        self.inner.finished_notify.notify_waiters();
++    }
++}
++
++#[derive(Clone)]
++struct RequestErrorDispatcher {
++    inner: Arc<RequestErrorActorInner>,
++    runtime: CommandHookRuntime,
++}
++
++impl RequestErrorDispatcher {
++    fn new(runtime: &CommandHookRuntime) -> Self {
++        let dispatcher = Self {
++            inner: Arc::new(RequestErrorActorInner {
++                state: Mutex::new(RequestErrorActorState {
++                    queue: VecDeque::new(),
++                    queued_by_key: HashMap::new(),
++                    jobs: HashMap::new(),
++                    next_job_id: 0,
++                    unstarted_jobs: 0,
++                    accepting: true,
++                    finished: false,
++                    actor_started: false,
++                }),
++                queue_notify: Notify::new(),
++                finished_notify: Notify::new(),
++            }),
++            runtime: runtime.clone(),
++        };
++        dispatcher
++    }
++
++    fn ensure_actor(&self) -> bool {
++        let mut state = self.lock_state();
++        if !state.accepting {
++            return false;
++        }
++        if state.actor_started {
++            return true;
++        }
++
++        let inner = Arc::clone(&self.inner);
++        if self
++            .runtime
++            .schedule_owned_task(async move { Self::run_actor(inner).await })
++        {
++            state.actor_started = true;
++            true
++        } else {
++            state.accepting = false;
++            state.finished = true;
++            drop(state);
++            self.inner.finished_notify.notify_waiters();
++            false
++        }
++    }
++
++    fn enqueue(
++        &self,
++        engine: ClaudeHooksEngine,
++        request: RequestErrorRequest,
++    ) -> RequestErrorDispatch {
++        if !self.ensure_actor() {
++            return RequestErrorDispatch::Rejected {
++                outcome: crate::events::model_request::request_error_dispatch_rejection(),
++                reason: "RequestError hook queue is closed".to_string(),
++            };
++        }
++        let key = RequestErrorKey {
++            turn_id: request.turn_id.clone(),
++            operation: request.operation,
++            endpoint_path: request.endpoint_path.clone(),
++            category: request.error.category,
++            code: request.error.code.clone(),
++            next_action: request.next_action,
++        };
++        let (outcome_sender, outcome_receiver) = oneshot::channel();
++        let mut state = self.lock_state();
++        if !state.accepting {
++            return RequestErrorDispatch::Rejected {
++                outcome: crate::events::model_request::request_error_dispatch_rejection(),
++                reason: "RequestError hook queue is closed".to_string(),
++            };
++        }
++        if let Some(job_id) = state.queued_by_key.get(&key).copied()
++            && let Some(existing) = state.jobs.get_mut(&job_id)
++        {
++            let coalesced_count = existing
++                .request
++                .coalesced_count
++                .max(1)
++                .saturating_add(request.coalesced_count.max(1));
++            // The most recent payload wins; only the aggregate count survives
++            // from the older queued payload.
++            existing.request = request;
++            existing.request.coalesced_count = coalesced_count;
++            existing.outcome_senders.push(outcome_sender);
++            return RequestErrorDispatch::Coalesced(outcome_receiver);
++        }
++
++        if state.unstarted_jobs >= REQUEST_ERROR_QUEUE_CAPACITY {
++            return RequestErrorDispatch::Rejected {
++                outcome: crate::events::model_request::request_error_dispatch_rejection(),
++                reason: format!(
++                    "RequestError hook queue is full (capacity {REQUEST_ERROR_QUEUE_CAPACITY})"
++                ),
++            };
++        }
++
++        let job_id = state.next_job_id;
++        state.next_job_id = state.next_job_id.wrapping_add(1);
++        state.queue.push_back(job_id);
++        state.queued_by_key.insert(key, job_id);
++        state.jobs.insert(
++            job_id,
++            PendingRequestError {
++                engine,
++                request,
++                outcome_senders: vec![outcome_sender],
++                ready: false,
++            },
++        );
++        state.unstarted_jobs += 1;
++        drop(state);
++        self.inner.queue_notify.notify_one();
++
++        RequestErrorDispatch::Queued {
++            receiver: outcome_receiver,
++            start: RequestErrorStart {
++                inner: Arc::clone(&self.inner),
++                job_id,
++                armed: true,
++            },
++        }
++    }
++
++    fn lock_state(&self) -> std::sync::MutexGuard<'_, RequestErrorActorState> {
++        self.inner
++            .state
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++    }
++
++    async fn run_actor(inner: Arc<RequestErrorActorInner>) {
++        let mut cancellation = RequestErrorActorCancellation::new(Arc::clone(&inner));
++        loop {
++            let notified = inner.queue_notify.notified();
++            let action = {
++                let mut state = inner
++                    .state
++                    .lock()
++                    .unwrap_or_else(std::sync::PoisonError::into_inner);
++                if let Some(job_id) = state.queue.front().copied() {
++                    let ready = state.jobs.get(&job_id).is_some_and(|job| job.ready);
++                    if ready {
++                        state.queue.pop_front();
++                        state.unstarted_jobs = state.unstarted_jobs.saturating_sub(1);
++                        state
++                            .queued_by_key
++                            .retain(|_, queued_id| *queued_id != job_id);
++                        match state.jobs.get(&job_id) {
++                            Some(job) => ActorAction::Run {
++                                job_id,
++                                engine: job.engine.clone(),
++                                request: job.request.clone(),
++                            },
++                            None => ActorAction::Wait,
++                        }
++                    } else {
++                        ActorAction::Wait
++                    }
++                } else if state.accepting {
++                    ActorAction::Wait
++                } else {
++                    ActorAction::Finish
++                }
++            };
++
++            match action {
++                ActorAction::Wait => notified.await,
++                ActorAction::Run {
++                    job_id,
++                    engine,
++                    request,
++                } => Self::run_job(&inner, job_id, engine, request).await,
++                ActorAction::Finish => {
++                    Self::mark_finished(&inner);
++                    cancellation.disarm();
++                    return;
++                }
++            }
++        }
++    }
++
++    async fn run_job(
++        inner: &Arc<RequestErrorActorInner>,
++        job_id: u64,
++        engine: ClaudeHooksEngine,
++        request: RequestErrorRequest,
++    ) {
++        let outcome = match AssertUnwindSafe(engine.run_request_error(request.clone()))
++            .catch_unwind()
++            .await
++        {
++            Ok(outcome) => outcome,
++            Err(_) => crate::events::model_request::request_error_dispatch_failure(
++                &engine.handlers,
++                request.turn_id,
++                "RequestError hook worker panicked",
++            ),
++        };
++        let job = {
++            let mut state = inner
++                .state
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner);
++            state.jobs.remove(&job_id)
++        };
++        if let Some(job) = job {
++            Self::deliver_job(job, outcome);
++        }
++    }
++
++    fn deliver_job(job: PendingRequestError, outcome: NotificationHookOutcome) {
++        for completed in outcome.hook_events.iter().cloned() {
++            job.engine.command_runtime.publish_completed(completed);
++        }
++        for sender in job.outcome_senders {
++            let _ = sender.send(outcome.clone());
++        }
++    }
++
++    fn complete_job(job: PendingRequestError, message: &'static str) {
++        let outcome = crate::events::model_request::request_error_dispatch_failure(
++            &job.engine.handlers,
++            job.request.turn_id.clone(),
++            message,
++        );
++        Self::deliver_job(job, outcome);
++    }
++
++    fn take_all_jobs(state: &mut RequestErrorActorState) -> Vec<PendingRequestError> {
++        state.queue.clear();
++        state.queued_by_key.clear();
++        state.unstarted_jobs = 0;
++        state.jobs.drain().map(|(_, job)| job).collect()
++    }
++
++    fn mark_finished(inner: &RequestErrorActorInner) {
++        let mut state = inner
++            .state
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        state.finished = true;
++        state.actor_started = false;
++        drop(state);
++        inner.finished_notify.notify_waiters();
++    }
++
++    async fn shutdown(&self) {
++        self.begin_shutdown();
++        self.wait_finished().await;
++    }
++
++    fn begin_shutdown(&self) {
++        let finished_without_actor = {
++            let mut state = self.lock_state();
++            state.accepting = false;
++            if !state.actor_started {
++                state.finished = true;
++                true
++            } else {
++                false
++            }
++        };
++        if finished_without_actor {
++            self.inner.finished_notify.notify_waiters();
++        }
++        self.inner.queue_notify.notify_waiters();
++    }
++
++    async fn wait_finished(&self) {
++        loop {
++            let notified = self.inner.finished_notify.notified();
++            if self.lock_state().finished {
++                return;
++            }
++            notified.await;
++        }
++    }
++}
++
++enum ActorAction {
++    Wait,
++    Run {
++        job_id: u64,
++        engine: ClaudeHooksEngine,
++        request: RequestErrorRequest,
++    },
++    Finish,
++}
++
++pub struct RequestErrorStart {
++    inner: Arc<RequestErrorActorInner>,
++    job_id: u64,
++    armed: bool,
++}
++
++impl RequestErrorStart {
++    pub fn start(mut self) {
++        self.mark_ready();
++        self.armed = false;
++    }
++
++    fn mark_ready(&self) {
++        let mut state = self
++            .inner
++            .state
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if let Some(job) = state.jobs.get_mut(&self.job_id) {
++            job.ready = true;
++        }
++        drop(state);
++        self.inner.queue_notify.notify_waiters();
++    }
++}
++
++impl Drop for RequestErrorStart {
++    fn drop(&mut self) {
++        if self.armed {
++            self.mark_ready();
++        }
++    }
++}
++
++pub enum RequestErrorDispatch {
++    Queued {
++        receiver: oneshot::Receiver<NotificationHookOutcome>,
++        start: RequestErrorStart,
++    },
++    Coalesced(oneshot::Receiver<NotificationHookOutcome>),
++    Rejected {
++        outcome: NotificationHookOutcome,
++        reason: String,
++    },
++}
+ 
+ #[derive(Default, Clone)]
+ pub struct HooksConfig {
+@@ -65,6 +499,7 @@ pub struct Hooks {
+     engine: ClaudeHooksEngine,
+     plugin_hook_sources: Vec<PluginHookSource>,
+     plugin_hook_load_warnings: Vec<String>,
++    request_error_dispatcher: RequestErrorDispatcher,
+ }
+ 
+ impl Hooks {
+@@ -77,9 +512,13 @@ impl Hooks {
+     ) -> anyhow::Result<(Self, Receiver<codex_protocol::protocol::HookCompletedEvent>)> {
+         let (result_sender, result_receiver) = async_channel::unbounded();
+         let environment = Arc::new(std::env::vars_os().collect());
+-        let hooks = Self::from_config(config, mcp_executor, Arc::clone(&environment), |shell| {
+-            CommandHookRuntime::new(shell, environment, thread_id, result_sender)
+-        });
++        let hooks = Self::from_config(
++            config,
++            mcp_executor,
++            Arc::clone(&environment),
++            None,
++            |shell| CommandHookRuntime::new(shell, environment, thread_id, result_sender),
++        );
+         let required_load_errors = hooks.engine.required_load_errors();
+         if !required_load_errors.is_empty() {
+             anyhow::bail!(
+@@ -96,6 +535,7 @@ impl Hooks {
+             config,
+             Arc::clone(&self.engine.mcp_executor),
+             Arc::clone(&self.environment),
++            Some(self.request_error_dispatcher.clone()),
+             |shell| self.engine.command_runtime.reconfigured(shell),
+         )
+     }
+@@ -119,6 +559,7 @@ impl Hooks {
+         config: HooksConfig,
+         mcp_executor: Arc<dyn HookMcpExecutor>,
+         environment: Arc<Vec<(OsString, OsString)>>,
++        request_error_dispatcher: Option<RequestErrorDispatcher>,
+         build_runtime: impl FnOnce(CommandShell) -> CommandHookRuntime,
+     ) -> Self {
+         let after_agent = config
+@@ -140,17 +581,21 @@ impl Hooks {
+             command_runtime,
+             mcp_executor,
+         );
++        let request_error_dispatcher = request_error_dispatcher
++            .unwrap_or_else(|| RequestErrorDispatcher::new(&engine.command_runtime));
+         Self {
+             environment,
+             after_agent,
+             engine,
+             plugin_hook_sources: config.plugin_hook_sources,
+             plugin_hook_load_warnings: config.plugin_hook_load_warnings,
++            request_error_dispatcher,
+         }
+     }
+ 
+     /// Abort and join outstanding async hooks during session shutdown.
+     pub async fn shutdown(&self) {
++        self.request_error_dispatcher.shutdown().await;
+         self.engine.command_runtime.shutdown().await;
+     }
+ 
+@@ -259,6 +704,29 @@ impl Hooks {
+         self.engine.run_post_compact(request).await
+     }
+ 
++    pub fn preview_request_error(
++        &self,
++        request: &RequestErrorRequest,
++    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
++        self.engine.preview_request_error(request)
++    }
++
++    pub fn enqueue_request_error(&self, request: RequestErrorRequest) -> RequestErrorDispatch {
++        self.request_error_dispatcher
++            .enqueue(self.engine.clone(), request)
++    }
++
++    pub fn preview_abnormal_stop(
++        &self,
++        request: &AbnormalStopRequest,
++    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
++        self.engine.preview_abnormal_stop(request)
++    }
++
++    pub async fn run_abnormal_stop(&self, request: AbnormalStopRequest) -> AbnormalStopOutcome {
++        self.engine.run_abnormal_stop(request).await
++    }
++
+     pub fn preview_user_prompt_submit(
+         &self,
+         request: &UserPromptSubmitRequest,
+@@ -334,3 +802,530 @@ pub(crate) fn command_from_argv(
+     scrub_non_inheritable_env_vars(command.as_std_mut());
+     Some(command)
+ }
++
++#[cfg(test)]
++mod tests {
++    use std::sync::Arc;
++    use std::time::Duration;
++
++    use async_channel::Receiver as AsyncReceiver;
++    use async_channel::TryRecvError;
++    use codex_protocol::ThreadId;
++    use codex_protocol::protocol::HookEventName;
++    use codex_protocol::protocol::HookRunStatus;
++    use codex_protocol::protocol::HookSource;
++    use codex_utils_absolute_path::AbsolutePathBuf;
++    use futures::FutureExt;
++    use futures::future::BoxFuture;
++    use serde_json::Map;
++    use serde_json::Value;
++    use tokio::sync::Semaphore;
++
++    use super::RequestErrorDispatch;
++    use super::RequestErrorDispatcher;
++    use super::RequestErrorStart;
++    use crate::engine::ClaudeHooksEngine;
++    use crate::engine::CommandShell;
++    use crate::engine::ConfiguredHandler;
++    use crate::engine::ConfiguredHandlerKind;
++    use crate::engine::command_runner::CommandHookRuntime;
++    use crate::events::model_request::ModelRequestError;
++    use crate::events::model_request::ModelRequestErrorCategory;
++    use crate::events::model_request::ModelRequestNextAction;
++    use crate::events::model_request::ModelRequestOperation;
++    use crate::events::model_request::REQUEST_ERROR_QUEUE_CAPACITY;
++    use crate::events::model_request::RequestErrorRequest;
++    use crate::mcp::HookMcpCall;
++    use crate::mcp::HookMcpExecutor;
++
++    struct ControlledMcpExecutor {
++        calls: async_channel::Sender<Map<String, Value>>,
++        release: Semaphore,
++        panic: bool,
++    }
++
++    impl ControlledMcpExecutor {
++        fn release(&self, count: usize) {
++            self.release.add_permits(count);
++        }
++    }
++
++    impl HookMcpExecutor for ControlledMcpExecutor {
++        fn execute(&self, call: HookMcpCall) -> BoxFuture<'_, anyhow::Result<String>> {
++            async move {
++                self.calls.send(call.input).await?;
++                if self.panic {
++                    panic!("controlled RequestError handler panic");
++                }
++                let permit = self.release.acquire().await?;
++                permit.forget();
++                Ok(String::new())
++            }
++            .boxed()
++        }
++    }
++
++    fn cwd() -> AbsolutePathBuf {
++        AbsolutePathBuf::current_dir().expect("current dir")
++    }
++
++    fn engine(
++        executor: Arc<dyn HookMcpExecutor>,
++    ) -> (
++        ClaudeHooksEngine,
++        AsyncReceiver<codex_protocol::protocol::HookCompletedEvent>,
++    ) {
++        let (result_sender, result_receiver) = async_channel::unbounded();
++        let mut engine = ClaudeHooksEngine::new(
++            /*enabled*/ true,
++            /*bypass_hook_trust*/ false,
++            /*config_layer_stack*/ None,
++            Vec::new(),
++            Vec::new(),
++            CommandHookRuntime::new(
++                CommandShell {
++                    program: String::new(),
++                    args: Vec::new(),
++                },
++                Arc::new(Vec::new()),
++                ThreadId::new(),
++                result_sender,
++            ),
++            executor,
++        );
++        engine.handlers = vec![ConfiguredHandler {
++            builtin: false,
++            event_name: HookEventName::RequestError,
++            matcher: None,
++            timeout_sec: 60,
++            status_message: None,
++            additional_context_limit: Default::default(),
++            source_path: cwd().join("request-error.json").into(),
++            source: HookSource::User,
++            display_order: 0,
++            kind: ConfiguredHandlerKind::McpTool {
++                server: "test".to_string(),
++                tool: "record".to_string(),
++                input: Map::from_iter([
++                    (
++                        "attempt".to_string(),
++                        Value::String("${attempt}".to_string()),
++                    ),
++                    (
++                        "coalescedCount".to_string(),
++                        Value::String("${coalescedCount}".to_string()),
++                    ),
++                    (
++                        "message".to_string(),
++                        Value::String("${error.message}".to_string()),
++                    ),
++                ]),
++            },
++        }];
++        (engine, result_receiver)
++    }
++
++    fn request(turn_id: impl Into<String>, attempt: u64) -> RequestErrorRequest {
++        RequestErrorRequest {
++            session_id: ThreadId::new(),
++            turn_id: turn_id.into(),
++            transcript_path: None,
++            cwd: cwd(),
++            model: "gpt-test".to_string(),
++            provider: "openai".to_string(),
++            operation: ModelRequestOperation::Sampling,
++            endpoint_path: "/responses".to_string(),
++            attempt,
++            retry_budget: None,
++            next_action: ModelRequestNextAction::Retry,
++            coalesced_count: 1,
++            error: ModelRequestError {
++                category: ModelRequestErrorCategory::Transport,
++                code: None,
++                message: "disconnected".to_string(),
++                retry_after_ms: None,
++            },
++        }
++    }
++
++    fn harness(
++        panic: bool,
++    ) -> (
++        ClaudeHooksEngine,
++        RequestErrorDispatcher,
++        Arc<ControlledMcpExecutor>,
++        AsyncReceiver<Map<String, Value>>,
++        AsyncReceiver<codex_protocol::protocol::HookCompletedEvent>,
++    ) {
++        let (call_sender, call_receiver) = async_channel::unbounded();
++        let executor = Arc::new(ControlledMcpExecutor {
++            calls: call_sender,
++            release: Semaphore::new(0),
++            panic,
++        });
++        let (engine, completed) = engine(executor.clone());
++        let dispatcher = RequestErrorDispatcher::new(&engine.command_runtime);
++        (engine, dispatcher, executor, call_receiver, completed)
++    }
++
++    fn enqueue_new(
++        dispatcher: &RequestErrorDispatcher,
++        engine: &ClaudeHooksEngine,
++        request: RequestErrorRequest,
++    ) -> (
++        tokio::sync::oneshot::Receiver<crate::events::model_request::NotificationHookOutcome>,
++        RequestErrorStart,
++    ) {
++        match dispatcher.enqueue(engine.clone(), request) {
++            RequestErrorDispatch::Queued { receiver, start } => (receiver, start),
++            RequestErrorDispatch::Coalesced(_) => panic!("new logical job was coalesced"),
++            RequestErrorDispatch::Rejected { reason, .. } => {
++                panic!("new logical job was rejected: {reason}")
++            }
++        }
++    }
++
++    async fn receive_outcome(
++        receiver: tokio::sync::oneshot::Receiver<
++            crate::events::model_request::NotificationHookOutcome,
++        >,
++    ) -> crate::events::model_request::NotificationHookOutcome {
++        tokio::time::timeout(Duration::from_secs(5), receiver)
++            .await
++            .expect("RequestError receiver timed out")
++            .expect("RequestError receiver closed without an outcome")
++    }
++
++    async fn receive_call(receiver: &AsyncReceiver<Map<String, Value>>) -> Map<String, Value> {
++        tokio::time::timeout(Duration::from_secs(5), receiver.recv())
++            .await
++            .expect("RequestError handler did not start")
++            .expect("RequestError call channel closed")
++    }
++
++    async fn finish(dispatcher: &RequestErrorDispatcher, engine: &ClaudeHooksEngine) {
++        tokio::time::timeout(Duration::from_secs(5), dispatcher.shutdown())
++            .await
++            .expect("RequestError actor did not shut down");
++        engine.command_runtime.shutdown().await;
++    }
++
++    #[tokio::test]
++    async fn request_error_dispatcher_preserves_fifo_order() {
++        let (engine, dispatcher, executor, calls, _completed) = harness(false);
++        let mut receivers = Vec::new();
++
++        for attempt in 0..4 {
++            let (receiver, start) = enqueue_new(
++                &dispatcher,
++                &engine,
++                request(format!("turn-{attempt}"), attempt),
++            );
++            start.start();
++            receivers.push(receiver);
++        }
++        for expected in 0..4 {
++            let call = receive_call(&calls).await;
++            assert_eq!(call.get("attempt").and_then(Value::as_u64), Some(expected));
++            executor.release(1);
++        }
++        for receiver in receivers {
++            receive_outcome(receiver).await;
++        }
++        finish(&dispatcher, &engine).await;
++    }
++
++    #[tokio::test]
++    async fn queued_same_key_uses_latest_payload_saturates_count_and_pairs_one_completion() {
++        let (engine, dispatcher, executor, calls, completed) = harness(false);
++        let (running, running_start) = enqueue_new(&dispatcher, &engine, request("running", 0));
++        running_start.start();
++        receive_call(&calls).await;
++
++        let mut first_request = request("queued", 1);
++        first_request.coalesced_count = u64::MAX - 1;
++        first_request.error.message = "old payload".to_string();
++        let (first, first_start) = enqueue_new(&dispatcher, &engine, first_request);
++        first_start.start();
++
++        let mut latest_request = request("queued", 9);
++        latest_request.coalesced_count = 10;
++        latest_request.error.message = "latest payload".to_string();
++        let mut reconfigured_engine = engine.clone();
++        reconfigured_engine.handlers[0].source_path =
++            cwd().join("replacement-request-error.json").into();
++        let merged = match dispatcher.enqueue(reconfigured_engine, latest_request) {
++            RequestErrorDispatch::Coalesced(receiver) => receiver,
++            RequestErrorDispatch::Queued { .. } => panic!("queued same-key job was not merged"),
++            RequestErrorDispatch::Rejected { reason, .. } => {
++                panic!("queued same-key job was rejected: {reason}")
++            }
++        };
++
++        executor.release(1);
++        let call = receive_call(&calls).await;
++        assert_eq!(call.get("attempt").and_then(Value::as_u64), Some(9));
++        assert_eq!(
++            call.get("message").and_then(Value::as_str),
++            Some("latest payload")
++        );
++        assert_eq!(
++            call.get("coalescedCount").and_then(Value::as_u64),
++            Some(u64::MAX)
++        );
++        executor.release(1);
++
++        receive_outcome(running).await;
++        receive_outcome(first).await;
++        receive_outcome(merged).await;
++        let completions = futures::future::join_all((0..2).map(|_| async {
++            tokio::time::timeout(Duration::from_secs(5), completed.recv())
++                .await
++                .expect("logical job completion timed out")
++                .expect("completion channel closed")
++        }))
++        .await;
++        assert!(
++            completions
++                .iter()
++                .all(|event| event.run.source_path.ends_with("request-error.json")),
++            "coalescing must retain the logical job's handler snapshot: {completions:?}"
++        );
++        assert_eq!(completed.try_recv(), Err(TryRecvError::Empty));
++        finish(&dispatcher, &engine).await;
++    }
++
++    #[tokio::test]
++    async fn running_same_key_creates_a_new_logical_job() {
++        let (engine, dispatcher, executor, calls, completed) = harness(false);
++        let (first, first_start) = enqueue_new(&dispatcher, &engine, request("same", 1));
++        first_start.start();
++        receive_call(&calls).await;
++
++        let (second, second_start) = enqueue_new(&dispatcher, &engine, request("same", 2));
++        second_start.start();
++        executor.release(1);
++        let second_call = receive_call(&calls).await;
++        assert_eq!(second_call.get("attempt").and_then(Value::as_u64), Some(2));
++        executor.release(1);
++        receive_outcome(first).await;
++        receive_outcome(second).await;
++        for _ in 0..2 {
++            completed.recv().await.expect("logical job completion");
++        }
++        finish(&dispatcher, &engine).await;
++    }
++
++    #[tokio::test]
++    async fn every_coalescing_key_field_distinguishes_queued_jobs() {
++        let (engine, dispatcher, executor, calls, _completed) = harness(false);
++        let (running, running_start) = enqueue_new(&dispatcher, &engine, request("running", 0));
++        running_start.start();
++        receive_call(&calls).await;
++
++        let base = request("key", 1);
++        let mut requests = vec![base.clone()];
++        let mut changed = base.clone();
++        changed.turn_id = "other-turn".to_string();
++        requests.push(changed);
++        let mut changed = base.clone();
++        changed.operation = ModelRequestOperation::LocalCompact;
++        requests.push(changed);
++        let mut changed = base.clone();
++        changed.endpoint_path = "/compact".to_string();
++        requests.push(changed);
++        let mut changed = base.clone();
++        changed.error.category = ModelRequestErrorCategory::Timeout;
++        requests.push(changed);
++        let mut changed = base.clone();
++        changed.error.code = Some("different".to_string());
++        requests.push(changed);
++        let mut changed = base;
++        changed.next_action = ModelRequestNextAction::Fallback;
++        requests.push(changed);
++
++        let mut receivers = vec![running];
++        for request in requests {
++            let (receiver, start) = enqueue_new(&dispatcher, &engine, request);
++            start.start();
++            receivers.push(receiver);
++        }
++        executor.release(receivers.len());
++        for _ in 0..7 {
++            receive_call(&calls).await;
++        }
++        for receiver in receivers {
++            receive_outcome(receiver).await;
++        }
++        finish(&dispatcher, &engine).await;
++    }
++
++    #[tokio::test]
++    async fn queue_capacity_is_exactly_sixty_four_unstarted_jobs() {
++        let (engine, dispatcher, executor, calls, _completed) = harness(false);
++        let (running, running_start) = enqueue_new(&dispatcher, &engine, request("running", 0));
++        running_start.start();
++        receive_call(&calls).await;
++
++        let mut receivers = vec![running];
++        for index in 0..REQUEST_ERROR_QUEUE_CAPACITY {
++            let (receiver, start) = enqueue_new(
++                &dispatcher,
++                &engine,
++                request(format!("queued-{index}"), index as u64 + 1),
++            );
++            start.start();
++            receivers.push(receiver);
++        }
++        match dispatcher.enqueue(engine.clone(), request("overflow", 1000)) {
++            RequestErrorDispatch::Rejected { outcome, reason } => {
++                assert_eq!(outcome.hook_dispatch_rejected, 1);
++                assert!(outcome.hook_events.is_empty());
++                assert!(reason.contains("capacity 64"));
++            }
++            RequestErrorDispatch::Queued { .. } | RequestErrorDispatch::Coalesced(_) => {
++                panic!("65th unstarted logical job was accepted")
++            }
++        }
++
++        executor.release(receivers.len());
++        for receiver in receivers {
++            receive_outcome(receiver).await;
++        }
++        finish(&dispatcher, &engine).await;
++    }
++
++    #[tokio::test]
++    async fn closed_queue_rejects_without_creating_lifecycle_events() {
++        let (engine, dispatcher, _executor, _calls, _completed) = harness(false);
++        dispatcher.begin_shutdown();
++        dispatcher.wait_finished().await;
++        match dispatcher.enqueue(engine.clone(), request("closed", 1)) {
++            RequestErrorDispatch::Rejected { outcome, reason } => {
++                assert_eq!(outcome.hook_dispatch_rejected, 1);
++                assert!(outcome.hook_events.is_empty());
++                assert!(reason.contains("closed"));
++            }
++            RequestErrorDispatch::Queued { .. } | RequestErrorDispatch::Coalesced(_) => {
++                panic!("closed queue accepted a job")
++            }
++        }
++        engine.command_runtime.shutdown().await;
++    }
++
++    #[tokio::test]
++    async fn worker_panic_becomes_failed_completion_and_actor_finishes() {
++        let (engine, dispatcher, _executor, _calls, completed) = harness(true);
++        let (receiver, start) = enqueue_new(&dispatcher, &engine, request("panic", 1));
++        start.start();
++        let outcome = receive_outcome(receiver).await;
++        assert_eq!(outcome.hook_events.len(), 1);
++        assert_eq!(outcome.hook_events[0].run.status, HookRunStatus::Failed);
++        assert!(
++            outcome.hook_events[0].run.entries[0]
++                .text
++                .contains("panicked")
++        );
++        assert_eq!(
++            completed.recv().await.expect("panic completion").run.status,
++            HookRunStatus::Failed
++        );
++        finish(&dispatcher, &engine).await;
++    }
++
++    #[tokio::test]
++    async fn command_handler_timeout_completes_receiver_as_failed() {
++        let (executor, _calls) = {
++            let (calls, receiver) = async_channel::unbounded();
++            (
++                Arc::new(ControlledMcpExecutor {
++                    calls,
++                    release: Semaphore::new(0),
++                    panic: false,
++                }),
++                receiver,
++            )
++        };
++        let (mut engine, _completed) = engine(executor);
++        engine.handlers[0].timeout_sec = 0;
++        engine.handlers[0].kind = ConfiguredHandlerKind::Command {
++            command: "sleep 60".to_string(),
++            env: std::collections::HashMap::new(),
++            r#async: false,
++        };
++        let dispatcher = RequestErrorDispatcher::new(&engine.command_runtime);
++        let (receiver, start) = enqueue_new(&dispatcher, &engine, request("timeout", 1));
++        start.start();
++        let outcome = receive_outcome(receiver).await;
++        assert_eq!(outcome.hook_events[0].run.status, HookRunStatus::Failed);
++        assert!(
++            outcome.hook_events[0].run.entries[0]
++                .text
++                .contains("timed out")
++        );
++        finish(&dispatcher, &engine).await;
++    }
++
++    #[tokio::test]
++    async fn graceful_shutdown_drains_running_and_queued_jobs() {
++        let (engine, dispatcher, executor, calls, _completed) = harness(false);
++        let (running, running_start) = enqueue_new(&dispatcher, &engine, request("running", 1));
++        running_start.start();
++        receive_call(&calls).await;
++        let (queued, queued_start) = enqueue_new(&dispatcher, &engine, request("queued", 2));
++        queued_start.start();
++
++        dispatcher.begin_shutdown();
++        let waiting_dispatcher = dispatcher.clone();
++        let shutdown = tokio::spawn(async move { waiting_dispatcher.wait_finished().await });
++        assert!(
++            !shutdown.is_finished(),
++            "graceful shutdown skipped the running job"
++        );
++        executor.release(2);
++        receive_outcome(running).await;
++        receive_outcome(queued).await;
++        tokio::time::timeout(Duration::from_secs(5), shutdown)
++            .await
++            .expect("graceful shutdown timed out")
++            .expect("graceful shutdown task panicked");
++        engine.command_runtime.shutdown().await;
++    }
++
++    #[tokio::test]
++    async fn forced_shutdown_fails_running_and_queued_jobs_and_completes_receivers() {
++        let (engine, dispatcher, _executor, calls, completed) = harness(false);
++        let (running, running_start) = enqueue_new(&dispatcher, &engine, request("running", 1));
++        running_start.start();
++        receive_call(&calls).await;
++        let (queued, queued_start) = enqueue_new(&dispatcher, &engine, request("queued", 2));
++        queued_start.start();
++
++        tokio::time::timeout(Duration::from_secs(5), engine.command_runtime.shutdown())
++            .await
++            .expect("forced runtime shutdown timed out");
++        for receiver in [running, queued] {
++            let outcome = receive_outcome(receiver).await;
++            assert_eq!(outcome.hook_events[0].run.status, HookRunStatus::Failed);
++            assert!(
++                outcome.hook_events[0].run.entries[0]
++                    .text
++                    .contains("forced runtime shutdown")
++            );
++        }
++        for _ in 0..2 {
++            assert_eq!(
++                completed
++                    .recv()
++                    .await
++                    .expect("forced cancellation completion")
++                    .run
++                    .status,
++                HookRunStatus::Failed
++            );
++        }
++        tokio::time::timeout(Duration::from_secs(5), dispatcher.wait_finished())
++            .await
++            .expect("cancelled actor did not mark itself finished");
++    }
++}
+diff --git a/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs b/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs
+index 3333f430f9064d6966c1d31491d28613ad7d8d52..8216722bf36d1e0e1a2701bf98a8e5aa6f957aed 100644
+--- a/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs
++++ b/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs
+@@ -3302,8 +3302,18 @@ terminal_visualization_instructions = true
+     Ok(())
+ }
+ 
+-#[tokio::test]
+-async fn changing_directory_preserves_project_trust_permissions_history_and_hooks() -> Result<()> {
++#[test]
++fn changing_directory_preserves_project_trust_permissions_history_and_hooks() -> Result<()> {
++    const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
++
++    std::thread::Builder::new()
++        .name("tui-change-directory-session".to_string())
++        .stack_size(TEST_STACK_SIZE_BYTES)
++        .spawn(|| {
++            let runtime = tokio::runtime::Builder::new_current_thread()
++                .enable_all()
++                .build()?;
++            runtime.block_on(async {
+     use codex_protocol::config_types::TrustLevel as T;
+     use serde_json::json;
+     use std::fs;
+@@ -3614,9 +3624,14 @@ async fn changing_directory_preserves_project_trust_permissions_history_and_hook
+     assert_eq!(rec(req, "thread/fork")[0]["approvalPolicy"], "untrusted");
+     let warning = "Project-local config, hooks, and exec policies are disabled";
+     assert!(history().iter().any(|line| line.contains(warning)));
+-    server.shutdown().await?;
+-    proxy.await??;
+-    Ok(())
++                server.shutdown().await?;
++                proxy.await??;
++                Ok(())
++            })
++        })
++        .expect("spawn large-stack change-directory test thread")
++        .join()
++        .expect("large-stack change-directory test thread panicked")
+ }
+ 
+ #[test]
+diff --git a/codex-rs/tui/src/bottom_pane/hooks_browser_view.rs b/codex-rs/tui/src/bottom_pane/hooks_browser_view.rs
+index 88318fb08adad1165eb1f64201802152a1608a32..6cf0a2fd18ad99dd5844948fad660daecc2cc3a4 100644
+--- a/codex-rs/tui/src/bottom_pane/hooks_browser_view.rs
++++ b/codex-rs/tui/src/bottom_pane/hooks_browser_view.rs
+@@ -773,6 +773,8 @@ fn event_label(event_name: HookEventName) -> &'static str {
+         HookEventName::PostToolUse => "PostToolUse",
+         HookEventName::PreCompact => "PreCompact",
+         HookEventName::PostCompact => "PostCompact",
++        HookEventName::RequestError => "RequestError",
++        HookEventName::AbnormalStop => "AbnormalStop",
+         HookEventName::SessionStart => "SessionStart",
+         HookEventName::SessionEnd => "SessionEnd",
+         HookEventName::UserPromptSubmit => "UserPromptSubmit",
+@@ -790,6 +792,8 @@ fn event_description(event_name: HookEventName) -> &'static str {
+         HookEventName::PostToolUse => "After a tool executes",
+         HookEventName::PreCompact => "Before context compaction",
+         HookEventName::PostCompact => "After context compaction",
++        HookEventName::RequestError => "When a model request fails",
++        HookEventName::AbnormalStop => "When a model request failure stops execution",
+         HookEventName::SessionStart => "When a new session starts",
+         HookEventName::SessionEnd => "Right before a session ends",
+         HookEventName::UserPromptSubmit => "When the user submits a prompt",
+diff --git a/codex-rs/tui/src/chatwidget/turn_runtime.rs b/codex-rs/tui/src/chatwidget/turn_runtime.rs
+index 0d5303686e69eda619a29bd60e6a9a4883a5e14d..39d74d98ffa662d8f73611bfd64a1141e6c21c9f 100644
+--- a/codex-rs/tui/src/chatwidget/turn_runtime.rs
++++ b/codex-rs/tui/src/chatwidget/turn_runtime.rs
+@@ -355,18 +355,14 @@ impl ChatWidget {
+     }
+ 
+     pub(super) fn on_server_overloaded_error(&mut self, message: String) {
+-        self.input_queue.submit_pending_steers_after_interrupt = false;
+-        self.finalize_turn();
+-
+         let message = if message.trim().is_empty() {
+-            "Codex is currently experiencing high load.".to_string()
++            "Codex is currently experiencing high load; waiting to retry.".to_string()
+         } else {
+-            message
++            format!("{message} Waiting to retry.")
+         };
+ 
+         self.add_to_history(history_cell::new_warning_event(message));
+         self.request_redraw();
+-        self.maybe_send_next_queued_input();
+     }
+ 
+     fn on_error(&mut self, message: String) {
+diff --git a/codex-rs/tui/src/history_cell/hook_cell.rs b/codex-rs/tui/src/history_cell/hook_cell.rs
+index 04c0946750cef8bdd029f3cfe7a05408bbc34562..626de13f673b2d21c6c002ed76beb7a2d6dfc3dc 100644
+--- a/codex-rs/tui/src/history_cell/hook_cell.rs
++++ b/codex-rs/tui/src/history_cell/hook_cell.rs
+@@ -516,7 +516,6 @@ fn hook_completed_bullet(status: HookRunStatus) -> Span<'static> {
+         HookRunStatus::Running => "•".into(),
+     }
+ }
+-
+ #[cfg(test)]
+ mod tests {
+     use super::*;

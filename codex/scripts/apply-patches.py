@@ -13,14 +13,13 @@ from common import (
     main_wrapper,
     patch_paths,
     require_git_worktree,
-    validate_binary_patches,
     validate_patch_directory,
 )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Apply or check the four-patch Codex series from the pinned upstream HEAD"
+        description="Apply or check the manifest-declared Codex series from the pinned upstream HEAD"
     )
     add_repo_root_argument(parser)
     parser.add_argument(
@@ -32,13 +31,13 @@ def main() -> int:
     manifest = load_manifest(args.repo_root)
     src = manifest.worktree
     require_git_worktree(src)
-    ensure_clean(src)
+    if not args.check:
+        ensure_clean(src)
     ensure_real_index_clean(src)
     ensure_pinned_head(src, manifest.upstream)
     validate_patch_directory(manifest)
     patches = patch_paths(manifest)
-    binary_patches = validate_binary_patches(src, patches)
-    apply_patches(src, patches, check_only=args.check)
+    binary_patches = apply_patches(src, patches, check_only=args.check)
     json_stdout(
         {
             "ref": manifest.upstream.ref,

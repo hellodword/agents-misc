@@ -1,32 +1,31 @@
 from __future__ import annotations
 
 import argparse
-import tempfile
-from pathlib import Path
 
 from common import (
     add_repo_root_argument,
-    apply_patches,
-    audit_default_overload_producer_coverage,
+    apply_patch_series,
     changed_tree_digest,
+    clone_pinned_checkout,
     ensure_pinned_head,
     ensure_real_index_clean,
     json_stdout,
     load_manifest,
+    maintenance_sandbox,
     main_wrapper,
     patch_paths,
     require_git_worktree,
-    run,
     run_generation_sequence,
     run_manifest_validation,
-    validate_binary_patches,
     validate_patch_directory,
     validate_zstd_fixture_tree,
 )
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate application, generation, and targeted Codex behavior")
+    parser = argparse.ArgumentParser(
+        description="Validate application, generation, and targeted Codex behavior"
+    )
     add_repo_root_argument(parser)
     args = parser.parse_args()
     manifest = load_manifest(args.repo_root)
@@ -34,33 +33,21 @@ def main() -> int:
     require_git_worktree(src)
     ensure_real_index_clean(src)
     ensure_pinned_head(src, manifest.upstream)
-    with tempfile.TemporaryDirectory(prefix="codex-test-") as temporary:
-        validation = Path(temporary) / "src"
-        run(
-            [
-                "git",
-                "-c",
-                "protocol.file.allow=always",
-                "clone",
-                "--quiet",
-                "--no-hardlinks",
-                str(src),
-                str(validation),
-            ]
-        )
-        run(["git", "checkout", "--quiet", "--detach", manifest.upstream.revision], cwd=validation)
+    with maintenance_sandbox(manifest, "test-workspace") as temporary:
+        validation = temporary / "src"
+        clone_pinned_checkout(manifest, validation)
         validate_patch_directory(manifest)
         patches = patch_paths(manifest)
-        binary_patches = validate_binary_patches(validation, patches)
-        apply_patches(validation, patches, check_only=False)
-        producer_coverage = audit_default_overload_producer_coverage(validation)
+        binary_patches = apply_patch_series(validation, patches)
         before_generate = changed_tree_digest(validation)
         first_generation_digest, second_generation_digest = run_generation_sequence(
             manifest, validation, twice=True
         )
         after_generate = changed_tree_digest(validation)
         if after_generate != before_generate:
-            raise RuntimeError("tracked generated artifacts drift after applying the patch series")
+            raise RuntimeError(
+                "tracked generated artifacts drift after applying the patch series"
+            )
         validate_zstd_fixture_tree(validation)
         seen = run_manifest_validation(manifest, validation)
     json_stdout(
@@ -74,7 +61,6 @@ def main() -> int:
             "binaryPatches": list(binary_patches),
             "regressionCommands": len(manifest.upstream.regression_commands),
             "targetedCommands": len(seen),
-            "overloadProducers": producer_coverage,
         }
     )
     return 0

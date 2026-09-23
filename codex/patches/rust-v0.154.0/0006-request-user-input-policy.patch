@@ -1,0 +1,678 @@
+diff --git a/codex-rs/cli/src/doctor.rs b/codex-rs/cli/src/doctor.rs
+index e42fa9be0171c082ad088475f41fea6e63f5fae0..9cf94b18a645d24cf2a7031aeba54584c73313b3 100644
+--- a/codex-rs/cli/src/doctor.rs
++++ b/codex-rs/cli/src/doctor.rs
+@@ -2371,7 +2371,7 @@ fn websocket_error_detail(err: &ApiError) -> String {
+         | ApiError::InvalidRequest { .. }
+         | ApiError::CyberPolicy { .. }
+         | ApiError::MisalignmentPolicyViolation { .. }
+-        | ApiError::ServerOverloaded => format!("handshake error: {err}"),
++        | ApiError::ServerOverloaded(_) => format!("handshake error: {err}"),
+     }
+ }
+ 
+@@ -3175,6 +3175,31 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn yolo_config_overrides_preserve_request_user_input_policy() {
++        let interactive = TuiCli::parse_from(["codex", "--yolo"]);
++        assert!(interactive.dangerously_bypass_approvals_and_sandbox);
++        assert!(
++            interactive
++                .config_overrides
++                .raw_overrides
++                .iter()
++                .all(|entry| !entry.contains("request_user_input_policy")),
++            "--yolo must not override the independent request-user-input policy"
++        );
++
++        let overrides = config_overrides_from_interactive(
++            &interactive,
++            &Arg0DispatchPaths {
++                codex_self_exe: None,
++                codex_linux_sandbox_exe: None,
++                main_execve_wrapper_exe: None,
++            },
++        );
++        assert_eq!(overrides.approval_policy, Some(AskForApproval::Never));
++        assert_eq!(overrides.sandbox_mode, Some(SandboxMode::DangerFullAccess));
++    }
++
+     #[test]
+     fn redacted_json_report_structures_and_sanitizes_details() {
+         let report = DoctorReport {
+diff --git a/codex-rs/core/src/mcp_skill_dependencies.rs b/codex-rs/core/src/mcp_skill_dependencies.rs
+index 6a9898c562c452259514b1082a3d64733e4ddde4..cb09e726c3075959d499bb3e20725c3a5fef2eaa 100644
+--- a/codex-rs/core/src/mcp_skill_dependencies.rs
++++ b/codex-rs/core/src/mcp_skill_dependencies.rs
+@@ -259,6 +259,10 @@ async fn should_install_mcp_dependencies(
+     missing: &HashMap<String, McpServerConfig>,
+     cancellation_token: &CancellationToken,
+ ) -> bool {
++    if turn_context.approval_policy() == AskForApproval::Never {
++        return false;
++    }
++
+     if mcp_permission_prompt_is_auto_approved(
+         turn_context.approval_policy(),
+         &turn_context.permission_profile(),
+@@ -267,10 +271,6 @@ async fn should_install_mcp_dependencies(
+         return true;
+     }
+ 
+-    if turn_context.approval_policy() == AskForApproval::Never {
+-        return false;
+-    }
+-
+     let server_list = format_missing_mcp_dependencies(missing);
+     let question = RequestUserInputQuestion {
+         id: SKILL_MCP_DEPENDENCY_PROMPT_ID.to_string(),
+@@ -528,3 +528,108 @@ fn collect_missing_mcp_dependencies(
+ 
+     missing
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::session::tests::make_session_and_context_with_auth_and_config_and_rx;
++    use crate::state::ActiveTurn;
++    use codex_config::config_toml::RequestUserInputPolicy;
++    use codex_login::CodexAuth;
++    use codex_protocol::models::PermissionProfile;
++    use codex_protocol::protocol::EventMsg;
++    use std::sync::Arc;
++
++    fn missing_dependency() -> HashMap<String, McpServerConfig> {
++        let dependency = SkillToolDependency {
++            r#type: "mcp".to_string(),
++            value: "calendar".to_string(),
++            description: None,
++            transport: Some("streamable_http".to_string()),
++            command: None,
++            url: Some("https://calendar.example/mcp".to_string()),
++            oauth_callback_port: None,
++        };
++        HashMap::from([(
++            dependency.value.clone(),
++            mcp_dependency_to_server_config(&dependency).expect("valid test dependency"),
++        )])
++    }
++
++    #[tokio::test]
++    async fn request_user_input_policy_preserve_source_keeps_skill_dependency_blocking() {
++        let (session, turn_context, events) = make_session_and_context_with_auth_and_config_and_rx(
++            CodexAuth::from_api_key("Test API Key"),
++            Vec::new(),
++            |config| {
++                config.request_user_input_policy = RequestUserInputPolicy::PreserveSource;
++            },
++        )
++        .await;
++        *session.active_turn.lock().await = Some(ActiveTurn::default());
++
++        let request = tokio::spawn({
++            let session = Arc::clone(&session);
++            let turn_context = Arc::clone(&turn_context);
++            async move {
++                should_install_mcp_dependencies(
++                    &session,
++                    &turn_context,
++                    &missing_dependency(),
++                    &CancellationToken::new(),
++                )
++                .await
++            }
++        });
++
++        let event = events.recv().await.expect("skill dependency prompt event");
++        let EventMsg::RequestUserInput(event) = event.msg else {
++            panic!("expected request-user-input skill dependency prompt");
++        };
++        assert!(event.is_blocking);
++        session
++            .notify_user_input_response(
++                &turn_context.sub_id,
++                RequestUserInputResponse {
++                    answers: HashMap::new(),
++                },
++            )
++            .await;
++        assert!(!request.await.expect("skill dependency prompt task"));
++    }
++
++    #[tokio::test]
++    async fn request_user_input_policy_yolo_skill_dependency_returns_false_without_prompting() {
++        let (session, turn_context, events) = make_session_and_context_with_auth_and_config_and_rx(
++            CodexAuth::from_api_key("Test API Key"),
++            Vec::new(),
++            |config| {
++                config
++                    .permissions
++                    .approval_policy
++                    .set(AskForApproval::Never)
++                    .expect("test policy should allow yolo approval mode");
++                config
++                    .permissions
++                    .set_permission_profile(PermissionProfile::Disabled)
++                    .expect("test policy should allow full access");
++            },
++        )
++        .await;
++
++        assert!(
++            !should_install_mcp_dependencies(
++                &session,
++                &turn_context,
++                &missing_dependency(),
++                &CancellationToken::new(),
++            )
++            .await
++        );
++        assert!(
++            !std::iter::from_fn(|| events.try_recv().ok())
++                .any(|event| matches!(event.msg, EventMsg::RequestUserInput(_))),
++            "yolo must not emit a skill dependency prompt"
++        );
++    }
++}
+diff --git a/codex-rs/core/src/mcp_tool_call_tests.rs b/codex-rs/core/src/mcp_tool_call_tests.rs
+index 3b44bafecd5f5a057d598ea0fbd6a63476461151..b35dc3eeb46f46c34f85f4a33673d75e244af280 100644
+--- a/codex-rs/core/src/mcp_tool_call_tests.rs
++++ b/codex-rs/core/src/mcp_tool_call_tests.rs
+@@ -6,6 +6,7 @@ use crate::environment_selection::EnvironmentConfigOrigin;
+ use crate::environment_selection::TurnEnvironmentState;
+ use crate::session::step_context::StepContext;
+ use crate::session::tests::make_session_and_context;
++use crate::session::tests::make_session_and_context_with_auth_and_config_and_rx;
+ use crate::session::tests::make_session_and_context_with_rx;
+ use crate::session::tests::mcp_config_for_test;
+ use crate::session::tests::update_selected_settings_for_test;
+@@ -17,6 +18,7 @@ use crate::tools::hook_names::HookToolName;
+ use crate::turn_metadata::McpTurnMetadataContext;
+ use codex_config::CONFIG_TOML_FILE;
+ use codex_config::config_toml::ConfigToml;
++use codex_config::config_toml::RequestUserInputPolicy;
+ use codex_config::types::AppConfig;
+ use codex_config::types::AppToolConfig;
+ use codex_config::types::AppToolsConfig;
+@@ -3007,6 +3009,98 @@ async fn session_approval_preserves_mcp_always_persistence_choice() {
+     .await;
+ }
+ 
++fn request_user_input_policy_mcp_approval_action(
++    approval_policy: AskForApproval,
++) -> ApprovalAction {
++    ApprovalAction::McpToolCall {
++        id: "call-mcp-policy".to_string(),
++        server: "example".to_string(),
++        tool_name: "dangerous".to_string(),
++        arguments: Some(serde_json::json!({ "id": 1 })),
++        connector_id: None,
++        connector_name: None,
++        connector_description: None,
++        connected_account_email: None,
++        tool_title: Some("Dangerous".to_string()),
++        tool_description: None,
++        annotations: None,
++        hook_tool_name: HookToolName::new("mcp__example__dangerous"),
++        approval_policy,
++        reviewer: ApprovalsReviewer::User,
++        approval_mode: AppToolApproval::Prompt,
++        allow_session_remember: false,
++        allow_persistent_approval: false,
++    }
++}
++
++#[tokio::test]
++async fn request_user_input_policy_preserve_source_keeps_mcp_approval_fallback_blocking() {
++    let (session, turn_context, events) = make_session_and_context_with_auth_and_config_and_rx(
++        codex_login::CodexAuth::from_api_key("Test API Key"),
++        Vec::new(),
++        |config| {
++            config.request_user_input_policy = RequestUserInputPolicy::PreserveSource;
++            config
++                .features
++                .disable(Feature::ToolCallMcpElicitation)
++                .expect("test config should disable MCP approval elicitation");
++        },
++    )
++    .await;
++    *session.active_turn.lock().await = Some(ActiveTurn::default());
++
++    let approval = tokio::spawn({
++        let session = Arc::clone(&session);
++        let turn_context = Arc::clone(&turn_context);
++        async move {
++            request_mcp_tool_user_approval(
++                &session,
++                &turn_context,
++                "call-mcp-policy",
++                &request_user_input_policy_mcp_approval_action(AskForApproval::OnRequest),
++            )
++            .await
++        }
++    });
++
++    let event = events.recv().await.expect("MCP approval fallback event");
++    let EventMsg::RequestUserInput(event) = event.msg else {
++        panic!("expected request-user-input MCP approval fallback");
++    };
++    assert!(event.is_blocking);
++    session
++        .notify_user_input_response(
++            &turn_context.sub_id,
++            RequestUserInputResponse {
++                answers: HashMap::new(),
++            },
++        )
++        .await;
++    assert_eq!(
++        approval.await.expect("MCP approval fallback task"),
++        ReviewDecision::Abort
++    );
++}
++
++#[tokio::test]
++async fn request_user_input_policy_yolo_mcp_tool_approval_denies_without_prompting() {
++    let (session, turn_context, events) = make_session_and_context_with_rx().await;
++    assert_eq!(
++        request_mcp_tool_user_approval(
++            &session,
++            &turn_context,
++            "call-mcp-policy",
++            &request_user_input_policy_mcp_approval_action(AskForApproval::Never),
++        )
++        .await,
++        ReviewDecision::denied("MCP tool call requires approval, but approval policy is never")
++    );
++    assert!(
++        events.try_recv().is_err(),
++        "yolo must not emit an MCP prompt"
++    );
++}
++
+ async fn assert_mcp_user_approval_persistence(
+     persistence: &'static str,
+     expected_decision: ReviewDecision,
+diff --git a/codex-rs/core/src/session/elicitation_holders_tests.rs b/codex-rs/core/src/session/elicitation_holders_tests.rs
+index 2f85db1eecfbd9e883d4be4674e8ca46eb71d7e4..4774e0382da2188f5f3d5dbc062fcafb58f3c9db 100644
+--- a/codex-rs/core/src/session/elicitation_holders_tests.rs
++++ b/codex-rs/core/src/session/elicitation_holders_tests.rs
+@@ -1,9 +1,12 @@
+ use std::collections::HashMap;
+ use std::sync::Arc;
+ 
++use codex_config::config_toml::RequestUserInputPolicy;
+ use codex_core_plugins::PluginCommandAttribution;
++use codex_login::CodexAuth;
+ use codex_plugin::PluginId;
+ use codex_protocol::approvals::ExecApprovalKind;
++use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::ReviewDecision;
+ use codex_protocol::request_permissions::PermissionGrantScope;
+ use codex_protocol::request_permissions::RequestPermissionProfile;
+@@ -14,6 +17,7 @@ use codex_protocol::request_user_input::RequestUserInputResponse;
+ use tokio::sync::watch;
+ use tokio_util::sync::CancellationToken;
+ 
++use super::tests::make_session_and_context_with_auth_and_config_and_rx;
+ use super::tests::make_session_and_context_with_rx;
+ use crate::session::step_context::StepContext;
+ use crate::state::ActiveTurn;
+@@ -197,3 +201,77 @@ async fn request_user_input_holds_an_elicitation_until_response() {
+     request.await.expect("request user input task");
+     wait_until_released(&mut pause_state).await;
+ }
++
++async fn assert_request_user_input_policy_at_session_boundary(
++    policy: Option<RequestUserInputPolicy>,
++    source_is_blocking: bool,
++    expected_is_blocking: bool,
++) {
++    let (session, turn_context, events) = make_session_and_context_with_auth_and_config_and_rx(
++        CodexAuth::from_api_key("Test API Key"),
++        Vec::new(),
++        move |config| {
++            if let Some(policy) = policy {
++                config.request_user_input_policy = policy;
++            }
++        },
++    )
++    .await;
++    *session.active_turn.lock().await = Some(ActiveTurn::default());
++
++    let request = tokio::spawn({
++        let session = Arc::clone(&session);
++        let turn_context = Arc::clone(&turn_context);
++        async move {
++            session
++                .request_user_input(
++                    turn_context.as_ref(),
++                    "policy-boundary".to_string(),
++                    RequestUserInputArgs {
++                        questions: Vec::new(),
++                        is_blocking: source_is_blocking,
++                        auto_resolution_ms: None,
++                    },
++                )
++                .await
++        }
++    });
++
++    let event = events.recv().await.expect("request user input event");
++    let EventMsg::RequestUserInput(event) = event.msg else {
++        panic!("expected request user input event");
++    };
++    assert_eq!(event.is_blocking, expected_is_blocking);
++
++    session
++        .notify_user_input_response(
++            &turn_context.sub_id,
++            RequestUserInputResponse {
++                answers: HashMap::new(),
++            },
++        )
++        .await;
++    assert!(request.await.expect("request user input task").is_some());
++}
++
++#[tokio::test]
++async fn request_user_input_policy_is_enforced_once_at_the_session_boundary() {
++    // Leaving the resolved config untouched represents a missing TOML setting:
++    // the resolved default must still force arbitrary future producers to block.
++    assert_request_user_input_policy_at_session_boundary(
++        /*policy*/ None, /*source_is_blocking*/ false, /*expected_is_blocking*/ true,
++    )
++    .await;
++    assert_request_user_input_policy_at_session_boundary(
++        Some(RequestUserInputPolicy::PreserveSource),
++        /*source_is_blocking*/ false,
++        /*expected_is_blocking*/ false,
++    )
++    .await;
++    assert_request_user_input_policy_at_session_boundary(
++        Some(RequestUserInputPolicy::PreserveSource),
++        /*source_is_blocking*/ true,
++        /*expected_is_blocking*/ true,
++    )
++    .await;
++}
+diff --git a/codex-rs/core/src/session/mcp_tests.rs b/codex-rs/core/src/session/mcp_tests.rs
+index 120789bc354162668154d3adddd7067c610e30c2..4e6489ee7ed9d177e7354dfe869eeafbdf6b8732 100644
+--- a/codex-rs/core/src/session/mcp_tests.rs
++++ b/codex-rs/core/src/session/mcp_tests.rs
+@@ -1,8 +1,44 @@
+ use super::*;
++use crate::session::TurnInput;
++use crate::session::tests::make_session_and_context_with_auth_and_config_and_rx;
++use crate::state::TaskKind;
++use crate::tasks::SessionTask;
++use crate::tasks::SessionTaskResult;
++use codex_login::CodexAuth;
++use codex_protocol::models::PermissionProfile;
++use codex_protocol::protocol::AskForApproval;
++use codex_protocol::protocol::EventMsg;
++use codex_protocol::protocol::TurnAbortReason;
+ use rmcp::model::BooleanSchema;
+ use rmcp::model::ElicitationSchema;
+ use rmcp::model::PrimitiveSchemaDefinition;
+ use serde_json::json;
++use std::sync::Arc;
++use tokio_util::sync::CancellationToken;
++
++#[derive(Clone, Copy)]
++struct RequestUserInputPolicyPendingTask;
++
++impl SessionTask for RequestUserInputPolicyPendingTask {
++    fn kind(&self) -> TaskKind {
++        TaskKind::Regular
++    }
++
++    fn span_name(&self) -> &'static str {
++        "session_task.request_user_input_policy_pending"
++    }
++
++    async fn run(
++        self: Arc<Self>,
++        _session: Arc<Session>,
++        _ctx: Arc<TurnContext>,
++        _input: Vec<TurnInput>,
++        cancellation_token: CancellationToken,
++    ) -> SessionTaskResult {
++        cancellation_token.cancelled().await;
++        Ok(None)
++    }
++}
+ 
+ fn meta(value: Value) -> Option<RequestMetaObject> {
+     let Value::Object(map) = value else {
+@@ -221,6 +257,80 @@ fn guardian_elicitation_review_request_declines_unsupported_opt_in_shapes() {
+     ));
+ }
+ 
++#[tokio::test]
++async fn request_user_input_policy_yolo_mcp_elicitation_declines_except_safe_empty_schema() {
++    let (session, turn_context, events) = make_session_and_context_with_auth_and_config_and_rx(
++        CodexAuth::from_api_key("Test API Key"),
++        Vec::new(),
++        |config| {
++            config
++                .permissions
++                .approval_policy
++                .set(AskForApproval::Never)
++                .expect("test policy should allow yolo approval mode");
++            config
++                .permissions
++                .set_permission_profile(PermissionProfile::Disabled)
++                .expect("test policy should allow full access");
++            config
++                .mcp_servers
++                .set(
++                    serde_json::from_value(json!({
++                        "browser-use": { "command": "missing-test-mcp-server" }
++                    }))
++                    .expect("test MCP server configuration should deserialize"),
++                )
++                .expect("test MCP server should be configurable");
++        },
++    )
++    .await;
++    session
++        .spawn_task(
++            Arc::clone(&turn_context),
++            Vec::new(),
++            RequestUserInputPolicyPendingTask,
++        )
++        .await;
++    session.mark_mcp_runtime_dirty();
++    session.refresh_mcp_if_dirty().await;
++
++    let safe = review_guardian_mcp_elicitation(Arc::clone(&session), form_request(/*meta*/ None))
++        .await
++        .expect("safe elicitation review should succeed")
++        .expect("safe empty-schema elicitation should resolve automatically");
++    assert_eq!(safe.action, ElicitationAction::Accept);
++    assert_eq!(safe.content, Some(json!({})));
++
++    let unsafe_request = ElicitationReviewRequest {
++        server_name: "browser-use".to_string(),
++        request_id: rmcp::model::NumberOrString::Number(8),
++        elicitation: Elicitation::Mcp(rmcp::model::ElicitRequestParams::FormElicitationParams {
++            meta: None,
++            message: "Provide confirmation".to_string(),
++            requested_schema: ElicitationSchema::builder()
++                .required_property(
++                    "confirmed",
++                    PrimitiveSchemaDefinition::Boolean(BooleanSchema::new()),
++                )
++                .build()
++                .expect("schema should build"),
++        }),
++    };
++    let declined = review_guardian_mcp_elicitation(Arc::clone(&session), unsafe_request)
++        .await
++        .expect("unsafe elicitation review should succeed")
++        .expect("yolo should resolve unsafe elicitation without prompting");
++    assert_eq!(declined.action, ElicitationAction::Decline);
++    assert!(declined.content.is_none());
++    assert!(
++        !std::iter::from_fn(|| events.try_recv().ok())
++            .any(|event| matches!(event.msg, EventMsg::ElicitationRequest(_))),
++        "yolo MCP elicitation must not prompt"
++    );
++
++    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
++}
++
+ #[test]
+ fn guardian_decisions_map_to_elicitation_responses_without_session_state() {
+     let model = codex_models_manager::model_info::model_info_from_slug("acting-model");
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 8ffc144d028b4f339d0ff323bbc804659406bada..ddadb37bcd6b92bddc1719cfb6d10882766c563b 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -209,6 +209,7 @@ use crate::context_manager::HistoryReplacement;
+ use crate::thread_rollout_truncation::initial_history_has_prior_user_turns;
+ use codex_config::CONFIG_TOML_FILE;
+ use codex_config::ConfigLayerSource;
++use codex_config::config_toml::RequestUserInputPolicy;
+ use codex_config::types::McpServerConfig;
+ use codex_model_provider::create_model_provider;
+ use codex_model_provider_info::ModelProviderInfo;
+@@ -2960,8 +2961,11 @@ impl Session {
+         &self,
+         turn_context: &TurnContext,
+         call_id: String,
+-        args: RequestUserInputArgs,
++        mut args: RequestUserInputArgs,
+     ) -> Option<AcceptedUserInputResponse> {
++        if turn_context.config.request_user_input_policy == RequestUserInputPolicy::AlwaysBlock {
++            args.is_blocking = true;
++        }
+         let _elicitation = self.services.elicitations.register();
+         let sub_id = turn_context.sub_id.clone();
+         let (tx_response, rx_response) = oneshot::channel();
+diff --git a/codex-rs/core/src/tools/handlers/request_user_input_tests.rs b/codex-rs/core/src/tools/handlers/request_user_input_tests.rs
+index 96bc27c43c95162d83a89ad15b5a17533dd3f5b4..cc0f35fa43041ba9576506028a29ea6d1a7e60f2 100644
+--- a/codex-rs/core/src/tools/handlers/request_user_input_tests.rs
++++ b/codex-rs/core/src/tools/handlers/request_user_input_tests.rs
+@@ -3,13 +3,13 @@ use crate::GuardianAuthorizationVersion;
+ use crate::session::step_context::StepContext;
+ use crate::session::tests::make_session_and_context;
+ use crate::session::tests::make_session_and_context_with_auth_and_config_and_rx;
+-use crate::session::tests::make_session_and_context_with_rx;
+ use crate::session::tests::update_selected_settings_for_test;
+ use crate::session::tests::update_turn_settings_for_test;
+ use crate::state::ActiveTurn;
+ use crate::tools::context::ToolInvocation;
+ use crate::tools::context::ToolPayload;
+ use crate::turn_diff_tracker::TurnDiffTracker;
++use codex_config::config_toml::RequestUserInputPolicy;
+ use codex_guardian_context::RenderedVerifiedAnswers;
+ use codex_protocol::ThreadId;
+ use codex_protocol::protocol::EventMsg;
+@@ -98,7 +98,7 @@ async fn multi_agent_v2_request_user_input_rejects_subagent_threads() {
+     complete: false,
+ }; "oversized multiline answer")]
+ #[tokio::test]
+-async fn request_user_input_sets_non_blocking_outside_plan_mode(
++async fn request_user_input_policy_preserve_source_keeps_model_default_nonblocking(
+     answer: Option<(&str, String)>,
+     expected: RenderedVerifiedAnswers,
+ ) {
+@@ -107,6 +107,7 @@ async fn request_user_input_sets_non_blocking_outside_plan_mode(
+             codex_login::CodexAuth::from_api_key("Test API Key"),
+             Vec::new(),
+             |config| {
++                config.request_user_input_policy = RequestUserInputPolicy::PreserveSource;
+                 config
+                     .features
+                     .set_enabled(Feature::GuardianThreadContext, thread_context_enabled)
+@@ -259,8 +260,15 @@ async fn request_user_input_sets_non_blocking_outside_plan_mode(
+ }
+ 
+ #[tokio::test]
+-async fn request_user_input_sets_blocking_from_turn_mode() {
+-    let (session, mut turn, events) = make_session_and_context_with_rx().await;
++async fn request_user_input_policy_preserve_source_keeps_model_plan_blocking() {
++    let (session, mut turn, events) = make_session_and_context_with_auth_and_config_and_rx(
++        codex_login::CodexAuth::from_api_key("Test API Key"),
++        Vec::new(),
++        |config| {
++            config.request_user_input_policy = RequestUserInputPolicy::PreserveSource;
++        },
++    )
++    .await;
+     update_turn_settings_for_test(
+         Arc::get_mut(&mut turn).expect("turn context should be uniquely owned"),
+         |settings| {
+diff --git a/codex-rs/core/tests/suite/request_user_input.rs b/codex-rs/core/tests/suite/request_user_input.rs
+index dc546a24b2bcfd49f0f913deb2142fc8eb79b2f9..6e6240907600c66c1b040c9745c40f071ea28a99 100644
+--- a/codex-rs/core/tests/suite/request_user_input.rs
++++ b/codex-rs/core/tests/suite/request_user_input.rs
+@@ -1,5 +1,6 @@
+ #![allow(clippy::unwrap_used)]
+ 
++use codex_config::config_toml::RequestUserInputPolicy;
+ use codex_core::TurnInputRequest;
+ use core_test_support::test_codex::local_selections;
+ use std::collections::HashMap;
+@@ -70,10 +71,13 @@ fn call_output_content_and_success(
+ 
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+ async fn request_user_input_round_trip_resolves_pending() -> anyhow::Result<()> {
+-    request_user_input_round_trip_for_mode(ModeKind::Plan).await
++    request_user_input_round_trip_for_mode(ModeKind::Plan, /*policy*/ None).await
+ }
+ 
+-async fn request_user_input_round_trip_for_mode(mode: ModeKind) -> anyhow::Result<()> {
++async fn request_user_input_round_trip_for_mode(
++    mode: ModeKind,
++    policy: Option<RequestUserInputPolicy>,
++) -> anyhow::Result<()> {
+     skip_if_no_network!(Ok(()));
+ 
+     let server = start_mock_server().await;
+@@ -86,6 +90,9 @@ async fn request_user_input_round_trip_for_mode(mode: ModeKind) -> anyhow::Resul
+         ..
+     } = builder
+         .with_config(move |config| {
++            if let Some(policy) = policy {
++                config.request_user_input_policy = policy;
++            }
+             if mode == ModeKind::Default {
+                 config
+                     .features
+@@ -97,7 +104,8 @@ async fn request_user_input_round_trip_for_mode(mode: ModeKind) -> anyhow::Resul
+         .await?;
+ 
+     let call_id = "user-input-call";
+-    let expected_is_blocking = mode == ModeKind::Plan;
++    let expected_is_blocking =
++        policy.unwrap_or_default() == RequestUserInputPolicy::AlwaysBlock || mode == ModeKind::Plan;
+     let request_args = json!({
+         "questions": [{
+             "id": "confirm_path",
+@@ -418,6 +426,17 @@ async fn request_user_input_rejected_in_default_mode_by_default() -> anyhow::Res
+ }
+ 
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+-async fn request_user_input_round_trip_in_default_mode_with_feature() -> anyhow::Result<()> {
+-    request_user_input_round_trip_for_mode(ModeKind::Default).await
++async fn request_user_input_yolo_direct_round_trip_in_default_mode_with_feature()
++-> anyhow::Result<()> {
++    request_user_input_round_trip_for_mode(ModeKind::Default, /*policy*/ None).await
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn request_user_input_policy_preserve_source_keeps_default_mode_nonblocking()
++-> anyhow::Result<()> {
++    request_user_input_round_trip_for_mode(
++        ModeKind::Default,
++        Some(RequestUserInputPolicy::PreserveSource),
++    )
++    .await
+ }

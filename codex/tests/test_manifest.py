@@ -5,7 +5,12 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from codex.scripts.common import PatchError, load_manifest, validate_generated_only_ownership, validate_patch_directory
+from codex.scripts.common import (
+    PatchError,
+    load_manifest,
+    validate_generated_only_ownership,
+    validate_patch_directory,
+)
 
 
 UPSTREAM = """
@@ -37,11 +42,15 @@ class ManifestTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
         (root / "codex").mkdir()
-        (root / "codex" / "upstream.toml").write_text(textwrap.dedent(upstream).lstrip())
+        (root / "codex" / "upstream.toml").write_text(
+            textwrap.dedent(upstream).lstrip()
+        )
         (root / "codex" / "series.toml").write_text(textwrap.dedent(series).lstrip())
         return root
 
-    def assert_manifest_error(self, upstream: str = UPSTREAM, series: str = PATCH) -> None:
+    def assert_manifest_error(
+        self, upstream: str = UPSTREAM, series: str = PATCH
+    ) -> None:
         with self.assertRaises(PatchError):
             load_manifest(self.make_root(upstream, series), require_patch_files=False)
 
@@ -52,7 +61,9 @@ class ManifestTests(unittest.TestCase):
             manifest.upstream.regression_commands,
             (("python3", "-c", "pass"),),
         )
-        self.assertEqual([patch.file for patch in manifest.patches], ["0001-example.patch"])
+        self.assertEqual(
+            [patch.file for patch in manifest.patches], ["0001-example.patch"]
+        )
 
     def test_unknown_upstream_field_is_rejected(self) -> None:
         self.assert_manifest_error(upstream=UPSTREAM + 'legacy = "no"\n')
@@ -76,30 +87,40 @@ class ManifestTests(unittest.TestCase):
         self.assert_manifest_error(series=PATCH + 'legacy = "no"\n')
 
     def test_missing_field_is_rejected(self) -> None:
-        self.assert_manifest_error(series=PATCH.replace('behavior = "A visible behavior remains deterministic."\n', ""))
+        self.assert_manifest_error(
+            series=PATCH.replace(
+                'behavior = "A visible behavior remains deterministic."\n', ""
+            )
+        )
 
     def test_duplicate_patch_is_rejected(self) -> None:
         self.assert_manifest_error(series=PATCH + PATCH)
 
     def test_non_contiguous_patch_number_is_rejected(self) -> None:
-        self.assert_manifest_error(series=PATCH.replace("0001-example.patch", "0002-example.patch"))
+        self.assert_manifest_error(
+            series=PATCH.replace("0001-example.patch", "0002-example.patch")
+        )
 
     def test_absolute_path_is_rejected(self) -> None:
-        self.assert_manifest_error(series=PATCH.replace("src/example.rs", "/src/example.rs"))
+        self.assert_manifest_error(
+            series=PATCH.replace("src/example.rs", "/src/example.rs")
+        )
 
     def test_parent_path_is_rejected(self) -> None:
-        self.assert_manifest_error(series=PATCH.replace("src/example.rs", "src/../example.rs"))
+        self.assert_manifest_error(
+            series=PATCH.replace("src/example.rs", "src/../example.rs")
+        )
 
     def test_duplicate_exact_ownership_is_rejected(self) -> None:
-        duplicate = PATCH + PATCH.replace("0001-example.patch", "0002-second.patch").replace(
-            "schema/example.json", "schema/second.json"
-        )
+        duplicate = PATCH + PATCH.replace(
+            "0001-example.patch", "0002-second.patch"
+        ).replace("schema/example.json", "schema/second.json")
         self.assert_manifest_error(series=duplicate)
 
     def test_file_under_another_patch_prefix_is_rejected(self) -> None:
-        first = PATCH.replace('source_files = ["src/example.rs"]', 'source_files = []').replace(
-            "source_prefixes = []", 'source_prefixes = ["src/"]', 1
-        )
+        first = PATCH.replace(
+            'source_files = ["src/example.rs"]', "source_files = []"
+        ).replace("source_prefixes = []", 'source_prefixes = ["src/"]', 1)
         second = PATCH.replace("0001-example.patch", "0002-second.patch").replace(
             "schema/example.json", "schema/second.json"
         )
@@ -124,10 +145,12 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(
             manifest.upstream.generate_commands,
             (
-                ("cargo", "generate-lockfile"),
                 ("bash", "codex-rs/config/scripts/generate-proto.sh"),
                 ("just", "write-config-schema"),
-                ("python3", "codex-rs/app-server-protocol/scripts/write_schema_fixtures.py"),
+                (
+                    "python3",
+                    "codex-rs/app-server-protocol/scripts/write_schema_fixtures.py",
+                ),
                 (
                     "python3",
                     "codex-rs/app-server-protocol/scripts/write_schema_fixtures.py",

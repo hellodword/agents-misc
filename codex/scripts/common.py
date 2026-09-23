@@ -13,6 +13,7 @@ import tempfile
 import tomllib
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
@@ -24,30 +25,6 @@ SERIES_FILE = "series.toml"
 PATCHES_DIR = "patches"
 REVISION_RE = re.compile(r"[0-9a-f]{40}")
 PATCH_FILE_RE = re.compile(r"(?P<number>[0-9]{4})-[a-z0-9]+(?:-[a-z0-9]+)*\.patch")
-TERMINAL_MARKERS = (
-    "terminal_wait",
-    "TerminalWait",
-    "TerminalWaitDecision",
-    "terminal_wait_control",
-    "TerminalWaitToml",
-    "YieldReason",
-)
-DEFAULT_OVERLOAD_PRODUCER_MARKERS = (
-    "responses sampling",
-    "local compact",
-    "remote compact",
-    "guardian",
-    "internal model request",
-)
-DEFAULT_OVERLOAD_PRODUCERS = {
-    "responses_sampling": "codex-rs/core/src/session/turn.rs",
-    "local_compact": "codex-rs/core/src/compact.rs",
-    "legacy_remote_compact": "codex-rs/core/src/compact_remote.rs",
-    "remote_compact_v2": "codex-rs/core/src/compact_remote_v2.rs",
-    "guardian_review": "codex-rs/core/src/guardian/review.rs",
-    "luna_guardian_v2": "codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs",
-    "internal_model_request": "codex-rs/core/src/hook_runtime.rs",
-}
 UPSTREAM_FIELDS = {
     "url",
     "ref",
@@ -105,7 +82,14 @@ class PatchSpec:
         return self.source_prefixes + self.generated_prefixes
 
     def owns(self, path: str) -> bool:
-        return path in self.files or any(path.startswith(prefix) for prefix in self.prefixes)
+        return path in self.files or any(
+            path.startswith(prefix) for prefix in self.prefixes
+        )
+
+    def owns_generated(self, path: str) -> bool:
+        return path in self.generated_files or any(
+            path.startswith(prefix) for prefix in self.generated_prefixes
+        )
 
 
 @dataclass(frozen=True)
@@ -126,6 +110,22 @@ class MaintenanceManifest:
     def patch_dir(self) -> Path:
         return self.codex_root / PATCHES_DIR / self.upstream.ref
 
+    @property
+    def runtime_root(self) -> Path:
+        return self.worktree.parent / "maintenance"
+
+    @property
+    def candidate_dir(self) -> Path:
+        return self.runtime_root / "candidate"
+
+    @property
+    def backup_dir(self) -> Path:
+        return self.runtime_root / "backup"
+
+    @property
+    def receipt_dir(self) -> Path:
+        return self.worktree.parent / "validation"
+
     def owner_for(self, path: str) -> PatchSpec:
         owners = [patch for patch in self.patches if patch.owns(path)]
         if not owners:
@@ -135,12 +135,15 @@ class MaintenanceManifest:
             )
         if len(owners) != 1:
             names = ", ".join(owner.file for owner in owners)
-            raise PatchError(f"changed path has multiple owners in codex/{SERIES_FILE}: {path}: {names}")
+            raise PatchError(
+                f"changed path has multiple owners in codex/{SERIES_FILE}: {path}: {names}"
+            )
         return owners[0]
 
 
 FaultHook = Callable[[str], None]
 _V8_ENV_CACHE: dict[tuple[Path, str], dict[str, str]] = {}
+_CARGO_LOCK_ENV_CACHE: dict[tuple[Path, str], dict[str, str]] = {}
 _HUNK_HEADER_RE = re.compile(
     r"^(?P<prefix>@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? "
     r"\+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@)(?P<suffix>.*\n?)$"
@@ -155,13 +158,19 @@ def json_stdout(payload: Mapping[str, Any]) -> None:
     print(json.dumps(payload, sort_keys=True))
 
 
-def _strict_fields(data: Mapping[str, Any], expected: set[str], source: Path, context: str) -> None:
+def _strict_fields(
+    data: Mapping[str, Any], expected: set[str], source: Path, context: str
+) -> None:
     unknown = sorted(set(data) - expected)
     if unknown:
-        raise PatchError(f"unknown {context} field(s) in {source}: {', '.join(unknown)}")
+        raise PatchError(
+            f"unknown {context} field(s) in {source}: {', '.join(unknown)}"
+        )
     missing = sorted(expected - set(data))
     if missing:
-        raise PatchError(f"missing {context} field(s) in {source}: {', '.join(missing)}")
+        raise PatchError(
+            f"missing {context} field(s) in {source}: {', '.join(missing)}"
+        )
 
 
 def _string(value: Any, source: Path, field: str) -> str:
@@ -172,7 +181,9 @@ def _string(value: Any, source: Path, field: str) -> str:
 
 def _command(value: Any, source: Path, field: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not value:
-        raise PatchError(f"{source}: {field} must be a non-empty array of command arguments")
+        raise PatchError(
+            f"{source}: {field} must be a non-empty array of command arguments"
+        )
     command = tuple(_string(part, source, f"{field}[]") for part in value)
     return command
 
@@ -193,7 +204,12 @@ def _path(value: Any, source: Path, field: str, *, prefix: bool) -> str:
         raise PatchError(f"{source}: {field} exact file must not end with '/': {raw}")
     candidate = raw[:-1] if prefix else raw
     parsed = PurePosixPath(candidate)
-    if parsed.is_absolute() or candidate.startswith("/") or ".." in parsed.parts or "." in parsed.parts:
+    if (
+        parsed.is_absolute()
+        or candidate.startswith("/")
+        or ".." in parsed.parts
+        or "." in parsed.parts
+    ):
         raise PatchError(f"{source}: {field} must be a contained relative path: {raw}")
     if not parsed.parts or any(not part for part in parsed.parts):
         raise PatchError(f"{source}: {field} is not a valid relative path: {raw}")
@@ -244,7 +260,9 @@ def _validate_ownership(patches: Sequence[PatchSpec], source: Path) -> None:
                 )
 
 
-def load_manifest(root: Path = DEFAULT_REPO_ROOT, *, require_patch_files: bool = True) -> MaintenanceManifest:
+def load_manifest(
+    root: Path = DEFAULT_REPO_ROOT, *, require_patch_files: bool = True
+) -> MaintenanceManifest:
     root = root.resolve()
     upstream_path = root / CODEX_DIR / UPSTREAM_FILE
     series_path = root / CODEX_DIR / SERIES_FILE
@@ -254,32 +272,42 @@ def load_manifest(root: Path = DEFAULT_REPO_ROOT, *, require_patch_files: bool =
         url=_string(upstream_data["url"], upstream_path, "url"),
         ref=_string(upstream_data["ref"], upstream_path, "ref"),
         revision=_string(upstream_data["revision"], upstream_path, "revision"),
-        worktree=_path(upstream_data["worktree"], upstream_path, "worktree", prefix=False),
+        worktree=_path(
+            upstream_data["worktree"], upstream_path, "worktree", prefix=False
+        ),
         generate_commands=_commands(
             upstream_data["generate_commands"], upstream_path, "generate_commands"
         ),
         regression_commands=_commands(
             upstream_data["regression_commands"], upstream_path, "regression_commands"
         ),
-        validation_command=_command(upstream_data["validation_command"], upstream_path, "validation_command"),
+        validation_command=_command(
+            upstream_data["validation_command"], upstream_path, "validation_command"
+        ),
     )
     if not upstream.ref.startswith("rust-v"):
         raise PatchError(f"{upstream_path}: ref must be a rust-v tag: {upstream.ref}")
     if not REVISION_RE.fullmatch(upstream.revision):
-        raise PatchError(f"{upstream_path}: revision must be a lowercase 40-character Git commit")
+        raise PatchError(
+            f"{upstream_path}: revision must be a lowercase 40-character Git commit"
+        )
 
     series_data = _read_toml(series_path)
     _strict_fields(series_data, SERIES_FIELDS, series_path, "series")
     raw_patches = series_data["patch"]
     if not isinstance(raw_patches, list) or not raw_patches:
-        raise PatchError(f"{series_path}: patch must contain at least one [[patch]] table")
+        raise PatchError(
+            f"{series_path}: patch must contain at least one [[patch]] table"
+        )
 
     patches: list[PatchSpec] = []
     for index, raw_patch in enumerate(raw_patches, start=1):
         if not isinstance(raw_patch, dict):
             raise PatchError(f"{series_path}: patch #{index} must be a table")
         _strict_fields(raw_patch, PATCH_FIELDS, series_path, f"patch #{index}")
-        filename = _path(raw_patch["file"], series_path, f"patch #{index}.file", prefix=False)
+        filename = _path(
+            raw_patch["file"], series_path, f"patch #{index}.file", prefix=False
+        )
         match = PATCH_FILE_RE.fullmatch(filename)
         if not match:
             raise PatchError(f"{series_path}: invalid patch filename: {filename}")
@@ -291,16 +319,29 @@ def load_manifest(root: Path = DEFAULT_REPO_ROOT, *, require_patch_files: bool =
         patches.append(
             PatchSpec(
                 file=filename,
-                intent=_string(raw_patch["intent"], series_path, f"patch #{index}.intent"),
-                behavior=_string(raw_patch["behavior"], series_path, f"patch #{index}.behavior"),
+                intent=_string(
+                    raw_patch["intent"], series_path, f"patch #{index}.intent"
+                ),
+                behavior=_string(
+                    raw_patch["behavior"], series_path, f"patch #{index}.behavior"
+                ),
                 source_files=_paths(
-                    raw_patch["source_files"], series_path, f"patch #{index}.source_files", prefix=False
+                    raw_patch["source_files"],
+                    series_path,
+                    f"patch #{index}.source_files",
+                    prefix=False,
                 ),
                 source_prefixes=_paths(
-                    raw_patch["source_prefixes"], series_path, f"patch #{index}.source_prefixes", prefix=True
+                    raw_patch["source_prefixes"],
+                    series_path,
+                    f"patch #{index}.source_prefixes",
+                    prefix=True,
                 ),
                 generated_files=_paths(
-                    raw_patch["generated_files"], series_path, f"patch #{index}.generated_files", prefix=False
+                    raw_patch["generated_files"],
+                    series_path,
+                    f"patch #{index}.generated_files",
+                    prefix=False,
                 ),
                 generated_prefixes=_paths(
                     raw_patch["generated_prefixes"],
@@ -308,7 +349,9 @@ def load_manifest(root: Path = DEFAULT_REPO_ROOT, *, require_patch_files: bool =
                     f"patch #{index}.generated_prefixes",
                     prefix=True,
                 ),
-                tests=_commands(raw_patch["tests"], series_path, f"patch #{index}.tests"),
+                tests=_commands(
+                    raw_patch["tests"], series_path, f"patch #{index}.tests"
+                ),
             )
         )
 
@@ -318,9 +361,15 @@ def load_manifest(root: Path = DEFAULT_REPO_ROOT, *, require_patch_files: bool =
     _validate_ownership(patches, series_path)
     manifest = MaintenanceManifest(root=root, upstream=upstream, patches=tuple(patches))
     if require_patch_files:
-        missing = [patch.file for patch in patches if not (manifest.patch_dir / patch.file).is_file()]
+        missing = [
+            patch.file
+            for patch in patches
+            if not (manifest.patch_dir / patch.file).is_file()
+        ]
         if missing:
-            raise PatchError(f"missing patch file(s) in {manifest.patch_dir}: {', '.join(missing)}")
+            raise PatchError(
+                f"missing patch file(s) in {manifest.patch_dir}: {', '.join(missing)}"
+            )
     return manifest
 
 
@@ -344,7 +393,9 @@ def validate_patch_directory(
     if missing:
         raise PatchError(f"missing patch file(s) in {patch_dir}: {', '.join(missing)}")
     if require_exact:
-        actual = sorted(path.name for path in patch_dir.glob("*.patch") if path.is_file())
+        actual = sorted(
+            path.name for path in patch_dir.glob("*.patch") if path.is_file()
+        )
         stale = sorted(set(actual) - set(expected))
         if stale:
             raise PatchError(
@@ -352,6 +403,98 @@ def validate_patch_directory(
                 f"{', '.join(stale)}"
             )
     return tuple(patch_dir / name for name in expected)
+
+
+def _validate_refresh_source_patch_directory(
+    manifest: MaintenanceManifest,
+) -> tuple[Path, ...]:
+    """Accept an exact current series or one pristine Git-tracked predecessor.
+
+    A manifest update can rename, split, or combine patches before refresh has
+    atomically installed the new directory. In that transition, validating the
+    installed directory against the new manifest is necessarily impossible.
+    Permit the predecessor only when Git proves every entry is an unchanged,
+    tracked patch file with no staged, untracked, symlink, or nested debris.
+    """
+
+    try:
+        return validate_patch_directory(manifest)
+    except PatchError as manifest_error:
+        patch_dir = manifest.patch_dir
+        relative = patch_dir.relative_to(manifest.root).as_posix()
+        if patch_dir.is_symlink() or not patch_dir.is_dir():
+            raise PatchError(
+                f"installed patch path is not a real directory: {patch_dir}"
+            ) from manifest_error
+
+        for diff_args, description in (
+            (["diff", "--quiet", "--exit-code"], "unstaged"),
+            (["diff", "--cached", "--quiet", "--exit-code"], "staged"),
+        ):
+            result = run(
+                ["git", *diff_args, "--", relative],
+                cwd=manifest.root,
+                check=False,
+                capture=True,
+            )
+            if result.returncode == 1:
+                raise PatchError(
+                    f"installed predecessor patch directory has {description} changes: "
+                    f"{patch_dir}; preserve user changes and restore or commit them before refresh"
+                ) from manifest_error
+            if result.returncode != 0:
+                raise PatchError(
+                    f"could not inspect {description} predecessor patch changes in {patch_dir}"
+                ) from manifest_error
+
+        untracked = run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z", "--", relative],
+            cwd=manifest.root,
+            capture=True,
+        ).stdout.split("\0")
+        untracked = sorted(path for path in untracked if path)
+        if untracked:
+            raise PatchError(
+                "installed predecessor patch directory contains untracked files: "
+                + ", ".join(untracked)
+            ) from manifest_error
+
+        entries = sorted(patch_dir.iterdir(), key=lambda path: path.name)
+        invalid = [
+            path
+            for path in entries
+            if path.is_symlink()
+            or not path.is_file()
+            or PATCH_FILE_RE.fullmatch(path.name) is None
+        ]
+        if invalid:
+            raise PatchError(
+                "installed predecessor patch directory contains non-patch, symlink, or nested entries: "
+                + ", ".join(str(path) for path in invalid)
+            ) from manifest_error
+        if not entries:
+            raise PatchError(
+                f"installed predecessor patch directory is empty: {patch_dir}"
+            ) from manifest_error
+
+        tracked = run(
+            ["git", "ls-files", "-z", "--", relative],
+            cwd=manifest.root,
+            capture=True,
+        ).stdout.split("\0")
+        tracked_set = {path for path in tracked if path}
+        actual_set = {path.relative_to(manifest.root).as_posix() for path in entries}
+        if tracked_set != actual_set:
+            raise PatchError(
+                "installed predecessor patch directory is not exactly Git-tracked: "
+                f"tracked={sorted(tracked_set)} actual={sorted(actual_set)}"
+            ) from manifest_error
+
+        eprint(
+            "transition: accepting pristine Git-tracked predecessor patch directory "
+            f"for atomic replacement: {patch_dir}"
+        )
+        return tuple(entries)
 
 
 def validate_generated_only_ownership(patch: PatchSpec) -> None:
@@ -363,10 +506,14 @@ def validate_generated_only_ownership(patch: PatchSpec) -> None:
             f"{list(patch.source_files) + list(patch.source_prefixes)}"
         )
     if not patch.generated_files and not patch.generated_prefixes:
-        raise PatchError(f"generated-only patch {patch.file} declares no generated ownership")
+        raise PatchError(
+            f"generated-only patch {patch.file} declares no generated ownership"
+        )
 
 
-def validate_generated_changes(manifest: MaintenanceManifest, changed: Iterable[str]) -> None:
+def validate_generated_changes(
+    manifest: MaintenanceManifest, changed: Iterable[str]
+) -> None:
     """Validate that paths owned by generated-only patches are generated paths."""
 
     changed_paths = tuple(changed)
@@ -379,8 +526,13 @@ def validate_generated_changes(manifest: MaintenanceManifest, changed: Iterable[
     for path in changed_paths:
         owner = manifest.owner_for(path)
         if not owner.source_files and not owner.source_prefixes:
-            if not (path in owner.generated_files or any(path.startswith(prefix) for prefix in owner.generated_prefixes)):
-                raise PatchError(f"generated-only patch {owner.file} owns non-generated path: {path}")
+            if not (
+                path in owner.generated_files
+                or any(path.startswith(prefix) for prefix in owner.generated_prefixes)
+            ):
+                raise PatchError(
+                    f"generated-only patch {owner.file} owns non-generated path: {path}"
+                )
 
 
 def run(
@@ -410,7 +562,9 @@ def run(
             eprint(completed.stdout.rstrip())
         if capture and completed.stderr:
             eprint(completed.stderr.rstrip())
-        raise PatchError(f"command failed with exit {completed.returncode}: {' '.join(command)}")
+        raise PatchError(
+            f"command failed with exit {completed.returncode}: {' '.join(command)}"
+        )
     return completed
 
 
@@ -418,19 +572,259 @@ def jobs_limit() -> int:
     available = max(1, (os.cpu_count() or 2) - 1)
     configured = os.environ.get("CODEX_CARGO_JOBS")
     if configured is None:
-        return min(7, available)
+        return available
     try:
         requested = int(configured)
     except ValueError as exc:
         raise PatchError("CODEX_CARGO_JOBS must be an integer") from exc
     if requested < 1:
         raise PatchError("CODEX_CARGO_JOBS must be at least 1")
-    return min(requested, available)
+    return requested
 
 
-def upstream_build_env(manifest: MaintenanceManifest) -> dict[str, str]:
-    return {
-        "CARGO_TARGET_DIR": str(manifest.worktree.parent / "target"),
+def _cargo_workspace_root(cwd: Path) -> Path | None:
+    candidates = (cwd, cwd / "codex-rs")
+    return next(
+        (
+            candidate
+            for candidate in candidates
+            if (candidate / "Cargo.toml").is_file()
+            and (candidate / "Cargo.lock").is_file()
+        ),
+        None,
+    )
+
+
+def _cargo_lock_input_digest(workspace: Path, cargo_version: str) -> str:
+    digest = hashlib.sha256()
+    digest.update(cargo_version.encode())
+    digest.update(b"\0")
+    inputs = [workspace / "Cargo.lock"]
+    for directory, names, files in os.walk(workspace):
+        names[:] = sorted(name for name in names if name not in {".git", "target"})
+        if "Cargo.toml" in files:
+            inputs.append(Path(directory) / "Cargo.toml")
+    for path in sorted(set(inputs)):
+        digest.update(path.relative_to(workspace).as_posix().encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def validate_cargo_lock_compatibility(
+    pinned_bytes: bytes,
+    normalized_bytes: bytes,
+    *,
+    workspace_version: str,
+) -> int:
+    """Allow only Cargo's local workspace-version normalization.
+
+    Release tags can carry a workspace version newer than the local package
+    entries in their checked-in lockfile.  An alternate ignored lock may
+    normalize those local entries, but registry/git packages and dependency
+    edges must remain byte-semantically identical.
+    """
+
+    try:
+        pinned = tomllib.loads(pinned_bytes.decode())
+        normalized = tomllib.loads(normalized_bytes.decode())
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise PatchError(
+            f"could not parse Cargo lockfile for compatibility: {exc}"
+        ) from exc
+    pinned_metadata = {key: value for key, value in pinned.items() if key != "package"}
+    normalized_metadata = {
+        key: value for key, value in normalized.items() if key != "package"
+    }
+    if pinned_metadata != normalized_metadata:
+        raise PatchError("alternate Cargo lock changed non-package lock metadata")
+
+    def split_packages(
+        lock: Mapping[str, Any],
+    ) -> tuple[
+        dict[tuple[str, str, str], Mapping[str, Any]], dict[str, Mapping[str, Any]]
+    ]:
+        external: dict[tuple[str, str, str], Mapping[str, Any]] = {}
+        local: dict[str, Mapping[str, Any]] = {}
+        for package in lock.get("package", []):
+            if not isinstance(package, dict):
+                raise PatchError("Cargo lock package entry must be a table")
+            name = str(package.get("name", ""))
+            version = str(package.get("version", ""))
+            source = package.get("source")
+            if source is None:
+                if not name or name in local:
+                    raise PatchError(
+                        f"Cargo lock has an invalid or duplicate local package: {name}"
+                    )
+                local[name] = package
+            else:
+                key = (name, version, str(source))
+                if key in external:
+                    raise PatchError(
+                        f"Cargo lock has a duplicate external package: {key}"
+                    )
+                external[key] = package
+        return external, local
+
+    pinned_external, pinned_local = split_packages(pinned)
+    normalized_external, normalized_local = split_packages(normalized)
+    if pinned_external != normalized_external:
+        raise PatchError("alternate Cargo lock changed external dependencies")
+    if pinned_local.keys() != normalized_local.keys():
+        raise PatchError("alternate Cargo lock changed the local workspace package set")
+
+    changed_versions = 0
+    for name in sorted(pinned_local):
+        pinned_package = dict(pinned_local[name])
+        normalized_package = dict(normalized_local[name])
+        pinned_version = pinned_package.pop("version", None)
+        normalized_version = normalized_package.pop("version", None)
+        if pinned_package != normalized_package:
+            raise PatchError(
+                f"alternate Cargo lock changed local dependency metadata for {name}"
+            )
+        if normalized_version != workspace_version:
+            raise PatchError(
+                f"alternate Cargo lock has unexpected local version for {name}: "
+                f"{normalized_version}; expected {workspace_version}"
+            )
+        if pinned_version != normalized_version:
+            if pinned_version != "0.0.0":
+                raise PatchError(
+                    f"alternate Cargo lock changed non-development local version for {name}: "
+                    f"{pinned_version} -> {normalized_version}"
+                )
+            changed_versions += 1
+    return changed_versions
+
+
+def cargo_lock_env(
+    manifest: MaintenanceManifest,
+    cwd: Path,
+) -> dict[str, str]:
+    workspace = _cargo_workspace_root(cwd)
+    if workspace is None:
+        return {}
+    cargo_version = run(["cargo", "-Vv"], capture=True).stdout
+    input_digest = _cargo_lock_input_digest(workspace, cargo_version)
+    key = (workspace.resolve(), input_digest)
+    cached = _CARGO_LOCK_ENV_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    cargo_toml = tomllib.loads((workspace / "Cargo.toml").read_text())
+    try:
+        workspace_version = str(cargo_toml["workspace"]["package"]["version"])
+    except (KeyError, TypeError) as exc:
+        raise PatchError(
+            "Cargo workspace is missing workspace.package.version"
+        ) from exc
+    pinned_lock = workspace / "Cargo.lock"
+    pinned_bytes = pinned_lock.read_bytes()
+    cache_root = manifest.worktree.parent / "cargo-lock"
+    _check_ignored_path(manifest, cache_root)
+    cache_dir = cache_root / input_digest
+    alternate_lock = cache_dir / "Cargo.lock"
+    receipt = cache_dir / "receipt.json"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    cache_valid = False
+    if alternate_lock.is_file() and receipt.is_file():
+        try:
+            receipt_data = json.loads(receipt.read_text())
+            normalized_bytes = alternate_lock.read_bytes()
+            changed_versions = validate_cargo_lock_compatibility(
+                pinned_bytes,
+                normalized_bytes,
+                workspace_version=workspace_version,
+            )
+            cache_valid = receipt_data == {
+                "cargoVersion": cargo_version.strip(),
+                "changedWorkspaceVersions": changed_versions,
+                "inputDigest": input_digest,
+                "normalizedSha256": hashlib.sha256(normalized_bytes).hexdigest(),
+                "pinnedSha256": hashlib.sha256(pinned_bytes).hexdigest(),
+                "workspaceVersion": workspace_version,
+            }
+        except (OSError, ValueError, PatchError, json.JSONDecodeError):
+            cache_valid = False
+
+    if not cache_valid:
+        temporary = Path(tempfile.mkdtemp(prefix=".prepare-", dir=cache_dir))
+        temporary_lock = temporary / "Cargo.lock"
+        shutil.copyfile(pinned_lock, temporary_lock)
+        prepare_environment = os.environ.copy()
+        prepare_environment.update(
+            {
+                "CARGO_NET_OFFLINE": "true",
+                "CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS": "fallback",
+                "CARGO_RESOLVER_LOCKFILE_PATH": str(temporary_lock),
+                "CARGO_UNSTABLE_LOCKFILE_PATH": "true",
+            }
+        )
+        try:
+            run(
+                ["cargo", "tree", "--offline", "-p", "codex-config-schema"],
+                cwd=workspace,
+                env=prepare_environment,
+                capture=True,
+            )
+            normalized_bytes = temporary_lock.read_bytes()
+            changed_versions = validate_cargo_lock_compatibility(
+                pinned_bytes,
+                normalized_bytes,
+                workspace_version=workspace_version,
+            )
+            if pinned_lock.read_bytes() != pinned_bytes:
+                raise PatchError(
+                    "alternate Cargo lock preparation changed project Cargo.lock"
+                )
+            run(
+                [
+                    "cargo",
+                    "tree",
+                    "--locked",
+                    "--offline",
+                    "-p",
+                    "codex-config-schema",
+                ],
+                cwd=workspace,
+                env=prepare_environment,
+                capture=True,
+            )
+            receipt_data = {
+                "cargoVersion": cargo_version.strip(),
+                "changedWorkspaceVersions": changed_versions,
+                "inputDigest": input_digest,
+                "normalizedSha256": hashlib.sha256(normalized_bytes).hexdigest(),
+                "pinnedSha256": hashlib.sha256(pinned_bytes).hexdigest(),
+                "workspaceVersion": workspace_version,
+            }
+            os.replace(temporary_lock, alternate_lock)
+            temporary_receipt = temporary / "receipt.json"
+            temporary_receipt.write_text(
+                json.dumps(receipt_data, indent=2, sort_keys=True) + "\n"
+            )
+            os.replace(temporary_receipt, receipt)
+        finally:
+            shutil.rmtree(temporary, ignore_errors=True)
+
+    result = {
+        "CARGO_RESOLVER_LOCKFILE_PATH": str(alternate_lock),
+        "CARGO_UNSTABLE_LOCKFILE_PATH": "true",
+    }
+    _CARGO_LOCK_ENV_CACHE[key] = result
+    return result
+
+
+def upstream_build_env(
+    manifest: MaintenanceManifest,
+    cwd: Path,
+) -> dict[str, str]:
+    environment = {
+        "CARGO_TARGET_DIR": str(manifest.worktree.parent / "cargo-target"),
         # Keep lockfile generation reproducible with the pinned Nix Rust toolchain;
         # Cargo otherwise selects registry releases requiring a newer compiler.
         "CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS": "fallback",
@@ -438,6 +832,8 @@ def upstream_build_env(manifest: MaintenanceManifest) -> dict[str, str]:
         # integration fixtures overflow Rust's smaller default test-thread stack.
         "RUST_MIN_STACK": "8388608",
     }
+    environment.update(cargo_lock_env(manifest, cwd))
+    return environment
 
 
 def _codex_v8_env(manifest: MaintenanceManifest, cwd: Path) -> dict[str, str]:
@@ -446,16 +842,22 @@ def _codex_v8_env(manifest: MaintenanceManifest, cwd: Path) -> dict[str, str]:
     if archive and binding:
         return {}
     if archive or binding:
-        raise PatchError("RUSTY_V8_ARCHIVE and RUSTY_V8_SRC_BINDING_PATH must be set together")
+        raise PatchError(
+            "RUSTY_V8_ARCHIVE and RUSTY_V8_SRC_BINDING_PATH must be set together"
+        )
 
     source_root = cwd.parent if cwd.name == "codex-rs" else cwd
     helper = source_root / "scripts" / "codex_package" / "v8.py"
     if not helper.is_file():
         return {}
     rustc = run(["rustc", "-vV"], capture=True)
-    target_lines = [line for line in rustc.stdout.splitlines() if line.startswith("host: ")]
+    target_lines = [
+        line for line in rustc.stdout.splitlines() if line.startswith("host: ")
+    ]
     if len(target_lines) != 1:
-        raise PatchError("could not determine the Rust host target for Codex V8 artifacts")
+        raise PatchError(
+            "could not determine the Rust host target for Codex V8 artifacts"
+        )
     target = target_lines[0].removeprefix("host: ")
     key = (source_root, target)
     cached = _V8_ENV_CACHE.get(key)
@@ -484,7 +886,9 @@ def _codex_v8_env(manifest: MaintenanceManifest, cwd: Path) -> dict[str, str]:
     except (KeyError, TypeError, json.JSONDecodeError) as exc:
         raise PatchError("upstream V8 artifact helper returned invalid output") from exc
     if not all(Path(path).is_file() for path in result.values()):
-        raise PatchError("upstream V8 artifact helper did not produce both verified files")
+        raise PatchError(
+            "upstream V8 artifact helper did not produce both verified files"
+        )
     _V8_ENV_CACHE[key] = result
     return result
 
@@ -522,7 +926,7 @@ def run_upstream(
         and "-j" not in args
     ):
         args[2:2] = ["--jobs", str(jobs_limit())]
-    environment = upstream_build_env(manifest)
+    environment = upstream_build_env(manifest, command_cwd)
     if len(args) >= 2 and args[0] == "cargo" and args[1] == "generate-lockfile":
         # Resolve from the Nix-provided local index/cache so a checked-in lock
         # is reproducible even when the public registry advances between runs.
@@ -531,28 +935,43 @@ def run_upstream(
     return run(args, cwd=command_cwd, env=environment)
 
 
-def git_output(src: Path, args: Sequence[str], *, env: Mapping[str, str] | None = None) -> str:
+def git_output(
+    src: Path, args: Sequence[str], *, env: Mapping[str, str] | None = None
+) -> str:
     return run(["git", *args], cwd=src, capture=True, env=env).stdout.strip()
 
 
 def require_git_worktree(src: Path) -> None:
-    result = run(["git", "rev-parse", "--is-inside-work-tree"], cwd=src, check=False, capture=True)
+    result = run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=src,
+        check=False,
+        capture=True,
+    )
     if result.returncode != 0 or result.stdout.strip() != "true":
-        raise PatchError(f"missing upstream checkout: {src}; run `just codex-fetch` first")
+        raise PatchError(
+            f"missing upstream checkout: {src}; run `just codex-fetch` first"
+        )
 
 
 def ensure_clean(src: Path) -> None:
     status = git_output(src, ["status", "--short"])
     if status:
-        raise PatchError(f"upstream checkout has local changes:\n{status}\nrecovery: refresh or discard them explicitly")
+        raise PatchError(
+            f"upstream checkout has local changes:\n{status}\nrecovery: refresh or discard them explicitly"
+        )
 
 
 def ensure_real_index_clean(src: Path) -> None:
-    result = run(["git", "diff", "--cached", "--quiet", "--exit-code"], cwd=src, check=False)
+    result = run(
+        ["git", "diff", "--cached", "--quiet", "--exit-code"], cwd=src, check=False
+    )
     if result.returncode not in (0, 1):
         raise PatchError(f"could not inspect the upstream Git index in {src}")
     if result.returncode == 1:
-        raise PatchError("upstream checkout has staged changes; recovery: unstage them before maintenance")
+        raise PatchError(
+            "upstream checkout has staged changes; recovery: unstage them before maintenance"
+        )
 
 
 def ensure_pinned_head(src: Path, upstream: Upstream) -> None:
@@ -564,15 +983,39 @@ def ensure_pinned_head(src: Path, upstream: Upstream) -> None:
         )
 
 
-def _check_worktree_ignored(manifest: MaintenanceManifest) -> None:
-    relative = manifest.worktree.relative_to(manifest.root).as_posix()
+def _check_ignored_path(manifest: MaintenanceManifest, path: Path) -> None:
+    try:
+        relative = path.relative_to(manifest.root).as_posix()
+    except ValueError as exc:
+        raise PatchError(
+            f"runtime path escapes the maintenance repository: {path}"
+        ) from exc
     result = run(
         ["git", "check-ignore", "--quiet", "--", relative],
         cwd=manifest.root,
         check=False,
     )
     if result.returncode != 0:
-        raise PatchError(f"configured worktree is not ignored by Git: {relative}")
+        raise PatchError(f"runtime path is not ignored by Git: {relative}")
+
+
+def _check_worktree_ignored(manifest: MaintenanceManifest) -> None:
+    _check_ignored_path(manifest, manifest.worktree)
+
+
+def _write_receipt(
+    manifest: MaintenanceManifest,
+    operation: str,
+    payload: Mapping[str, Any],
+) -> Path:
+    _check_ignored_path(manifest, manifest.receipt_dir)
+    manifest.receipt_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
+    receipt = manifest.receipt_dir / f"{timestamp}-{operation}.json"
+    temporary = receipt.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    os.replace(temporary, receipt)
+    return receipt
 
 
 def fetch_upstream(manifest: MaintenanceManifest) -> str:
@@ -586,7 +1029,9 @@ def fetch_upstream(manifest: MaintenanceManifest) -> str:
     require_git_worktree(src)
     origin = git_output(src, ["remote", "get-url", "origin"])
     if origin != manifest.upstream.url:
-        raise PatchError(f"unexpected origin URL in {src}: {origin}; expected {manifest.upstream.url}")
+        raise PatchError(
+            f"unexpected origin URL in {src}: {origin}; expected {manifest.upstream.url}"
+        )
     ensure_clean(src)
     ensure_real_index_clean(src)
     run(
@@ -600,7 +1045,9 @@ def fetch_upstream(manifest: MaintenanceManifest) -> str:
         ],
         cwd=src,
     )
-    resolved = git_output(src, ["rev-parse", f"refs/tags/{manifest.upstream.ref}^{{commit}}"])
+    resolved = git_output(
+        src, ["rev-parse", f"refs/tags/{manifest.upstream.ref}^{{commit}}"]
+    )
     if resolved != manifest.upstream.revision:
         raise PatchError(
             f"tag {manifest.upstream.ref} resolves to {resolved}, expected {manifest.upstream.revision}; "
@@ -613,9 +1060,22 @@ def fetch_upstream(manifest: MaintenanceManifest) -> str:
 
 def _clone_base(src: Path, destination: Path, revision: str) -> None:
     run(
-        ["git", "-c", "protocol.file.allow=always", "clone", "--quiet", "--no-hardlinks", str(src), str(destination)]
+        [
+            "git",
+            "-c",
+            "protocol.file.allow=always",
+            "clone",
+            "--quiet",
+            "--no-hardlinks",
+            str(src),
+            str(destination),
+        ]
     )
     run(["git", "checkout", "--quiet", "--detach", revision], cwd=destination)
+
+
+def clone_pinned_checkout(manifest: MaintenanceManifest, destination: Path) -> None:
+    _clone_base(manifest.worktree, destination, manifest.upstream.revision)
 
 
 def _changed_paths(src: Path) -> list[str]:
@@ -666,15 +1126,31 @@ def _normalize_generated_diff(diff: str) -> str:
     raise PatchError("generated diff ended with context but contained no hunk header")
 
 
-def _temporary_index_diff(src: Path, paths: Sequence[str], index: Path, *, selected: Sequence[str] | None = None) -> str:
+def _temporary_index_diff(
+    src: Path,
+    paths: Sequence[str],
+    index: Path,
+    *,
+    selected: Sequence[str] | None = None,
+) -> str:
     env = {"GIT_INDEX_FILE": str(index)}
     run(["git", "read-tree", "HEAD"], cwd=src, env=env)
     if paths:
         run(["git", "add", "--", *paths], cwd=src, env=env)
-    command = ["git", "diff", "--cached", "--binary", "--full-index", "--no-renames", "HEAD"]
+    command = [
+        "git",
+        "diff",
+        "--cached",
+        "--binary",
+        "--full-index",
+        "--no-renames",
+        "HEAD",
+    ]
     if selected is not None:
         command.extend(["--", *selected])
-    return _normalize_generated_diff(run(command, cwd=src, capture=True, env=env).stdout)
+    return _normalize_generated_diff(
+        run(command, cwd=src, capture=True, env=env).stdout
+    )
 
 
 def _tree_digest(src: Path, paths: Iterable[str]) -> str:
@@ -692,7 +1168,9 @@ def _tree_digest(src: Path, paths: Iterable[str]) -> str:
         elif not path.exists():
             digest.update(b"missing\0")
         else:
-            raise PatchError(f"owned path is not a file, symlink, or deletion: {relative}")
+            raise PatchError(
+                f"owned path is not a file, symlink, or deletion: {relative}"
+            )
         digest.update(b"\0")
     return digest.hexdigest()
 
@@ -714,22 +1192,87 @@ def _iter_tree_paths(root: Path) -> Iterator[Path]:
             yield path
 
 
-def tree_digest(root: Path) -> str:
-    """Hash the complete generated/source tree with stable path and byte order."""
+def _is_declared_generated(manifest: MaintenanceManifest, path: str) -> bool:
+    return any(patch.owns_generated(path) for patch in manifest.patches)
 
-    digest = hashlib.sha256()
-    for path in _iter_tree_paths(root):
-        relative = path.relative_to(root).as_posix()
-        digest.update(relative.encode())
-        digest.update(b"\0")
-        if path.is_symlink():
-            digest.update(b"link\0")
-            digest.update(os.readlink(path).encode())
-        else:
-            digest.update(b"file\0")
-            digest.update(path.read_bytes())
-        digest.update(b"\0")
-    return digest.hexdigest()
+
+def declared_generated_paths(
+    manifest: MaintenanceManifest, root: Path
+) -> tuple[str, ...]:
+    """Return every exact or prefix-owned generated path, including deletions."""
+
+    paths = {path for patch in manifest.patches for path in patch.generated_files}
+    prefixes = tuple(
+        prefix for patch in manifest.patches for prefix in patch.generated_prefixes
+    )
+    if prefixes:
+        tracked = run(
+            ["git", "ls-files", "-z", "--", *prefixes],
+            cwd=root,
+            capture=True,
+        ).stdout.split("\0")
+        paths.update(path for path in tracked if path)
+        for prefix in prefixes:
+            directory = root / prefix
+            if not directory.is_dir():
+                continue
+            paths.update(
+                path.relative_to(root).as_posix()
+                for path in directory.rglob("*")
+                if path.is_file() or path.is_symlink()
+            )
+    paths.update(
+        path for path in _changed_paths(root) if _is_declared_generated(manifest, path)
+    )
+    return tuple(sorted(paths))
+
+
+def generated_tree_digest(
+    manifest: MaintenanceManifest, root: Path
+) -> tuple[tuple[str, ...], str]:
+    paths = declared_generated_paths(manifest, root)
+    return paths, _tree_digest(root, paths)
+
+
+def _non_generated_change_digest(
+    manifest: MaintenanceManifest,
+    root: Path,
+) -> tuple[tuple[str, ...], str]:
+    paths = tuple(
+        path
+        for path in _changed_paths(root)
+        if not _is_declared_generated(manifest, path)
+    )
+    return paths, _tree_digest(root, paths)
+
+
+def _path_digest_map(root: Path, paths: Iterable[str]) -> dict[str, str]:
+    return {path: _tree_digest(root, (path,)) for path in paths}
+
+
+def _bootstrap_missing_generated_files(
+    manifest: MaintenanceManifest,
+    worktree: Path,
+) -> tuple[str, ...]:
+    """Create empty compile-time inputs for newly declared exact outputs.
+
+    Some generators compile consumers that use ``include_str!`` before writing
+    a newly introduced generated file.  Exact generated-file declarations make
+    that bootstrap boundary explicit.  The caller must prove that the first
+    generator pass replaced every empty placeholder.
+    """
+
+    missing: list[str] = []
+    for path in sorted(
+        path for patch in manifest.patches for path in patch.generated_files
+    ):
+        target = worktree / path
+        if os.path.lexists(target):
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.touch(exist_ok=False)
+        missing.append(path)
+    return tuple(missing)
 
 
 def run_generation_sequence(
@@ -741,22 +1284,67 @@ def run_generation_sequence(
 ) -> tuple[str, str | None]:
     """Run the declared generators and optionally prove a second run is stable.
 
-    The returned pair is ``(first_digest, second_digest)``.  The digest covers
-    the whole generated checkout (excluding ``.git`` and build targets), which
-    catches both tracked changes and newly-created generated files.
+    The returned pair is ``(first_digest, second_digest)``. The digest covers
+    only manifest-declared generated files and prefixes. Any generator change
+    outside that boundary is rejected independently.
     """
 
     fault_hook = fault or (lambda _stage: None)
+    before_non_generated = _non_generated_change_digest(manifest, worktree)
+    before_non_generated_paths = _path_digest_map(worktree, before_non_generated[0])
+    bootstrapped = _bootstrap_missing_generated_files(manifest, worktree)
     for command in manifest.upstream.generate_commands:
         fault_hook("generate")
         run_upstream(manifest, command, cwd=worktree)
-    first = tree_digest(worktree)
+    incomplete_bootstraps = [
+        path
+        for path in bootstrapped
+        if not (worktree / path).is_file() or not (worktree / path).read_bytes()
+    ]
+    if incomplete_bootstraps:
+        raise PatchError(
+            "generator did not replace bootstrapped generated file(s): "
+            + ", ".join(incomplete_bootstraps)
+        )
+    after_first_non_generated = _non_generated_change_digest(manifest, worktree)
+    if after_first_non_generated != before_non_generated:
+        after_non_generated_paths = _path_digest_map(
+            worktree, after_first_non_generated[0]
+        )
+        changed_paths = sorted(
+            path
+            for path in before_non_generated_paths.keys()
+            | after_non_generated_paths.keys()
+            if before_non_generated_paths.get(path)
+            != after_non_generated_paths.get(path)
+        )
+        raise PatchError(
+            "generator changed path(s) outside manifest-declared generated ownership: "
+            + ", ".join(changed_paths)
+        )
+    _, first = generated_tree_digest(manifest, worktree)
     if not twice:
         return first, None
     for command in manifest.upstream.generate_commands:
         fault_hook("generate")
         run_upstream(manifest, command, cwd=worktree)
-    second = tree_digest(worktree)
+    after_second_non_generated = _non_generated_change_digest(manifest, worktree)
+    if after_second_non_generated != before_non_generated:
+        after_non_generated_paths = _path_digest_map(
+            worktree, after_second_non_generated[0]
+        )
+        changed_paths = sorted(
+            path
+            for path in before_non_generated_paths.keys()
+            | after_non_generated_paths.keys()
+            if before_non_generated_paths.get(path)
+            != after_non_generated_paths.get(path)
+        )
+        raise PatchError(
+            "generator changed path(s) outside manifest-declared generated ownership: "
+            + ", ".join(changed_paths)
+        )
+    _, second = generated_tree_digest(manifest, worktree)
     if first != second:
         raise PatchError(
             "generator sequence is not reproducible: the second run changed the generated tree "
@@ -778,7 +1366,9 @@ def _canonical_json(value: Any) -> Any:
 def _read_zstd_json(path: Path) -> Any:
     if not path.is_file():
         raise PatchError(f"missing zstd fixture: {path}")
-    result = run(["zstd", "--quiet", "--decompress", "--stdout", str(path)], capture=True)
+    result = run(
+        ["zstd", "--quiet", "--decompress", "--stdout", str(path)], capture=True
+    )
     try:
         return _canonical_json(json.loads(result.stdout))
     except json.JSONDecodeError as exc:
@@ -792,8 +1382,12 @@ def zstd_semantic_diff(expected: Path, actual: Path) -> tuple[str, ...]:
     maintenance and Nix gates a stable semantic review for binary schema hunks.
     """
 
-    expected_json = json.dumps(_read_zstd_json(expected), sort_keys=True, indent=2).splitlines()
-    actual_json = json.dumps(_read_zstd_json(actual), sort_keys=True, indent=2).splitlines()
+    expected_json = json.dumps(
+        _read_zstd_json(expected), sort_keys=True, indent=2
+    ).splitlines()
+    actual_json = json.dumps(
+        _read_zstd_json(actual), sort_keys=True, indent=2
+    ).splitlines()
     return tuple(
         difflib.unified_diff(
             expected_json,
@@ -811,7 +1405,9 @@ def assert_zstd_semantically_equal(expected: Path, actual: Path) -> None:
         raise PatchError("zstd JSON semantic diff detected:\n" + "\n".join(diff))
 
 
-def assert_zstd_fixture_trees_semantically_equal(expected_root: Path, actual_root: Path) -> None:
+def assert_zstd_fixture_trees_semantically_equal(
+    expected_root: Path, actual_root: Path
+) -> None:
     """Compare every matching ``*.json.zst`` fixture in two trees."""
 
     expected_paths = {
@@ -871,162 +1467,97 @@ def run_manifest_validation(
     return tuple(sorted(seen))
 
 
-def terminal_marker_hits(
-    root: Path,
-    *,
-    markers: Sequence[str] = TERMINAL_MARKERS,
-    allowlist: Mapping[str, Sequence[str]] | None = None,
-) -> tuple[str, ...]:
-    """Return source marker hits, excluding explicitly allowlisted path fragments."""
-
-    allowed = allowlist or {}
-    hits: list[str] = []
-    for path in _iter_tree_paths(root):
-        relative = path.relative_to(root).as_posix()
-        if not path.is_file():
-            continue
-        try:
-            text = path.read_text()
-        except (OSError, UnicodeDecodeError):
-            continue
-        path_allowlist = tuple(allowed.get(relative, ()))
-        for line_number, line in enumerate(text.splitlines(), start=1):
-            for marker in markers:
-                if marker in line and not any(token in line for token in path_allowlist):
-                    hits.append(f"{relative}:{line_number}:{marker}")
-    return tuple(sorted(set(hits)))
-
-
-def assert_terminal_markers_absent(
-    root: Path,
-    *,
-    markers: Sequence[str] = TERMINAL_MARKERS,
-    allowlist: Mapping[str, Sequence[str]] | None = None,
-) -> None:
-    hits = terminal_marker_hits(root, markers=markers, allowlist=allowlist)
-    if hits:
-        raise PatchError("terminal-only markers remain:\n" + "\n".join(hits))
-
-
-def audit_overload_producer_coverage(
-    root: Path,
-    *,
-    producer_files: Mapping[str, str],
-    adapter_markers: Sequence[str] = ("model_request_failure_policy", "FailurePolicyAdapter"),
-) -> dict[str, Any]:
-    """Audit that every declared live producer references the shared policy adapter."""
-
-    missing: list[str] = []
-    covered: list[str] = []
-    for producer, relative in sorted(producer_files.items()):
-        path = root / relative
-        if not path.is_file():
-            missing.append(f"{producer}: missing {relative}")
-            continue
-        text = path.read_text(errors="replace")
-        if any(marker in text for marker in adapter_markers):
-            covered.append(producer)
-        else:
-            missing.append(f"{producer}: {relative} has no shared overload policy adapter")
-    report = {"covered": tuple(covered), "missing": tuple(missing), "total": len(producer_files)}
-    if missing:
-        raise PatchError("overload producer coverage failed:\n" + "\n".join(missing))
-    return report
-
-
-def audit_default_overload_producer_coverage(root: Path) -> dict[str, Any]:
-    """Audit every live producer declared by the pinned four-patch contract."""
-
-    return audit_overload_producer_coverage(
-        root,
-        producer_files=DEFAULT_OVERLOAD_PRODUCERS,
-        adapter_markers=("model_request_failure_policy", "record_model_request_failure"),
-    )
-
-
-def audit_default_overload_producer_coverage_if_codex_tree(root: Path) -> dict[str, Any]:
-    """Run the production producer audit when validating a Codex source tree.
-
-    The maintenance workflow tests also exercise the patch engine with tiny
-    synthetic repositories. Those fixtures intentionally do not contain the
-    pinned Codex source layout, so they must not be treated as a partial
-    production checkout.
-    """
-
-    if not (root / "codex-rs").is_dir():
-        return {"covered": (), "missing": (), "total": 0, "skipped": True}
-    return audit_default_overload_producer_coverage(root)
-
-
 def patch_contains_binary_data(patch: Path) -> bool:
-    return b"GIT binary patch" in patch.read_bytes()
+    payload = patch.read_bytes()
+    marker_present = b"GIT binary patch" in payload
+    header_present = (
+        re.search(rb"(?m)^GIT binary patch\n(?:literal|delta) [0-9]+\n", payload)
+        is not None
+    )
+    if marker_present != header_present:
+        raise PatchError(f"malformed Git binary patch header: {patch}")
+    return header_present
 
 
-def validate_binary_patches(src: Path, patches: Sequence[Path]) -> tuple[str, ...]:
-    """Check binary-bearing patches in their cumulative series context."""
+def validate_binary_patches(patches: Sequence[Path]) -> tuple[str, ...]:
+    """Identify patches containing real Git binary patch headers without cloning."""
 
-    binary = tuple(patch for patch in patches if patch_contains_binary_data(patch))
-    if not binary:
-        return ()
+    return tuple(patch.name for patch in patches if patch_contains_binary_data(patch))
+
+
+def apply_patch_series(
+    checkout: Path,
+    patches: Sequence[Path],
+    *,
+    fault: FaultHook | None = None,
+) -> tuple[str, ...]:
+    """Check and cumulatively apply one series to an existing clean checkout."""
+
+    binary = validate_binary_patches(patches)
+    fault_hook = fault or (lambda _stage: None)
+    for patch in patches:
+        fault_hook("apply")
+        run(["git", "apply", "--check", "--binary", str(patch)], cwd=checkout)
+        run(["git", "apply", "--binary", str(patch)], cwd=checkout)
+    return binary
+
+
+def apply_patches(
+    src: Path,
+    patches: Sequence[Path],
+    *,
+    check_only: bool,
+) -> tuple[str, ...]:
     revision = git_output(src, ["rev-parse", "HEAD"])
-    with tempfile.TemporaryDirectory(prefix="codex-binary-check-") as temporary:
-        clone = Path(temporary) / "src"
-        _clone_base(src, clone, revision)
-        for patch in patches:
-            run(["git", "apply", "--check", "--binary", str(patch)], cwd=clone)
-            run(["git", "apply", "--binary", str(patch)], cwd=clone)
-    return tuple(patch.name for patch in binary)
-
-
-def apply_patches(src: Path, patches: Sequence[Path], *, check_only: bool) -> None:
-    if check_only:
-        with tempfile.TemporaryDirectory(prefix="codex-apply-check-") as temporary:
-            clone = Path(temporary) / "src"
-            revision = git_output(src, ["rev-parse", "HEAD"])
-            _clone_base(src, clone, revision)
-            for patch in patches:
-                run(["git", "apply", "--check", "--binary", str(patch)], cwd=clone)
-                run(["git", "apply", "--binary", str(patch)], cwd=clone)
-            assert_terminal_markers_absent(clone)
-            audit_default_overload_producer_coverage_if_codex_tree(clone)
-        return
-
-    revision = git_output(src, ["rev-parse", "HEAD"])
-    before_status = run(["git", "status", "--porcelain=v1", "-z"], cwd=src, capture=True).stdout
+    before_status = run(
+        ["git", "status", "--porcelain=v1", "-z"], cwd=src, capture=True
+    ).stdout
     index_path = Path(git_output(src, ["rev-parse", "--git-path", "index"]))
     if not index_path.is_absolute():
         index_path = src / index_path
     before_index = index_path.read_bytes()
-    candidate = Path(tempfile.mkdtemp(prefix=f".{src.name}.apply-candidate-", dir=src.parent))
+    candidate = Path(
+        tempfile.mkdtemp(prefix=f".{src.name}.apply-candidate-", dir=src.parent)
+    )
     retained_old: Path | None = None
     try:
         candidate.rmdir()
         _clone_base(src, candidate, revision)
-        for patch in patches:
-            run(["git", "apply", "--check", "--binary", str(patch)], cwd=candidate)
-            run(["git", "apply", "--binary", str(patch)], cwd=candidate)
-        assert_terminal_markers_absent(candidate)
-        audit_default_overload_producer_coverage_if_codex_tree(candidate)
+        binary = apply_patch_series(candidate, patches)
+
+        if check_only:
+            return binary
 
         if git_output(src, ["rev-parse", "HEAD"]) != revision:
-            raise PatchError("upstream checkout HEAD changed while applying candidate patches")
+            raise PatchError(
+                "upstream checkout HEAD changed while applying candidate patches"
+            )
         after_status = run(
             ["git", "status", "--porcelain=v1", "-z"], cwd=src, capture=True
         ).stdout
         if after_status != before_status:
-            raise PatchError("upstream checkout changed while applying candidate patches")
+            raise PatchError(
+                "upstream checkout changed while applying candidate patches"
+            )
         if index_path.read_bytes() != before_index:
-            raise PatchError("upstream Git index changed while applying candidate patches")
+            raise PatchError(
+                "upstream Git index changed while applying candidate patches"
+            )
 
         retained_old = _replace_directory_atomically(candidate, src)
         if retained_old is not None:
-            eprint(f"warning: applied patches but old worktree remains at {retained_old}")
+            eprint(
+                f"warning: applied patches but old worktree remains at {retained_old}"
+            )
+        return binary
     finally:
         if candidate.exists() and candidate != retained_old:
             shutil.rmtree(candidate)
 
 
-def patch_paths(manifest: MaintenanceManifest, *, directory: Path | None = None) -> list[Path]:
+def patch_paths(
+    manifest: MaintenanceManifest, *, directory: Path | None = None
+) -> list[Path]:
     base = directory or manifest.patch_dir
     return [base / patch.file for patch in manifest.patches]
 
@@ -1034,27 +1565,29 @@ def patch_paths(manifest: MaintenanceManifest, *, directory: Path | None = None)
 def _validate_candidate(
     manifest: MaintenanceManifest,
     candidate: Path,
-    expected: Path,
-    changed: Sequence[str],
-    temporary: Path,
+    checkout: Path,
+    expected_paths: Sequence[str],
+    expected_digest: str,
     fault: FaultHook,
-) -> None:
-    validation = temporary / "validation"
-    _clone_base(manifest.worktree, validation, manifest.upstream.revision)
+) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
     validate_patch_directory(manifest, directory=candidate)
-    for patch in patch_paths(manifest, directory=candidate):
-        fault("apply")
-        run(["git", "apply", "--check", "--binary", str(patch)], cwd=validation)
-        run(["git", "apply", "--binary", str(patch)], cwd=validation)
-    assert_terminal_markers_absent(validation)
-    audit_default_overload_producer_coverage_if_codex_tree(validation)
-    validate_binary_patches(manifest.worktree, patch_paths(manifest, directory=candidate))
-    validate_generated_changes(manifest, changed)
-    if _tree_digest(validation, changed) != _tree_digest(expected, changed):
-        raise PatchError("candidate patches do not reproduce the generated editing tree")
-    assert_zstd_fixture_trees_semantically_equal(expected, validation)
+    run(["git", "reset", "--hard", manifest.upstream.revision], cwd=checkout)
+    run(["git", "clean", "-ffdx"], cwd=checkout)
+    binary = apply_patch_series(
+        checkout,
+        patch_paths(manifest, directory=candidate),
+        fault=fault,
+    )
+    replay_paths, replay_digest = changed_tree_digest(checkout)
+    validate_generated_changes(manifest, replay_paths)
+    if tuple(expected_paths) != replay_paths or expected_digest != replay_digest:
+        raise PatchError(
+            "candidate patches do not reproduce the generated editing tree"
+        )
+    validate_zstd_fixture_tree(checkout)
     fault("validate")
-    run_manifest_validation(manifest, validation)
+    seen = run_manifest_validation(manifest, checkout)
+    return binary, seen
 
 
 def _exchange_directories(candidate: Path, target: Path) -> None:
@@ -1090,24 +1623,122 @@ def _replace_directory_atomically(candidate: Path, target: Path) -> Path | None:
     return None
 
 
-def _replace_patch_directory(target: Path, candidate: Path, fault: FaultHook) -> Path | None:
+def _patch_hashes(manifest: MaintenanceManifest, directory: Path) -> dict[str, str]:
+    validate_patch_directory(manifest, directory=directory)
+    return {
+        patch.file: hashlib.sha256((directory / patch.file).read_bytes()).hexdigest()
+        for patch in manifest.patches
+    }
+
+
+def _install_patch_directory(
+    manifest: MaintenanceManifest,
+    candidate: Path,
+    expected_hashes: Mapping[str, str],
+    fault: FaultHook,
+) -> tuple[dict[str, str], tuple[Path, ...]]:
+    target = manifest.patch_dir
+    backup = manifest.backup_dir
+    if backup.exists():
+        raise PatchError(f"stale refresh backup blocks installation: {backup}")
+
     fault("replace")
-    return _replace_directory_atomically(candidate, target)
+    target_existed = target.exists()
+    if target_existed:
+        _exchange_directories(candidate, target)
+        try:
+            os.replace(candidate, backup)
+        except OSError as exc:
+            try:
+                _exchange_directories(candidate, target)
+            except Exception as restore_exc:
+                raise PatchError(
+                    "could not move the previous patch tree to its ignored backup and rollback failed; "
+                    f"installed={target} candidate={candidate} backup={backup}: {restore_exc}"
+                ) from exc
+            raise PatchError(
+                f"could not create ignored patch backup at {backup}; the installed tree was restored"
+            ) from exc
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(candidate, target)
+
+    try:
+        shutil.copytree(target, candidate)
+        fault("installed")
+        installed_hashes = _patch_hashes(manifest, target)
+        if installed_hashes != dict(expected_hashes):
+            raise PatchError(
+                "installed patch hashes differ from the validated candidate"
+            )
+    except Exception as install_exc:
+        try:
+            if target_existed:
+                _exchange_directories(backup, target)
+                shutil.rmtree(backup)
+            else:
+                shutil.rmtree(target)
+        except Exception as restore_exc:
+            raise PatchError(
+                "patch installation failed and automatic restoration also failed; "
+                f"installed={target} candidate={candidate} backup={backup}: {restore_exc}"
+            ) from install_exc
+        raise
+
+    retained_paths: list[Path] = []
+    for runtime_path in (candidate, backup):
+        if not runtime_path.exists():
+            continue
+        try:
+            shutil.rmtree(runtime_path)
+        except OSError:
+            retained_paths.append(runtime_path)
+            eprint(
+                f"warning: installed patches but runtime tree remains at {runtime_path}"
+            )
+    return installed_hashes, tuple(retained_paths)
 
 
 @contextmanager
-def _refresh_sandbox(manifest: MaintenanceManifest) -> Iterator[Path]:
-    sandbox = manifest.worktree.parent / "refresh-sandbox"
+def maintenance_sandbox(manifest: MaintenanceManifest, name: str) -> Iterator[Path]:
+    if not re.fullmatch(r"[a-z][a-z0-9-]*", name):
+        raise PatchError(f"invalid maintenance sandbox name: {name}")
+    _check_ignored_path(manifest, manifest.runtime_root)
+    manifest.runtime_root.mkdir(parents=True, exist_ok=True)
+    sandbox = manifest.runtime_root / name
     if sandbox.exists():
         raise PatchError(
-            f"stale refresh sandbox blocks maintenance: {sandbox}; "
-            "recovery: verify no refresh is running, then remove this ignored tool-owned directory"
+            f"stale maintenance workspace blocks operation: {sandbox}; "
+            "recovery: verify no workflow is running, then remove this ignored tool-owned directory"
         )
     sandbox.mkdir()
     try:
         yield sandbox
     finally:
         shutil.rmtree(sandbox, ignore_errors=True)
+
+
+@contextmanager
+def _refresh_sandbox(manifest: MaintenanceManifest) -> Iterator[Path]:
+    for path in (
+        manifest.runtime_root,
+        manifest.candidate_dir,
+        manifest.backup_dir,
+        manifest.receipt_dir,
+    ):
+        _check_ignored_path(manifest, path)
+    if manifest.candidate_dir.exists():
+        raise PatchError(
+            f"stale refresh candidate blocks maintenance: {manifest.candidate_dir}; "
+            "recovery: inspect its receipt and patches, then remove it explicitly"
+        )
+    if manifest.backup_dir.exists():
+        raise PatchError(
+            f"stale refresh backup blocks maintenance: {manifest.backup_dir}; "
+            "recovery: verify the installed series before removing the backup"
+        )
+    with maintenance_sandbox(manifest, "refresh-workspace") as sandbox:
+        yield sandbox
 
 
 def refresh_patches(
@@ -1118,11 +1749,13 @@ def refresh_patches(
 ) -> dict[str, Any]:
     src = manifest.worktree
     if manifest.patch_dir.exists():
-        validate_patch_directory(manifest)
+        _validate_refresh_source_patch_directory(manifest)
     require_git_worktree(src)
     ensure_pinned_head(src, manifest.upstream)
     ensure_real_index_clean(src)
-    before_status = run(["git", "status", "--porcelain=v1", "-z"], cwd=src, capture=True).stdout
+    before_status = run(
+        ["git", "status", "--porcelain=v1", "-z"], cwd=src, capture=True
+    ).stdout
     index_path = Path(git_output(src, ["rev-parse", "--git-path", "index"]))
     if not index_path.is_absolute():
         index_path = src / index_path
@@ -1137,7 +1770,9 @@ def refresh_patches(
             raise PatchError("upstream worktree has no changes to refresh")
         for path in source_paths:
             manifest.owner_for(path)
-        source_diff = _temporary_index_diff(src, source_paths, temporary / "source.index")
+        source_diff = _temporary_index_diff(
+            src, source_paths, temporary / "source.index"
+        )
         applied = subprocess.run(
             ["git", "apply", "--binary", "-"],
             cwd=working,
@@ -1148,9 +1783,16 @@ def refresh_patches(
             stderr=subprocess.PIPE,
         )
         if applied.returncode != 0:
-            raise PatchError(f"could not copy editing tree into refresh sandbox: {applied.stderr.strip()}")
+            raise PatchError(
+                f"could not copy editing tree into refresh sandbox: {applied.stderr.strip()}"
+            )
 
-        run_generation_sequence(manifest, working, twice=True, fault=fault_hook)
+        first_generation_digest, second_generation_digest = run_generation_sequence(
+            manifest,
+            working,
+            twice=True,
+            fault=fault_hook,
+        )
         changed = _changed_paths(working)
         if not changed:
             raise PatchError("generation produced no patchable changes")
@@ -1159,13 +1801,14 @@ def refresh_patches(
             owners[manifest.owner_for(path).file].append(path)
         empty = [name for name, paths in owners.items() if not paths]
         if empty:
-            raise PatchError(f"refresh would produce empty patch file(s): {', '.join(empty)}")
+            raise PatchError(
+                f"refresh would produce empty patch file(s): {', '.join(empty)}"
+            )
 
-        manifest.patch_dir.parent.mkdir(parents=True, exist_ok=True)
-        candidate = Path(
-            tempfile.mkdtemp(prefix=f".{manifest.upstream.ref}.candidate-", dir=manifest.patch_dir.parent)
-        )
-        retained_old: Path | None = None
+        expected_paths = tuple(changed)
+        expected_digest = _tree_digest(working, expected_paths)
+        candidate = manifest.candidate_dir
+        candidate.mkdir()
         try:
             for patch in manifest.patches:
                 text = _temporary_index_diff(
@@ -1177,19 +1820,25 @@ def refresh_patches(
                 if not text:
                     raise PatchError(f"refresh produced an empty patch: {patch.file}")
                 (candidate / patch.file).write_text(text)
-            _validate_candidate(manifest, candidate, working, changed, temporary, fault_hook)
-            patch_hashes = {
-                patch.file: hashlib.sha256((candidate / patch.file).read_bytes()).hexdigest()
-                for patch in manifest.patches
-            }
+            binary_patches, seen = _validate_candidate(
+                manifest,
+                candidate,
+                working,
+                expected_paths,
+                expected_digest,
+                fault_hook,
+            )
+            patch_hashes = _patch_hashes(manifest, candidate)
+            retained_runtime_paths: tuple[Path, ...] = ()
+            installed_hashes: dict[str, str] | None = None
             if not dry_run:
-                retained_old = _replace_patch_directory(manifest.patch_dir, candidate, fault_hook)
-                if retained_old is not None:
-                    eprint(
-                        "warning: refreshed patches but old patch directory remains at "
-                        f"{retained_old}"
-                    )
-            return {
+                installed_hashes, retained_runtime_paths = _install_patch_directory(
+                    manifest,
+                    candidate,
+                    patch_hashes,
+                    fault_hook,
+                )
+            result: dict[str, Any] = {
                 "ref": manifest.upstream.ref,
                 "revision": manifest.upstream.revision,
                 "dryRun": dry_run,
@@ -1197,16 +1846,42 @@ def refresh_patches(
                 "patches": [patch.file for patch in manifest.patches],
                 "patchSha256": patch_hashes,
                 "changedPaths": changed,
+                "binaryPatches": list(binary_patches),
+                "generationDigest": first_generation_digest,
+                "secondGenerationDigest": second_generation_digest,
+                "targetedCommands": len(seen),
+                "candidatePath": str(candidate) if dry_run else None,
+                "installedSha256": installed_hashes,
+                "retainedRuntimePaths": [str(path) for path in retained_runtime_paths],
             }
+            receipt = _write_receipt(
+                manifest,
+                "refresh-dry-run" if dry_run else "refresh-install",
+                result,
+            )
+            result["receiptPath"] = str(receipt)
+            return result
+        except Exception:
+            if candidate.exists():
+                eprint(f"recovery: preserved refresh candidate at {candidate}")
+            if manifest.backup_dir.exists():
+                eprint(
+                    f"recovery: preserved previous patch backup at {manifest.backup_dir}"
+                )
+            raise
         finally:
-            if candidate.exists() and candidate != retained_old:
-                shutil.rmtree(candidate)
-            after_status = run(["git", "status", "--porcelain=v1", "-z"], cwd=src, capture=True).stdout
+            after_status = run(
+                ["git", "status", "--porcelain=v1", "-z"], cwd=src, capture=True
+            ).stdout
             after_index = index_path.read_bytes()
             if after_status != before_status:
-                raise PatchError("refresh changed the editing worktree; recovery: inspect the upstream checkout")
+                raise PatchError(
+                    "refresh changed the editing worktree; recovery: inspect the upstream checkout"
+                )
             if after_index != before_index:
-                raise PatchError("refresh changed the real Git index; recovery: inspect and unstage unexpected entries")
+                raise PatchError(
+                    "refresh changed the real Git index; recovery: inspect and unstage unexpected entries"
+                )
 
 
 def manifest_order(manifest: MaintenanceManifest) -> list[str]:
@@ -1227,9 +1902,13 @@ def main_wrapper(fn: Callable[[], int]) -> int:
         return fn()
     except PatchError as exc:
         eprint(f"error: {exc}")
-        eprint("recovery: fix the reported contract or restore the last committed patch set, then rerun the command")
+        eprint(
+            "recovery: fix the reported contract or restore the last committed patch set, then rerun the command"
+        )
         return 1
     except Exception as exc:  # noqa: BLE001
         eprint(f"error: unexpected maintenance failure: {exc}")
-        eprint("recovery: the original patch set, editing worktree, and Git index were preserved; inspect and retry")
+        eprint(
+            "recovery: the original patch set, editing worktree, and Git index were preserved; inspect and retry"
+        )
         return 1

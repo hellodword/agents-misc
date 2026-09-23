@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import argparse
 
-from common import add_repo_root_argument, json_stdout, load_manifest, main_wrapper, refresh_patches
+from common import (
+    add_repo_root_argument,
+    json_stdout,
+    load_manifest,
+    main_wrapper,
+    refresh_patches,
+)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run the pinned generators twice and atomically refresh the four-patch Codex series"
+        description="Run the pinned generators twice and atomically refresh the manifest-declared Codex series"
     )
     add_repo_root_argument(parser)
     parser.add_argument(

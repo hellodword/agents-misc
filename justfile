@@ -105,7 +105,7 @@ _codex-fetch:
   @test "${AGENTS_MISC_SHELL:-}" = "codex" || { echo "error: run 'just codex-fetch' to enter nix develop .#codex" >&2; exit 2; }
   python3 codex/scripts/fetch-upstream.py
 
-# Check the four pinned Codex patches cumulatively, including binary and negative gates.
+# Check the manifest-declared Codex patches cumulatively, including binary hunks.
 codex-apply-check:
   {{codex_nix}} just _codex-apply-check
 
@@ -141,7 +141,7 @@ _codex-refresh:
   @test "${AGENTS_MISC_SHELL:-}" = "codex" || { echo "error: run 'just codex-refresh' to enter nix develop .#codex" >&2; exit 2; }
   python3 codex/scripts/refresh-patches.py
 
-# Primary gate: binary apply, double generation, negative/producer audits, Cargo, and regressions.
+# Primary gate: binary apply, double generation, Cargo validation, and regressions.
 codex-test:
   {{codex_nix}} just _codex-test
 

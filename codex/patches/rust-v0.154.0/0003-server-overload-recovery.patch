@@ -1,0 +1,2405 @@
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index 4aacc97d107f4effd31b789af57ed78f3899ee6d..f033ea2b045a1daa30587c632ba46a5065fc9ae0 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -8,10 +8,17 @@ use crate::client_common::ResponseEvent;
+ use crate::context::CompactionSummary;
+ use crate::context::ContextualUserFragment;
+ use crate::context::world_state::WorldState;
++use crate::hook_runtime::ModelRequestFailure;
++use crate::hook_runtime::ModelRequestHookContext;
+ use crate::hook_runtime::PostCompactHookOutcome;
+ use crate::hook_runtime::PreCompactHookOutcome;
++use crate::hook_runtime::run_abnormal_stop_hooks;
+ use crate::hook_runtime::run_post_compact_hooks;
+ use crate::hook_runtime::run_pre_compact_hooks;
++use crate::hook_runtime::run_request_error_hooks;
++use crate::model_request_failure_policy::is_persistent_capacity_error;
++use crate::model_request_failure_policy::persistent_capacity_decision;
++use crate::model_request_failure_policy::wait_for_retry;
+ use crate::responses_metadata::CodexResponsesMetadata;
+ use crate::responses_metadata::CodexResponsesRequestKind;
+ use crate::responses_metadata::CompactionTurnMetadata;
+@@ -56,6 +63,7 @@ use codex_utils_output_truncation::TruncationPolicy;
+ use codex_utils_output_truncation::approx_token_count;
+ use codex_utils_output_truncation::truncate_text;
+ use futures::prelude::*;
++use tokio_util::sync::CancellationToken;
+ use tracing::error;
+ 
+ pub use codex_prompts::SUMMARIZATION_PROMPT;
+@@ -122,6 +130,7 @@ pub(crate) async fn run_inline_auto_compact_task(
+     initial_context_injection: InitialContextInjection,
+     reason: CompactionReason,
+     phase: CompactionPhase,
++    cancellation_token: &CancellationToken,
+ ) -> CodexResult<()> {
+     let prompt = turn_context
+         .config
+@@ -143,6 +152,7 @@ pub(crate) async fn run_inline_auto_compact_task(
+         CompactionTrigger::Auto,
+         reason,
+         phase,
++        cancellation_token,
+     )
+     .await?;
+     Ok(())
+@@ -152,6 +162,7 @@ pub(crate) async fn run_compact_task(
+     sess: Arc<Session>,
+     turn_context: Arc<TurnContext>,
+     input: Vec<UserInput>,
++    cancellation_token: CancellationToken,
+ ) -> CodexResult<()> {
+     let start_event = EventMsg::TurnStarted(TurnStartedEvent {
+         turn_id: turn_context.sub_id.clone(),
+@@ -169,6 +180,7 @@ pub(crate) async fn run_compact_task(
+         CompactionTrigger::Manual,
+         CompactionReason::UserRequested,
+         CompactionPhase::StandaloneTurn,
++        &cancellation_token,
+     )
+     .await?;
+     Ok(())
+@@ -182,6 +194,7 @@ async fn run_compact_task_inner(
+     trigger: CompactionTrigger,
+     reason: CompactionReason,
+     phase: CompactionPhase,
++    cancellation_token: &CancellationToken,
+ ) -> CodexResult<()> {
+     let compaction_metadata =
+         CompactionTurnMetadata::new(trigger, reason, CompactionImplementation::Responses, phase);
+@@ -216,6 +229,7 @@ async fn run_compact_task_inner(
+         input,
+         initial_context_injection,
+         compaction_metadata,
++        cancellation_token,
+     )
+     .await;
+     let status = compaction_status_from_result(&result);
+@@ -251,6 +265,7 @@ async fn run_compact_task_inner_impl(
+     input: Vec<UserInput>,
+     initial_context_injection: InitialContextInjection,
+     compaction_metadata: CompactionTurnMetadata,
++    cancellation_token: &CancellationToken,
+ ) -> CodexResult<String> {
+     let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
+     sess.emit_turn_item_started(&turn_context, &compaction_item)
+@@ -264,7 +279,8 @@ async fn run_compact_task_inner_impl(
+     );
+ 
+     let max_retries = turn_context.provider.info().stream_max_retries();
+-    let mut retries = 0;
++    let mut retries = 0_u64;
++    let mut failure_attempt = 0_u64;
+     let mut client_session = sess.services.model_client.new_session();
+     // Reuse one client session so turn-scoped state (sticky routing, websocket incremental
+     // request tracking)
+@@ -277,6 +293,9 @@ async fn run_compact_task_inner_impl(
+         .await;
+ 
+     let compaction_response_id = loop {
++        if cancellation_token.is_cancelled() {
++            return Err(CodexErr::TurnAborted);
++        }
+         // Clone is required because of the loop
+         let turn_input = history
+             .clone()
+@@ -315,7 +334,15 @@ async fn run_compact_task_inner_impl(
+                 return Err(e);
+             }
+             Err(e) if matches!(e.details(), CodexErrorDetails::ContextWindowExceeded) => {
++                failure_attempt = failure_attempt.saturating_add(1).max(1);
+                 if turn_input_len > 1 {
++                    let failure = ModelRequestFailure::new(
++                        ModelRequestHookContext::local_compact(),
++                        failure_attempt,
++                        codex_hooks::ModelRequestNextAction::Retry,
++                        &e,
++                    );
++                    run_request_error_hooks(&sess, &turn_context, failure).await;
+                     // Trim from the beginning to preserve cache (prefix-based) and keep recent messages intact.
+                     error!(
+                         "Context window exceeded while compacting; removing oldest history item. Error: {e}"
+@@ -326,24 +353,96 @@ async fn run_compact_task_inner_impl(
+                 }
+                 sess.set_total_tokens_full(turn_context.as_ref()).await;
+                 sess.track_turn_codex_error(turn_context.as_ref(), &e);
++                let failure = ModelRequestFailure::new(
++                    ModelRequestHookContext::local_compact(),
++                    failure_attempt,
++                    codex_hooks::ModelRequestNextAction::Stop,
++                    &e,
++                );
++                run_request_error_hooks(&sess, &turn_context, failure.clone()).await;
++                run_abnormal_stop_hooks(&sess, &turn_context, failure).await;
+                 let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
+                 sess.send_event(&turn_context, event).await;
+                 return Err(e);
+             }
++            Err(e)
++                if is_persistent_capacity_error(
++                    &e,
++                    turn_context.provider.info().server_overload_policy,
++                ) =>
++            {
++                failure_attempt = failure_attempt.saturating_add(1).max(1);
++                let decision = persistent_capacity_decision(
++                    &e,
++                    turn_context.provider.info().server_overload_policy,
++                    failure_attempt,
++                    Some(max_retries),
++                )
++                .expect("persistent capacity guard must produce a decision");
++                wait_for_retry(decision.delay, cancellation_token).await?;
++                if cancellation_token.is_cancelled() {
++                    return Err(CodexErr::TurnAborted);
++                }
++                run_request_error_hooks(
++                    &sess,
++                    &turn_context,
++                    ModelRequestFailure::from_policy(
++                        ModelRequestHookContext::local_compact(),
++                        failure_attempt,
++                        decision,
++                        &e,
++                    ),
++                )
++                .await;
++                sess.send_event(
++                    &turn_context,
++                    EventMsg::Warning(WarningEvent {
++                        message: format!(
++                            "Compaction is waiting for model capacity; retrying in {:?}.",
++                            decision.delay
++                        ),
++                    }),
++                )
++                .await;
++                if decision.next_action == codex_hooks::ModelRequestNextAction::Retry {
++                    retries = retries.saturating_add(1).min(max_retries);
++                }
++                continue;
++            }
+             Err(e) => {
++                failure_attempt = failure_attempt.saturating_add(1).max(1);
+                 if retries < max_retries {
+-                    retries += 1;
++                    retries = retries.saturating_add(1);
+                     let delay = backoff(retries);
++                    let failure = ModelRequestFailure::new(
++                        ModelRequestHookContext::local_compact(),
++                        failure_attempt,
++                        codex_hooks::ModelRequestNextAction::Retry,
++                        &e,
++                    )
++                    .with_coalesced_count(1);
+                     sess.notify_stream_error(
+                         turn_context.as_ref(),
+                         format!("Reconnecting... {retries}/{max_retries}"),
+                         e,
+                     )
+                     .await;
+-                    tokio::time::sleep(delay).await;
++                    wait_for_retry(delay, cancellation_token).await?;
++                    if cancellation_token.is_cancelled() {
++                        return Err(CodexErr::TurnAborted);
++                    }
++                    run_request_error_hooks(&sess, &turn_context, failure).await;
+                     continue;
+                 } else {
+                     sess.track_turn_codex_error(turn_context.as_ref(), &e);
++                    let failure = ModelRequestFailure::new(
++                        ModelRequestHookContext::local_compact(),
++                        failure_attempt,
++                        codex_hooks::ModelRequestNextAction::Stop,
++                        &e,
++                    );
++                    run_request_error_hooks(&sess, &turn_context, failure.clone()).await;
++                    run_abnormal_stop_hooks(&sess, &turn_context, failure).await;
+                     let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
+                     sess.send_event(&turn_context, event).await;
+                     return Err(e);
+diff --git a/codex-rs/core/src/compact_remote.rs b/codex-rs/core/src/compact_remote.rs
+index d1eb2124ebe70fdbbd0e5f712f1828719727415e..0ad0f9bd6041ce2dd4c7992b1bb47177bb646ad1 100644
+--- a/codex-rs/core/src/compact_remote.rs
++++ b/codex-rs/core/src/compact_remote.rs
+@@ -15,10 +15,17 @@ use crate::compact_remote_history::history_item_groups;
+ use crate::context::world_state::WorldState;
+ use crate::context_manager::ContextManager;
+ use crate::context_manager::estimate_item_token_count;
++use crate::hook_runtime::ModelRequestFailure;
++use crate::hook_runtime::ModelRequestHookContext;
+ use crate::hook_runtime::PostCompactHookOutcome;
+ use crate::hook_runtime::PreCompactHookOutcome;
++use crate::hook_runtime::run_abnormal_stop_hooks;
+ use crate::hook_runtime::run_post_compact_hooks;
+ use crate::hook_runtime::run_pre_compact_hooks;
++use crate::hook_runtime::run_request_error_hooks;
++use crate::model_request_failure_policy::is_persistent_capacity_error;
++use crate::model_request_failure_policy::persistent_capacity_decision;
++use crate::model_request_failure_policy::wait_for_retry;
+ use crate::responses_metadata::CompactionTurnMetadata;
+ use crate::session::session::Session;
+ use crate::session::step_context::StepContext;
+@@ -38,6 +45,7 @@ use codex_protocol::models::FunctionCallOutputPayload;
+ use codex_protocol::models::ResponseItem;
+ use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::TurnStartedEvent;
++use codex_protocol::protocol::WarningEvent;
+ use codex_rollout_trace::CompactionCheckpointTracePayload;
+ use codex_utils_output_truncation::approx_token_count;
+ use tokio_util::sync::CancellationToken;
+@@ -58,6 +66,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
+     initial_context_injection: InitialContextInjection,
+     reason: CompactionReason,
+     phase: CompactionPhase,
++    cancellation_token: &CancellationToken,
+ ) -> CodexResult<()> {
+     let compaction_metadata = CompactionTurnMetadata::new(
+         CompactionTrigger::Auto,
+@@ -72,6 +81,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
+         Some(turn_state),
+         initial_context_injection,
+         compaction_metadata,
++        cancellation_token,
+     )
+     .await?;
+     Ok(())
+@@ -80,10 +90,11 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
+ pub(crate) async fn run_remote_compact_task(
+     sess: Arc<Session>,
+     turn_context: Arc<TurnContext>,
++    cancellation_token: CancellationToken,
+ ) -> CodexResult<()> {
+     // Standalone compaction is its own request boundary, so it captures a fresh step.
+     let step_context = sess
+-        .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new())
++        .capture_step_context(Arc::clone(&turn_context), &cancellation_token)
+         .await?;
+     let start_event = EventMsg::TurnStarted(TurnStartedEvent {
+         turn_id: turn_context.sub_id.clone(),
+@@ -107,6 +118,7 @@ pub(crate) async fn run_remote_compact_task(
+         /*turn_state*/ None,
+         InitialContextInjection::DoNotInject,
+         compaction_metadata,
++        &cancellation_token,
+     )
+     .await?;
+     Ok(())
+@@ -119,6 +131,7 @@ async fn run_remote_compact_task_inner(
+     turn_state: Option<Arc<OnceLock<String>>>,
+     initial_context_injection: InitialContextInjection,
+     compaction_metadata: CompactionTurnMetadata,
++    cancellation_token: &CancellationToken,
+ ) -> CodexResult<()> {
+     let turn_context = &step_context.turn;
+     let trigger = compaction_metadata.trigger();
+@@ -162,6 +175,7 @@ async fn run_remote_compact_task_inner(
+         initial_context_injection,
+         compaction_metadata,
+         &mut analytics_details,
++        cancellation_token,
+     )
+     .await;
+     let status = compaction_status_from_result(&result);
+@@ -197,6 +211,7 @@ async fn run_remote_compact_task_inner_impl(
+     initial_context_injection: InitialContextInjection,
+     compaction_metadata: CompactionTurnMetadata,
+     analytics_details: &mut CompactionAnalyticsDetails,
++    cancellation_token: &CancellationToken,
+ ) -> CodexResult<()> {
+     let turn_context = &step_context.turn;
+     let context_compaction_item = ContextCompactionItem::new();
+@@ -212,24 +227,60 @@ async fn run_remote_compact_task_inner_impl(
+     let compaction_item = TurnItem::ContextCompaction(context_compaction_item);
+     sess.emit_turn_item_started(turn_context, &compaction_item)
+         .await;
+-    let attempt = run_remote_compact_attempt(
++    let mut failure_attempt = 0_u64;
++    let attempt = run_remote_compact_attempt_with_policy(
+         sess,
+         step_context,
+         turn_state.clone(),
+         &compaction_trace,
+         compaction_metadata,
+         analytics_details,
++        cancellation_token,
++        &mut failure_attempt,
+     )
+     .await;
+     let (attempt, compaction_turn_context) = match attempt {
+         Ok(attempt) => (attempt, turn_context),
+         Err(error) => {
++            if matches!(
++                error.details(),
++                codex_protocol::error::CodexErrorDetails::TurnAborted
++            ) {
++                return Err(error);
++            }
+             let Some(fallback_step_context) = fallback_step_context else {
++                run_remote_compact_failure_hooks(
++                    sess,
++                    turn_context,
++                    codex_hooks::ModelRequestNextAction::Stop,
++                    &error,
++                    failure_attempt,
++                    /*abnormal_stop*/ true,
++                )
++                .await;
+                 return Err(error);
+             };
+             if !should_retry_with_current_model(&error) {
++                run_remote_compact_failure_hooks(
++                    sess,
++                    turn_context,
++                    codex_hooks::ModelRequestNextAction::Stop,
++                    &error,
++                    failure_attempt,
++                    /*abnormal_stop*/ true,
++                )
++                .await;
+                 return Err(error);
+             }
++            run_remote_compact_failure_hooks(
++                sess,
++                turn_context,
++                codex_hooks::ModelRequestNextAction::Fallback,
++                &error,
++                failure_attempt,
++                /*abnormal_stop*/ false,
++            )
++            .await;
+             sess.set_last_known_step_context(fallback_step_context)
+                 .await;
+             let fallback_turn_context = &fallback_step_context.turn;
+@@ -240,13 +291,15 @@ async fn run_remote_compact_task_inner_impl(
+                     fallback_turn_context.model_info().slug.as_str(),
+                     fallback_turn_context.provider.info().name.as_str(),
+                 );
+-            let fallback_result = run_remote_compact_attempt(
++            let fallback_result = run_remote_compact_attempt_with_policy(
+                 sess,
+                 fallback_step_context,
+                 turn_state,
+                 &fallback_compaction_trace,
+                 compaction_metadata,
+                 analytics_details,
++                cancellation_token,
++                &mut failure_attempt,
+             )
+             .await;
+             record_model_fallback(
+@@ -259,7 +312,24 @@ async fn run_remote_compact_task_inner_impl(
+             );
+             match fallback_result {
+                 Ok(attempt) => (attempt, fallback_turn_context),
+-                Err(_) => return Err(error),
++                Err(fallback_error) => {
++                    if matches!(
++                        fallback_error.details(),
++                        codex_protocol::error::CodexErrorDetails::TurnAborted
++                    ) {
++                        return Err(fallback_error);
++                    }
++                    run_remote_compact_failure_hooks(
++                        sess,
++                        fallback_turn_context,
++                        codex_hooks::ModelRequestNextAction::Stop,
++                        &fallback_error,
++                        failure_attempt,
++                        /*abnormal_stop*/ true,
++                    )
++                    .await;
++                    return Err(error);
++                }
+             }
+         }
+     };
+@@ -312,6 +382,107 @@ async fn run_remote_compact_task_inner_impl(
+     Ok(())
+ }
+ 
++/// Run the legacy remote compact request through the same typed capacity
++/// recovery policy as sampling and Responses compaction v2. This wrapper owns
++/// the retry/defer loop for one model while the caller retains the pinned
++/// primary/alternate relationship.
++async fn run_remote_compact_attempt_with_policy(
++    sess: &Arc<Session>,
++    step_context: &Arc<StepContext>,
++    turn_state: Option<Arc<OnceLock<String>>>,
++    compaction_trace: &codex_rollout_trace::CompactionTraceContext,
++    compaction_metadata: CompactionTurnMetadata,
++    analytics_details: &mut CompactionAnalyticsDetails,
++    cancellation_token: &CancellationToken,
++    failure_attempt: &mut u64,
++) -> CodexResult<RemoteCompactAttempt> {
++    let retry_budget = step_context.turn.provider.info().request_max_retries();
++    loop {
++        if cancellation_token.is_cancelled() {
++            return Err(CodexErr::TurnAborted);
++        }
++        match run_remote_compact_attempt(
++            sess,
++            step_context,
++            turn_state.clone(),
++            compaction_trace,
++            compaction_metadata,
++            analytics_details,
++        )
++        .await
++        {
++            Ok(result) => return Ok(result),
++            Err(error) => {
++                if matches!(
++                    error.details(),
++                    codex_protocol::error::CodexErrorDetails::TurnAborted
++                ) {
++                    return Err(error);
++                }
++                *failure_attempt = (*failure_attempt).saturating_add(1).max(1);
++                if !is_persistent_capacity_error(
++                    &error,
++                    step_context.turn.provider.info().server_overload_policy,
++                ) {
++                    return Err(error);
++                }
++                let decision = persistent_capacity_decision(
++                    &error,
++                    step_context.turn.provider.info().server_overload_policy,
++                    *failure_attempt,
++                    Some(retry_budget),
++                )
++                .expect("persistent capacity guard must produce a decision");
++                wait_for_retry(decision.delay, cancellation_token).await?;
++                if cancellation_token.is_cancelled() {
++                    return Err(CodexErr::TurnAborted);
++                }
++                run_request_error_hooks(
++                    sess,
++                    &step_context.turn,
++                    ModelRequestFailure::from_policy(
++                        ModelRequestHookContext::remote_compact(),
++                        *failure_attempt,
++                        decision,
++                        &error,
++                    ),
++                )
++                .await;
++                sess.send_event(
++                    &step_context.turn,
++                    EventMsg::Warning(WarningEvent {
++                        message: format!(
++                            "Model capacity is temporarily unavailable during compaction; waiting to retry ({:?}).",
++                            decision.delay
++                        ),
++                    }),
++                )
++                .await;
++            }
++        }
++    }
++}
++
++async fn run_remote_compact_failure_hooks(
++    sess: &Arc<Session>,
++    turn_context: &Arc<TurnContext>,
++    next_action: codex_hooks::ModelRequestNextAction,
++    err: &CodexErr,
++    attempt: u64,
++    abnormal_stop: bool,
++) {
++    let failure = ModelRequestFailure::new(
++        ModelRequestHookContext::remote_compact(),
++        attempt,
++        next_action,
++        err,
++    );
++    run_request_error_hooks(sess, turn_context, failure.clone()).await;
++    if abnormal_stop {
++        run_abnormal_stop_hooks(sess, turn_context, failure).await;
++    }
++}
++
+ pub(crate) async fn process_compacted_history(
+     sess: &Session,
+     compacted_history: Vec<ResponseItem>,
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index f02e2db678e6266204660a0e72a444047a0db626..1f80522504b9443ea83215ea949e7cd4f0bb0110 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -17,10 +17,15 @@ use crate::compact_remote::should_keep_compacted_history_item;
+ use crate::compact_remote_history::HistoryItemGroup;
+ use crate::compact_remote_history::history_item_groups;
+ use crate::context_manager::estimate_item_token_count;
++use crate::hook_runtime::ModelRequestFailure;
++use crate::hook_runtime::ModelRequestHookContext;
+ use crate::hook_runtime::PostCompactHookOutcome;
+ use crate::hook_runtime::PreCompactHookOutcome;
++use crate::hook_runtime::run_abnormal_stop_hooks;
+ use crate::hook_runtime::run_post_compact_hooks;
+ use crate::hook_runtime::run_pre_compact_hooks;
++use crate::hook_runtime::run_request_error_hooks;
++use crate::model_request_failure_policy::is_persistent_capacity_error;
+ use crate::responses_metadata::CodexResponsesMetadata;
+ use crate::responses_metadata::CompactionTurnMetadata;
+ use crate::responses_retry::ResponsesStreamRequest;
+@@ -87,6 +92,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
+     initial_context_injection: InitialContextInjection,
+     reason: CompactionReason,
+     phase: CompactionPhase,
++    cancellation_token: &CancellationToken,
+ ) -> CodexResult<()> {
+     let compaction_metadata = CompactionTurnMetadata::new(
+         CompactionTrigger::Auto,
+@@ -101,6 +107,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
+         Some(client_session),
+         initial_context_injection,
+         compaction_metadata,
++        cancellation_token,
+     )
+     .await
+ }
+@@ -108,10 +115,11 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
+ pub(crate) async fn run_remote_compact_task(
+     sess: Arc<Session>,
+     turn_context: Arc<TurnContext>,
++    cancellation_token: CancellationToken,
+ ) -> CodexResult<()> {
+     // Standalone compaction is its own request boundary, so it captures a fresh step.
+     let step_context = sess
+-        .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new())
++        .capture_step_context(Arc::clone(&turn_context), &cancellation_token)
+         .await?;
+     let start_event = EventMsg::TurnStarted(TurnStartedEvent {
+         turn_id: turn_context.sub_id.clone(),
+@@ -135,6 +143,7 @@ pub(crate) async fn run_remote_compact_task(
+         /*client_session*/ None,
+         InitialContextInjection::DoNotInject,
+         compaction_metadata,
++        &cancellation_token,
+     )
+     .await
+ }
+@@ -146,6 +155,7 @@ async fn run_remote_compact_task_inner(
+     client_session: Option<&mut ModelClientSession>,
+     initial_context_injection: InitialContextInjection,
+     compaction_metadata: CompactionTurnMetadata,
++    cancellation_token: &CancellationToken,
+ ) -> CodexResult<()> {
+     let turn_context = &step_context.turn;
+     let trigger = compaction_metadata.trigger();
+@@ -189,6 +199,7 @@ async fn run_remote_compact_task_inner(
+         initial_context_injection,
+         compaction_metadata,
+         &mut analytics_details,
++        cancellation_token,
+     )
+     .await;
+     let status = compaction_status_from_result(&result);
+@@ -227,6 +238,7 @@ async fn run_remote_compact_task_inner_impl(
+     initial_context_injection: InitialContextInjection,
+     compaction_metadata: CompactionTurnMetadata,
+     analytics_details: &mut CompactionAnalyticsDetails,
++    cancellation_token: &CancellationToken,
+ ) -> CodexResult<()> {
+     let turn_context = &step_context.turn;
+     let context_compaction_item = ContextCompactionItem::new();
+@@ -241,6 +253,7 @@ async fn run_remote_compact_task_inner_impl(
+     sess.emit_turn_item_started(turn_context, &compaction_item)
+         .await;
+ 
++    let mut retry_state = ResponsesStreamRetryState::default();
+     let attempt = run_remote_compact_v2_attempt(
+         sess,
+         step_context,
+@@ -248,17 +261,49 @@ async fn run_remote_compact_task_inner_impl(
+         &compaction_trace,
+         compaction_metadata,
+         analytics_details,
++        cancellation_token,
++        &mut retry_state,
+     )
+     .await;
+     let (attempt, compaction_turn_context) = match attempt {
+         Ok(attempt) => (attempt, turn_context),
+         Err(error) => {
++            if matches!(error.details(), CodexErrorDetails::TurnAborted) {
++                return Err(error);
++            }
+             let Some(fallback_step_context) = fallback_step_context else {
++                run_remote_compact_v2_failure_hooks(
++                    sess,
++                    turn_context,
++                    codex_hooks::ModelRequestNextAction::Stop,
++                    &error,
++                    retry_state.failure_attempt(),
++                    /*abnormal_stop*/ true,
++                )
++                .await;
+                 return Err(error);
+             };
+             if !should_retry_with_current_model(&error) {
++                run_remote_compact_v2_failure_hooks(
++                    sess,
++                    turn_context,
++                    codex_hooks::ModelRequestNextAction::Stop,
++                    &error,
++                    retry_state.failure_attempt(),
++                    /*abnormal_stop*/ true,
++                )
++                .await;
+                 return Err(error);
+             }
++            run_remote_compact_v2_failure_hooks(
++                sess,
++                turn_context,
++                codex_hooks::ModelRequestNextAction::Fallback,
++                &error,
++                retry_state.failure_attempt(),
++                /*abnormal_stop*/ false,
++            )
++            .await;
+             sess.set_last_known_step_context(fallback_step_context)
+                 .await;
+             let fallback_turn_context = &fallback_step_context.turn;
+@@ -269,6 +314,7 @@ async fn run_remote_compact_task_inner_impl(
+                     fallback_turn_context.model_info().slug.as_str(),
+                     fallback_turn_context.provider.info().name.as_str(),
+                 );
++            retry_state.reset_transport_retries();
+             let fallback_result = run_remote_compact_v2_attempt(
+                 sess,
+                 fallback_step_context,
+@@ -276,6 +322,8 @@ async fn run_remote_compact_task_inner_impl(
+                 &fallback_compaction_trace,
+                 compaction_metadata,
+                 analytics_details,
++                cancellation_token,
++                &mut retry_state,
+             )
+             .await;
+             record_model_fallback(
+@@ -288,7 +336,21 @@ async fn run_remote_compact_task_inner_impl(
+             );
+             match fallback_result {
+                 Ok(attempt) => (attempt, fallback_turn_context),
+-                Err(_) => return Err(error),
++                Err(fallback_error) => {
++                    if matches!(fallback_error.details(), CodexErrorDetails::TurnAborted) {
++                        return Err(fallback_error);
++                    }
++                    run_remote_compact_v2_failure_hooks(
++                        sess,
++                        fallback_turn_context,
++                        codex_hooks::ModelRequestNextAction::Stop,
++                        &fallback_error,
++                        retry_state.failure_attempt(),
++                        /*abnormal_stop*/ true,
++                    )
++                    .await;
++                    return Err(error);
++                }
+             }
+         }
+     };
+@@ -362,6 +424,26 @@ async fn run_remote_compact_task_inner_impl(
+     Ok(())
+ }
+ 
++async fn run_remote_compact_v2_failure_hooks(
++    sess: &Arc<Session>,
++    turn_context: &Arc<TurnContext>,
++    next_action: codex_hooks::ModelRequestNextAction,
++    err: &CodexErr,
++    attempt: u64,
++    abnormal_stop: bool,
++) {
++    let failure = ModelRequestFailure::new(
++        ModelRequestHookContext::remote_compaction_v2(),
++        attempt,
++        next_action,
++        err,
++    );
++    run_request_error_hooks(sess, turn_context, failure.clone()).await;
++    if abnormal_stop {
++        run_abnormal_stop_hooks(sess, turn_context, failure).await;
++    }
++}
++
+ struct RemoteCompactionV2Output {
+     compaction_output: ResponseItem,
+     response_id: String,
+@@ -369,11 +451,13 @@ struct RemoteCompactionV2Output {
+ }
+ 
+ async fn run_remote_compaction_request_v2(
+-    sess: &Session,
++    sess: &Arc<Session>,
+     step_context: &StepContext,
+     client_session: &mut ModelClientSession,
+     prompt: &Prompt,
+     responses_metadata: &CodexResponsesMetadata,
++    cancellation_token: &CancellationToken,
++    retry_state: &mut ResponsesStreamRetryState,
+ ) -> CodexResult<RemoteCompactionV2Output> {
+     let turn_context = &step_context.turn;
+     let max_retries = turn_context
+@@ -381,8 +465,10 @@ async fn run_remote_compaction_request_v2(
+         .info()
+         .stream_max_retries()
+         .min(MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES);
+-    let mut retry_state = ResponsesStreamRetryState::default();
+     loop {
++        if cancellation_token.is_cancelled() {
++            return Err(CodexErr::TurnAborted);
++        }
+         let result = match client_session
+             .stream(
+                 prompt,
+@@ -402,18 +488,34 @@ async fn run_remote_compaction_request_v2(
+ 
+         match result {
+             Ok(compaction_output) => return Ok(compaction_output),
+-            Err(err) if !err.is_retryable() => return Err(err),
++            Err(err)
++                if !err.is_retryable()
++                    && !is_persistent_capacity_error(
++                        &err,
++                        turn_context.provider.info().server_overload_policy,
++                    ) =>
++            {
++                if matches!(err.details(), CodexErrorDetails::TurnAborted) {
++                    return Err(err);
++                }
++                retry_state.record_failure();
++                return Err(err);
++            }
+             Err(err) => {
+-                handle_retryable_response_stream_error(
+-                    &mut retry_state,
++                if let Err(err) = handle_retryable_response_stream_error(
++                    retry_state,
+                     max_retries,
+                     err,
+                     client_session,
+                     sess,
+                     turn_context,
+                     ResponsesStreamRequest::RemoteCompactionV2,
++                    cancellation_token,
+                 )
+-                .await?;
++                .await
++                {
++                    return Err(err);
++                }
+             }
+         }
+     }
+diff --git a/codex-rs/core/src/compact_remote_v2_attempt.rs b/codex-rs/core/src/compact_remote_v2_attempt.rs
+index 8827ba1d21a89298192740f379de7c0746188dc1..d21e6cb22b0cf7b3eb300c9219ad4b46da65db5d 100644
+--- a/codex-rs/core/src/compact_remote_v2_attempt.rs
++++ b/codex-rs/core/src/compact_remote_v2_attempt.rs
+@@ -8,6 +8,7 @@ use crate::compact::CompactionAnalyticsDetails;
+ use crate::compact_remote::trim_function_call_history_to_fit_context_window;
+ use crate::responses_metadata::CodexResponsesRequestKind;
+ use crate::responses_metadata::CompactionTurnMetadata;
++use crate::responses_retry::ResponsesStreamRetryState;
+ use crate::session::session::Session;
+ use crate::session::step_context::StepContext;
+ use codex_history::CodexHarnessMetadata;
+@@ -15,6 +16,7 @@ use codex_protocol::error::Result as CodexResult;
+ use codex_protocol::models::ResponseItem;
+ use codex_protocol::protocol::TokenUsage;
+ use codex_rollout_trace::CompactionTraceContext;
++use tokio_util::sync::CancellationToken;
+ use tracing::info;
+ 
+ pub(super) struct RemoteCompactV2Attempt {
+@@ -35,6 +37,8 @@ pub(super) async fn run_remote_compact_v2_attempt(
+     compaction_trace: &CompactionTraceContext,
+     compaction_metadata: CompactionTurnMetadata,
+     analytics_details: &mut CompactionAnalyticsDetails,
++    cancellation_token: &CancellationToken,
++    retry_state: &mut ResponsesStreamRetryState,
+ ) -> CodexResult<RemoteCompactV2Attempt> {
+     let turn_context = &step_context.turn;
+     let mut history = sess.clone_history().await;
+@@ -107,6 +111,8 @@ pub(super) async fn run_remote_compact_v2_attempt(
+         client_session,
+         &prompt,
+         &responses_metadata,
++        cancellation_token,
++        retry_state,
+     )
+     .await;
+     trace_attempt.record_result(
+diff --git a/codex-rs/core/src/compact_token_budget.rs b/codex-rs/core/src/compact_token_budget.rs
+index 60d25c53d8fb9f41e1727daa066017b7027a3480..d8d513ccdf1587255b3d1b862f9e55c9fb5c75a4 100644
+--- a/codex-rs/core/src/compact_token_budget.rs
++++ b/codex-rs/core/src/compact_token_budget.rs
+@@ -26,6 +26,7 @@ use tokio_util::sync::CancellationToken;
+ pub(crate) async fn run_manual_compact_task(
+     sess: Arc<Session>,
+     turn_context: Arc<TurnContext>,
++    cancellation_token: CancellationToken,
+ ) -> CodexResult<()> {
+     let start_event = EventMsg::TurnStarted(TurnStartedEvent {
+         turn_id: turn_context.sub_id.clone(),
+@@ -38,10 +39,17 @@ pub(crate) async fn run_manual_compact_task(
+ 
+     // Manual compaction runs outside run_turn, so it captures its own current step.
+     let step_context = sess
+-        .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new())
++        .capture_step_context(Arc::clone(&turn_context), &cancellation_token)
+         .await?;
+     let world_state = Arc::new(sess.build_world_state_for_step(&step_context).await?);
+-    run_compact_task_inner(&sess, &step_context, world_state, CompactionTrigger::Manual).await
++    run_compact_task_inner(
++        &sess,
++        &step_context,
++        world_state,
++        CompactionTrigger::Manual,
++        &cancellation_token,
++    )
++    .await
+ }
+ 
+ /// Runs token-budget inline auto-compaction as a normal compaction lifecycle.
+@@ -53,6 +61,7 @@ pub(crate) async fn run_inline_auto_compact_task(
+     sess: Arc<Session>,
+     step_context: Arc<StepContext>,
+     initial_context_injection: InitialContextInjection,
++    cancellation_token: &CancellationToken,
+ ) -> CodexResult<()> {
+     let world_state = match initial_context_injection {
+         InitialContextInjection::BeforeLastUserMessage { world_state, .. } => world_state,
+@@ -60,7 +69,14 @@ pub(crate) async fn run_inline_auto_compact_task(
+             Arc::new(sess.build_world_state_for_step(&step_context).await?)
+         }
+     };
+-    run_compact_task_inner(&sess, &step_context, world_state, CompactionTrigger::Auto).await
++    run_compact_task_inner(
++        &sess,
++        &step_context,
++        world_state,
++        CompactionTrigger::Auto,
++        cancellation_token,
++    )
++    .await
+ }
+ 
+ async fn run_compact_task_inner(
+@@ -68,6 +84,7 @@ async fn run_compact_task_inner(
+     step_context: &Arc<StepContext>,
+     world_state: Arc<WorldState>,
+     trigger: CompactionTrigger,
++    _cancellation_token: &CancellationToken,
+ ) -> CodexResult<()> {
+     let turn_context = &step_context.turn;
+     let pre_compact_outcome = run_pre_compact_hooks(sess, turn_context, trigger).await;
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index 581392fb57dff81df5411a95cede4765acefb2b6..74657e4307aed2aa79ff387877fef2a05ea4a467 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -9,6 +9,7 @@ mod apply_patch;
+ mod apps;
+ mod client;
+ mod client_common;
++pub mod model_request_failure_policy;
+ mod realtime_context;
+ mod realtime_conversation;
+ mod realtime_history;
+diff --git a/codex-rs/core/src/model_request_failure_policy.rs b/codex-rs/core/src/model_request_failure_policy.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..47b68124b09199bdd5d7441731f1789965484271
+--- /dev/null
++++ b/codex-rs/core/src/model_request_failure_policy.rs
+@@ -0,0 +1,266 @@
++//! Shared policy primitives for model-request capacity recovery.
++//!
++//! Producers retain their own bounded retry and fallback state machines. This
++//! module only classifies typed capacity failures and supplies the persistent
++//! policy's quick-retry/defer transition, delay selection, and cancellable wait.
++
++use std::future::Future;
++use std::time::Duration;
++
++use codex_hooks::ModelRequestNextAction;
++use codex_model_provider_info::ServerOverloadPolicy;
++use codex_protocol::error::CodexErr;
++use codex_protocol::error::CodexErrorDetails;
++use tokio_util::sync::CancellationToken;
++
++use crate::util::backoff;
++
++/// A provider may ask for a longer delay, but each persistent recovery wait is
++/// capped so cancellation and shutdown remain observable.
++pub const MAX_RECOVERY_DELAY: Duration = Duration::from_secs(60);
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct RecoveryDecision {
++    pub next_action: ModelRequestNextAction,
++    /// `None` means persistent recovery has left the producer's quick budget.
++    pub retry_budget: Option<u64>,
++    pub delay: Duration,
++}
++
++/// Returns true only for the typed semantic capacity category. Generic HTTP
++/// 503 values and message text never classify as capacity here.
++pub fn is_capacity_error(error: &CodexErr) -> bool {
++    matches!(error.details(), CodexErrorDetails::ServerOverloaded)
++}
++
++pub fn is_persistent_capacity_error(error: &CodexErr, policy: ServerOverloadPolicy) -> bool {
++    policy == ServerOverloadPolicy::Persistent && is_capacity_error(error)
++}
++
++/// Select the persistent policy transition for one actual failed request.
++/// Bounded capacity and non-capacity failures return `None` so the producer's
++/// pinned v0.154.0 state machine remains authoritative.
++pub fn persistent_capacity_decision(
++    error: &CodexErr,
++    policy: ServerOverloadPolicy,
++    attempt: u64,
++    retry_budget: Option<u64>,
++) -> Option<RecoveryDecision> {
++    if !is_persistent_capacity_error(error, policy) {
++        return None;
++    }
++
++    let attempt = attempt.max(1);
++    let next_action = match retry_budget {
++        Some(budget) if attempt <= budget => ModelRequestNextAction::Retry,
++        Some(_) | None => ModelRequestNextAction::Defer,
++    };
++    Some(RecoveryDecision {
++        next_action,
++        retry_budget: if next_action == ModelRequestNextAction::Defer {
++            None
++        } else {
++            retry_budget
++        },
++        delay: retry_delay(error, attempt),
++    })
++}
++
++/// Compute provider-advised or jittered exponential delay, capped at one
++/// minute. Existing `backoff` supplies the short retry delay when no advice is
++/// present.
++pub fn retry_delay(error: &CodexErr, attempt: u64) -> Duration {
++    retry_delay_with(error, || backoff(attempt.max(1)))
++}
++
++fn retry_delay_with(error: &CodexErr, fallback: impl FnOnce() -> Duration) -> Duration {
++    error
++        .server_overload_info()
++        .and_then(|info| info.retry_delay())
++        .or_else(|| error.retry_delay())
++        .unwrap_or_else(fallback)
++        .min(MAX_RECOVERY_DELAY)
++}
++
++/// Wait without making cancellation pay the full retry delay. Cancellation is
++/// checked before polling the sleeper, during the wait, and once more before a
++/// producer is allowed to issue its next request.
++pub async fn wait_for_retry(
++    delay: Duration,
++    cancellation_token: &CancellationToken,
++) -> Result<(), CodexErr> {
++    wait_for_retry_with(cancellation_token, tokio::time::sleep(delay)).await
++}
++
++async fn wait_for_retry_with(
++    cancellation_token: &CancellationToken,
++    sleeper: impl Future<Output = ()>,
++) -> Result<(), CodexErr> {
++    if cancellation_token.is_cancelled() {
++        return Err(CodexErr::TurnAborted);
++    }
++
++    tokio::pin!(sleeper);
++    tokio::select! {
++        biased;
++        _ = cancellation_token.cancelled() => return Err(CodexErr::TurnAborted),
++        _ = &mut sleeper => {}
++    }
++
++    if cancellation_token.is_cancelled() {
++        Err(CodexErr::TurnAborted)
++    } else {
++        Ok(())
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use codex_protocol::error::ServerOverloadInfo;
++    use std::sync::Arc;
++    use std::sync::atomic::AtomicUsize;
++    use std::sync::atomic::Ordering;
++
++    fn overloaded(retry_after_ms: Option<u64>) -> CodexErr {
++        CodexErr::server_overloaded(ServerOverloadInfo {
++            code: Some("server_is_overloaded".to_string()),
++            message: "busy".to_string(),
++            retry_after_ms,
++        })
++    }
++
++    #[test]
++    fn max_retries_two_retries_failures_one_and_two_then_defers() {
++        let error = overloaded(Some(0));
++        let mut retry_budget = Some(2);
++        let actions = (1..=5)
++            .map(|attempt| {
++                let decision = persistent_capacity_decision(
++                    &error,
++                    ServerOverloadPolicy::Persistent,
++                    attempt,
++                    retry_budget,
++                )
++                .expect("persistent capacity decision");
++                retry_budget = decision.retry_budget;
++                decision
++            })
++            .collect::<Vec<_>>();
++
++        assert_eq!(actions[0].next_action, ModelRequestNextAction::Retry);
++        assert_eq!(actions[1].next_action, ModelRequestNextAction::Retry);
++        for decision in &actions[2..] {
++            assert_eq!(decision.next_action, ModelRequestNextAction::Defer);
++            assert_eq!(decision.retry_budget, None);
++        }
++    }
++
++    #[test]
++    fn bounded_capacity_and_non_capacity_stay_with_the_producer() {
++        assert!(
++            persistent_capacity_decision(
++                &overloaded(None),
++                ServerOverloadPolicy::Bounded,
++                1,
++                Some(2),
++            )
++            .is_none()
++        );
++        assert!(
++            persistent_capacity_decision(
++                &CodexErr::Stream("disconnected".to_string()),
++                ServerOverloadPolicy::Persistent,
++                1,
++                Some(2),
++            )
++            .is_none()
++        );
++    }
++
++    #[test]
++    fn provider_advice_and_fallback_backoff_are_capped() {
++        assert_eq!(
++            retry_delay_with(&overloaded(Some(120_000)), || Duration::from_secs(1)),
++            MAX_RECOVERY_DELAY
++        );
++        assert_eq!(
++            retry_delay_with(&overloaded(None), || Duration::from_millis(375)),
++            Duration::from_millis(375)
++        );
++        assert_eq!(
++            retry_delay_with(&overloaded(None), || Duration::from_secs(90)),
++            MAX_RECOVERY_DELAY
++        );
++    }
++
++    #[test]
++    fn generic_503_is_not_capacity() {
++        let generic = CodexErr::UnexpectedStatus(codex_protocol::error::UnexpectedResponseError {
++            status: http::StatusCode::SERVICE_UNAVAILABLE,
++            body: "Selected model is at capacity".to_string(),
++            user_message: None,
++            url: None,
++            cf_ray: None,
++            request_id: None,
++            identity_authorization_error: None,
++            identity_error_code: None,
++        });
++        assert!(!is_capacity_error(&generic));
++    }
++
++    #[tokio::test(start_paused = true)]
++    async fn cancellation_before_wait_skips_the_sleeper() {
++        let token = CancellationToken::new();
++        token.cancel();
++        let sleeper_polls = Arc::new(AtomicUsize::new(0));
++        let sleeper_polls_for_future = Arc::clone(&sleeper_polls);
++        let result = wait_for_retry_with(&token, async move {
++            sleeper_polls_for_future.fetch_add(1, Ordering::SeqCst);
++        })
++        .await;
++
++        assert!(
++            matches!(result, Err(error) if matches!(error.details(), CodexErrorDetails::TurnAborted))
++        );
++        assert_eq!(sleeper_polls.load(Ordering::SeqCst), 0);
++    }
++
++    #[tokio::test(start_paused = true)]
++    async fn cancellation_during_wait_ends_without_advancing_time() {
++        let token = CancellationToken::new();
++        let waiting_token = token.clone();
++        let started_at = tokio::time::Instant::now();
++        let wait =
++            tokio::spawn(
++                async move { wait_for_retry(Duration::from_secs(60), &waiting_token).await },
++            );
++        tokio::task::yield_now().await;
++        token.cancel();
++
++        let result = wait.await.expect("wait task should join");
++        assert!(
++            matches!(result, Err(error) if matches!(error.details(), CodexErrorDetails::TurnAborted))
++        );
++        assert_eq!(tokio::time::Instant::now(), started_at);
++    }
++
++    #[tokio::test(start_paused = true)]
++    async fn cancellation_after_sleeper_prevents_the_next_request() {
++        let token = CancellationToken::new();
++        let sleeper_token = token.clone();
++        let request_count = AtomicUsize::new(0);
++        let result = wait_for_retry_with(&token, async move {
++            sleeper_token.cancel();
++        })
++        .await;
++        if result.is_ok() {
++            request_count.fetch_add(1, Ordering::SeqCst);
++        }
++
++        assert!(
++            matches!(result, Err(error) if matches!(error.details(), CodexErrorDetails::TurnAborted))
++        );
++        assert_eq!(request_count.load(Ordering::SeqCst), 0);
++    }
++}
+diff --git a/codex-rs/core/src/responses_retry.rs b/codex-rs/core/src/responses_retry.rs
+index fb0505411e19db75d29d6ea16300825001cdd1c2..ce950a853379b6df106a3d58474994d4967d977b 100644
+--- a/codex-rs/core/src/responses_retry.rs
++++ b/codex-rs/core/src/responses_retry.rs
+@@ -1,17 +1,25 @@
+ //! Shared retry and transport fallback decisions for Responses requests.
+ 
++use std::sync::Arc;
+ use std::time::Duration;
+ 
+ use crate::client::ModelClientSession;
++use crate::hook_runtime::ModelRequestFailure;
++use crate::hook_runtime::ModelRequestHookContext;
++use crate::hook_runtime::run_request_error_hooks;
++use crate::model_request_failure_policy::persistent_capacity_decision;
++use crate::model_request_failure_policy::wait_for_retry;
+ use crate::session::session::Session;
+ use crate::session::turn_context::TurnContext;
+ use crate::util::backoff;
+ use codex_client::RetryOperation;
+ use codex_features::Feature;
++use codex_hooks::ModelRequestNextAction;
+ use codex_protocol::error::CodexErr;
+ use codex_protocol::error::CodexErrorDetails;
+ use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::WarningEvent;
++use tokio_util::sync::CancellationToken;
+ use tracing::warn;
+ 
+ const INITIAL_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(5);
+@@ -23,10 +31,20 @@ pub(crate) enum ResponsesStreamRequest {
+     RemoteCompactionV2,
+ }
+ 
++impl ResponsesStreamRequest {
++    fn hook_context(self) -> ModelRequestHookContext {
++        match self {
++            Self::Sampling => ModelRequestHookContext::sampling(),
++            Self::RemoteCompactionV2 => ModelRequestHookContext::remote_compaction_v2(),
++        }
++    }
++}
++
+ pub(crate) struct ResponsesStreamRetryState {
+     retries: u64,
+     connection_retries: u64,
+     connection_retry_delay: Duration,
++    failure_attempt: u64,
+ }
+ 
+ impl Default for ResponsesStreamRetryState {
+@@ -35,10 +53,34 @@ impl Default for ResponsesStreamRetryState {
+             retries: 0,
+             connection_retries: 0,
+             connection_retry_delay: INITIAL_CONNECTION_RETRY_DELAY,
++            failure_attempt: 0,
+         }
+     }
+ }
+ 
++impl ResponsesStreamRetryState {
++    pub(crate) fn failure_attempt(&self) -> u64 {
++        self.failure_attempt
++    }
++
++    pub(crate) fn record_failure(&mut self) -> u64 {
++        self.failure_attempt = self.failure_attempt.saturating_add(1).max(1);
++        self.failure_attempt
++    }
++
++    fn begin_transport_retry(&mut self, max_retries: u64) -> Option<u64> {
++        if self.retries >= max_retries {
++            return None;
++        }
++        self.retries = self.retries.saturating_add(1);
++        Some(self.retries)
++    }
++
++    pub(crate) fn reset_transport_retries(&mut self) {
++        self.retries = 0;
++    }
++}
++
+ /// Handles a retryable stream error and returns `Ok(())` when the caller should
+ /// retry the request loop.
+ pub(crate) async fn handle_retryable_response_stream_error(
+@@ -46,14 +88,55 @@ pub(crate) async fn handle_retryable_response_stream_error(
+     max_retries: u64,
+     err: CodexErr,
+     client_session: &mut ModelClientSession,
+-    sess: &Session,
+-    turn_context: &TurnContext,
++    sess: &Arc<Session>,
++    turn_context: &Arc<TurnContext>,
+     request: ResponsesStreamRequest,
++    cancellation_token: &CancellationToken,
+ ) -> Result<(), CodexErr> {
+     let operation = match request {
+         ResponsesStreamRequest::Sampling => RetryOperation::Sampling,
+         ResponsesStreamRequest::RemoteCompactionV2 => RetryOperation::RemoteCompactionV2,
+     };
++    let observe_failure = !(matches!(request, ResponsesStreamRequest::Sampling)
++        && crate::guardian::is_basic_session_source(&turn_context.session_source));
++    if cancellation_token.is_cancelled() {
++        return Err(CodexErr::TurnAborted);
++    }
++    let attempt = retry_state.record_failure();
++
++    if observe_failure
++        && let Some(decision) = persistent_capacity_decision(
++            &err,
++            turn_context.provider.info().server_overload_policy,
++            attempt,
++            Some(max_retries),
++        )
++    {
++        wait_for_retry(decision.delay, cancellation_token).await?;
++        if cancellation_token.is_cancelled() {
++            return Err(CodexErr::TurnAborted);
++        }
++        run_request_error_hooks(
++            sess,
++            turn_context,
++            ModelRequestFailure::from_policy(request.hook_context(), attempt, decision, &err),
++        )
++        .await;
++        sess.send_event(
++            turn_context,
++            EventMsg::Warning(WarningEvent {
++                message: format!(
++                    "Model capacity is temporarily unavailable; waiting to retry ({:?}).",
++                    decision.delay
++                ),
++            }),
++        )
++        .await;
++        if decision.next_action == ModelRequestNextAction::Retry {
++            retry_state.retries = retry_state.retries.saturating_add(1).min(max_retries);
++        }
++        return Ok(());
++    }
+ 
+     if turn_context
+         .config
+@@ -65,6 +148,12 @@ pub(crate) async fn handle_retryable_response_stream_error(
+         && !turn_context.provider.info().is_amazon_bedrock()
+     {
+         let retry_delay = retry_state.connection_retry_delay;
++        let failure = ModelRequestFailure::new(
++            request.hook_context(),
++            attempt,
++            ModelRequestNextAction::Retry,
++            &err,
++        );
+         warn!(
+             turn_id = %turn_context.sub_id,
+             error = %err,
+@@ -75,7 +164,13 @@ pub(crate) async fn handle_retryable_response_stream_error(
+             .await;
+         retry_state.connection_retries = retry_state.connection_retries.saturating_add(1);
+         codex_client::record_retry!(retry_state.connection_retries, retry_delay, operation);
+-        tokio::time::sleep(retry_delay).await;
++        wait_for_retry(retry_delay, cancellation_token).await?;
++        if cancellation_token.is_cancelled() {
++            return Err(CodexErr::TurnAborted);
++        }
++        if observe_failure {
++            run_request_error_hooks(sess, turn_context, failure).await;
++        }
+         retry_state.connection_retry_delay = retry_delay
+             .saturating_mul(2)
+             .min(MAX_CONNECTION_RETRY_DELAY);
+@@ -88,6 +183,19 @@ pub(crate) async fn handle_retryable_response_stream_error(
+             turn_context.model_info(),
+         )
+     {
++        if observe_failure {
++            run_request_error_hooks(
++                sess,
++                turn_context,
++                ModelRequestFailure::new(
++                    request.hook_context(),
++                    attempt,
++                    ModelRequestNextAction::Fallback,
++                    &err,
++                ),
++            )
++            .await;
++        }
+         sess.send_event(
+             turn_context,
+             EventMsg::Warning(WarningEvent {
+@@ -95,14 +203,18 @@ pub(crate) async fn handle_retryable_response_stream_error(
+             }),
+         )
+         .await;
+-        retry_state.retries = 0;
++        retry_state.reset_transport_retries();
+         return Ok(());
+     }
+ 
+-    if retry_state.retries < max_retries {
+-        retry_state.retries += 1;
+-        let retry_count = retry_state.retries;
++    if let Some(retry_count) = retry_state.begin_transport_retry(max_retries) {
+         let delay = err.retry_delay().unwrap_or_else(|| backoff(retry_count));
++        let failure = ModelRequestFailure::new(
++            request.hook_context(),
++            attempt,
++            ModelRequestNextAction::Retry,
++            &err,
++        );
+         log_retry(request, turn_context, &err, retry_count, max_retries, delay);
+ 
+         // In release builds, hide the first websocket retry notification to reduce noisy
+@@ -121,7 +233,13 @@ pub(crate) async fn handle_retryable_response_stream_error(
+             .await;
+         }
+         codex_client::record_retry!(retry_count, delay, operation);
+-        tokio::time::sleep(delay).await;
++        wait_for_retry(delay, cancellation_token).await?;
++        if cancellation_token.is_cancelled() {
++            return Err(CodexErr::TurnAborted);
++        }
++        if observe_failure {
++            run_request_error_hooks(sess, turn_context, failure).await;
++        }
+         return Ok(());
+     }
+ 
+diff --git a/codex-rs/core/src/responses_retry_tests.rs b/codex-rs/core/src/responses_retry_tests.rs
+index b6465ded37cb6d7eccd5906cdc39e2b12dc3e1dd..a6fd72c240b612482a9f3af8b1c42ee3b1c6d5a6 100644
+--- a/codex-rs/core/src/responses_retry_tests.rs
++++ b/codex-rs/core/src/responses_retry_tests.rs
+@@ -41,3 +41,28 @@ async fn sampling_retry_logs_stream_error_context() {
+         "sampling_error=stream disconnected before completion: websocket closed by server before response.completed"
+     ));
+ }
++#[test]
++fn bounded_sampling_max_retries_two_retries_failures_one_and_two() {
++    let mut state = super::ResponsesStreamRetryState::default();
++
++    assert_eq!(state.record_failure(), 1);
++    assert_eq!(state.begin_transport_retry(/*max_retries*/ 2), Some(1));
++    assert_eq!(state.record_failure(), 2);
++    assert_eq!(state.begin_transport_retry(/*max_retries*/ 2), Some(2));
++    assert_eq!(state.record_failure(), 3);
++    assert_eq!(state.begin_transport_retry(/*max_retries*/ 2), None);
++}
++
++#[test]
++fn transport_fallback_resets_only_the_transport_counter() {
++    let mut state = super::ResponsesStreamRetryState::default();
++
++    assert_eq!(state.record_failure(), 1);
++    assert_eq!(state.begin_transport_retry(/*max_retries*/ 1), Some(1));
++    state.reset_transport_retries();
++    assert_eq!(state.retries, 0);
++    assert_eq!(state.failure_attempt(), 1);
++
++    assert_eq!(state.record_failure(), 2);
++    assert_eq!(state.begin_transport_retry(/*max_retries*/ 1), Some(1));
++}
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 4719e1d891b208ce5910d6995d6d56fc4b298b6d..1fa7a0b00d3165cf526e3c961a64a6686e95b47f 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -16,18 +16,23 @@ use crate::context::ContextualUserFragment;
+ use crate::context::UserVerificationNotice;
+ use crate::environment_selection::TurnEnvironmentSnapshot;
+ use crate::feedback_tags;
++use crate::hook_runtime::ModelRequestFailure;
++use crate::hook_runtime::ModelRequestHookContext;
+ use crate::hook_runtime::drain_async_hook_results;
+ use crate::hook_runtime::inspect_pending_input;
+ use crate::hook_runtime::record_additional_contexts;
+ use crate::hook_runtime::record_pending_input;
++use crate::hook_runtime::run_abnormal_stop_hooks;
+ use crate::hook_runtime::run_legacy_after_agent_hook;
+ use crate::hook_runtime::run_pending_session_start_hooks;
++use crate::hook_runtime::run_request_error_hooks;
+ use crate::hook_runtime::run_turn_stop_hooks;
+ use crate::mcp_skill_dependencies::maybe_prompt_and_install_mcp_dependencies;
+ use crate::mentions::build_connector_slug_counts;
+ use crate::mentions::collect_explicit_app_ids;
+ use crate::mentions::collect_explicit_plugin_mentions;
+ use crate::mentions::collect_tool_mentions_from_messages;
++use crate::model_request_failure_policy::is_persistent_capacity_error;
+ use crate::plugins::build_plugin_injections;
+ use crate::responses_metadata::CodexResponsesMetadata;
+ use crate::responses_metadata::CodexResponsesRequestKind;
+@@ -531,6 +536,7 @@ pub(crate) async fn run_turn(
+                         },
+                         CompactionReason::ContextLimit,
+                         CompactionPhase::MidTurn,
++                        &cancellation_token,
+                     )
+                     .await
+                     {
+@@ -1109,6 +1115,7 @@ async fn run_pre_sampling_compact(
+             InitialContextInjection::DoNotInject,
+             CompactionReason::ContextLimit,
+             CompactionPhase::PreTurn,
++            cancellation_token,
+         )
+         .await?;
+     }
+@@ -1191,6 +1198,7 @@ async fn maybe_run_previous_model_inline_compact(
+             InitialContextInjection::DoNotInject,
+             CompactionReason::CompHashChanged,
+             CompactionPhase::PreTurn,
++            cancellation_token,
+         )
+         .await?;
+         return Ok(());
+@@ -1239,6 +1247,7 @@ async fn maybe_run_previous_model_inline_compact(
+             InitialContextInjection::DoNotInject,
+             CompactionReason::ModelDownshift,
+             CompactionPhase::PreTurn,
++            cancellation_token,
+         )
+         .await?;
+     }
+@@ -1258,6 +1267,7 @@ async fn run_auto_compact(
+     initial_context_injection: InitialContextInjection,
+     reason: CompactionReason,
+     phase: CompactionPhase,
++    cancellation_token: &CancellationToken,
+ ) -> CodexResult<()> {
+     let turn_context = &step_context.turn;
+     let _profile_guard = turn_context.turn_timing_state.begin_compaction();
+@@ -1268,6 +1278,7 @@ async fn run_auto_compact(
+             Arc::clone(sess),
+             step_context,
+             initial_context_injection,
++            cancellation_token,
+         )
+         .await?;
+         return Ok(());
+@@ -1293,6 +1304,7 @@ async fn run_auto_compact(
+                 initial_context_injection,
+                 reason,
+                 phase,
++                cancellation_token,
+             )
+             .await?;
+         }
+@@ -1310,6 +1322,7 @@ async fn run_auto_compact(
+                 initial_context_injection,
+                 reason,
+                 phase,
++                cancellation_token,
+             )
+             .await?;
+         }
+@@ -1325,6 +1338,7 @@ async fn run_auto_compact(
+                 initial_context_injection,
+                 reason,
+                 phase,
++                cancellation_token,
+             )
+             .await?;
+         }
+@@ -1424,6 +1438,8 @@ async fn run_sampling_request(
+     cancellation_token: CancellationToken,
+ ) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
+     let turn_context = Arc::clone(&step_context.turn);
++    let is_guardian_sampling =
++        crate::guardian::is_basic_session_source(&turn_context.session_source);
+     let base_instructions = sess.get_prompt_base_instructions().await;
+ 
+     let tool_runtime = ToolCallRuntime::new(
+@@ -1442,6 +1458,9 @@ async fn run_sampling_request(
+     let mut original_input = None;
+     let mut executed_tool_calls_by_output = HashMap::new();
+     loop {
++        if cancellation_token.is_cancelled() {
++            return Err(CodexErr::TurnAborted);
++        }
+         // A retry must not attribute the next tool call to the previous response.
+         turn_context
+             .extension_data
+@@ -1481,9 +1500,21 @@ async fn run_sampling_request(
+             Ok(output) => {
+                 return Ok((output, original_input.unwrap_or(prompt.input)));
+             }
+-            Err(err) => match err.details() {
++            Err(SamplingAttemptError::Other(err)) => return Err(err),
++            Err(SamplingAttemptError::ModelRequest(err)) => match err.details() {
+                 CodexErrorDetails::ContextWindowExceeded => {
+                     sess.set_total_tokens_full(&turn_context).await;
++                    if !is_guardian_sampling {
++                        let attempt = retry_state.record_failure();
++                        let failure = ModelRequestFailure::new(
++                            ModelRequestHookContext::sampling(),
++                            attempt,
++                            codex_hooks::ModelRequestNextAction::Stop,
++                            &err,
++                        );
++                        run_request_error_hooks(&sess, &turn_context, failure.clone()).await;
++                        run_abnormal_stop_hooks(&sess, &turn_context, failure).await;
++                    }
+                     return Err(err);
+                 }
+                 CodexErrorDetails::UsageLimitReached(e) => {
+@@ -1491,6 +1522,17 @@ async fn run_sampling_request(
+                     if let Some(rate_limits) = rate_limits {
+                         sess.update_rate_limits(&turn_context, *rate_limits).await;
+                     }
++                    if !is_guardian_sampling {
++                        let attempt = retry_state.record_failure();
++                        let failure = ModelRequestFailure::new(
++                            ModelRequestHookContext::sampling(),
++                            attempt,
++                            codex_hooks::ModelRequestNextAction::Stop,
++                            &err,
++                        );
++                        run_request_error_hooks(&sess, &turn_context, failure.clone()).await;
++                        run_abnormal_stop_hooks(&sess, &turn_context, failure).await;
++                    }
+                     return Err(err);
+                 }
+                 _ => err,
+@@ -1501,11 +1543,27 @@ async fn run_sampling_request(
+             original_input = Some(prompt.input);
+         }
+ 
+-        if !err.is_retryable() {
++        let persistent_capacity = !is_guardian_sampling
++            && is_persistent_capacity_error(
++                &err,
++                turn_context.provider.info().server_overload_policy,
++            );
++        if !err.is_retryable() && !persistent_capacity {
++            if !is_guardian_sampling {
++                let attempt = retry_state.record_failure();
++                let failure = ModelRequestFailure::new(
++                    ModelRequestHookContext::sampling(),
++                    attempt,
++                    codex_hooks::ModelRequestNextAction::Stop,
++                    &err,
++                );
++                run_request_error_hooks(&sess, &turn_context, failure.clone()).await;
++                run_abnormal_stop_hooks(&sess, &turn_context, failure).await;
++            }
+             return Err(err);
+         }
+ 
+-        handle_retryable_response_stream_error(
++        if let Err(err) = handle_retryable_response_stream_error(
+             &mut retry_state,
+             max_retries,
+             err,
+@@ -1513,8 +1571,25 @@ async fn run_sampling_request(
+             &sess,
+             &turn_context,
+             ResponsesStreamRequest::Sampling,
++            &cancellation_token,
+         )
+-        .await?;
++        .await
++        {
++            if matches!(err.details(), CodexErrorDetails::TurnAborted) {
++                return Err(err);
++            }
++            if !is_guardian_sampling {
++                let failure = ModelRequestFailure::new(
++                    ModelRequestHookContext::sampling(),
++                    retry_state.failure_attempt(),
++                    codex_hooks::ModelRequestNextAction::Stop,
++                    &err,
++                );
++                run_request_error_hooks(&sess, &turn_context, failure.clone()).await;
++                run_abnormal_stop_hooks(&sess, &turn_context, failure).await;
++            }
++            return Err(err);
++        }
+         turn_context.turn_timing_state.record_sampling_retry();
+     }
+ }
+@@ -1661,6 +1736,12 @@ struct SamplingRequestResult {
+     last_agent_message: Option<String>,
+ }
+ 
++#[derive(Debug)]
++enum SamplingAttemptError {
++    ModelRequest(CodexErr),
++    Other(CodexErr),
++}
++
+ /// Ephemeral per-response state for streaming a single proposed plan.
+ /// This is intentionally not persisted or stored in session/state since it
+ /// only exists while a response is actively streaming. The final plan text
+@@ -2281,7 +2362,7 @@ async fn try_run_sampling_request(
+     turn_diff_tracker: SharedTurnDiffTracker,
+     prompt: &Prompt,
+     cancellation_token: CancellationToken,
+-) -> CodexResult<SamplingRequestResult> {
++) -> Result<SamplingRequestResult, SamplingAttemptError> {
+     let turn_context = Arc::clone(&step_context.turn);
+     feedback_tags!(
+         model = step_context.settings.model_info.slug.clone(),
+@@ -2302,7 +2383,7 @@ async fn try_run_sampling_request(
+         .features
+         .enabled(Feature::ConcurrentReasoningSummaries)
+         && turn_context.provider.info().is_openai();
+-    let mut stream = client_session
++    let stream_result = client_session
+         .stream(
+             prompt,
+             &step_context.settings.model_info,
+@@ -2315,7 +2396,14 @@ async fn try_run_sampling_request(
+         )
+         .instrument(trace_span!("stream_request"))
+         .or_cancel(&cancellation_token)
+-        .await??;
++        .await;
++    let mut stream = match stream_result {
++        Ok(Ok(stream)) => stream,
++        Ok(Err(err)) => return Err(SamplingAttemptError::ModelRequest(err)),
++        Err(codex_async_utils::CancelErr::Cancelled) => {
++            return Err(SamplingAttemptError::Other(CodexErr::TurnAborted));
++        }
++    };
+     let mut in_flight: FuturesOrdered<InFlightFuture<'static>> = FuturesOrdered::new();
+     let mut needs_follow_up = false;
+     let mut last_agent_message: Option<String> = None;
+@@ -2345,7 +2433,7 @@ async fn try_run_sampling_request(
+         !sess.services.extensions.turn_item_contributors().is_empty();
+     let mut active_item_is_streaming_to_client = false;
+     let receiving_span = trace_span!("receiving_stream");
+-    let outcome: CodexResult<SamplingRequestResult> = loop {
++    let outcome: Result<SamplingRequestResult, SamplingAttemptError> = loop {
+         let handle_responses = trace_span!(
+             parent: &receiving_span,
+             "handle_responses",
+@@ -2369,17 +2457,17 @@ async fn try_run_sampling_request(
+         {
+             Ok(event) => event,
+             Err(codex_async_utils::CancelErr::Cancelled) => {
+-                break Err(CodexErr::TurnAborted);
++                break Err(SamplingAttemptError::Other(CodexErr::TurnAborted));
+             }
+         };
+ 
+         let event = match event {
+             Some(Ok(event)) => event,
+-            Some(Err(err)) => break Err(err),
++            Some(Err(err)) => break Err(SamplingAttemptError::ModelRequest(err)),
+             None => {
+-                break Err(CodexErr::Stream(
++                break Err(SamplingAttemptError::ModelRequest(CodexErr::Stream(
+                     "stream closed before response.completed".into(),
+-                ));
++                )));
+             }
+         };
+ 
+@@ -2491,7 +2579,7 @@ async fn try_run_sampling_request(
+                         .await
+                     {
+                         Ok(output_result) => output_result,
+-                        Err(err) => break Err(err),
++                        Err(err) => break Err(SamplingAttemptError::Other(err)),
+                     };
+                 if let Some(tool_future) = output_result.tool_future {
+                     in_flight.push_back(tool_future);
+@@ -2677,7 +2765,7 @@ async fn try_run_sampling_request(
+                 should_emit_token_count = true;
+                 should_emit_turn_diff = true;
+                 if let Err(err) = budget_result {
+-                    break Err(err);
++                    break Err(SamplingAttemptError::Other(err));
+                 }
+                 if let Some(false) = end_turn {
+                     needs_follow_up = true;
+@@ -2851,7 +2939,9 @@ async fn try_run_sampling_request(
+     } else {
+         Some(turn_context.turn_timing_state.begin_tool_blocking())
+     };
+-    drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await?;
++    drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone())
++        .await
++        .map_err(SamplingAttemptError::Other)?;
+     drop(tool_blocking_timing_guard);
+ 
+     if should_emit_token_count {
+@@ -2863,7 +2953,7 @@ async fn try_run_sampling_request(
+     }
+ 
+     if cancellation_token.is_cancelled() {
+-        return Err(CodexErr::TurnAborted);
++        return Err(SamplingAttemptError::Other(CodexErr::TurnAborted));
+     }
+ 
+     if should_emit_turn_diff {
+diff --git a/codex-rs/core/src/tasks/compact.rs b/codex-rs/core/src/tasks/compact.rs
+index 99e21134856a95ad25ba7f675b35dc06d62067d3..ecc54df6ebf2db3dbcdf05ac9b77772e69988867 100644
+--- a/codex-rs/core/src/tasks/compact.rs
++++ b/codex-rs/core/src/tasks/compact.rs
+@@ -30,11 +30,12 @@ impl SessionTask for CompactTask {
+         session: Arc<Session>,
+         ctx: Arc<TurnContext>,
+         _input: Vec<TurnInput>,
+-        _cancellation_token: CancellationToken,
++        cancellation_token: CancellationToken,
+     ) -> SessionTaskResult {
+         let _profile_guard = ctx.turn_timing_state.begin_compaction();
+         if ctx.config.features.enabled(Feature::TokenBudget) {
+-            crate::compact_token_budget::run_manual_compact_task(session, ctx).await?;
++            crate::compact_token_budget::run_manual_compact_task(session, ctx, cancellation_token)
++                .await?;
+             return Ok(None);
+         }
+ 
+@@ -47,7 +48,12 @@ impl SessionTask for CompactTask {
+                     "remote_v2",
+                     /*manual*/ true,
+                 );
+-                crate::compact_remote_v2::run_remote_compact_task(session.clone(), ctx).await
++                crate::compact_remote_v2::run_remote_compact_task(
++                    session.clone(),
++                    ctx,
++                    cancellation_token.clone(),
++                )
++                .await
+             }
+             RemoteCompactionSupport::V2 => {
+                 emit_compact_metric(
+@@ -55,7 +61,12 @@ impl SessionTask for CompactTask {
+                     "remote",
+                     /*manual*/ true,
+                 );
+-                crate::compact_remote::run_remote_compact_task(session.clone(), ctx).await
++                crate::compact_remote::run_remote_compact_task(
++                    session.clone(),
++                    ctx,
++                    cancellation_token.clone(),
++                )
++                .await
+             }
+             RemoteCompactionSupport::Unsupported => {
+                 emit_compact_metric(
+@@ -73,7 +84,13 @@ impl SessionTask for CompactTask {
+                     // Compaction prompt is synthesized; no UI element ranges to preserve.
+                     text_elements: Vec::new(),
+                 }];
+-                crate::compact::run_compact_task(session.clone(), ctx, input).await
++                crate::compact::run_compact_task(
++                    session.clone(),
++                    ctx,
++                    input,
++                    cancellation_token.clone(),
++                )
++                .await
+             }
+         };
+         if let Err(err) = result
+diff --git a/codex-rs/core/tests/suite/compact.rs b/codex-rs/core/tests/suite/compact.rs
+index 09ae3e2cdd239a0ed34eb629b1cd2979a7e6d968..1781cb4afa910f8d3a92e8844918d5e2eb6990d6 100644
+--- a/codex-rs/core/tests/suite/compact.rs
++++ b/codex-rs/core/tests/suite/compact.rs
+@@ -8,6 +8,7 @@ use codex_features::Feature;
+ use codex_history::RolloutItem;
+ use codex_login::CodexAuth;
+ use codex_model_provider_info::ModelProviderInfo;
++use codex_model_provider_info::ServerOverloadPolicy;
+ use codex_model_provider_info::built_in_model_providers;
+ use codex_models_manager::bundled_models_response;
+ use codex_protocol::config_types::AutoCompactTokenLimitScope;
+@@ -283,6 +284,71 @@ with Path(r"{manual_post_log_path}").open("a", encoding="utf-8") as handle:
+     fs::write(home.join("hooks.json"), hooks.to_string()).expect("write hooks.json");
+ }
+ 
++fn write_model_request_failure_hooks(home: &Path) {
++    let script_path = home.join("model_request_failure.py");
++    let log_path = home.join("model_request_failure_log.jsonl");
++    let script = format!(
++        r#"import json
++from pathlib import Path
++import sys
++
++payload = json.load(sys.stdin)
++with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
++    handle.write(json.dumps(payload) + "\n")
++"#,
++        log_path = log_path.display(),
++    );
++    let command = python_hook_command(&script_path);
++    let hooks = json!({
++        "hooks": {
++            "RequestError": [{
++                "hooks": [{
++                    "type": "command",
++                    "command": command,
++                }]
++            }],
++            "AbnormalStop": [{
++                "hooks": [{
++                    "type": "command",
++                    "command": python_hook_command(&script_path),
++                }]
++            }]
++        }
++    });
++
++    fs::write(&script_path, script).expect("write model request failure hook script");
++    fs::write(home.join("hooks.json"), hooks.to_string()).expect("write hooks.json");
++}
++
++async fn wait_for_model_request_failure_inputs(home: &Path, count: usize) -> Vec<Value> {
++    let log_path = home.join("model_request_failure_log.jsonl");
++    let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
++        loop {
++            if log_path.exists() {
++                let inputs = read_hook_inputs(&log_path);
++                if inputs.len() >= count {
++                    return inputs;
++                }
++            }
++            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
++        }
++    })
++    .await;
++    match result {
++        Ok(inputs) => inputs,
++        Err(_) => {
++            let observed = if log_path.exists() {
++                read_hook_inputs(&log_path)
++            } else {
++                Vec::new()
++            };
++            panic!(
++                "model request failure hooks should complete: expected at least {count}, observed {observed:?}"
++            );
++        }
++    }
++}
++
+ fn non_openai_model_provider(server: &MockServer) -> ModelProviderInfo {
+     let mut provider =
+         built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone();
+@@ -394,6 +460,20 @@ fn remote_v2_compaction_response() -> String {
+     ])
+ }
+ 
++fn server_overload_sse(id: &str) -> String {
++    responses::sse(vec![json!({
++        "type": "response.failed",
++        "response": {
++            "id": id,
++            "error": {
++                "code": "server_is_overloaded",
++                "message": "capacity is temporarily limited",
++                "retry_after_ms": 0,
++            }
++        }
++    })])
++}
++
+ fn local_compaction_provider(server: &wiremock::MockServer) -> ModelProviderInfo {
+     let mut provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
+     provider.name = "OpenAI-compatible test provider".to_string();
+@@ -505,6 +585,162 @@ fn format_labeled_requests_snapshot(
+     )
+ }
+ 
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn persistent_sampling_keeps_requesting_after_quick_retry_budget_is_exhausted() -> Result<()>
++{
++    skip_if_no_network!(Ok(()));
++
++    let server = start_mock_server().await;
++    let request_log = mount_sse_sequence(
++        &server,
++        vec![
++            server_overload_sse("capacity-1"),
++            server_overload_sse("capacity-2"),
++            server_overload_sse("capacity-3"),
++            sse(vec![
++                ev_assistant_message("recovered-message", "recovered"),
++                ev_completed("recovered-response"),
++            ]),
++        ],
++    )
++    .await;
++    let mut provider = non_openai_model_provider(&server);
++    provider.request_max_retries = Some(0);
++    provider.stream_max_retries = Some(2);
++    provider.server_overload_policy = ServerOverloadPolicy::Persistent;
++    let mut builder = test_codex().with_config(move |config| {
++        config.model_provider = provider;
++    });
++    let test = builder.build_with_auto_env(&server).await?;
++
++    test.submit_turn("wait through persistent capacity").await?;
++
++    assert_eq!(
++        request_log.requests().len(),
++        4,
++        "persistent sampling must continue after its two quick retries enter Defer"
++    );
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn bounded_sampling_stops_without_entering_persistent_recovery() -> Result<()> {
++    skip_if_no_network!(Ok(()));
++
++    let server = start_mock_server().await;
++    let request_log =
++        mount_sse_sequence(&server, vec![server_overload_sse("bounded-capacity")]).await;
++    let mut provider = non_openai_model_provider(&server);
++    provider.request_max_retries = Some(0);
++    provider.stream_max_retries = Some(2);
++    provider.server_overload_policy = ServerOverloadPolicy::Bounded;
++    let mut builder = test_codex().with_config(move |config| {
++        config.model_provider = provider;
++    });
++    let test = builder.build_with_auto_env(&server).await?;
++
++    test.submit_turn("stop at bounded capacity").await?;
++
++    assert_eq!(
++        request_log.requests().len(),
++        1,
++        "bounded sampling preserves the v0.154 terminal capacity behavior"
++    );
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn bounded_local_compact_stops_at_zero_stream_retry_budget() -> Result<()> {
++    skip_if_no_network!(Ok(()));
++
++    let server = start_mock_server().await;
++    let request_log = mount_sse_sequence(
++        &server,
++        vec![
++            sse(vec![
++                ev_assistant_message("seed-message", "seed"),
++                ev_completed("seed-response"),
++            ]),
++            server_overload_sse("bounded-local-compact"),
++        ],
++    )
++    .await;
++    let mut provider = local_compaction_provider(&server);
++    provider.request_max_retries = Some(0);
++    provider.stream_max_retries = Some(0);
++    provider.server_overload_policy = ServerOverloadPolicy::Bounded;
++    let mut builder = test_codex().with_config(move |config| {
++        config.model_provider = provider;
++        set_test_compact_prompt(config);
++    });
++    let test = builder.build_with_auto_env(&server).await?;
++
++    test.submit_turn("seed local compact").await?;
++    test.codex.submit(Op::Compact).await?;
++    wait_for_event(&test.codex, |event| {
++        matches!(event, EventMsg::TurnComplete(_))
++    })
++    .await;
++
++    assert_eq!(
++        request_log.requests().len(),
++        2,
++        "bounded local compact must return after the configured zero retry budget"
++    );
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn bounded_legacy_remote_compact_stops_at_zero_request_retry_budget() -> Result<()> {
++    skip_if_no_network!(Ok(()));
++
++    let server = start_mock_server().await;
++    let response_log = mount_sse_sequence(
++        &server,
++        vec![sse(vec![
++            ev_assistant_message("seed-message", "seed"),
++            ev_completed("seed-response"),
++        ])],
++    )
++    .await;
++    let compact_log = mount_compact_response_sequence(
++        &server,
++        vec![wiremock::ResponseTemplate::new(503).set_body_json(json!({
++            "error": {
++                "code": "server_is_overloaded",
++                "message": "capacity is temporarily limited",
++                "retry_after_ms": 0,
++            }
++        }))],
++    )
++    .await;
++    let mut builder = test_codex()
++        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
++        .with_config(|config| {
++            config.model_provider.request_max_retries = Some(0);
++            config.model_provider.stream_max_retries = Some(0);
++            config.model_provider.server_overload_policy = ServerOverloadPolicy::Bounded;
++            set_test_compact_prompt(config);
++            let _ = config.features.disable(Feature::RemoteCompactionV2);
++        });
++    let test = builder.build_with_auto_env(&server).await?;
++
++    test.submit_turn("seed legacy remote compact").await?;
++    test.codex.submit(Op::Compact).await?;
++    wait_for_event(&test.codex, |event| {
++        matches!(event, EventMsg::TurnComplete(_))
++    })
++    .await;
++
++    assert_eq!(response_log.requests().len(), 1);
++    assert_eq!(
++        compact_log.requests().len(),
++        1,
++        "bounded legacy remote compact must not enter persistent recovery"
++    );
++    Ok(())
++}
++
+ #[test_case::test_case(false, false; "checklist disabled")]
+ #[test_case::test_case(true, false; "checklist enabled")]
+ #[test_case::test_case(false, true; "custom instructions with checklist disabled")]
+@@ -2759,6 +2995,7 @@ async fn pre_sampling_compact_falls_back_after_previous_model_invalid_request_on
+ 
+     let model_provider = openai_model_provider(&server);
+     let mut builder = test_codex()
++        .with_pre_build_hook(write_model_request_failure_hooks)
+         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+         .with_model(retired_model)
+         .with_config(move |config| {
+@@ -2766,6 +3003,7 @@ async fn pre_sampling_compact_falls_back_after_previous_model_invalid_request_on
+             config.tool_registry.turn_metadata_includes_tool_info = true;
+             set_test_compact_prompt(config);
+             let _ = config.features.enable(Feature::RemoteCompactionV2);
++            trust_discovered_hooks(config);
+         });
+     let test = builder.build(&server).await.expect("build test codex");
+ 
+@@ -2828,6 +3066,19 @@ async fn pre_sampling_compact_falls_back_after_previous_model_invalid_request_on
+         compact_metadata["tool_namespaces_info"],
+         first_metadata["tool_namespaces_info"],
+     );
++
++    let hook_inputs =
++        wait_for_model_request_failure_inputs(&test.codex_home_path(), /*count*/ 1).await;
++    assert_eq!(hook_inputs.len(), 1);
++    assert_eq!(hook_inputs[0]["hookEventName"], "RequestError");
++    assert_eq!(hook_inputs[0]["operation"], "remoteCompact");
++    assert_eq!(hook_inputs[0]["nextAction"], "fallback");
++    assert_eq!(hook_inputs[0]["model"], retired_model);
++    assert!(
++        hook_inputs[0]["error"]["message"]
++            .as_str()
++            .is_some_and(|message| message.contains("previous-model compaction was rejected"))
++    );
+ }
+ 
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+@@ -2884,12 +3135,14 @@ async fn pre_sampling_legacy_remote_compact_falls_back_after_previous_model_inva
+ 
+     let model_provider = openai_model_provider(&server);
+     let mut builder = test_codex()
++        .with_pre_build_hook(write_model_request_failure_hooks)
+         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+         .with_model(retired_model)
+         .with_config(move |config| {
+             config.model_provider = model_provider;
+             set_test_compact_prompt(config);
+             let _ = config.features.disable(Feature::RemoteCompactionV2);
++            trust_discovered_hooks(config);
+         });
+     let test = builder.build(&server).await.expect("build test codex");
+ 
+@@ -2934,6 +3187,218 @@ async fn pre_sampling_legacy_remote_compact_falls_back_after_previous_model_inva
+         Some(next_model)
+     );
+     assert_eq!(requests[1].body_json()["model"].as_str(), Some(next_model));
++
++    let hook_inputs =
++        wait_for_model_request_failure_inputs(&test.codex_home_path(), /*count*/ 1).await;
++    assert_eq!(hook_inputs.len(), 1);
++    assert_eq!(hook_inputs[0]["hookEventName"], "RequestError");
++    assert_eq!(hook_inputs[0]["operation"], "remoteCompact");
++    assert_eq!(hook_inputs[0]["nextAction"], "fallback");
++    assert_eq!(hook_inputs[0]["model"], retired_model);
++    assert!(
++        hook_inputs[0]["error"]["message"]
++            .as_str()
++            .is_some_and(|message| message.contains("previous-model compaction was rejected"))
++    );
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn pre_sampling_legacy_remote_compact_reports_fallback_failure_and_returns_original_error() {
++    skip_if_no_network!();
++
++    let server = MockServer::start().await;
++    let retired_model = "gpt-5.6";
++    let previous_model_family = "gpt-5.6";
++    let next_model = "gpt-5.5";
++    let mut previous_model_info =
++        model_info_with_context_window("gpt-5.4", /*context_window*/ 273_000);
++    previous_model_info.slug = previous_model_family.to_string();
++    let mut next_model_info =
++        model_info_with_context_window("gpt-5.4", /*context_window*/ 125_000);
++    next_model_info.slug = next_model.to_string();
++
++    let models_mock = mount_models_once(
++        &server,
++        ModelsResponse {
++            models: vec![previous_model_info, next_model_info],
++        },
++    )
++    .await;
++    let request_log = mount_sse_sequence(
++        &server,
++        vec![sse(vec![
++            ev_assistant_message("m1", "before switch"),
++            ev_completed_with_tokens("r1", /*total_tokens*/ 120_000),
++        ])],
++    )
++    .await;
++    let compact_request_log = mount_compact_response_sequence(
++        &server,
++        vec![
++            invalid_request_response("primary previous-model compact failure"),
++            invalid_request_response("actual fallback compact failure"),
++        ],
++    )
++    .await;
++
++    let model_provider = openai_model_provider(&server);
++    let mut builder = test_codex()
++        .with_pre_build_hook(write_model_request_failure_hooks)
++        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
++        .with_model(retired_model)
++        .with_config(move |config| {
++            config.model_provider = model_provider;
++            set_test_compact_prompt(config);
++            let _ = config.features.disable(Feature::RemoteCompactionV2);
++            trust_discovered_hooks(config);
++        });
++    let test = builder.build(&server).await.expect("build test codex");
++
++    test.codex
++        .start_or_steer_turn(disabled_permission_user_turn(
++            "before switch",
++            test.cwd.path().to_path_buf(),
++            retired_model.to_string(),
++        ))
++        .await
++        .expect("submit first user turn");
++    wait_for_event(&test.codex, |event| {
++        matches!(event, EventMsg::TurnComplete(_))
++    })
++    .await;
++
++    test.codex
++        .start_or_steer_turn(disabled_permission_user_turn(
++            "after switch",
++            test.cwd.path().to_path_buf(),
++            next_model.to_string(),
++        ))
++        .await
++        .expect("submit smaller-model turn");
++    let error_message = wait_for_event_match(&test.codex, |event| match event {
++        EventMsg::Error(error) => Some(error.message.clone()),
++        _ => None,
++    })
++    .await;
++    assert!(error_message.contains("primary previous-model compact failure"));
++    wait_for_event(&test.codex, |event| {
++        matches!(event, EventMsg::TurnComplete(_))
++    })
++    .await;
++
++    assert_eq!(models_mock.requests().len(), 1);
++    assert_eq!(request_log.requests().len(), 1);
++    assert_eq!(compact_request_log.requests().len(), 2);
++
++    let hook_inputs =
++        wait_for_model_request_failure_inputs(&test.codex_home_path(), /*count*/ 3).await;
++    assert_eq!(hook_inputs.len(), 3);
++    let primary_fallback = hook_inputs
++        .iter()
++        .find(|input| input["hookEventName"] == "RequestError" && input["nextAction"] == "fallback")
++        .expect("primary fallback RequestError");
++    assert_eq!(primary_fallback["model"], retired_model);
++    assert!(
++        primary_fallback["error"]["message"]
++            .as_str()
++            .is_some_and(|message| message.contains("primary previous-model compact failure"))
++    );
++
++    let final_events = [
++        hook_inputs
++            .iter()
++            .find(|input| input["hookEventName"] == "RequestError" && input["nextAction"] == "stop")
++            .expect("final RequestError stop"),
++        hook_inputs
++            .iter()
++            .find(|input| input["hookEventName"] == "AbnormalStop")
++            .expect("final AbnormalStop"),
++    ];
++    for final_stop in &final_events {
++        assert_eq!(final_stop["model"], next_model);
++        assert!(
++            final_stop["error"]["message"]
++                .as_str()
++                .is_some_and(|message| message.contains("actual fallback compact failure"))
++        );
++    }
++    assert!(
++        final_events[1].get("nextAction").is_none(),
++        "AbnormalStop must not retain RequestError-only fields"
++    );
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn sampling_internal_http_retries_emit_one_visible_stop_decision() {
++    skip_if_no_network!();
++
++    let server = MockServer::start().await;
++    let request_log = mount_response_sequence(
++        &server,
++        vec![
++            wiremock::ResponseTemplate::new(/*status*/ 500)
++                .insert_header("retry-after-ms", "0")
++                .set_body_json(json!({"error": {"message": "internal attempt one"}})),
++            wiremock::ResponseTemplate::new(/*status*/ 500)
++                .insert_header("retry-after-ms", "0")
++                .set_body_json(json!({"error": {"message": "internal attempt two"}})),
++        ],
++    )
++    .await;
++    let mut model_provider = openai_model_provider(&server);
++    model_provider.request_max_retries = Some(1);
++    model_provider.stream_max_retries = Some(0);
++    let mut builder = test_codex()
++        .with_pre_build_hook(write_model_request_failure_hooks)
++        .with_model("gpt-test")
++        .with_config(move |config| {
++            config.model_provider = model_provider;
++            trust_discovered_hooks(config);
++        });
++    let test = builder.build(&server).await.expect("build test codex");
++
++    test.codex
++        .start_or_steer_turn(disabled_permission_user_turn(
++            "exercise internal request retries",
++            test.cwd.path().to_path_buf(),
++            "gpt-test".to_string(),
++        ))
++        .await
++        .expect("submit turn");
++    wait_for_event_match(&test.codex, |event| match event {
++        EventMsg::Error(error) => Some(error.message.clone()),
++        _ => None,
++    })
++    .await;
++    wait_for_event(&test.codex, |event| {
++        matches!(event, EventMsg::TurnComplete(_))
++    })
++    .await;
++
++    assert_eq!(request_log.requests().len(), 2);
++    let hook_inputs =
++        wait_for_model_request_failure_inputs(&test.codex_home_path(), /*count*/ 2).await;
++    assert_eq!(
++        hook_inputs
++            .iter()
++            .filter(|input| input["hookEventName"] == "RequestError")
++            .count(),
++        1
++    );
++    assert_eq!(
++        hook_inputs
++            .iter()
++            .filter(|input| input["hookEventName"] == "AbnormalStop")
++            .count(),
++        1
++    );
++    let request_error = hook_inputs
++        .iter()
++        .find(|input| input["hookEventName"] == "RequestError")
++        .expect("visible RequestError");
++    assert_eq!(request_error["operation"], "sampling");
++    assert_eq!(request_error["nextAction"], "stop");
++    assert_eq!(request_error["attempt"], 1);
+ }
+ 
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs b/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs
+index 9b60a471ebb6b07c1c39c02285163e6412c39cca..57b6bc5872eefec737a6e19aed3589e993f09a00 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs
+@@ -50,7 +50,7 @@ pub(super) fn sampler_failure_reason(error: &LunaSamplerError) -> &'static str {
+             ApiError::CyberPolicy { .. } | ApiError::MisalignmentPolicyViolation { .. } => {
+                 "policy_error"
+             }
+-            ApiError::ServerOverloaded => "server_overloaded",
++            ApiError::ServerOverloaded(_) => "server_overloaded",
+         },
+     }
+ }
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
+index 993e2d48d7322b3b37d981b45e8fa57f3ba3470b..95a8a4787f0500950e141984210ad01acb567f12 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
+@@ -208,7 +208,7 @@ impl LunaSampler {
+                 ApiError::Retryable { .. }
+                 | ApiError::RateLimitExceeded { .. }
+                 | ApiError::Stream(_)
+-                | ApiError::ServerOverloaded,
++                | ApiError::ServerOverloaded(_),
+             )
+             | LunaSamplerError::Api(ApiError::Transport(
+                 TransportError::RetryLimit

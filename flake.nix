@@ -35,6 +35,7 @@
       };
 
       inherit (codexProject)
+        codexBaseFor
         codexCheckFor
         codexFor
         patchOrder
@@ -108,6 +109,7 @@
         inherit
           lib
           nixpkgs
+          codexBaseFor
           codexFor
           supportedSystems
           ;

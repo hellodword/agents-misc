@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import argparse
 
-from common import add_repo_root_argument, fetch_upstream, json_stdout, load_manifest, main_wrapper
+from common import (
+    add_repo_root_argument,
+    fetch_upstream,
+    json_stdout,
+    load_manifest,
+    main_wrapper,
+)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Fetch the one pinned Codex revision used by the four-patch maintenance workflow"
+        description="Fetch the one pinned Codex revision used by the maintenance workflow"
     )
     add_repo_root_argument(parser)
     args = parser.parse_args()

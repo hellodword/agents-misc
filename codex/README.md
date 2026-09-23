@@ -1,211 +1,182 @@
 # Codex pure-patch workspace
 
-This directory maintains a reproducible patch set over one pinned revision of
-[`openai/codex`](https://github.com/openai/codex). The patched upstream source
-tree is never committed.
+This directory maintains one ordered, reproducible patch set over a pinned
+[`openai/codex`](https://github.com/openai/codex) revision. The applied
+upstream source tree is runtime state and is never tracked.
 
 ## Authority and layout
 
-Two TOML files are the only maintenance manifests:
+Two TOML files define the maintenance product:
 
 - [`upstream.toml`](upstream.toml) pins the repository URL, tag, peeled commit,
-  ignored worktree, generator commands, mandatory regression commands, and
-  cumulative Cargo validation.
+  ignored worktree, generator sequence, regression commands, and cumulative
+  Cargo validation command.
 - [`series.toml`](series.toml) defines patch order, intent, behavior, exclusive
-  source/generated ownership, and focused tests.
+  source/generated ownership, and focused behavior tests.
 
-The current patch files live below `patches/<upstream-ref>/`. Patch order must
-come from `series.toml`; there is no YAML manifest, text `series` file, ref CLI
-argument, or historical patch-directory fallback.
+The active patch directory is
+`patches/rust-v0.154.0/`. Its contents must exactly match `series.toml`; no
+fallback manifest or historical patch directory participates in maintenance.
 
 ```text
 codex/
   upstream.toml
   series.toml
-  patches/<upstream-ref>/
-    0001-*.patch
-    ...
+  patches/rust-v0.154.0/
+    0001-provider-network-config.patch
+    0002-typed-server-overload.patch
+    0003-server-overload-recovery.patch
+    0004-failure-hook-contract.patch
+    0005-failure-hook-integration.patch
+    0006-request-user-input-policy.patch
+    0007-generated-contracts.patch
   scripts/
   tests/
-.work/codex/<upstream-ref>/src/  # ignored checkout
+.work/codex/rust-v0.154.0/src/  # ignored upstream checkout
 ```
 
-All human-facing commands are root Just recipes. They enter the pinned
-`codex` development shell before invoking Python, Cargo, or upstream
-generators. Do not run repository maintenance with host Python or Cargo.
+All public maintenance recipes enter `nix develop .#codex` before invoking
+Python, Cargo, or an upstream generator. Use those root Just recipes for daily
+work; do not substitute host tools.
 
 ## Maintained series
 
-The following order mirrors `series.toml`. The manifest remains authoritative
-for exact file ownership and commands.
+| Order | Patch | Responsibility |
+| --- | --- | --- |
+| 1 | `0001-provider-network-config.patch` | Shared provider network settings, validated timeout defaults, overload policy, request-input policy, and thread-config transport. |
+| 2 | `0002-typed-server-overload.patch` | One strict overload classifier across HTTP, SSE, WebSocket, protocol errors, and retry advice. |
+| 3 | `0003-server-overload-recovery.patch` | Producer-specific bounded or persistent recovery with cancellable delays and preserved Guardian/Luna boundaries. |
+| 4 | `0004-failure-hook-contract.patch` | Strict event-specific RequestError and AbnormalStop wire, matcher, parser, and source-schema contracts. |
+| 5 | `0005-failure-hook-integration.patch` | Bounded/coalescing RequestError dispatch, synchronous AbnormalStop handling, receiver completion, and active-goal continuation. |
+| 6 | `0006-request-user-input-policy.patch` | Default blocking at the Session emission boundary while preserving tool exposure, approval, yolo, and source intent. |
+| 7 | `0007-generated-contracts.patch` | Reproducible protobuf, config, app-server, hook-schema, and snapshot outputs only. |
 
-| Order | Patch                                 | Intent and affected behavior                                                                                                                                                                       | Focused validation                                       |
-| ----- | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| 1     | `0001-provider-network-config.patch`  | Make the OpenAI sampling/compact endpoint and compact timeout explicit, validated, and precedence-aware.                                                                                           | Provider config plus compact timeout behavior.           |
-| 2     | `0002-failure-hook-contract.patch`    | Preserve typed `ServerOverloaded` and define the hook fields `operation`, `category`, `code`, `message`, `retryAfterMs`, `attempt`, `retryBudget`, `nextAction`, `terminal`, and `coalescedCount`. | HTTP, SSE, WebSocket, protocol, and hook contract tests. |
-| 3     | `0003-failure-hook-integration.patch` | Route sampling, local/remote compact, guardian, Luna, and internal requests through one cancellation-aware capped recovery policy and bounded coalescing mailbox.                                  | Core recovery, queue pressure, cancellation, and UI.     |
-| 4     | `0004-generated-contracts.patch`      | Exclusively own the generated Cargo lock, protobuf binding, config schema, stable/experimental app schemas, TypeScript, and hook schemas.                                                          | Double generation and schema fixture tests.              |
+Every changed upstream path has exactly one owner. Patches 1–6 own handwritten
+source. Patch 7 has no handwritten owner and is the only patch allowed to
+contain generated files or binary hunks.
 
-The former terminal-wait and Code Mode wait-control patches are removed from
-the active series. The maintenance gates reject their source markers. This is
-an intentional breaking contract: no compatibility alias or text-based
-overload guessing recreates the removed behavior.
+## Generated ownership
 
-## Data flow and generated ownership
+The generator sequence is authoritative in `upstream.toml` and runs in this
+order:
 
-```text
-upstream.toml pinned commit
-  -> ignored exact upstream checkout
-  -> series.toml cumulative patch application
-  -> manifest-declared generators
-  -> manifest-declared Cargo and focused tests
-  -> atomic replacement of current patch files
-```
+1. thread-config protobuf binding;
+2. config schema;
+3. stable app-server fixtures;
+4. experimental app-server fixtures;
+5. hook schemas and declared UI snapshots.
 
-The first three patches own handwritten behavior. The fourth patch exclusively
-owns generated files and prefixes declared in `series.toml`. Never edit
-`Cargo.lock`, generated JSON/TypeScript/Rust, or zstd binary hunks by hand.
-Change their authoritative source in the ignored checkout, run the declared
-generators, and refresh the series.
+The workflow runs the complete sequence twice and requires the second pass to
+produce the same bytes and digest. Compressed app-server fixtures must also
+decompress, parse as JSON, and have a reviewed canonical semantic diff.
 
-The exact generator order is `cargo generate-lockfile`, config proto,
-config schema, stable app schema, experimental app schema, then hook schemas.
-The stable and experimental commands are deliberately explicit:
+Never edit `Cargo.lock`, generated JSON/TypeScript/Rust, snapshots, or zstd
+patch hunks by hand. Change authoritative handwritten source in the ignored
+checkout and let `codex-refresh` regenerate the declared outputs. The applied
+tree's `Cargo.lock` and every `Cargo.toml` must remain byte-identical to the
+pinned revision.
 
-```text
-nix develop .#codex --command python3 codex-rs/app-server-protocol/scripts/write_schema_fixtures.py
-nix develop .#codex --command python3 codex-rs/app-server-protocol/scripts/write_schema_fixtures.py --experimental
-```
+## Daily workflow
 
-Review a binary schema semantically by decompressing it inside the pinned
-shell; the workflow also requires the generated bytes themselves to be
-identical on consecutive runs:
-
-```text
-nix develop .#codex --command bash -c 'zstd --quiet --decompress --stdout "$1" | jq -S .' _ path/to/schema.json.zst
-```
-
-Atlas's unpatched historical schema registry is a separate product documented
-in the [Codex Config Atlas guide](../tools/codex-config-atlas/README.md). Do not
-copy the locally patched schema into that registry.
-
-## Daily commands
-
-Validate the manifests without fetching upstream:
+Validate the manifests and cumulative application without changing the
+ignored checkout:
 
 ```sh
 just codex-manifest-check
+just codex-apply-check
 ```
 
-Fetch the exact pinned revision, check cumulative application, apply it to the
-ignored checkout, and run the complete Codex patch gate:
+Create or update the exact pinned checkout, then apply the installed series to
+a clean checkout when an editable applied tree is needed:
 
 ```sh
 just codex-fetch
-just codex-apply-check
 just codex-apply
-just codex-test
 ```
 
-`codex-test` checks binary cumulative application from the pinned HEAD, runs
-every declared generator twice, rejects source/generated drift and former
-terminal-only markers, audits every live overload producer, and runs Cargo,
-focused, and mandatory regression tests in declared order. The regression
-commands protect the pending request round trip and TUI timer policy. To run
-the same Cargo and regression command set against an already-applied checkout:
+Run both validation paths:
 
 ```sh
+just codex-test
 just codex-build
 ```
 
-Build the patched package or its deterministic Nix checks without creating a
-result link:
+`codex-test` clones a disposable clean checkout from the pinned revision,
+applies all seven patches cumulatively, runs the generator sequence twice,
+checks generated drift and compressed fixtures, then runs the manifest Cargo,
+focused, consumer, and regression commands. `codex-build` runs the cumulative
+Cargo validation and regressions against the already-applied ignored checkout.
 
-```sh
-nix build --no-link --accept-flake-config .#codex
-nix build --no-link --accept-flake-config .#checks.x86_64-linux.codex-patch-contract
-nix build --no-link --accept-flake-config .#checks.x86_64-linux.codex-behavior
-nix build --no-link --accept-flake-config .#checks.x86_64-linux.codex-generation
-nix build --no-link --accept-flake-config .#checks.x86_64-linux.codex-hooks
-```
+## Changing the patch set
 
-The optional local hook transport is maintained separately in the
-[hook helper guide](../tools/codex-hooks/README.md).
+1. Run `just codex-manifest-check`, `just codex-fetch`, and
+   `just codex-apply-check`. Confirm the ignored checkout is at the exact
+   revision and its real Git index is clean.
+2. Apply the installed series to a clean checkout with `just codex-apply`, then
+   edit only `.work/codex/rust-v0.154.0/src/`. Keep each changed path inside
+   exactly one ownership boundary in `series.toml`.
+3. Run focused behavior tests through `nix develop .#codex --command ...`.
+   Do not add dependencies or change dependency manifests as a side effect.
+4. Run `just codex-refresh-dry-run`. Inspect its ignored candidate, patch
+   hashes, numstat, binary ownership, clean replay, and generated semantic
+   evidence. Remove only the exact reported candidate after review before
+   starting another refresh operation.
+5. Run `just codex-refresh`. It repeats generation and validation before an
+   atomic directory exchange. Then run `just codex-manifest-check`,
+   `just codex-apply-check`, `just codex-test`, and `just codex-build`.
+6. Review the complete tracked diff and repository status. Stage only explicit
+   task paths.
 
-## Changing a patch
-
-1. Run `just codex-manifest-check` and `just codex-fetch`. Confirm the ignored
-   checkout is at the exact revision in `upstream.toml` with no local changes,
-   then run `just codex-apply`.
-2. Edit only the ignored worktree declared by `upstream.toml`. Keep every
-   changed path inside exactly one patch ownership boundary.
-3. Run the narrow upstream tests through `nix develop .#codex`. Run
-   `just codex-refresh-dry-run` twice before installation and compare every
-   reported `patchSha256`; both maps must be identical.
-4. Review all four candidate patches, including the decompressed zstd semantic
-   diff. A dry-run must not change the installed patch directory or real index.
-5. Run `just codex-refresh` for the atomic exchange, then run one more dry-run.
-   Its digest map must still match the two pre-install candidates.
-6. Run `just codex-test`, `just codex-build`, the four Codex Nix checks, and
-   `nix build --accept-flake-config --no-link .#codex`.
-7. Review status and the complete diff, stage only explicit paths, and make one
-   focused commit for the semantic step. Continue the next step only after the
-   tracked worktree is clean.
-
-`refresh-patches.py` uses a temporary Git index and a sibling candidate
-directory. It applies patches cumulatively, checks ownership after each
-boundary, runs generation and validation, and replaces the installed patch
-directory only after every gate succeeds.
+The refresh workflow uses a temporary Git index and ignored maintenance
+workspaces. It does not update the real upstream index and does not install a
+candidate unless cumulative apply, generation, Cargo, focused behavior, and
+consumer validation are all green.
 
 ## Advancing upstream
 
-An upstream upgrade is an explicit manifest change, not a positional CLI
-argument:
+An upgrade is an explicit manifest change:
 
-1. Choose a signed or otherwise reviewed upstream tag and resolve its peeled
-   commit through Git.
-2. Update `ref`, `revision`, and the ref-derived `worktree` together in
-   `upstream.toml`.
-3. Rename/create only the current patch directory for that ref; do not retain
-   historical consumer directories.
-4. Fetch the exact revision and port each `series.toml` responsibility in
-   order. Update the manifest only when ownership, intent, or validation
-   genuinely changes.
-5. Refresh generators, compare the patched schema, and complete `codex-test`,
-   the four Codex Nix checks, and the patched package build.
+1. Review the target upstream tag and resolve its peeled commit.
+2. Update `ref`, `revision`, and `worktree` together in `upstream.toml`.
+3. Create only the new active patch directory and remove the replaced version
+   directory in the same task.
+4. Port the seven `series.toml` responsibilities in order, changing ownership
+   only when the source boundary genuinely changed.
+5. Run two-pass generation, clean-base replay, focused/consumer tests, and the
+   applied-worktree Cargo gate. Confirm dependency files are unchanged.
+6. Perform the package build only after the package-preflight receipt is
+   green:
 
-If Nix reports a `cargoDeps` fixed-output mismatch after the generator-owned
-lockfile changes, use only the `got: sha256-...` value from that real mismatch.
-Do not predict the hash or edit the lockfile. Upstream advancement may break
-the typed hook contract; port it explicitly and do not preserve obsolete
-aliases merely to hide the break.
+   ```sh
+   nix build --no-link --print-out-paths --accept-flake-config .#codex
+   ```
 
-Do not infer a target from a floating branch or a newest-tag query. Do not
-accept a revision mismatch merely because the tag name exists.
+Do not infer an upgrade from a floating branch or newest-tag query. A tag name
+never substitutes for the pinned commit check.
 
 ## Failure recovery
 
-The tools fail before installing partial state and print the exact candidate,
-backup, or worktree path needed for recovery.
+The tools fail closed and report the exact ignored candidate, backup, or
+maintenance workspace involved.
 
-- Manifest, path ownership, revision, or cumulative apply failure: correct the
-  authoritative TOML/source. The patch directory, source tree, temporary
-  index, and real upstream index remain unchanged.
-- Generator, Cargo, or focused-test failure: fix the ignored checkout and run
-  the dry-run again. The current patch directory is still the last validated
-  version.
-- Atomic install failure: keep the reported sibling backup. If automatic
-  restoration also fails, move that exact backup back to the printed patch
-  path only after verifying both paths; never delete both copies.
-- Interrupted refresh: the installed directory remains the last validated
-  series unless the tool reports an exchanged backup; follow that exact path
-  rather than reconstructing patch files manually.
-- Generated drift after apply: do not edit the generated patch. Re-run the
-  manifest-declared generator in `nix develop .#codex`, then refresh.
-- Nix V8 download/cache failure: retry through the pinned Codex shell or
-  package inputs. Do not install a host Rust/Node toolchain or rewrite the lock
-  manually.
+- Manifest, ownership, revision, or cumulative-apply failure: correct the
+  authoritative TOML or handwritten source; do not edit a patch to bypass the
+  gate.
+- Generator, Cargo, focused-test, or consumer-test failure: fix the ignored
+  checkout and rerun refresh from the first generator. Do not reuse partial
+  generated output.
+- Preserved candidate: inspect its receipt and files, verify the exact ignored
+  real path and contents, then remove only that candidate before retrying.
+- Atomic exchange failure: retain the reported candidate and backup. Verify
+  both exact paths before restoring the reported backup; never delete both.
+- Interrupted refresh: treat the installed directory as valid only if the
+  receipt and installed hashes agree. Otherwise follow the reported recovery
+  paths and rerun the full operation.
+- Generated drift: change the authoritative source or generator and refresh;
+  never patch a generated artifact manually.
+- Nix download or V8 cache failure: retry through the pinned shell or package
+  inputs. Do not install host tools, edit a lockfile, or clear shared caches.
 
-Use `just codex-refresh-dry-run` as the recovery proof: success with identical
-candidate hashes demonstrates that the installed patch set is complete,
-reproducible, and safe to commit.
+The patched Nix package is a final delivery check, not a development shortcut.
+Do not build it until clean replay, two-pass generation, dependency-file
+identity, all behavior gates, and the package-preflight receipt are green.

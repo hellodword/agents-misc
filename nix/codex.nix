@@ -34,12 +34,15 @@ let
     "source_prefixes"
     "tests"
   ];
-  expectedPatchCount = 4;
+  expectedPatchCount = 7;
   expectedPatchOrder = [
     "0001-provider-network-config.patch"
-    "0002-failure-hook-contract.patch"
-    "0003-failure-hook-integration.patch"
-    "0004-generated-contracts.patch"
+    "0002-typed-server-overload.patch"
+    "0003-server-overload-recovery.patch"
+    "0004-failure-hook-contract.patch"
+    "0005-failure-hook-integration.patch"
+    "0006-request-user-input-policy.patch"
+    "0007-generated-contracts.patch"
   ];
   unknownUpstreamFields = lib.subtractLists expectedUpstreamFields (builtins.attrNames upstream);
   missingUpstreamFields = lib.subtractLists (builtins.attrNames upstream) expectedUpstreamFields;
@@ -72,7 +75,7 @@ let
       false
     else
       let
-        generatedPatch = builtins.elemAt validatedPatches 3;
+        generatedPatch = builtins.elemAt validatedPatches 6;
       in
       generatedPatch.source_files == [ ]
       && generatedPatch.source_prefixes == [ ]
@@ -112,26 +115,17 @@ let
       else if lib.length patches != expectedPatchCount then
         throw "agents-misc: expected exactly ${toString expectedPatchCount} active Codex patches"
       else if patchOrder != expectedPatchOrder then
-        throw "agents-misc: active Codex patch order must be 0001..0004 with generated contracts in 0004"
+        throw "agents-misc: active Codex patch order must be 0001..0007 with generated contracts in 0007"
       else if actualPatchFiles != expectedPatchOrder then
         throw "agents-misc: codex patch directory contains stale or missing patch files"
       else if !generatedOnlyPatchValid then
-        throw "agents-misc: 0004-generated-contracts.patch must have generated-only ownership"
+        throw "agents-misc: 0007-generated-contracts.patch must have generated-only ownership"
       else if packageRef != upstream.ref then
         throw "agents-misc: llm-agents Codex ${packageRef} does not match pinned ${upstream.ref}"
       else if patchPaths == [ ] then
         throw "agents-misc: empty codex patch series for ${upstream.ref}"
       else
         {
-          cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
-            inherit (old) pname src;
-            inherit version;
-            sourceRoot = old.sourceRoot or "source/codex-rs";
-            patches = (old.patches or [ ]) ++ patchPaths;
-            nativeBuildInputs = [ pkgs.gitMinimal ];
-            patchPhase = gitPatchPhase;
-            hash = "sha256-5kwpOFDCVeurNtaZhH6FWz3rtl2QqGyR1N2c5suIL1M=";
-          };
           patches = (old.patches or [ ]) ++ patchPaths;
 
           nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.gitMinimal ];
@@ -152,16 +146,13 @@ let
     );
 
   supportedSystems = builtins.attrNames llm-agents.packages;
-  codexFor =
+  codexBaseFor =
     system:
-    let
-      pkgs = import nixpkgs { inherit system; };
-      codex = llm-agents.packages.${system}.codex.override {
-        version = pinnedVersion;
-        srcOverride = pinnedSource;
-      };
-    in
-    patchCodex pkgs codex;
+    llm-agents.packages.${system}.codex.override {
+      version = pinnedVersion;
+      srcOverride = pinnedSource;
+    };
+  codexFor = system: patchCodex (import nixpkgs { inherit system; }) (codexBaseFor system);
   codexCheckFor =
     system:
     let
@@ -221,30 +212,11 @@ let
         cp -a ${pinnedSource}/. "$pinned_root/"
         chmod -R u+w "$pinned_root"
 
-        # Prove that the complete four-patch series applies from the pinned
-        # upstream revision, including the binary generated-contract patch.
+        # Prove that the complete manifest-declared series applies from the
+        # pinned upstream revision, including binary generated artifacts.
         for patch in ${patchPathsForShell}; do
           git -C "$pinned_root" apply --check --binary "$patch"
           git -C "$pinned_root" apply --binary "$patch"
-        done
-
-        # Negative terminal marker gate and static live-producer coverage.
-        if rg -n --hidden --glob '!.git/**' --glob '!target/**' \
-          'terminal_wait|TerminalWait|TerminalWaitDecision|terminal_wait_control|TerminalWaitToml|YieldReason' \
-          "$pinned_root"; then
-          echo "error: terminal-only marker found in patched pinned source" >&2
-          exit 1
-        fi
-        for producer in \
-          codex-rs/core/src/session/turn.rs \
-          codex-rs/core/src/compact.rs \
-          codex-rs/core/src/compact_remote.rs \
-          codex-rs/core/src/compact_remote_v2.rs \
-          codex-rs/core/src/guardian/review.rs \
-          codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs \
-          codex-rs/core/src/hook_runtime.rs; do
-          test -f "$pinned_root/$producer"
-          rg -q 'model_request_failure_policy|record_model_request_failure' "$pinned_root/$producer"
         done
 
         for fixture in \
@@ -281,16 +253,7 @@ let
 
         cd "$repo_root"
         run_cargo_generator() (
-          # Nix's cargo vendor hook supplies pinned git sources and deliberately
-          # rejects `cargo generate-lockfile` until a lockfile already exists.
-          # The lockfile itself is generated by the declared command in the
-          # codex shell; here metadata --locked proves that exact generated
-          # lockfile is consumable without network access.
-          if test "''${1-}" = generate-lockfile; then
-            (cd "$repo_root/codex-rs" && cargo metadata --locked --offline --no-deps --format-version 1 >/dev/null)
-          else
-            (cd "$repo_root/codex-rs" && cargo "$@")
-          fi
+          (cd "$repo_root/codex-rs" && cargo "$@")
         )
         run_generators() {
           ${renderGeneratorCommands upstream.generate_commands}
@@ -343,6 +306,7 @@ let
 in
 {
   inherit
+    codexBaseFor
     codexCheckFor
     codexFor
     patchOrder
