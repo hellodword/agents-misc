@@ -1,3 +1,16 @@
+diff --git a/codex-rs/cli/src/doctor.rs b/codex-rs/cli/src/doctor.rs
+index e42fa9be0171c082ad088475f41fea6e63f5fae0..5c22dabe6c48f059acef49d5c2540ba8e6932abe 100644
+--- a/codex-rs/cli/src/doctor.rs
++++ b/codex-rs/cli/src/doctor.rs
+@@ -2371,7 +2371,7 @@ fn websocket_error_detail(err: &ApiError) -> String {
+         | ApiError::InvalidRequest { .. }
+         | ApiError::CyberPolicy { .. }
+         | ApiError::MisalignmentPolicyViolation { .. }
+-        | ApiError::ServerOverloaded => format!("handshake error: {err}"),
++        | ApiError::ServerOverloaded(_) => format!("handshake error: {err}"),
+     }
+ }
+ 
 diff --git a/codex-rs/codex-api/src/api_bridge.rs b/codex-rs/codex-api/src/api_bridge.rs
 index e8d7c4743c5a9e827f5f020847dbc25da58f64ac..faca830581cd74aec70b5efdd597584b2fc9e3f0 100644
 --- a/codex-rs/codex-api/src/api_bridge.rs

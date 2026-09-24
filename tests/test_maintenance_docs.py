@@ -20,6 +20,9 @@ class MaintenanceDocsTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
+        (self.root / "justfile").write_text(
+            (REPO_ROOT / "justfile").read_text(encoding="utf-8"), encoding="utf-8"
+        )
         for relative in CHECKER.MAINTENANCE_DOCS:
             path = self.root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -108,6 +111,22 @@ class MaintenanceDocsTests(unittest.TestCase):
             CHECKER.smoke_for(server).argv,
         )
 
+        app = CHECKER.DocumentedCommand(
+            Path("README.md"),
+            3,
+            "nix run --accept-flake-config .#agents-viewer -- --help",
+        )
+        self.assertEqual(
+            (
+                "nix",
+                "eval",
+                "--raw",
+                "--accept-flake-config",
+                ".#apps.__NIX_SYSTEM__.agents-viewer.program",
+            ),
+            CHECKER.smoke_for(app).argv,
+        )
+
     def test_live_eval_recipe_is_only_inspected(self) -> None:
         command = CHECKER.DocumentedCommand(
             Path("tests/evals/README.md"),
@@ -117,6 +136,32 @@ class MaintenanceDocsTests(unittest.TestCase):
         self.assertEqual(
             ("just", "--show", "agent-evals"), CHECKER.smoke_for(command).argv
         )
+
+    def test_private_or_nested_just_recipes_fail(self) -> None:
+        justfile = self.root / "justfile"
+        text = justfile.read_text(encoding="utf-8")
+        text = text.replace(
+            "  nix develop .#dev --command python3 scripts/check-maintenance-docs.py --root . --execute-commands",
+            "  nix develop .#dev --command just check-docs",
+            1,
+        )
+        justfile.write_text(f"[private]\n{text}", encoding="utf-8")
+        errors = self.errors()
+        self.assertTrue(
+            any("private recipes are forbidden" in error for error in errors)
+        )
+        self.assertTrue(any("nested Just invocation" in error for error in errors))
+
+    def test_missing_or_extra_public_recipe_fails(self) -> None:
+        justfile = self.root / "justfile"
+        justfile.write_text(
+            justfile.read_text(encoding="utf-8")
+            + "\nextra-recipe:\n"
+            + "  nix develop .#dev --command python3 --version\n",
+            encoding="utf-8",
+        )
+        errors = self.errors()
+        self.assertTrue(any("unexpected public recipe" in error for error in errors))
 
 
 if __name__ == "__main__":

@@ -68,14 +68,14 @@ Nix packaging and generated-output checks live in
 
 ## CLI
 
-Run the packaged CLI through the root Just menu:
+Run the packaged CLI through its flake app:
 
 ```bash
-just codex-config-atlas-current
-just codex-config-atlas-check-registry
-just codex-config-atlas-diff 0.143.0 0.144.1
-just codex-config-atlas-diff-defaults 0.143.0 0.144.1
-just codex-config-atlas-gen-toml 0.144.1 reference
+nix run .#codex-config-atlas -- current
+nix run .#codex-config-atlas -- check-registry --schemas tools/codex-config-atlas/schemas
+nix run .#codex-config-atlas -- diff --schemas tools/codex-config-atlas/schemas --from 0.143.0 --to 0.144.1
+nix run .#codex-config-atlas -- diff-defaults --schemas tools/codex-config-atlas/schemas --from 0.143.0 --to 0.144.1
+nix run .#codex-config-atlas -- gen-toml --schemas tools/codex-config-atlas/schemas --version 0.144.1 --mode reference
 ```
 
 The CLI exposes these subcommands:
@@ -103,7 +103,7 @@ changes with different values or field metadata remain visible.
 Register an explicit upstream version:
 
 ```bash
-just codex-config-atlas-sync-schema 0.148.0
+nix run .#codex-config-atlas -- sync-schema --schemas tools/codex-config-atlas/schemas --version 0.148.0
 ```
 
 Review the new schema and metadata together, then compare it with the previous

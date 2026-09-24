@@ -11,53 +11,6 @@ index 875306fdb4c8c29b53291b33af1dc0e44043704d..3d7ccbbd913c5ced517b4cbbd90f5698
              requires_openai_auth: false,
              supports_websockets: true,
              supports_standalone_web_search: false,
-diff --git a/codex-rs/config/scripts/generate-proto.sh b/codex-rs/config/scripts/generate-proto.sh
-index 86af22b8957c5d1bae44eaf8620e18d251db242b..1b668365f3eac28da578e5ce2fbd9bdfd581e37b 100755
---- a/codex-rs/config/scripts/generate-proto.sh
-+++ b/codex-rs/config/scripts/generate-proto.sh
-@@ -6,19 +6,35 @@ repo_root="$(cd "$script_dir/../../.." && pwd)"
- proto_dir="$repo_root/codex-rs/config/src/thread_config/proto"
- generated="$proto_dir/codex.thread_config.v1.rs"
- tmpdir="$(mktemp -d)"
-+generator_dir="$tmpdir/generator"
- 
- cleanup() {
-     rm -rf "$tmpdir"
- }
- trap cleanup EXIT
- 
--(
--    cd "$repo_root/codex-rs"
--    CARGO_TARGET_DIR="$tmpdir/target" cargo run \
--        -p codex-config \
--        --example generate-proto \
--        -- "$proto_dir"
--)
-+mkdir -p "$generator_dir/src"
-+cp "$repo_root/codex-rs/config/examples/generate-proto.rs" "$generator_dir/src/main.rs"
-+cp "$repo_root/codex-rs/Cargo.lock" "$generator_dir/Cargo.lock"
-+printf '%s\n' \
-+    '[package]' \
-+    'name = "codex-thread-config-proto-generator"' \
-+    'version = "0.0.0"' \
-+    'edition = "2024"' \
-+    'publish = false' \
-+    '' \
-+    '[dependencies]' \
-+    'tonic-prost-build = { version = "=0.14.3", default-features = false, features = ["transport"] }' \
-+    > "$generator_dir/Cargo.toml"
-+
-+env \
-+    -u CARGO_RESOLVER_LOCKFILE_PATH \
-+    -u CARGO_UNSTABLE_LOCKFILE_PATH \
-+    CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$tmpdir/target}" \
-+    cargo run \
-+    --offline \
-+    --manifest-path "$generator_dir/Cargo.toml" \
-+    -- "$proto_dir"
- 
- if ! sed -n '2p' "$generated" | grep -q 'clippy::trivially_copy_pass_by_ref'; then
-     {
 diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
 index 7bf981482f6ade394c484c5794f9bbdb42404b9b..a996fe15448de42a4cf511793a3cd9a5c5d13b70 100644
 --- a/codex-rs/config/src/config_toml.rs

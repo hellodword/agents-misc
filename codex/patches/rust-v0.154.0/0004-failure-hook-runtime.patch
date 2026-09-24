@@ -222,7 +222,7 @@ index c70eda9e6686dda958d31f079b4d2dc76f9aabd4..b54b334e13855424072319d21d3ca694
  async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Result<()> {
      let server = create_mock_responses_server_sequence_unchecked(vec![
 diff --git a/codex-rs/core/src/hook_runtime.rs b/codex-rs/core/src/hook_runtime.rs
-index e17f1508e7ffdb313af4c444d36dc4248e4d680b..552e5317ebc8db04fed6e33b7e73c4df7344889c 100644
+index e17f1508e7ffdb313af4c444d36dc4248e4d680b..4b42fb3557d61bab944447970f23f91849f7dd6b 100644
 --- a/codex-rs/core/src/hook_runtime.rs
 +++ b/codex-rs/core/src/hook_runtime.rs
 @@ -29,6 +29,8 @@ use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
@@ -234,15 +234,7 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..552e5317ebc8db04fed6e33b7e73c4df
  use codex_protocol::items::FunctionCallOutputItem;
  use codex_protocol::items::TurnItem;
  use codex_protocol::items::UserMessageItem;
-@@ -60,6 +62,7 @@ use tracing::instrument;
- use crate::context::ContextualUserFragment;
- use crate::context::HookAdditionalContext;
- use crate::event_mapping::parse_turn_item;
-+use crate::model_request_failure_policy::RecoveryDecision;
- use crate::session::TurnInput;
- use crate::session::session::Session;
- use crate::session::step_context::StepContext;
-@@ -79,6 +82,91 @@ pub(crate) enum PreToolUseHookResult {
+@@ -79,6 +81,76 @@ pub(crate) enum PreToolUseHookResult {
      Blocked(String),
  }
  
@@ -296,30 +288,15 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..552e5317ebc8db04fed6e33b7e73c4df
 +    pub(crate) fn new(
 +        context: ModelRequestHookContext,
 +        attempt: u64,
++        retry_budget: Option<u64>,
 +        next_action: codex_hooks::ModelRequestNextAction,
 +        error: &CodexErr,
 +    ) -> Self {
 +        Self {
 +            context,
 +            attempt: attempt.max(1),
-+            retry_budget: None,
++            retry_budget,
 +            next_action,
-+            coalesced_count: 1,
-+            error: model_request_error_payload(error),
-+        }
-+    }
-+
-+    pub(crate) fn from_policy(
-+        context: ModelRequestHookContext,
-+        attempt: u64,
-+        decision: RecoveryDecision,
-+        error: &CodexErr,
-+    ) -> Self {
-+        Self {
-+            context,
-+            attempt: attempt.max(1),
-+            retry_budget: decision.retry_budget,
-+            next_action: decision.next_action,
 +            coalesced_count: 1,
 +            error: model_request_error_payload(error),
 +        }
@@ -334,14 +311,15 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..552e5317ebc8db04fed6e33b7e73c4df
  struct ContextInjectingHookOutcome {
      hook_events: Vec<HookCompletedEvent>,
      outcome: HookRuntimeOutcome,
-@@ -589,6 +677,106 @@ pub(crate) async fn run_post_compact_hooks(
+@@ -589,6 +661,137 @@ pub(crate) async fn run_post_compact_hooks(
      }
  }
  
-+pub(crate) async fn run_request_error_hooks(
++async fn run_request_error_hooks_inner(
 +    sess: &Arc<Session>,
 +    turn_context: &Arc<TurnContext>,
 +    failure: ModelRequestFailure,
++    wait_for_completion: bool,
 +) {
 +    let request = codex_hooks::RequestErrorRequest {
 +        session_id: sess.session_id().into(),
@@ -365,15 +343,13 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..552e5317ebc8db04fed6e33b7e73c4df
 +        return;
 +    }
 +
-+    match hooks.enqueue_request_error(request) {
-+        codex_hooks::RequestErrorDispatch::Queued {
-+            receiver: _outcome_receiver,
-+            start,
-+        } => {
++    let outcome_receiver = match hooks.enqueue_request_error(request) {
++        codex_hooks::RequestErrorDispatch::Queued { receiver, start } => {
 +            emit_hook_started_events(sess, turn_context, preview_runs).await;
 +            start.start();
++            Some(receiver)
 +        }
-+        codex_hooks::RequestErrorDispatch::Coalesced(_outcome_receiver) => {}
++        codex_hooks::RequestErrorDispatch::Coalesced(receiver) => Some(receiver),
 +        codex_hooks::RequestErrorDispatch::Rejected { outcome, reason } => {
 +            if outcome.hook_dispatch_rejected > 0 {
 +                sess.send_event(
@@ -387,11 +363,27 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..552e5317ebc8db04fed6e33b7e73c4df
 +                )
 +                .await;
 +            }
++            None
 +        }
++    };
++
++    if wait_for_completion
++        && let Some(outcome_receiver) = outcome_receiver
++        && outcome_receiver.await.is_err()
++    {
++        tracing::debug!("RequestError hook dispatcher closed before terminal completion");
 +    }
 +}
 +
-+pub(crate) async fn run_abnormal_stop_hooks(
++pub(crate) async fn run_request_error_hooks(
++    sess: &Arc<Session>,
++    turn_context: &Arc<TurnContext>,
++    failure: ModelRequestFailure,
++) {
++    run_request_error_hooks_inner(sess, turn_context, failure, false).await;
++}
++
++async fn run_abnormal_stop_hooks(
 +    sess: &Arc<Session>,
 +    turn_context: &Arc<TurnContext>,
 +    failure: ModelRequestFailure,
@@ -438,10 +430,26 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..552e5317ebc8db04fed6e33b7e73c4df
 +    }
 +}
 +
++pub(crate) async fn run_terminal_model_request_failure_hooks(
++    sess: &Arc<Session>,
++    turn_context: &Arc<TurnContext>,
++    failure: ModelRequestFailure,
++) {
++    debug_assert_eq!(
++        failure.next_action,
++        codex_hooks::ModelRequestNextAction::Stop,
++        "terminal model-request hooks require a stop decision"
++    );
++    // Terminal delivery is ordered: finish RequestError before AbnormalStop so
++    // command hooks observe the stop decision before the final stop lifecycle.
++    run_request_error_hooks_inner(sess, turn_context, failure.clone(), true).await;
++    run_abnormal_stop_hooks(sess, turn_context, failure).await;
++}
++
  #[instrument(level = "trace", skip_all)]
  pub(crate) async fn run_legacy_after_agent_hook(
      sess: &Arc<Session>,
-@@ -965,6 +1153,8 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str);
+@@ -965,6 +1168,8 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str);
          HookEventName::PostToolUse => "PostToolUse",
          HookEventName::PreCompact => "PreCompact",
          HookEventName::PostCompact => "PostCompact",
@@ -450,7 +458,7 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..552e5317ebc8db04fed6e33b7e73c4df
          HookEventName::SessionStart => "SessionStart",
          HookEventName::SessionEnd => "SessionEnd",
          HookEventName::UserPromptSubmit => "UserPromptSubmit",
-@@ -1005,6 +1195,75 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str);
+@@ -1005,6 +1210,75 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str);
      ]
  }
  
@@ -526,7 +534,7 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..552e5317ebc8db04fed6e33b7e73c4df
  fn hook_permission_mode(turn_context: &TurnContext) -> String {
      match turn_context.approval_policy() {
          AskForApproval::Never => "bypassPermissions",
-@@ -1047,10 +1306,14 @@ fn compaction_trigger_label(value: CompactionTrigger) -> &'static str {
+@@ -1047,10 +1321,14 @@ fn compaction_trigger_label(value: CompactionTrigger) -> &'static str {
  mod tests {
      use std::sync::Arc;
  
@@ -541,7 +549,7 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..552e5317ebc8db04fed6e33b7e73c4df
      use codex_protocol::models::ContentItem;
      use codex_protocol::protocol::HookEventName;
      use codex_protocol::protocol::HookExecutionMode;
-@@ -1070,12 +1333,73 @@ mod tests {
+@@ -1070,12 +1348,73 @@ mod tests {
      use super::emit_hook_started_events;
      use super::hook_run_analytics_payload;
      use super::hook_run_metric_tags;
@@ -2275,7 +2283,7 @@ index 3333f430f9064d6966c1d31491d28613ad7d8d52..8216722bf36d1e0e1a2701bf98a8e5aa
  
  #[test]
 diff --git a/codex-rs/tui/src/bottom_pane/hooks_browser_view.rs b/codex-rs/tui/src/bottom_pane/hooks_browser_view.rs
-index 88318fb08adad1165eb1f64201802152a1608a32..6cf0a2fd18ad99dd5844948fad660daecc2cc3a4 100644
+index 88318fb08adad1165eb1f64201802152a1608a32..5ed4c2ce6b1ee5d174fa081dafe74fb9d6d57997 100644
 --- a/codex-rs/tui/src/bottom_pane/hooks_browser_view.rs
 +++ b/codex-rs/tui/src/bottom_pane/hooks_browser_view.rs
 @@ -773,6 +773,8 @@ fn event_label(event_name: HookEventName) -> &'static str {
@@ -2296,6 +2304,51 @@ index 88318fb08adad1165eb1f64201802152a1608a32..6cf0a2fd18ad99dd5844948fad660dae
          HookEventName::SessionStart => "When a new session starts",
          HookEventName::SessionEnd => "Right before a session ends",
          HookEventName::UserPromptSubmit => "When the user submits a prompt",
+@@ -961,6 +965,14 @@ mod tests {
+         buf
+     }
+ 
++    fn render_event_lines(view: &HooksBrowserView, width: u16) -> String {
++        render_lines(view, width)
++            .lines()
++            .map(str::trim_end)
++            .collect::<Vec<_>>()
++            .join("\n")
++    }
++
+     #[allow(clippy::too_many_arguments)]
+     fn hook(
+         key: &str,
+@@ -1043,7 +1055,10 @@ mod tests {
+     #[test]
+     fn renders_event_browser() {
+         let mut view = view();
+-        assert_snapshot!("hooks_browser_events", render_lines(&view, /*width*/ 112));
++        assert_snapshot!(
++            "hooks_browser_events",
++            render_event_lines(&view, /*width*/ 112)
++        );
+         view.keymap.accept.clear();
+         assert!(!render_lines(&view, /*width*/ 112).contains("enter to view hooks"));
+     }
+@@ -1091,7 +1106,7 @@ mod tests {
+ 
+         assert_snapshot!(
+             "hooks_browser_events_with_review_column",
+-            render_lines(&view, /*width*/ 112)
++            render_event_lines(&view, /*width*/ 112)
+         );
+         assert_eq!(
+             view.event_table_lines()[1].spans[3].style.fg,
+@@ -1120,7 +1135,7 @@ mod tests {
+ 
+         assert_snapshot!(
+             "hooks_browser_events_with_issues",
+-            render_lines(&view, /*width*/ 112)
++            render_event_lines(&view, /*width*/ 112)
+         );
+     }
+ 
 diff --git a/codex-rs/tui/src/chatwidget/turn_runtime.rs b/codex-rs/tui/src/chatwidget/turn_runtime.rs
 index 0d5303686e69eda619a29bd60e6a9a4883a5e14d..39d74d98ffa662d8f73611bfd64a1141e6c21c9f 100644
 --- a/codex-rs/tui/src/chatwidget/turn_runtime.rs

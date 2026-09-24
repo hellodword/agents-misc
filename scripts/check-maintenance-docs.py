@@ -27,6 +27,29 @@ SHELL_FENCES = {"bash", "sh", "shell"}
 LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*#*\s*$")
+JUST_RECIPE_RE = re.compile(r"^([a-z0-9][a-z0-9-]*)(?:\s+[^:]*)?:(.*)$")
+NIX_SYSTEM_RE = re.compile(r"^[A-Za-z0-9_+-]+-[A-Za-z0-9_+-]+$")
+NIX_SYSTEM_PLACEHOLDER = "__NIX_SYSTEM__"
+JUST_RECIPES = {
+    "check-agent-rules": "dev",
+    "check-docs": "dev",
+    "check-workflows": "dev",
+    "agent-evals-auth-init": "agent-evals",
+    "agent-evals-preflight": "agent-evals",
+    "agent-evals": "agent-evals",
+    "codex-fetch": "codex",
+    "codex-apply-check": "codex",
+    "codex-apply": "codex",
+    "codex-refresh-dry-run": "codex",
+    "codex-refresh": "codex",
+    "codex-test": "codex",
+    "agents-viewer-api-dev": "agents-viewer",
+    "agents-viewer-web-dev": "agents-viewer",
+    "agents-viewer-test": "agents-viewer",
+    "agents-viewer-generate": "agents-viewer",
+    "agents-viewer-e2e": "agents-viewer",
+    "agents-viewer-verify": "agents-viewer",
+}
 
 
 @dataclass(frozen=True)
@@ -203,6 +226,8 @@ def _nix_develop_smoke(tokens: list[str]) -> tuple[str, ...]:
         and "--help" not in command
     ):
         smoke = tokens[: command_index + 1] + command[:2] + ["--help"]
+    elif command[:2] == ["cargo", "test"]:
+        smoke = tokens[: command_index + 1] + ["cargo", "test", "--help"]
     safe = (
         "--help" in smoke
         or command[:2] == ["python3", "scripts/check-agent-rules.py"]
@@ -212,6 +237,25 @@ def _nix_develop_smoke(tokens: list[str]) -> tuple[str, ...]:
     if not safe:
         raise ValueError("nix develop command has no reviewed help/smoke mapping")
     return tuple(smoke)
+
+
+def _nix_run_smoke(tokens: list[str]) -> tuple[str, ...]:
+    command_end = tokens.index("--") if "--" in tokens else len(tokens)
+    installables = [
+        token for token in tokens[2:command_end] if not token.startswith("-")
+    ]
+    if len(installables) != 1 or not installables[0].startswith(".#"):
+        raise ValueError("nix run command must name one local flake app")
+    app_name = installables[0][2:]
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", app_name) is None:
+        raise ValueError("nix run command has an invalid local flake app name")
+    return (
+        "nix",
+        "eval",
+        "--raw",
+        "--accept-flake-config",
+        f".#apps.{NIX_SYSTEM_PLACEHOLDER}.{app_name}.program",
+    )
 
 
 def smoke_for(command: DocumentedCommand) -> SmokeCommand:
@@ -247,8 +291,8 @@ def smoke_for(command: DocumentedCommand) -> SmokeCommand:
         argv = _nix_build_smoke(tokens)
     elif tokens[:2] == ["nix", "develop"]:
         argv = _nix_develop_smoke(tokens)
-    elif tokens[:2] == ["nix", "run"] and "--help" in tokens:
-        argv = tuple(tokens)
+    elif tokens[:2] == ["nix", "run"]:
+        argv = _nix_run_smoke(tokens)
     else:
         raise ValueError("command has no reviewed help/smoke mapping")
     return SmokeCommand(
@@ -258,9 +302,84 @@ def smoke_for(command: DocumentedCommand) -> SmokeCommand:
     )
 
 
+def _check_justfile(root: Path, errors: list[str]) -> None:
+    path = root / "justfile"
+    if not path.is_file():
+        errors.append("justfile: required root Just menu is missing")
+        return
+    recipes: dict[str, tuple[int, str, list[tuple[int, str]]]] = {}
+    current: str | None = None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        errors.append(f"justfile: cannot read root Just menu: {exc}")
+        return
+    for line_number, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if line[:1].isspace():
+            if current is not None:
+                recipes[current][2].append((line_number, stripped))
+            continue
+        current = None
+        if stripped == "[private]":
+            errors.append(f"justfile:{line_number}: private recipes are forbidden")
+            continue
+        if stripped.startswith("set "):
+            continue
+        match = JUST_RECIPE_RE.fullmatch(line)
+        if match is None:
+            errors.append(f"justfile:{line_number}: unsupported top-level syntax")
+            continue
+        name, dependencies = match.groups()
+        if dependencies.strip():
+            errors.append(
+                f"justfile:{line_number}: recipe dependencies are forbidden: {name}"
+            )
+        if name in recipes:
+            errors.append(f"justfile:{line_number}: duplicate recipe: {name}")
+            continue
+        recipes[name] = (line_number, dependencies, [])
+        current = name
+
+    actual = set(recipes)
+    expected = set(JUST_RECIPES)
+    for name in sorted(expected - actual):
+        errors.append(f"justfile: missing public recipe: {name}")
+    for name in sorted(actual - expected):
+        errors.append(f"justfile: unexpected public recipe: {name}")
+    for name in sorted(actual & expected):
+        line_number, _dependencies, commands = recipes[name]
+        if not commands:
+            errors.append(f"justfile:{line_number}: recipe has no command: {name}")
+            continue
+        if len(commands) > 3:
+            errors.append(
+                f"justfile:{line_number}: recipe has more than three commands: {name}"
+            )
+        prefix = f"nix develop .#{JUST_RECIPES[name]} --command "
+        for command_line, command in commands:
+            if not command.startswith(prefix):
+                errors.append(
+                    f"justfile:{command_line}: {name} must directly enter "
+                    f"nix develop .#{JUST_RECIPES[name]}"
+                )
+            try:
+                tokens = shlex.split(command, comments=False, posix=True)
+            except ValueError as exc:
+                errors.append(f"justfile:{command_line}: invalid shell syntax: {exc}")
+                continue
+            if "just" in tokens:
+                errors.append(
+                    f"justfile:{command_line}: nested Just invocation is forbidden"
+                )
+
+
 def check_repository(root: Path) -> tuple[list[str], list[SmokeCommand]]:
     errors: list[str] = []
     smokes: list[SmokeCommand] = []
+    _check_justfile(root, errors)
     for relative in MAINTENANCE_DOCS:
         document = root / relative
         if not document.is_file():
@@ -292,17 +411,29 @@ def execute_smokes(
     errors: list[str] = []
     seen: set[tuple[tuple[str, ...], tuple[tuple[str, str], ...]]] = set()
     for smoke in smokes:
-        identity = (smoke.argv, smoke.environment)
+        location = f"{smoke.documented.document}:{smoke.documented.line}"
+        environment = os.environ.copy()
+        environment.update(smoke.environment)
+        argv = smoke.argv
+        if any(NIX_SYSTEM_PLACEHOLDER in argument for argument in argv):
+            current_system = environment.get("system", "")
+            if NIX_SYSTEM_RE.fullmatch(current_system) is None:
+                errors.append(
+                    f"{location}: Nix dev shell did not provide a valid system"
+                )
+                continue
+            argv = tuple(
+                argument.replace(NIX_SYSTEM_PLACEHOLDER, current_system)
+                for argument in argv
+            )
+        identity = (argv, smoke.environment)
         if identity in seen:
             continue
         seen.add(identity)
-        location = f"{smoke.documented.document}:{smoke.documented.line}"
-        print(f"docs smoke {location}: {shlex.join(smoke.argv)}", file=sys.stderr)
-        environment = os.environ.copy()
-        environment.update(smoke.environment)
+        print(f"docs smoke {location}: {shlex.join(argv)}", file=sys.stderr)
         try:
             result = runner(
-                smoke.argv,
+                argv,
                 cwd=root,
                 env=environment,
                 text=True,
@@ -318,7 +449,7 @@ def execute_smokes(
             output = result.stdout[-4000:] if result.stdout else ""
             errors.append(
                 f"{location}: smoke exited {result.returncode}: "
-                f"{shlex.join(smoke.argv)}\n{output}"
+                f"{shlex.join(argv)}\n{output}"
             )
     return errors
 

@@ -35,15 +35,6 @@ let
     "tests"
   ];
   expectedPatchCount = 7;
-  expectedPatchOrder = [
-    "0001-provider-network-config.patch"
-    "0002-typed-server-overload.patch"
-    "0003-server-overload-recovery.patch"
-    "0004-failure-hook-contract.patch"
-    "0005-failure-hook-integration.patch"
-    "0006-request-user-input-policy.patch"
-    "0007-generated-contracts.patch"
-  ];
   unknownUpstreamFields = lib.subtractLists expectedUpstreamFields (builtins.attrNames upstream);
   missingUpstreamFields = lib.subtractLists (builtins.attrNames upstream) expectedUpstreamFields;
   patches = series.patch or (throw "agents-misc: codex/series.toml must define [[patch]] entries");
@@ -67,18 +58,20 @@ let
   targetedTests = lib.unique (lib.concatMap (patch: patch.tests) validatedPatches);
   patchDir = ../codex/patches + "/${upstream.ref}";
   patchDirectoryEntries = if builtins.pathExists patchDir then builtins.readDir patchDir else { };
-  actualPatchFiles = lib.sort (a: b: a < b) (
-    lib.filter (name: lib.hasSuffix ".patch" name) (builtins.attrNames patchDirectoryEntries)
-  );
+  actualPatchFiles = lib.sort (a: b: a < b) (builtins.attrNames patchDirectoryEntries);
+  patchFilesAreRegular = lib.all (
+    filename: patchDirectoryEntries.${filename} == "regular"
+  ) actualPatchFiles;
   generatedOnlyPatchValid =
     if lib.length validatedPatches != expectedPatchCount then
       false
     else
       let
-        generatedPatch = builtins.elemAt validatedPatches 6;
+        generatedPatch = lib.last validatedPatches;
       in
       generatedPatch.source_files == [ ]
       && generatedPatch.source_prefixes == [ ]
+      && lib.elem "codex-rs/Cargo.lock" generatedPatch.generated_files
       && (generatedPatch.generated_files != [ ] || generatedPatch.generated_prefixes != [ ]);
   patchPaths = map (
     filename:
@@ -98,6 +91,30 @@ let
       let
         version = old.version or (builtins.parseDrvName old.name).version;
         packageRef = "rust-v${version}";
+        generatedPatch = lib.last patchPaths;
+        patchedCargoLock =
+          pkgs.runCommand "codex-${version}-patched-Cargo.lock"
+            {
+              nativeBuildInputs = [ pkgs.gitMinimal ];
+            }
+            ''
+              work="$TMPDIR/source"
+              mkdir -p "$work/codex-rs"
+              cp ${pinnedSource}/codex-rs/Cargo.lock "$work/codex-rs/Cargo.lock"
+              chmod u+w "$work/codex-rs/Cargo.lock"
+              git -C "$work" init --quiet
+              git -C "$work" apply --check --binary \
+                --include=codex-rs/Cargo.lock ${generatedPatch}
+              git -C "$work" apply --binary \
+                --include=codex-rs/Cargo.lock ${generatedPatch}
+              cp "$work/codex-rs/Cargo.lock" "$out"
+            '';
+        patchedCargoDeps = pkgs.runCommand "codex-${version}-patched-vendor" { } ''
+          mkdir -p "$out"
+          cp -a ${old.cargoDeps}/. "$out/"
+          chmod -R u+w "$out"
+          cp ${patchedCargoLock} "$out/Cargo.lock"
+        '';
         gitPatchPhase = ''
           runHook prePatch
           chmod -R u+w ..
@@ -114,12 +131,10 @@ let
         throw "agents-misc: missing field(s) in codex/upstream.toml: ${lib.concatStringsSep ", " missingUpstreamFields}"
       else if lib.length patches != expectedPatchCount then
         throw "agents-misc: expected exactly ${toString expectedPatchCount} active Codex patches"
-      else if patchOrder != expectedPatchOrder then
-        throw "agents-misc: active Codex patch order must be 0001..0007 with generated contracts in 0007"
-      else if actualPatchFiles != expectedPatchOrder then
+      else if actualPatchFiles != patchOrder || !patchFilesAreRegular then
         throw "agents-misc: codex patch directory contains stale or missing patch files"
       else if !generatedOnlyPatchValid then
-        throw "agents-misc: 0007-generated-contracts.patch must have generated-only ownership"
+        throw "agents-misc: final Codex patch must have generated-only ownership"
       else if packageRef != upstream.ref then
         throw "agents-misc: llm-agents Codex ${packageRef} does not match pinned ${upstream.ref}"
       else if patchPaths == [ ] then
@@ -128,6 +143,11 @@ let
         {
           patches = (old.patches or [ ]) ++ patchPaths;
 
+          # The generated patch normalizes only local workspace versions in
+          # Cargo.lock. Reuse the pinned vendor payload, but give Cargo's
+          # consistency hook the same generated lock applied to package source.
+          cargoDeps = patchedCargoDeps;
+
           nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.gitMinimal ];
 
           # llm-agents.nix builds from source/codex-rs, while these patches
@@ -135,13 +155,6 @@ let
           # is required because the generated-contract patch owns binary
           # precomputed schemas in addition to text files.
           patchPhase = gitPatchPhase;
-
-          passthru = (old.passthru or { }) // {
-            agentsMiscPatch = builtins.head patchPaths;
-            agentsMiscPatches = patchPaths;
-            agentsMiscPatchOrder = patchOrder;
-            agentsMiscUpstreamRevision = upstream.revision;
-          };
         }
     );
 
@@ -160,8 +173,22 @@ let
       codex = codexFor system;
       renderGeneratorCommand =
         command:
-        if command != [ ] && builtins.head command == "cargo" then
-          "run_cargo_generator ${lib.escapeShellArgs (builtins.tail command)}"
+        let
+          isEnvAssignment = value: builtins.match "[A-Za-z_][A-Za-z0-9_]*=.*" value != null;
+          dropEnvAssignments =
+            values:
+            if values != [ ] && isEnvAssignment (builtins.head values) then
+              dropEnvAssignments (builtins.tail values)
+            else
+              values;
+          commandWithoutEnv =
+            if command != [ ] && builtins.head command == "env" then
+              dropEnvAssignments (builtins.tail command)
+            else
+              command;
+        in
+        if commandWithoutEnv != [ ] && builtins.head commandWithoutEnv == "cargo" then
+          ''(cd "$repo_root/codex-rs" && ${lib.escapeShellArgs command})''
         else
           lib.escapeShellArgs command;
       renderGeneratorCommands = commands: lib.concatMapStringsSep "\n" renderGeneratorCommand commands;
@@ -174,7 +201,6 @@ let
       nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [
         pkgs.cacert
         pkgs.gitMinimal
-        pkgs.just
         pkgs.jq
         pkgs.protobuf
         pkgs.python3
@@ -252,9 +278,6 @@ let
         before_generation="$(generation_digest "$repo_root")"
 
         cd "$repo_root"
-        run_cargo_generator() (
-          (cd "$repo_root/codex-rs" && cargo "$@")
-        )
         run_generators() {
           ${renderGeneratorCommands upstream.generate_commands}
         }

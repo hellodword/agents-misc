@@ -11,18 +11,6 @@ index 613d1eb0abd174319ec6dee9350ae5173d93b801..38ebcc2a49e6857a440b0c1ed35a51ba
          HookEventName::SessionStart => "SessionStart",
          HookEventName::SessionEnd => "SessionEnd",
          HookEventName::UserPromptSubmit => "UserPromptSubmit",
-diff --git a/codex-rs/app-server-protocol/scripts/write_schema_fixtures.py b/codex-rs/app-server-protocol/scripts/write_schema_fixtures.py
-index f23da4fc86990f9c9a7fd2ab633fc5493e07d5e8..09505a7d29dec4e1ac18ddfde30f7e67631b458e 100644
---- a/codex-rs/app-server-protocol/scripts/write_schema_fixtures.py
-+++ b/codex-rs/app-server-protocol/scripts/write_schema_fixtures.py
-@@ -41,6 +41,7 @@ def main() -> None:
-         [
-             "cargo",
-             "test",
-+            "--locked",
-             "-p",
-             "codex-app-server-protocol",
-             "--lib",
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/config.rs b/codex-rs/app-server-protocol/src/protocol/v2/config.rs
 index 5e5f58d5799a0aaaf9640efcabc16952f88a76bf..e961e3459b24343a245edfe4d320eb5ab5b08524 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/config.rs
@@ -1859,31 +1847,3 @@ index 66e431551ddfda9e61b19ee6b8ae61ea046a2817..b6693af5f1213f8d6aa5e8d8a846ce88
      SessionStart,
      SessionEnd,
      UserPromptSubmit,
-diff --git a/justfile b/justfile
-index f85f1c0338b7df5c7f87e8bbbc09e3047a634876..dfd4b2e89eb976a475fb8e06c0b5aefef2024012 100644
---- a/justfile
-+++ b/justfile
-@@ -171,15 +171,18 @@ build-for-release:
- 
- # Regenerate the json schema for config.toml from the current config types.
- write-config-schema:
--    cargo run -p codex-config-schema --bin codex-write-config-schema
-+    cargo run --locked -p codex-config-schema --bin codex-write-config-schema
- 
--# Regenerate vendored app-server protocol schema artifacts.
--write-app-server-schema *args:
--    cargo run -p codex-app-server-protocol --bin write_schema_fixtures -- {args}
-+# Regenerate vendored stable and experimental app-server protocol schema artifacts.
-+write-app-server-schema:
-+    python3 app-server-protocol/scripts/write_schema_fixtures.py
-+    python3 app-server-protocol/scripts/write_schema_fixtures.py --experimental
- 
- [no-cd]
- write-hooks-schema:
--    cargo run --manifest-path {{ justfile_directory() }}/codex-rs/Cargo.toml -p codex-hooks --bin write_hooks_schema_fixtures
-+    cargo run --locked --manifest-path {{ justfile_directory() }}/codex-rs/Cargo.toml -p codex-hooks --bin write_hooks_schema_fixtures
-+    INSTA_UPDATE=always cargo test --locked --manifest-path {{ justfile_directory() }}/codex-rs/Cargo.toml -p codex-tui --lib renders_event_browser
-+    INSTA_UPDATE=always cargo test --locked --manifest-path {{ justfile_directory() }}/codex-rs/Cargo.toml -p codex-tui --lib hooks_popup_shows_list_diagnostics
- 
- # Run the argument-comment Dylint checks across codex-rs.
- [no-cd]

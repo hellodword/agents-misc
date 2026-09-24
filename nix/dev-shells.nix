@@ -26,12 +26,10 @@ lib.genAttrs supportedSystems (
         coreutils
         git
         jq
-        just
         nixfmt
+        ruff
         agentRulesPython
       ];
-
-      AGENTS_MISC_SHELL = "dev";
     };
     codexShell = pkgs.mkShell {
       inputsFrom = [ codexBasePackage ];
@@ -43,7 +41,6 @@ lib.genAttrs supportedSystems (
         git
         gnupatch
         jq
-        just
         codexPkgConfig
         protobuf
         python3
@@ -53,8 +50,6 @@ lib.genAttrs supportedSystems (
         rustfmt
         zstd
       ];
-
-      AGENTS_MISC_SHELL = "codex";
       OPENSSL_INCLUDE_DIR = "${lib.getDev pkgs.openssl}/include";
       OPENSSL_LIB_DIR = "${lib.getLib pkgs.openssl}/lib";
       PKG_CONFIG_PATH = "${lib.getDev pkgs.openssl}/lib/pkgconfig";
@@ -68,9 +63,10 @@ lib.genAttrs supportedSystems (
           [
             cargo
             clippy
-            just
             nodejs_24
             pkg-config
+            python3
+            ruff
             rustc
             rustfmt
             sqlite
@@ -79,8 +75,6 @@ lib.genAttrs supportedSystems (
             chromium
             strace
           ];
-
-        AGENTS_MISC_SHELL = "agents-viewer";
         CARGO_TARGET_DIR = "target";
       }
       // lib.optionalAttrs pkgs.stdenv.isLinux {
@@ -95,8 +89,6 @@ lib.genAttrs supportedSystems (
         pkgs.ruff
         agentRulesPython
       ];
-
-      AGENTS_MISC_SHELL = "agent-evals";
     };
   in
   {

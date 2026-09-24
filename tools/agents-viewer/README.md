@@ -170,10 +170,10 @@ These are application guards, not an operating-system sandbox. The local SQLite 
 
 ## Running Agents Viewer
 
-Run the packaged application through the root Just menu:
+Run the packaged application through its flake app:
 
 ```bash
-just agents-viewer-run
+nix run .#agents-viewer
 ```
 
 On first start it creates `~/.agents-viewer/config.toml` and a generated `schema.json`, builds the lightweight session catalog, and prints its URL once. The viewer never opens a browser. Full transcript content is not synchronized until Start live sync is pressed on a conversation page.
@@ -236,24 +236,28 @@ Keyboard controls:
 
 ## Development, build, and test
 
-Nix is the reproducible environment and Just is the human-facing command menu. Public recipes enter the pinned development environment themselves:
+Nix is the reproducible environment and root Just recipes are the daily source
+workflow. Invoke Just from the repository root; recipes enter the matching
+development shell and call bottom-level tools directly.
 
 ```bash
 just agents-viewer-api-dev --config /path/to/config.toml
 just agents-viewer-web-dev
-just agents-viewer-build
 ```
 
 The durable validation entrypoints are:
 
 ```bash
-just agents-viewer-generate       # regenerate Rust -> TypeScript DTOs
-just agents-viewer-generate-check # verify the checked-in generated contract
-just agents-viewer-test           # Rust and browserless Web tests
-just agents-viewer-verify         # formatting, Clippy, tests, Web, embedded and Nix builds
-just agents-viewer-e2e            # embedded server plus host-browser Playwright tests
-just agents-viewer-acceptance-large
+just agents-viewer-generate # regenerate Rust -> TypeScript DTOs
+just agents-viewer-test     # Rust and browserless Web tests
+just agents-viewer-verify   # binding drift, formatting, Clippy, Rust/Web, and embedded-UI checks
+just agents-viewer-e2e      # embedded debug server plus host-browser Playwright tests
 ```
+
+`agents-viewer-verify` and `agents-viewer-e2e` are orchestrated by the single
+Viewer-owned `scripts/workflow.py`; neither invokes Just or builds a Nix
+package. The verify path checks the generated binding before running the source
+gates. Package and app consumers continue to use direct Nix commands.
 
 The development Playwright fixtures locate `target/debug/agents-viewer` through
 Cargo metadata; the Nix check instead runs the packaged binary supplied through
@@ -292,14 +296,23 @@ Common failures:
 - no FTS5: use the Nix package or another build with bundled SQLite and FTS5.
 - no E2E browser: enter `nix develop .#agents-viewer`; E2E is intentionally unavailable from non-Linux shells and without the Nix-provided absolute browser path.
 - stale UI during E2E: use `just agents-viewer-e2e`, not the Web package's `e2e` script directly; the Just recipe rebuilds the compile-time embedded bundle first.
-- UI/API version mismatch: rebuild the embedded binary with `just agents-viewer-build`.
+- UI/API version mismatch: rerun `just agents-viewer-e2e` for a debug build or `nix build .#agents-viewer` for the package.
 - generated binding drift: change the Rust DTO, run `just agents-viewer-generate`,
-  review the public contract diff, then run `just agents-viewer-generate-check`;
+  review the public contract diff, then run `just agents-viewer-verify`;
   never hand-edit `web/src/generated/api.ts`.
+
+The large bounded-memory and Linux read-only syscall gates are deliberately not
+daily menu aliases. Run their bottom-level commands explicitly when that
+boundary changes:
+
+```bash
+nix develop .#agents-viewer --command cargo test --locked --manifest-path tools/agents-viewer/Cargo.toml --test performance -- --ignored --nocapture --test-threads=1
+nix develop .#agents-viewer --command cargo test --locked --manifest-path tools/agents-viewer/Cargo.toml --test read_only_strace -- --ignored --nocapture
+```
 
 All SQLite recovery commands apply only to Viewer-owned derived caches. Stop
 the process and verify the exact source namespace before removing one; never
 delete or modify rollout JSONL. A successful `just agents-viewer-verify`
-followed by `just agents-viewer-acceptance-large` is the complete local
-recovery proof for source, generated, package, bounded-memory, and Linux
-read-only syscall boundaries.
+followed by the two explicit large gates is the complete local source,
+generated, bounded-memory, and Linux read-only syscall recovery proof. Validate
+the Nix package separately at the delivery boundary.

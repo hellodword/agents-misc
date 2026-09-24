@@ -17,7 +17,7 @@ has one authoritative input boundary and one primary verification entrypoint:
 | [Agent behavior evals](tests/evals/README.md)            | Deterministic corpus validation and optional isolated live Codex diagnostics | eval JSONL, hidden oracles, schemas, and runtime contract       | `nix build --no-link .#checks.x86_64-linux.agent-evals`              |
 
 Generated ownership is explicit. Codex generated contracts live exclusively
-inside the fourth patch in `codex/series.toml`; Atlas data and site trees are
+inside the final patch in `codex/series.toml`; Atlas data and site trees are
 Nix outputs; Viewer's `web/src/generated/api.ts` is the only checked-in
 Rust-to-TypeScript binding; eval run artifacts remain below ignored
 `tmp/agent/evals/`. No other generated tree is a durable source input.
@@ -81,12 +81,14 @@ The 11 skills are:
 
 Read [.project-agent/project.md](.project-agent/project.md) before modifying the kit. The required checks are:
 
+Invoke Just only from the repository root. Each public recipe enters its named
+Nix shell and calls a bottom-level tool directly; do not run Just from inside a
+development shell.
+
 ```sh
-nix fmt
-nix develop .#dev --command python3 scripts/check-agent-rules.py --root .
-nix develop .#dev --command python3 -m unittest discover -s tests -p 'test_*.py'
-nix build --no-link .#checks.x86_64-linux.agent-rules
-nix flake check
+just check-agent-rules
+just check-docs
+just check-workflows
 git status --short --ignored
 ```
 
@@ -98,7 +100,8 @@ behavior judging, and skill-disabled certification baselines, see
 [the eval runner guide](tests/evals/README.md). Live model output remains
 diagnostic and is intentionally excluded from the deterministic Nix checks.
 
-Run the repository-wide deterministic gate with:
+Package and flake consumers remain available through their direct Nix
+interfaces. Run the repository-wide delivery gate with:
 
 ```sh
 nix flake check --accept-flake-config
