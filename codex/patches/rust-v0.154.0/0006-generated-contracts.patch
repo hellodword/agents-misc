@@ -12472,10 +12472,10 @@ index 777a5319e281e7b7e6657f8bfafa854f48d24de5..dc297158cb3747e6f6f3917145fb1425
 -export type ManagedHooksRequirements = { managedDir: string | null, windowsManagedDir: string | null, PreToolUse: Array<ConfiguredHookMatcherGroup>, PermissionRequest: Array<ConfiguredHookMatcherGroup>, PostToolUse: Array<ConfiguredHookMatcherGroup>, PreCompact: Array<ConfiguredHookMatcherGroup>, PostCompact: Array<ConfiguredHookMatcherGroup>, SessionStart: Array<ConfiguredHookMatcherGroup>, SessionEnd: Array<ConfiguredHookMatcherGroup>, UserPromptSubmit: Array<ConfiguredHookMatcherGroup>, SubagentStart: Array<ConfiguredHookMatcherGroup>, SubagentStop: Array<ConfiguredHookMatcherGroup>, Stop: Array<ConfiguredHookMatcherGroup>, Interrupt: Array<ConfiguredHookMatcherGroup>, };
 +export type ManagedHooksRequirements = { managedDir: string | null, windowsManagedDir: string | null, PreToolUse: Array<ConfiguredHookMatcherGroup>, PermissionRequest: Array<ConfiguredHookMatcherGroup>, PostToolUse: Array<ConfiguredHookMatcherGroup>, PreCompact: Array<ConfiguredHookMatcherGroup>, PostCompact: Array<ConfiguredHookMatcherGroup>, ModelRequestRecovery: Array<ConfiguredHookMatcherGroup>, ModelRequestFailed: Array<ConfiguredHookMatcherGroup>, SessionStart: Array<ConfiguredHookMatcherGroup>, SessionEnd: Array<ConfiguredHookMatcherGroup>, UserPromptSubmit: Array<ConfiguredHookMatcherGroup>, SubagentStart: Array<ConfiguredHookMatcherGroup>, SubagentStop: Array<ConfiguredHookMatcherGroup>, Stop: Array<ConfiguredHookMatcherGroup>, Interrupt: Array<ConfiguredHookMatcherGroup>, };
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index 2d5d268a678f81a5f59890bd1526a2da26287427..b39a5e22e5aaf260bf8cf328589effe6961a80c3 100644
+index 2d5d268a678f81a5f59890bd1526a2da26287427..a45210c94229eab7f300c4b59edf29f932613465 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
-@@ -507,6 +507,31 @@
+@@ -507,6 +507,38 @@
        },
        "type": "object"
      },
@@ -12485,6 +12485,13 @@ index 2d5d268a678f81a5f59890bd1526a2da26287427..b39a5e22e5aaf260bf8cf328589effe6
 +      "properties": {
 +        "force_request_user_input_blocking": {
 +          "type": "boolean"
++        },
++        "recovery_max_wait_ms": {
++          "default": null,
++          "description": "Maximum wait per patch-managed retry; defaults to 120 seconds.",
++          "format": "uint64",
++          "minimum": 1.0,
++          "type": "integer"
 +        },
 +        "responses_compact_timeout_ms": {
 +          "default": null,
@@ -12507,7 +12514,7 @@ index 2d5d268a678f81a5f59890bd1526a2da26287427..b39a5e22e5aaf260bf8cf328589effe6
      "ComputerUseConfigToml": {
        "additionalProperties": false,
        "properties": {
-@@ -1813,6 +1838,20 @@
+@@ -1813,6 +1845,20 @@
            },
            "type": "array"
          },
@@ -12528,7 +12535,7 @@ index 2d5d268a678f81a5f59890bd1526a2da26287427..b39a5e22e5aaf260bf8cf328589effe6
          "PermissionRequest": {
            "default": [],
            "items": {
-@@ -3369,6 +3408,24 @@
+@@ -3369,6 +3415,24 @@
          }
        ]
      },
@@ -12553,7 +12560,7 @@ index 2d5d268a678f81a5f59890bd1526a2da26287427..b39a5e22e5aaf260bf8cf328589effe6
      "ResumeCwdMode": {
        "description": "Working directory to use when resuming or forking a session.",
        "oneOf": [
-@@ -5928,6 +5985,14 @@
+@@ -5928,6 +5992,14 @@
        "default": null,
        "description": "Preferred backend for storing CLI auth credentials. file (default): Use a file in the Codex home directory. keyring: Use an OS-specific keyring service. auto: Use the keyring if available, otherwise use a file."
      },

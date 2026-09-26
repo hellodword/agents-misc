@@ -36,6 +36,7 @@ lib.genAttrs supportedSystems (
 
       packages = with pkgs; [
         cargo
+        clippy
         coreutils
         diffutils
         git

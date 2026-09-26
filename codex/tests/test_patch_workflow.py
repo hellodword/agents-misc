@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import json
 import os
 import subprocess
@@ -8,17 +9,23 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from codex.scripts import workflow
 
 from codex.scripts.workflow import (
     PatchError,
     _copy_editing_tree,
     _preserve_unchanged_generated_mtimes,
     apply_patches,
+    check_patches,
     clone_pinned_checkout,
     fetch_upstream,
     load_manifest,
     refresh_patches,
     validate_cargo_lock_compatibility,
+    validate_cargo_lock_tree,
     validate_patch_directory,
     verify_patches,
 )
@@ -305,8 +312,9 @@ class PatchWorkflowTests(unittest.TestCase):
         command(["git", "commit", "--quiet", "-m", "track patches"], self.root)
         first = self.manifest.patch_dir / "0001-feature.patch"
         first.write_text(first.read_text() + "dirty\n")
-        with self.assertRaisesRegex(PatchError, "unstaged changes"):
-            refresh_patches(self.manifest, dry_run=False)
+        for dry_run in (True, False):
+            with self.assertRaisesRegex(PatchError, "unstaged changes"):
+                refresh_patches(self.manifest, dry_run=dry_run)
         self.assertTrue(first.read_text().endswith("dirty\n"))
 
     def test_refresh_rejects_files_outside_the_manifest_patch_set(self) -> None:
@@ -314,6 +322,111 @@ class PatchWorkflowTests(unittest.TestCase):
         (self.manifest.patch_dir / "9999-unowned.patch").write_text("not owned\n")
         with self.assertRaisesRegex(PatchError, "untracked files"):
             refresh_patches(self.manifest, dry_run=False)
+
+    def test_check_uses_editing_changes_but_verify_uses_exported_patches(self) -> None:
+        refresh_patches(self.manifest, dry_run=False)
+        marker = self.manifest.worktree / "src/feature.txt"
+        marker.write_text("broken editing change\n")
+        with self.assertRaises((PatchError, subprocess.CalledProcessError)):
+            check_patches(self.manifest, selector="0001")
+        verify_patches(self.manifest)
+        self.assertEqual(marker.read_text(), "broken editing change\n")
+
+    def test_repeated_refresh_and_noop_need_no_commit(self) -> None:
+        first = refresh_patches(self.manifest, dry_run=False)
+        marker = self.manifest.worktree / "src/feature.txt"
+        marker.write_text("another edit\n")
+        second = refresh_patches(self.manifest, dry_run=False)
+        self.assertNotEqual(first["installedSha256"], second["installedSha256"])
+        third = refresh_patches(self.manifest, dry_run=False)
+        self.assertEqual(second["installedSha256"], third["installedSha256"])
+
+    def test_refresh_preserves_edits_made_while_generating(self) -> None:
+        refresh_patches(self.manifest, dry_run=False)
+        previous = patch_hashes(self.manifest.patch_dir)
+        generate = workflow.run_generation_sequence
+        marker = self.manifest.worktree / "src/feature.txt"
+
+        def edit_during_generation(*args, **kwargs):
+            result = generate(*args, **kwargs)
+            marker.write_text("concurrent edit\n")
+            return result
+
+        with patch.object(workflow, "run_generation_sequence", edit_during_generation):
+            with self.assertRaisesRegex(PatchError, "editing checkout changed"):
+                refresh_patches(self.manifest, dry_run=False)
+        self.assertEqual(marker.read_text(), "concurrent edit\n")
+        self.assertEqual(previous, patch_hashes(self.manifest.patch_dir))
+
+    def test_refresh_recovery_holds_the_install_lock(self) -> None:
+        recover = workflow._recover_patch_install
+
+        def locked_recovery(manifest):
+            with (manifest.runtime_root / "workspace.lock").open("a+") as other:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return recover(manifest)
+
+        with patch.object(workflow, "_recover_patch_install", locked_recovery):
+            refresh_patches(self.manifest, dry_run=False)
+
+    def test_interrupted_install_restores_uncommitted_previous_export(self) -> None:
+        refresh_patches(self.manifest, dry_run=False)
+        previous = patch_hashes(self.manifest.patch_dir)
+        (self.manifest.worktree / "src/feature.txt").write_text("another edit\n")
+        run = workflow.run
+
+        def partial_install(args, **kwargs):
+            if args[:3] == ["git", "apply", "--binary"] and str(args[-1]).endswith(
+                "install.patch"
+            ):
+                run(
+                    [
+                        *args[:3],
+                        "--include=codex/patches/rust-v1.0.0/0001-feature.patch",
+                        *args[3:],
+                    ],
+                    **kwargs,
+                )
+                raise RuntimeError("interrupted install")
+            return run(args, **kwargs)
+
+        with patch.object(workflow, "run", partial_install):
+            with self.assertRaisesRegex(RuntimeError, "interrupted install"):
+                refresh_patches(self.manifest, dry_run=False)
+        self.assertTrue(self.manifest.install_receipt.exists())
+        self.assertNotEqual(previous, patch_hashes(self.manifest.patch_dir))
+        copy = workflow._copy_editing_tree
+
+        def check_rollback(*args):
+            self.assertEqual(previous, patch_hashes(self.manifest.patch_dir))
+            return copy(*args)
+
+        with patch.object(workflow, "_copy_editing_tree", check_rollback):
+            result = refresh_patches(self.manifest, dry_run=False)
+        self.assertFalse(self.manifest.install_receipt.exists())
+        self.assertNotEqual(previous, result["installedSha256"])
+
+    def test_completed_install_is_recovered_before_next_export(self) -> None:
+        refresh_patches(self.manifest, dry_run=False)
+        (self.manifest.worktree / "src/feature.txt").write_text("another edit\n")
+        write_json = workflow._write_json_atomic
+
+        def interrupt_after_install(path, payload):
+            if path == self.manifest.last_export:
+                raise RuntimeError("interrupted after install")
+            write_json(path, payload)
+
+        with patch.object(workflow, "_write_json_atomic", interrupt_after_install):
+            with self.assertRaisesRegex(RuntimeError, "interrupted after install"):
+                refresh_patches(self.manifest, dry_run=False)
+        installed = patch_hashes(self.manifest.patch_dir)
+        with self.assertRaisesRegex(PatchError, "pending patch installation"):
+            refresh_patches(self.manifest, dry_run=True)
+        result = refresh_patches(self.manifest, dry_run=False)
+        self.assertEqual(installed, result["installedSha256"])
+        self.assertTrue(result["recoveredInstall"])
+        self.assertFalse(self.manifest.install_receipt.exists())
 
 
 class CargoLockContractTests(unittest.TestCase):
@@ -346,6 +459,44 @@ checksum = "abc"
             validate_cargo_lock_compatibility(
                 self.PINNED, bad, workspace_version="1.0.0"
             )
+
+    def test_already_normalized_upstream_lock_is_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cargo = root / "codex-rs"
+            cargo.mkdir()
+            # Synthetic validator fixtures, never consumed by Cargo.
+            (cargo / "Cargo.lock").write_bytes(self.GENERATED)
+            (cargo / "Cargo.toml").write_text(
+                '[workspace.package]\nversion = "1.0.0"\n'
+            )
+            command(["git", "init", "--quiet"], root)
+            command(
+                ["git", "add", "--", "codex-rs/Cargo.lock", "codex-rs/Cargo.toml"], root
+            )
+            command(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "normalized upstream",
+                ],
+                root,
+            )
+            manifest = SimpleNamespace(
+                upstream=SimpleNamespace(revision="HEAD"),
+                patches=[
+                    SimpleNamespace(
+                        owns_generated=lambda path: path == "codex-rs/Cargo.lock"
+                    )
+                ],
+            )
+            self.assertEqual(validate_cargo_lock_tree(manifest, root), 0)
 
 
 if __name__ == "__main__":

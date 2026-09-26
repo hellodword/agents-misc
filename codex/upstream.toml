@@ -3,7 +3,7 @@ ref = "rust-v0.154.0"
 revision = "6b9826e3aa83b1a5947db50f4332cb9c65f1b340"
 worktree = ".work/codex/rust-v0.154.0/src"
 generate_commands = [
-  ["cargo", "tree", "--offline", "-p", "codex-config-schema"],
+  ["cargo", "tree", "-p", "codex-config-schema"],
   ["cargo", "metadata", "--locked", "--offline", "--format-version", "1", "--no-deps"],
   ["cargo", "run", "--locked", "-p", "codex-config-schema", "--bin", "codex-write-config-schema"],
   ["env", "CODEX_APP_SERVER_SCHEMA_ROOT=schema", "CODEX_APP_SERVER_SCHEMA_EXPERIMENTAL=0", "cargo", "test", "--locked", "-p", "codex-app-server-protocol", "--lib", "schema_fixtures_tests::write_schema_fixtures_from_env", "--", "--exact", "--ignored"],

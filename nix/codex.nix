@@ -15,61 +15,22 @@ let
     rev = upstream.revision;
     shallow = true;
   };
-  expectedUpstreamFields = [
-    "generate_commands"
-    "integration_commands"
-    "ref"
-    "revision"
-    "url"
-    "worktree"
-  ];
-  expectedPatchFields = [
-    "behavior"
-    "file"
-    "generated_files"
-    "generated_prefixes"
-    "intent"
-    "source_files"
-    "source_prefixes"
-    "tests"
-  ];
-  unknownUpstreamFields = lib.subtractLists expectedUpstreamFields (builtins.attrNames upstream);
-  missingUpstreamFields = lib.subtractLists (builtins.attrNames upstream) expectedUpstreamFields;
   patches = series.patch or (throw "agents-misc: codex/series.toml must define [[patch]] entries");
-  validatePatch =
-    index: patch:
-    let
-      unknown = lib.subtractLists expectedPatchFields (builtins.attrNames patch);
-      missing = lib.subtractLists (builtins.attrNames patch) expectedPatchFields;
-      expectedPrefix = lib.fixedWidthNumber 4 (index + 1) + "-";
-    in
-    if unknown != [ ] then
-      throw "agents-misc: unknown field(s) in codex/series.toml patch: ${lib.concatStringsSep ", " unknown}"
-    else if missing != [ ] then
-      throw "agents-misc: missing field(s) in codex/series.toml patch: ${lib.concatStringsSep ", " missing}"
-    else if !(lib.hasPrefix expectedPrefix patch.file) then
-      throw "agents-misc: non-contiguous codex patch number at ${patch.file}; expected ${expectedPrefix}"
+  # The maintenance CLI owns manifest semantics. Nix checks the inputs it
+  # consumes: safe paths, a complete ordered set, and the pinned package version.
+  patchOrder = map (
+    patch:
+    if builtins.match "[0-9]{4}-[a-z0-9-]+\\.patch" patch.file == null then
+      throw "agents-misc: invalid Codex patch filename: ${patch.file}"
     else
-      patch;
-  validatedPatches = lib.imap0 validatePatch patches;
-  patchOrder = map (patch: patch.file) validatedPatches;
+      patch.file
+  ) patches;
   patchDir = ../codex/patches + "/${upstream.ref}";
   patchDirectoryEntries = if builtins.pathExists patchDir then builtins.readDir patchDir else { };
   actualPatchFiles = lib.sort (a: b: a < b) (builtins.attrNames patchDirectoryEntries);
   patchFilesAreRegular = lib.all (
     filename: patchDirectoryEntries.${filename} == "regular"
   ) actualPatchFiles;
-  generatedOnlyPatchValid =
-    if validatedPatches == [ ] then
-      false
-    else
-      let
-        generatedPatch = lib.last validatedPatches;
-      in
-      generatedPatch.source_files == [ ]
-      && generatedPatch.source_prefixes == [ ]
-      && lib.elem "codex-rs/Cargo.lock" generatedPatch.generated_files
-      && (generatedPatch.generated_files != [ ] || generatedPatch.generated_prefixes != [ ]);
   patchPaths = map (
     filename:
     let
@@ -89,6 +50,9 @@ let
         version = old.version or (builtins.parseDrvName old.name).version;
         packageRef = "rust-v${version}";
         generatedPatch = lib.last patchPaths;
+        lockChanged = builtins.elem "diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock" (
+          lib.splitString "\n" (builtins.readFile generatedPatch)
+        );
         patchedCargoLock =
           pkgs.runCommand "codex-${version}-patched-Cargo.lock"
             {
@@ -122,14 +86,8 @@ let
           runHook postPatch
         '';
       in
-      if unknownUpstreamFields != [ ] then
-        throw "agents-misc: unknown field(s) in codex/upstream.toml: ${lib.concatStringsSep ", " unknownUpstreamFields}"
-      else if missingUpstreamFields != [ ] then
-        throw "agents-misc: missing field(s) in codex/upstream.toml: ${lib.concatStringsSep ", " missingUpstreamFields}"
-      else if actualPatchFiles != patchOrder || !patchFilesAreRegular then
+      if actualPatchFiles != lib.sort (a: b: a < b) patchOrder || !patchFilesAreRegular then
         throw "agents-misc: codex patch directory contains stale or missing patch files"
-      else if !generatedOnlyPatchValid then
-        throw "agents-misc: final Codex patch must have generated-only ownership"
       else if packageRef != upstream.ref then
         throw "agents-misc: llm-agents Codex ${packageRef} does not match pinned ${upstream.ref}"
       else if patchPaths == [ ] then
@@ -141,7 +99,7 @@ let
           # The generated patch normalizes only local workspace versions in
           # Cargo.lock. Reuse the pinned vendor payload, but give Cargo's
           # consistency hook the same generated lock applied to package source.
-          cargoDeps = patchedCargoDeps;
+          cargoDeps = if lockChanged then patchedCargoDeps else old.cargoDeps;
 
           nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.gitMinimal ];
 

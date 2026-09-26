@@ -43,7 +43,7 @@ codex-refresh-dry-run:
 codex-refresh:
   nix develop .#codex --command python3 codex/scripts/maintain.py refresh
 
-# Run only the focused commands owned by one Codex patch or the integration group.
+# Generate current editing sources, then run the selected patch or integration checks.
 codex-check *args:
   nix develop .#codex --command python3 codex/scripts/maintain.py check "$@"
 

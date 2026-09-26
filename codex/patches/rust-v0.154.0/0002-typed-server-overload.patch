@@ -12,17 +12,57 @@ index e42fa9be0171c082ad088475f41fea6e63f5fae0..5c22dabe6c48f059acef49d5c2540ba8
  }
  
 diff --git a/codex-rs/codex-api/src/api_bridge.rs b/codex-rs/codex-api/src/api_bridge.rs
-index e8d7c4743c5a9e827f5f020847dbc25da58f64ac..faca830581cd74aec70b5efdd597584b2fc9e3f0 100644
+index e8d7c4743c5a9e827f5f020847dbc25da58f64ac..c22275ec3f556804a35381909b25e35887b0d13f 100644
 --- a/codex-rs/codex-api/src/api_bridge.rs
 +++ b/codex-rs/codex-api/src/api_bridge.rs
-@@ -1,5 +1,6 @@
+@@ -1,5 +1,7 @@
  use crate::TransportError;
  use crate::error::ApiError;
 +use crate::error::parse_server_overload;
++use crate::error::retry_advice_ms;
  use crate::rate_limits::parse_promo_message;
  use crate::rate_limits::parse_rate_limit_for_limit;
  use crate::rate_limits::parse_rate_limit_reached_type;
-@@ -38,7 +39,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
+@@ -19,18 +21,36 @@ use serde::Deserialize;
+ use serde_json::Value;
+ 
+ pub fn map_api_error(err: ApiError) -> CodexErr {
++    // Keep newly recognized advice separate from upstream's retry delay so
++    // opting out of patch recovery preserves the producer's original policy.
++    let recovery_delay = match &err {
++        ApiError::Transport(TransportError::Http { headers, body, .. }) => {
++            let payload = body
++                .as_deref()
++                .and_then(|body| serde_json::from_str::<Value>(body).ok())
++                .unwrap_or(Value::Null);
++            retry_advice_ms(headers.as_ref(), &payload).map(std::time::Duration::from_millis)
++        }
++        ApiError::Retryable { recovery_delay, .. }
++        | ApiError::RateLimitExceeded { recovery_delay, .. } => *recovery_delay,
++        _ => None,
++    };
++    map_api_error_inner(err).with_recovery_retry_delay(recovery_delay)
++}
++
++fn map_api_error_inner(err: ApiError) -> CodexErr {
+     match err {
+         ApiError::ContextWindowExceeded => CodexErr::ContextWindowExceeded,
+         ApiError::QuotaExceeded => CodexErr::QuotaExceeded,
+         ApiError::UsageNotIncluded => CodexErr::UsageNotIncluded,
+-        ApiError::Retryable { message, delay } => {
++        ApiError::Retryable { message, delay, .. } => {
+             let error = CodexErr::Stream(message);
+             match delay {
+                 Some(delay) => error.with_retry_delay(delay),
+                 None => error,
+             }
+         }
+-        ApiError::RateLimitExceeded { message, delay } => {
++        ApiError::RateLimitExceeded { message, delay, .. } => {
+             let error = CodexErr::new(CodexErrorDetails::RateLimitExceeded(message));
+             match delay {
+                 Some(delay) => error.with_retry_delay(delay),
+@@ -38,7 +58,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
              }
          }
          ApiError::Stream(msg) => CodexErr::Stream(msg),
@@ -31,7 +71,7 @@ index e8d7c4743c5a9e827f5f020847dbc25da58f64ac..faca830581cd74aec70b5efdd597584b
          ApiError::Api { status, message } => {
              let user_message = api_error_user_message(status, &message);
              CodexErr::UnexpectedStatus(UnexpectedResponseError {
-@@ -72,17 +73,11 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
+@@ -72,17 +92,11 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
              } => {
                  let body_text = body.unwrap_or_default();
  
@@ -54,10 +94,10 @@ index e8d7c4743c5a9e827f5f020847dbc25da58f64ac..faca830581cd74aec70b5efdd597584b
  
                  if (status == http::StatusCode::BAD_REQUEST
 diff --git a/codex-rs/codex-api/src/api_bridge_tests.rs b/codex-rs/codex-api/src/api_bridge_tests.rs
-index 666dea886441e12479650e3839ddea7b9c56e1b6..79a193dc4afd0162d110e5a0a8dae580018d94b7 100644
+index 666dea886441e12479650e3839ddea7b9c56e1b6..1b09916bc8cafe221c006ec4469cb9cae74ce9e0 100644
 --- a/codex-rs/codex-api/src/api_bridge_tests.rs
 +++ b/codex-rs/codex-api/src/api_bridge_tests.rs
-@@ -1,12 +1,13 @@
+@@ -1,15 +1,57 @@
  use super::*;
  use base64::Engine;
 +use codex_protocol::error::ServerOverloadInfo;
@@ -73,7 +113,67 @@ index 666dea886441e12479650e3839ddea7b9c56e1b6..79a193dc4afd0162d110e5a0a8dae580
      assert!(matches!(err.details(), CodexErrorDetails::ServerOverloaded));
  }
  
-@@ -52,7 +53,7 @@ fn map_api_error_preserves_retry_delay() {
++#[test]
++fn codex_patch_http_advice_is_available_without_changing_upstream_delays() {
++    for (status, body) in [
++        (503, r#"{"error":{"message":"busy"}}"#),
++        (500, "not json"),
++        (429, r#"{"error":{"message":"rate limited"}}"#),
++        (429, r#"{"error":{"type":"usage_limit_reached"}}"#),
++    ] {
++        for (header, field, expected) in [
++            (Some("600"), None, Some(600_000)),
++            (Some("0"), None, Some(0)),
++            (None, Some(42), Some(42)),
++            (Some("invalid"), None, None),
++        ] {
++            let mut headers = HeaderMap::new();
++            if let Some(value) = header {
++                headers.insert("retry-after", value.parse().unwrap());
++            }
++            let body = if let Some(ms) = field {
++                let mut value =
++                    serde_json::from_str::<Value>(body).unwrap_or(serde_json::json!({"error": {}}));
++                value["error"]["retry_after_ms"] = ms.into();
++                value.to_string()
++            } else {
++                body.to_string()
++            };
++            let error = map_api_error(ApiError::Transport(TransportError::Http {
++                status: http::StatusCode::from_u16(status).unwrap(),
++                url: None,
++                headers: Some(headers),
++                body: Some(body),
++            }));
++            assert_eq!(error.retry_delay(), None);
++            assert_eq!(
++                error.recovery_retry_delay(),
++                expected.map(std::time::Duration::from_millis)
++            );
++        }
++    }
++}
++
+ #[test]
+ fn map_api_error_preserves_retry_delay() {
+     let retry_delay = std::time::Duration::from_secs(17);
+@@ -18,6 +60,7 @@ fn map_api_error_preserves_retry_delay() {
+             ApiError::Retryable {
+                 message: "retry later".to_string(),
+                 delay: Some(retry_delay),
++                recovery_delay: None,
+             },
+             CodexErrorInfo::Other,
+             "stream disconnected before completion: retry later",
+@@ -26,6 +69,7 @@ fn map_api_error_preserves_retry_delay() {
+             ApiError::RateLimitExceeded {
+                 message: "retry later".to_string(),
+                 delay: Some(retry_delay),
++                recovery_delay: None,
+             },
+             CodexErrorInfo::RateLimitExceeded,
+             "rate limit exceeded: retry later",
+@@ -52,7 +96,7 @@ fn map_api_error_preserves_retry_delay() {
  }
  
  #[test]
@@ -82,7 +182,7 @@ index 666dea886441e12479650e3839ddea7b9c56e1b6..79a193dc4afd0162d110e5a0a8dae580
      let body = serde_json::json!({
          "error": {
              "code": "server_is_overloaded"
-@@ -69,6 +70,92 @@ fn map_api_error_maps_server_overloaded_from_503_body() {
+@@ -69,6 +113,92 @@ fn map_api_error_maps_server_overloaded_from_503_body() {
      assert!(matches!(err.details(), CodexErrorDetails::ServerOverloaded));
  }
  
@@ -176,7 +276,7 @@ index 666dea886441e12479650e3839ddea7b9c56e1b6..79a193dc4afd0162d110e5a0a8dae580
  fn map_api_error_maps_cloudflare_blocked_response_to_user_message() {
      let mut headers = HeaderMap::new();
 diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
-index 95d41e0d9154de47cdbc75f93e8aafa7fcf00966..ca54e6775fb0bcdfead9a82034248cb08dda1ca7 100644
+index 95d41e0d9154de47cdbc75f93e8aafa7fcf00966..3f813cd92174a7c1460b8df78c58fbe25cdd310b 100644
 --- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
 +++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
 @@ -6,6 +6,7 @@ use crate::common::SafetyBufferingTreatment;
@@ -187,7 +287,19 @@ index 95d41e0d9154de47cdbc75f93e8aafa7fcf00966..ca54e6775fb0bcdfead9a82034248cb0
  use crate::provider::Provider;
  use crate::rate_limits::parse_rate_limit_event;
  use crate::safety_buffering::treatment_from_headers;
-@@ -645,7 +646,18 @@ fn map_wrapped_websocket_error_event(
+@@ -642,10 +643,30 @@ fn map_wrapped_websocket_error_event(
+                 .clone()
+                 .unwrap_or_else(|| fallback_message.to_string()),
+             delay: None,
++            recovery_delay: serde_json::from_str::<Value>(&original_payload)
++                .ok()
++                .and_then(|payload| {
++                    crate::error::retry_advice_ms(
++                        headers.as_ref().map(json_headers_to_http_headers).as_ref(),
++                        &payload,
++                    )
++                })
++                .map(Duration::from_millis),
          });
      }
  
@@ -207,7 +319,7 @@ index 95d41e0d9154de47cdbc75f93e8aafa7fcf00966..ca54e6775fb0bcdfead9a82034248cb0
      if status.is_success() {
          return None;
      }
-@@ -653,7 +665,7 @@ fn map_wrapped_websocket_error_event(
+@@ -653,7 +674,7 @@ fn map_wrapped_websocket_error_event(
      Some(ApiError::Transport(TransportError::Http {
          status,
          url: None,
@@ -216,7 +328,7 @@ index 95d41e0d9154de47cdbc75f93e8aafa7fcf00966..ca54e6775fb0bcdfead9a82034248cb0
          body: Some(original_payload),
      }))
  }
-@@ -1057,6 +1069,72 @@ mod tests {
+@@ -1057,6 +1078,72 @@ mod tests {
          assert!(body.contains("The usage limit has been reached"));
      }
  
@@ -289,8 +401,17 @@ index 95d41e0d9154de47cdbc75f93e8aafa7fcf00966..ca54e6775fb0bcdfead9a82034248cb0
      #[test]
      fn parse_wrapped_websocket_error_event_ignores_non_error_payloads() {
          let payload = json!({
+@@ -1113,7 +1200,7 @@ mod tests {
+             .expect("expected websocket error payload to be parsed");
+         let api_error = map_wrapped_websocket_error_event(wrapped_error, payload)
+             .expect("expected websocket error payload to map to ApiError");
+-        let ApiError::Retryable { message, delay } = api_error else {
++        let ApiError::Retryable { message, delay, .. } = api_error else {
+             panic!("expected ApiError::Retryable");
+         };
+         assert_eq!(message, WEBSOCKET_CONNECTION_LIMIT_REACHED_MESSAGE);
 diff --git a/codex-rs/codex-api/src/error.rs b/codex-rs/codex-api/src/error.rs
-index d1d83cf401476593bce9bc918295044019a8b74d..7cca7e27b017fd5c976eaa33d436d0c272b6dac9 100644
+index d1d83cf401476593bce9bc918295044019a8b74d..130b1315f5fe5257fbbac1ebad163dce18583c5f 100644
 --- a/codex-rs/codex-api/src/error.rs
 +++ b/codex-rs/codex-api/src/error.rs
 @@ -1,7 +1,13 @@
@@ -307,7 +428,21 @@ index d1d83cf401476593bce9bc918295044019a8b74d..7cca7e27b017fd5c976eaa33d436d0c2
  use std::time::Duration;
  use thiserror::Error;
  
-@@ -41,7 +47,7 @@ pub enum ApiError {
+@@ -23,11 +29,13 @@ pub enum ApiError {
+     Retryable {
+         message: String,
+         delay: Option<Duration>,
++        recovery_delay: Option<Duration>,
+     },
+     #[error("rate limit exceeded: {message}")]
+     RateLimitExceeded {
+         message: String,
+         delay: Option<Duration>,
++        recovery_delay: Option<Duration>,
+     },
+     #[error("rate limit: {0}")]
+     RateLimit(String),
+@@ -41,7 +49,7 @@ pub enum ApiError {
          misalignment: Option<MisalignmentErrorDetails>,
      },
      #[error("server overloaded")]
@@ -316,7 +451,7 @@ index d1d83cf401476593bce9bc918295044019a8b74d..7cca7e27b017fd5c976eaa33d436d0c2
  }
  
  impl From<RateLimitError> for ApiError {
-@@ -49,3 +55,244 @@ impl From<RateLimitError> for ApiError {
+@@ -49,3 +57,262 @@ impl From<RateLimitError> for ApiError {
          Self::RateLimit(err.to_string())
      }
  }
@@ -367,9 +502,7 @@ index d1d83cf401476593bce9bc918295044019a8b74d..7cca7e27b017fd5c976eaa33d436d0c2
 +        .filter(|message| !message.trim().is_empty())
 +        .unwrap_or(DEFAULT_OVERLOAD_MESSAGE)
 +        .to_string();
-+    let retry_after_ms = headers
-+        .and_then(|headers| retry_after_header_ms_at(headers, &now))
-+        .or_else(|| error.get("retry_after_ms").and_then(Value::as_u64));
++    let retry_after_ms = retry_advice_ms_at(headers, payload, now);
 +
 +    Some(ServerOverloadInfo {
 +        code: Some(code.to_string()),
@@ -377,6 +510,26 @@ index d1d83cf401476593bce9bc918295044019a8b74d..7cca7e27b017fd5c976eaa33d436d0c2
 +        message,
 +        retry_after_ms,
 +    })
++}
++
++pub(crate) fn retry_advice_ms(headers: Option<&HeaderMap>, payload: &Value) -> Option<u64> {
++    retry_advice_ms_at(headers, payload, Utc::now())
++}
++
++fn retry_advice_ms_at(
++    headers: Option<&HeaderMap>,
++    payload: &Value,
++    now: DateTime<Utc>,
++) -> Option<u64> {
++    headers
++        .and_then(|headers| retry_after_header_ms_at(headers, &now))
++        .or_else(|| {
++            payload
++                .get("error")
++                .unwrap_or(payload)
++                .get("retry_after_ms")
++                .and_then(Value::as_u64)
++        })
 +}
 +
 +fn retry_after_header_ms_at(headers: &HeaderMap, now: &DateTime<Utc>) -> Option<u64> {
@@ -562,7 +715,7 @@ index d1d83cf401476593bce9bc918295044019a8b74d..7cca7e27b017fd5c976eaa33d436d0c2
 +    }
 +}
 diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
-index e4f5f04d62b3834cef16cf222cb55f288ca50841..d2f25c7559834a2c0af26cd42b488d76e648190e 100644
+index e4f5f04d62b3834cef16cf222cb55f288ca50841..05bd1578008c0c581492f2c46b832779a38ef803 100644
 --- a/codex-rs/codex-api/src/sse/responses.rs
 +++ b/codex-rs/codex-api/src/sse/responses.rs
 @@ -3,6 +3,7 @@ use crate::common::ResponseStream;
@@ -573,96 +726,46 @@ index e4f5f04d62b3834cef16cf222cb55f288ca50841..d2f25c7559834a2c0af26cd42b488d76
  use crate::rate_limits::parse_all_rate_limits;
  use crate::safety_buffering::treatment_from_headers;
  use crate::telemetry::SseTelemetry;
-@@ -417,49 +418,51 @@ pub fn process_responses_event(
+@@ -416,6 +417,9 @@ pub fn process_responses_event(
+         }
          "response.failed" => {
              if let Some(resp_val) = event.response {
++                if let Some(info) = parse_server_overload(None, None, &resp_val) {
++                    return Err(ResponsesEventError::Api(ApiError::ServerOverloaded(info)));
++                }
                  let mut response_error = ApiError::Stream("response.failed event received".into());
--                if let Some(error) = resp_val.get("error")
--                    && let Ok(error) = serde_json::from_value::<Error>(error.clone())
--                {
--                    if is_context_window_error(&error) {
--                        response_error = ApiError::ContextWindowExceeded;
--                    } else if is_quota_exceeded_error(&error) {
--                        response_error = ApiError::QuotaExceeded;
--                    } else if is_usage_not_included(&error) {
--                        response_error = ApiError::UsageNotIncluded;
--                    } else if is_cyber_policy_error(&error) {
--                        let message = cyber_policy_message(error.message);
--                        response_error = ApiError::CyberPolicy { message };
--                    } else if error.code.as_deref() == Some("misalignment_policy_violation") {
--                        let message = error
-+                if let Some(error_value) = resp_val.get("error") {
-+                    if let Some(info) = parse_server_overload(None, None, error_value) {
-+                        response_error = ApiError::ServerOverloaded(info);
-+                    } else if let Ok(error) = serde_json::from_value::<Error>(error_value.clone()) {
-+                        if is_context_window_error(&error) {
-+                            response_error = ApiError::ContextWindowExceeded;
-+                        } else if is_quota_exceeded_error(&error) {
-+                            response_error = ApiError::QuotaExceeded;
-+                        } else if is_usage_not_included(&error) {
-+                            response_error = ApiError::UsageNotIncluded;
-+                        } else if is_cyber_policy_error(&error) {
-+                            let message = cyber_policy_message(error.message);
-+                            response_error = ApiError::CyberPolicy { message };
-+                        } else if error.code.as_deref() == Some("misalignment_policy_violation") {
-+                            let message = error
+                 if let Some(error) = resp_val.get("error")
+                     && let Ok(error) = serde_json::from_value::<Error>(error.clone())
+@@ -449,16 +453,22 @@ pub fn process_responses_event(
                              .message
-                             .filter(|message| !message.trim().is_empty())
-                             .unwrap_or_else(|| {
-                                 "This request was blocked due to a misalignment policy violation."
-                                     .to_string()
-                             });
--                        response_error = ApiError::MisalignmentPolicyViolation {
--                            message,
--                            misalignment: error.misalignment.and_then(|details| {
--                                serde_json::from_value::<MisalignmentErrorDetails>(details).ok()
--                            }),
--                        };
--                    } else if matches!(error.code.as_deref(), Some("invalid_prompt" | "bio_policy"))
--                    {
--                        let message = error
--                            .message
--                            .unwrap_or_else(|| "Invalid request.".to_string());
--                        response_error = ApiError::InvalidRequest { message };
+                             .unwrap_or_else(|| "Invalid request.".to_string());
+                         response_error = ApiError::InvalidRequest { message };
 -                    } else if is_server_overloaded_error(&error) {
 -                        response_error = ApiError::ServerOverloaded;
--                    } else {
--                        let delay = try_parse_retry_after(&error);
--                        let message = error.message.unwrap_or_default();
--                        response_error = match error.code.as_deref() {
+                     } else {
+                         let delay = try_parse_retry_after(&error);
++                        let recovery_delay = crate::error::retry_advice_ms(None, &resp_val)
++                            .map(Duration::from_millis);
+                         let message = error.message.unwrap_or_default();
+                         response_error = match error.code.as_deref() {
 -                            Some("rate_limit_exceeded") => {
 -                                ApiError::RateLimitExceeded { message, delay }
 -                            }
 -                            _ => ApiError::Retryable { message, delay },
--                        };
-+                            response_error = ApiError::MisalignmentPolicyViolation {
++                            Some("rate_limit_exceeded") => ApiError::RateLimitExceeded {
 +                                message,
-+                                misalignment: error.misalignment.and_then(|details| {
-+                                    serde_json::from_value::<MisalignmentErrorDetails>(details).ok()
-+                                }),
-+                            };
-+                        } else if matches!(
-+                            error.code.as_deref(),
-+                            Some("invalid_prompt" | "bio_policy")
-+                        ) {
-+                            let message = error
-+                                .message
-+                                .unwrap_or_else(|| "Invalid request.".to_string());
-+                            response_error = ApiError::InvalidRequest { message };
-+                        } else {
-+                            let delay = try_parse_retry_after(&error);
-+                            let message = error.message.unwrap_or_default();
-+                            response_error = match error.code.as_deref() {
-+                                Some("rate_limit_exceeded") => {
-+                                    ApiError::RateLimitExceeded { message, delay }
-+                                }
-+                                _ => ApiError::Retryable { message, delay },
-+                            };
-+                        }
++                                delay,
++                                recovery_delay,
++                            },
++                            _ => ApiError::Retryable {
++                                message,
++                                delay,
++                                recovery_delay,
++                            },
+                         };
                      }
                  }
-                 return Err(ResponsesEventError::Api(response_error));
-@@ -724,11 +727,6 @@ fn is_cyber_policy_error(error: &Error) -> bool {
+@@ -724,11 +734,6 @@ fn is_cyber_policy_error(error: &Error) -> bool {
      error.code.as_deref() == Some("cyber_policy")
  }
  
@@ -674,10 +777,50 @@ index e4f5f04d62b3834cef16cf222cb55f288ca50841..d2f25c7559834a2c0af26cd42b488d76
  fn cyber_policy_fallback_message() -> String {
      "This request has been flagged for possible cybersecurity risk.".to_string()
  }
-@@ -1155,6 +1153,33 @@ mod tests {
+@@ -1103,7 +1108,7 @@ mod tests {
+         assert_eq!(events.len(), 1);
+ 
+         match &events[0] {
+-            Err(ApiError::RateLimitExceeded { message, delay }) => {
++            Err(ApiError::RateLimitExceeded { message, delay, .. }) => {
+                 assert_eq!(
+                     message,
+                     "Rate limit reached for gpt-5.1 in organization org-AAA on tokens per min (TPM): Limit 30000, Used 22999, Requested 12528. Please try again in 11.054s. Visit https://platform.openai.com/account/rate-limits to learn more."
+@@ -1136,6 +1141,7 @@ mod tests {
+                         Err(ApiError::RateLimitExceeded {
+                             message: actual,
+                             delay,
++                            ..
+                         }),
+                     ],
+                 )
+@@ -1145,6 +1151,7 @@ mod tests {
+                         Err(ApiError::Retryable {
+                             message: actual,
+                             delay,
++                            ..
+                         }),
+                     ],
+                 ) => {
+@@ -1155,6 +1162,48 @@ mod tests {
          }
      }
  
++    #[tokio::test]
++    async fn codex_patch_sse_advice_preserves_upstream_delay() {
++        for code in ["rate_limit_exceeded", "server_error"] {
++            let event = json!({
++                "type": "response.failed",
++                "response": {"error": {"code": code, "message": "retry later", "retry_after_ms": 600000}},
++            });
++            let sse = format!("event: response.failed\ndata: {event}\n\n");
++            let mut events = collect_events(&[sse.as_bytes()]).await;
++            let error = crate::api_bridge::map_api_error(events.remove(0).unwrap_err());
++            assert_eq!(error.retry_delay(), None);
++            assert_eq!(error.recovery_retry_delay(), Some(Duration::from_secs(600)));
++        }
++    }
++
 +    #[tokio::test]
 +    async fn codex_patch_failed_response_classifies_raw_server_overload_before_full_error() {
 +        for (code, retry_after_ms) in [("server_is_overloaded", 1_250_u64), ("slow_down", 2_000)] {
@@ -735,7 +878,7 @@ index 993e2d48d7322b3b37d981b45e8fa57f3ba3470b..95a8a4787f0500950e141984210ad01a
              | LunaSamplerError::Api(ApiError::Transport(
                  TransportError::RetryLimit
 diff --git a/codex-rs/protocol/src/error.rs b/codex-rs/protocol/src/error.rs
-index be0192f61aa580ea6660084d0464504900da24ef..0388805a99559a9e0cf15d4a9c1f552bd1cf33bd 100644
+index be0192f61aa580ea6660084d0464504900da24ef..a7fbff6022740ed91427ff43c4669f31bd558c5c 100644
 --- a/codex-rs/protocol/src/error.rs
 +++ b/codex-rs/protocol/src/error.rs
 @@ -20,6 +20,8 @@ use codex_http_client::HttpError;
@@ -776,31 +919,34 @@ index be0192f61aa580ea6660084d0464504900da24ef..0388805a99559a9e0cf15d4a9c1f552b
  /// Limit UI error messages to a reasonable size while keeping useful context.
  const ERROR_MESSAGE_UI_MAX_BYTES: usize = 2 * 1024;
  
-@@ -71,6 +95,7 @@ pub enum SandboxErr {
+@@ -71,6 +95,8 @@ pub enum SandboxErr {
  pub struct CodexErr {
      details: CodexErrorDetails,
      retry_delay: Option<Duration>,
++    recovery_retry_delay: Option<Duration>,
 +    server_overload: Option<ServerOverloadInfo>,
  }
  
  /// The semantic category and diagnostic payload for a [`CodexErr`].
-@@ -225,6 +250,7 @@ impl From<CodexErrorDetails> for CodexErr {
+@@ -225,6 +251,8 @@ impl From<CodexErrorDetails> for CodexErr {
          Self {
              details,
              retry_delay: None,
++            recovery_retry_delay: None,
 +            server_overload: None,
          }
      }
  }
-@@ -289,6 +315,7 @@ macro_rules! codex_err_unit_constructors {
+@@ -289,6 +317,8 @@ macro_rules! codex_err_unit_constructors {
              pub const $variant: Self = Self {
                  details: CodexErrorDetails::$variant,
                  retry_delay: None,
++                recovery_retry_delay: None,
 +                server_overload: None,
              };
          )*
      };
-@@ -363,11 +390,27 @@ impl CodexErr {
+@@ -363,11 +393,28 @@ impl CodexErr {
          details.into()
      }
  
@@ -810,6 +956,7 @@ index be0192f61aa580ea6660084d0464504900da24ef..0388805a99559a9e0cf15d4a9c1f552b
 +        Self {
 +            details: CodexErrorDetails::ServerOverloaded,
 +            retry_delay,
++            recovery_retry_delay: None,
 +            server_overload: Some(info),
 +        }
 +    }
@@ -828,6 +975,23 @@ index be0192f61aa580ea6660084d0464504900da24ef..0388805a99559a9e0cf15d4a9c1f552b
      pub fn is_retryable(&self) -> bool {
          match self.details() {
              CodexErrorDetails::TurnAborted
+@@ -415,6 +462,16 @@ impl CodexErr {
+         self.retry_delay
+     }
+ 
++    /// Advice consumed only by explicitly configured downstream recovery.
++    pub fn recovery_retry_delay(&self) -> Option<Duration> {
++        self.recovery_retry_delay.or(self.retry_delay)
++    }
++
++    pub fn with_recovery_retry_delay(mut self, delay: Option<Duration>) -> Self {
++        self.recovery_retry_delay = delay;
++        self
++    }
++
+     pub fn with_retry_delay(mut self, retry_delay: Duration) -> Self {
+         self.retry_delay = Some(retry_delay);
+         self
 diff --git a/codex-rs/protocol/src/error_tests.rs b/codex-rs/protocol/src/error_tests.rs
 index ca0b7b2cff5f31e77f8a64b7c3feb982746c5d6c..e37f7bf4ba60f82d5e25a9a9562bbebf9a1d246d 100644
 --- a/codex-rs/protocol/src/error_tests.rs
@@ -856,7 +1020,7 @@ index ca0b7b2cff5f31e77f8a64b7c3feb982746c5d6c..e37f7bf4ba60f82d5e25a9a9562bbebf
  fn sandbox_denied_uses_aggregated_output_when_stderr_empty() {
      let output = ExecToolCallOutput {
 diff --git a/codex-rs/response-debug-context/src/lib.rs b/codex-rs/response-debug-context/src/lib.rs
-index 42825a7c986ddacc71eb01c74c209840043988da..18a45696abbb3418b853b1d06ddae5dd3f63532c 100644
+index 42825a7c986ddacc71eb01c74c209840043988da..ee7fd44d6b9f317c7442b0de672d6add7aeae82e 100644
 --- a/codex-rs/response-debug-context/src/lib.rs
 +++ b/codex-rs/response-debug-context/src/lib.rs
 @@ -85,7 +85,7 @@ pub fn telemetry_api_error_message(error: &ApiError) -> String {
@@ -868,3 +1032,11 @@ index 42825a7c986ddacc71eb01c74c209840043988da..18a45696abbb3418b853b1d06ddae5dd
      }
  }
  
+@@ -152,6 +152,7 @@ mod tests {
+             telemetry_api_error_message(&ApiError::RateLimitExceeded {
+                 message: "private upstream diagnostic".to_string(),
+                 delay: Some(std::time::Duration::from_secs(1)),
++                recovery_delay: None,
+             }),
+             "rate limit exceeded"
+         );

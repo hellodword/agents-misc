@@ -38,7 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="validate candidate patch hashes without changing tracked files",
     )
     check = commands.add_parser(
-        "check", help="run focused tests for one patch or the integration group"
+        "check", help="generate and test the current editing checkout"
     )
     check.add_argument("selector", help="patch number/name or integration")
     commands.add_parser("verify", help="replay, regenerate, and run all declared gates")
@@ -49,7 +49,7 @@ def main() -> int:
     args = build_parser().parse_args()
     manifest = load_manifest(
         args.repo_root,
-        require_patch_files=args.command not in {"fetch", "refresh"},
+        require_patch_files=args.command not in {"fetch", "refresh", "check"},
     )
     if args.command == "fetch":
         result = fetch_upstream(manifest)

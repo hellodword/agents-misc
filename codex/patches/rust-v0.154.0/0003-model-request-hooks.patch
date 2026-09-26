@@ -164,7 +164,7 @@ index 01ed3eab47f0a5d45eeaa9a95d7240efeea633d6..51b65766cfc1b2f6f5e3365b324efdcd
      changed |= append_vec(&mut existing.session_end, session_end);
      changed |= append_vec(&mut existing.user_prompt_submit, user_prompt_submit);
 diff --git a/codex-rs/core/src/hook_runtime.rs b/codex-rs/core/src/hook_runtime.rs
-index e17f1508e7ffdb313af4c444d36dc4248e4d680b..dea17f6889d58c32196e71001a1d7f56e38c8968 100644
+index e17f1508e7ffdb313af4c444d36dc4248e4d680b..a0fd554136ea400aee5891f6712854a8f51d8d4d 100644
 --- a/codex-rs/core/src/hook_runtime.rs
 +++ b/codex-rs/core/src/hook_runtime.rs
 @@ -29,6 +29,8 @@ use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
@@ -176,52 +176,25 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..dea17f6889d58c32196e71001a1d7f56
  use codex_protocol::items::FunctionCallOutputItem;
  use codex_protocol::items::TurnItem;
  use codex_protocol::items::UserMessageItem;
-@@ -79,6 +81,54 @@ pub(crate) enum PreToolUseHookResult {
+@@ -79,6 +81,27 @@ pub(crate) enum PreToolUseHookResult {
      Blocked(String),
  }
  
-+#[derive(Debug, Clone, Copy)]
-+pub(crate) struct ModelRequestHookContext {
-+    operation: codex_hooks::ModelRequestOperation,
-+}
-+
-+impl ModelRequestHookContext {
-+    pub(crate) fn sampling() -> Self {
-+        Self {
-+            operation: codex_hooks::ModelRequestOperation::Sampling,
-+        }
-+    }
-+
-+    pub(crate) fn local_compact() -> Self {
-+        Self {
-+            operation: codex_hooks::ModelRequestOperation::LocalCompact,
-+        }
-+    }
-+
-+    pub(crate) fn remote_compact() -> Self {
-+        Self {
-+            operation: codex_hooks::ModelRequestOperation::RemoteCompact,
-+        }
-+    }
-+
-+    pub(crate) fn remote_compaction_v2() -> Self {
-+        Self {
-+            operation: codex_hooks::ModelRequestOperation::RemoteCompactV2,
-+        }
-+    }
-+}
-+
 +#[derive(Debug, Clone)]
 +pub(crate) struct ModelRequestFailure {
-+    context: ModelRequestHookContext,
++    operation: codex_hooks::ModelRequestOperation,
 +    attempt: u64,
 +    error: codex_hooks::ModelRequestError,
 +}
 +
 +impl ModelRequestFailure {
-+    pub(crate) fn new(context: ModelRequestHookContext, attempt: u64, error: &CodexErr) -> Self {
++    pub(crate) fn new(
++        operation: codex_hooks::ModelRequestOperation,
++        attempt: u64,
++        error: &CodexErr,
++    ) -> Self {
 +        Self {
-+            context,
++            operation,
 +            attempt: attempt.max(1),
 +            error: model_request_error_payload(error),
 +        }
@@ -231,7 +204,7 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..dea17f6889d58c32196e71001a1d7f56
  struct ContextInjectingHookOutcome {
      hook_events: Vec<HookCompletedEvent>,
      outcome: HookRuntimeOutcome,
-@@ -589,6 +639,72 @@ pub(crate) async fn run_post_compact_hooks(
+@@ -589,6 +612,72 @@ pub(crate) async fn run_post_compact_hooks(
      }
  }
  
@@ -249,7 +222,7 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..dea17f6889d58c32196e71001a1d7f56
 +        cwd: turn_context.cwd.clone(),
 +        model: turn_context.model_info().slug.clone(),
 +        provider: turn_context.config.model_provider_id.clone(),
-+        operation: failure.context.operation,
++        operation: failure.operation,
 +        attempt: failure.attempt,
 +        next_action,
 +        error: failure.error,
@@ -284,7 +257,7 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..dea17f6889d58c32196e71001a1d7f56
 +        cwd: turn_context.cwd.clone(),
 +        model: turn_context.model_info().slug.clone(),
 +        provider: turn_context.config.model_provider_id.clone(),
-+        operation: failure.context.operation,
++        operation: failure.operation,
 +        attempt: failure.attempt,
 +        error: failure.error,
 +    };
@@ -304,7 +277,7 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..dea17f6889d58c32196e71001a1d7f56
  #[instrument(level = "trace", skip_all)]
  pub(crate) async fn run_legacy_after_agent_hook(
      sess: &Arc<Session>,
-@@ -965,6 +1081,8 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str);
+@@ -965,6 +1054,8 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str);
          HookEventName::PostToolUse => "PostToolUse",
          HookEventName::PreCompact => "PreCompact",
          HookEventName::PostCompact => "PostCompact",
@@ -313,7 +286,7 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..dea17f6889d58c32196e71001a1d7f56
          HookEventName::SessionStart => "SessionStart",
          HookEventName::SessionEnd => "SessionEnd",
          HookEventName::UserPromptSubmit => "UserPromptSubmit",
-@@ -1005,6 +1123,77 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str);
+@@ -1005,6 +1096,77 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str);
      ]
  }
  
@@ -391,7 +364,7 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..dea17f6889d58c32196e71001a1d7f56
  fn hook_permission_mode(turn_context: &TurnContext) -> String {
      match turn_context.approval_policy() {
          AskForApproval::Never => "bypassPermissions",
-@@ -1047,10 +1236,15 @@ fn compaction_trigger_label(value: CompactionTrigger) -> &'static str {
+@@ -1047,10 +1209,15 @@ fn compaction_trigger_label(value: CompactionTrigger) -> &'static str {
  mod tests {
      use std::sync::Arc;
  
@@ -407,7 +380,7 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..dea17f6889d58c32196e71001a1d7f56
      use codex_protocol::models::ContentItem;
      use codex_protocol::protocol::HookEventName;
      use codex_protocol::protocol::HookExecutionMode;
-@@ -1070,12 +1264,94 @@ mod tests {
+@@ -1070,12 +1237,94 @@ mod tests {
      use super::emit_hook_started_events;
      use super::hook_run_analytics_payload;
      use super::hook_run_metric_tags;
@@ -503,13 +476,20 @@ index e17f1508e7ffdb313af4c444d36dc4248e4d680b..dea17f6889d58c32196e71001a1d7f56
      #[test]
      fn additional_context_messages_stay_separate_and_ordered() {
 diff --git a/codex-rs/hooks/src/engine/command_runner.rs b/codex-rs/hooks/src/engine/command_runner.rs
-index b68474f0cfa9c4e5a208bfd0de4ae9fddd5821b6..2a04599bcb156f233166f913ab9843791be6e5db 100644
+index b68474f0cfa9c4e5a208bfd0de4ae9fddd5821b6..e2c2990bf75020443a0b4136f9718193bab6942b 100644
 --- a/codex-rs/hooks/src/engine/command_runner.rs
 +++ b/codex-rs/hooks/src/engine/command_runner.rs
-@@ -176,6 +176,33 @@ impl CommandHookRuntime {
+@@ -176,6 +176,40 @@ impl CommandHookRuntime {
          });
      }
  
++    /// Await owned background work while retaining the shared async-hook limit.
++    pub(crate) async fn run_async_task<T>(&self, task: impl Future<Output = T>) -> Option<T> {
++        let concurrency_limit = Arc::clone(&self.lock_state().concurrency_limit);
++        let _permit = concurrency_limit.acquire_owned().await.ok()?;
++        Some(task.await)
++    }
++
 +    /// Track session-owned work that manages its own concurrency.
 +    ///
 +    /// Unlike individual async hooks, an owner task must not hold one of the
@@ -541,7 +521,7 @@ index b68474f0cfa9c4e5a208bfd0de4ae9fddd5821b6..2a04599bcb156f233166f913ab984379
          let mut tasks = {
              let mut state = self.lock_state();
 diff --git a/codex-rs/hooks/src/engine/dispatcher.rs b/codex-rs/hooks/src/engine/dispatcher.rs
-index c5ee0d2ce1da03ec07b08f9ba692088142673e99..d0b353c397e51ecf0e88a5f2b98847880eab2926 100644
+index c5ee0d2ce1da03ec07b08f9ba692088142673e99..b0edc0418fce50e90051a0f4c6a05f379c712845 100644
 --- a/codex-rs/hooks/src/engine/dispatcher.rs
 +++ b/codex-rs/hooks/src/engine/dispatcher.rs
 @@ -67,9 +67,11 @@ pub(crate) fn select_handlers_for_matcher_inputs(
@@ -559,7 +539,76 @@ index c5ee0d2ce1da03ec07b08f9ba692088142673e99..d0b353c397e51ecf0e88a5f2b9884788
          })
          .cloned()
          .collect()
-@@ -263,6 +265,8 @@ pub(crate) fn scope_for_event(event_name: HookEventName) -> HookScope {
+@@ -131,7 +133,11 @@ pub(crate) async fn execute_handlers_with_metadata<T: 'static>(
+             executor_handlers.push(handler);
+             continue;
+         }
+-        if handler.execution_mode() == HookExecutionMode::Async {
++        // Recovery already runs in its bounded background dispatcher. Await
++        // async handlers here so slow hooks cannot escape that queue's bound.
++        if handler.execution_mode() == HookExecutionMode::Async
++            && handler.event_name != HookEventName::ModelRequestRecovery
++        {
+             engine.command_runtime.schedule_async_hook(
+                 handler,
+                 input_json.clone(),
+@@ -144,9 +150,16 @@ pub(crate) async fn execute_handlers_with_metadata<T: 'static>(
+         let input_json = input_json.clone();
+         let turn_id = turn_id.clone();
+         pending.push(async move {
+-            let result =
+-                execute_handler(engine, &handler, &input_json, cwd, /*metadata*/ None).await;
+-            (configured_order, parse(&handler, result, turn_id))
++            let run = async {
++                let result =
++                    execute_handler(engine, &handler, &input_json, cwd, /*metadata*/ None).await;
++                (configured_order, parse(&handler, result, turn_id))
++            };
++            if handler.execution_mode() == HookExecutionMode::Async {
++                engine.command_runtime.run_async_task(run).await
++            } else {
++                Some(run.await)
++            }
+         });
+     }
+ 
+@@ -154,7 +167,10 @@ pub(crate) async fn execute_handlers_with_metadata<T: 'static>(
+     let mut completion_order = 0;
+     let mut should_stop = false;
+     let mut should_block = false;
+-    while let Some((configured_order, mut parsed)) = pending.next().await {
++    while let Some(result) = pending.next().await {
++        let Some((configured_order, mut parsed)) = result else {
++            continue;
++        };
+         should_stop |= parsed.completed.run.status == HookRunStatus::Stopped;
+         should_block |= parsed.completed.run.status == HookRunStatus::Blocked;
+         parsed.completion_order = completion_order;
+@@ -169,7 +185,8 @@ pub(crate) async fn execute_handlers_with_metadata<T: 'static>(
+             let input_json = input_json.clone();
+             let cwd = cwd.to_path_buf();
+             let metadata = metadata.cloned();
+-            engine.command_runtime.schedule_async_task(async move {
++            let await_completion = handler.event_name == HookEventName::ModelRequestRecovery;
++            let task = async move {
+                 let result =
+                     execute_handler(&task_engine, &handler, &input_json, &cwd, metadata.as_ref())
+                         .await;
+@@ -180,7 +197,12 @@ pub(crate) async fn execute_handlers_with_metadata<T: 'static>(
+                         "executor-scoped hook failed"
+                     );
+                 }
+-            });
++            };
++            if await_completion {
++                let _ = engine.command_runtime.run_async_task(task).await;
++            } else {
++                engine.command_runtime.schedule_async_task(task);
++            }
+         }
+     }
+ 
+@@ -263,6 +285,8 @@ pub(crate) fn scope_for_event(event_name: HookEventName) -> HookScope {
          | HookEventName::PostToolUse
          | HookEventName::PreCompact
          | HookEventName::PostCompact
@@ -568,7 +617,7 @@ index c5ee0d2ce1da03ec07b08f9ba692088142673e99..d0b353c397e51ecf0e88a5f2b9884788
          | HookEventName::UserPromptSubmit
          | HookEventName::SubagentStop
          | HookEventName::Stop
-@@ -277,6 +281,8 @@ pub(crate) fn hook_event_name_label(event_name: HookEventName) -> &'static str {
+@@ -277,6 +301,8 @@ pub(crate) fn hook_event_name_label(event_name: HookEventName) -> &'static str {
          HookEventName::PostToolUse => "PostToolUse",
          HookEventName::PreCompact => "PreCompact",
          HookEventName::PostCompact => "PostCompact",
@@ -577,7 +626,7 @@ index c5ee0d2ce1da03ec07b08f9ba692088142673e99..d0b353c397e51ecf0e88a5f2b9884788
          HookEventName::SessionStart => "SessionStart",
          HookEventName::SessionEnd => "SessionEnd",
          HookEventName::UserPromptSubmit => "UserPromptSubmit",
-@@ -626,6 +632,27 @@ mod tests {
+@@ -626,6 +652,27 @@ mod tests {
          assert_eq!(selected[1].display_order, 1);
      }
  
@@ -1026,7 +1075,7 @@ index 6abc173535b23b5ee6bd057fd3f49d9b82ea7fe0..364049991fd2b0eabafeefab3f241bd5
          HookEventName::SessionEnd => "session_end",
          HookEventName::UserPromptSubmit => "user_prompt_submit",
 diff --git a/codex-rs/hooks/src/registry.rs b/codex-rs/hooks/src/registry.rs
-index 5a033f9c64dacaf031719e60c3c42d52b2d9eb07..a0ad1bda37e69da410f9efd90afba8376a85e4e7 100644
+index 5a033f9c64dacaf031719e60c3c42d52b2d9eb07..4252f51a8df265b70b782e226e68ac35602cd82c 100644
 --- a/codex-rs/hooks/src/registry.rs
 +++ b/codex-rs/hooks/src/registry.rs
 @@ -8,6 +8,9 @@ use crate::events::compact::PreCompactRequest;
@@ -1039,42 +1088,37 @@ index 5a033f9c64dacaf031719e60c3c42d52b2d9eb07..a0ad1bda37e69da410f9efd90afba837
  use crate::events::permission_request::PermissionRequestOutcome;
  use crate::events::permission_request::PermissionRequestRequest;
  use crate::events::post_tool_use::PostToolUseOutcome;
-@@ -33,10 +36,280 @@ use codex_plugin::ExecutorPluginHookSource;
+@@ -33,10 +36,185 @@ use codex_plugin::ExecutorPluginHookSource;
  use codex_plugin::PluginHookSource;
  use codex_protocol::ThreadId;
  use codex_protocol::shell_environment::scrub_non_inheritable_env_vars;
 +use futures::FutureExt;
-+use std::collections::VecDeque;
  use std::ffi::OsString;
 +use std::panic::AssertUnwindSafe;
  use std::sync::Arc;
 +use std::sync::Mutex;
  use std::time::Duration;
  use tokio::process::Command;
-+use tokio::sync::Notify;
++use tokio::sync::OwnedSemaphorePermit;
++use tokio::sync::Semaphore;
++use tokio::sync::mpsc;
++use tokio::sync::oneshot;
 +use tokio::sync::watch;
 +
 +struct PendingModelRequestRecovery {
-+    id: u64,
 +    engine: ClaudeHooksEngine,
 +    request: ModelRequestRecoveryRequest,
-+    ready: bool,
-+}
-+
-+struct ModelRequestRecoveryState {
-+    queue: VecDeque<PendingModelRequestRecovery>,
-+    next_id: u64,
-+    dropped_full: u64,
-+    accepting: bool,
-+    actor_started: bool,
-+    finished: bool,
++    ready: oneshot::Receiver<()>,
++    // Count queued and executing notifications together, including async hooks.
++    _permit: OwnedSemaphorePermit,
 +}
 +
 +struct ModelRequestRecoveryInner {
-+    state: Mutex<ModelRequestRecoveryState>,
-+    notify: Notify,
-+    finished_notify: Notify,
++    sender: mpsc::Sender<PendingModelRequestRecovery>,
++    receiver: Mutex<Option<mpsc::Receiver<PendingModelRequestRecovery>>>,
++    slots: Arc<Semaphore>,
 +    shutdown: watch::Sender<bool>,
++    finished: watch::Sender<bool>,
 +}
 +
 +#[derive(Clone)]
@@ -1085,53 +1129,41 @@ index 5a033f9c64dacaf031719e60c3c42d52b2d9eb07..a0ad1bda37e69da410f9efd90afba837
 +
 +impl ModelRequestRecoveryDispatcher {
 +    fn new(runtime: &CommandHookRuntime) -> Self {
++        let (sender, receiver) = mpsc::channel(MODEL_REQUEST_RECOVERY_QUEUE_CAPACITY);
 +        let (shutdown, _) = watch::channel(false);
++        let (finished, _) = watch::channel(false);
 +        Self {
 +            inner: Arc::new(ModelRequestRecoveryInner {
-+                state: Mutex::new(ModelRequestRecoveryState {
-+                    queue: VecDeque::new(),
-+                    next_id: 0,
-+                    dropped_full: 0,
-+                    accepting: true,
-+                    actor_started: false,
-+                    finished: false,
-+                }),
-+                notify: Notify::new(),
-+                finished_notify: Notify::new(),
++                sender,
++                receiver: Mutex::new(Some(receiver)),
++                slots: Arc::new(Semaphore::new(MODEL_REQUEST_RECOVERY_QUEUE_CAPACITY)),
 +                shutdown,
++                finished,
 +            }),
 +            runtime: runtime.clone(),
 +        }
 +    }
 +
-+    fn lock_state(&self) -> std::sync::MutexGuard<'_, ModelRequestRecoveryState> {
-+        self.inner
-+            .state
-+            .lock()
-+            .unwrap_or_else(std::sync::PoisonError::into_inner)
-+    }
-+
 +    fn ensure_actor(&self) -> bool {
-+        let mut state = self.lock_state();
-+        if !state.accepting {
++        let mut receiver = self
++            .inner
++            .receiver
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if *self.inner.shutdown.borrow() {
 +            return false;
 +        }
-+        if state.actor_started {
-+            return true;
++        if let Some(receiver) = receiver.take() {
++            let inner = Arc::clone(&self.inner);
++            if !self.runtime.schedule_owned_task(async move {
++                Self::run_actor(inner, receiver).await;
++            }) {
++                self.inner.finished.send_replace(true);
++                self.inner.slots.close();
++                return false;
++            }
 +        }
-+        let inner = Arc::clone(&self.inner);
-+        if !self
-+            .runtime
-+            .schedule_owned_task(async move { Self::run_actor(inner).await })
-+        {
-+            state.accepting = false;
-+            state.finished = true;
-+            drop(state);
-+            self.inner.finished_notify.notify_waiters();
-+            return false;
-+        }
-+        state.actor_started = true;
-+        true
++        !self.inner.sender.is_closed()
 +    }
 +
 +    fn enqueue(
@@ -1144,172 +1176,94 @@ index 5a033f9c64dacaf031719e60c3c42d52b2d9eb07..a0ad1bda37e69da410f9efd90afba837
 +                reason: "model request recovery hook queue is closed".to_string(),
 +            };
 +        }
-+        let mut state = self.lock_state();
-+        if !state.accepting {
++        let Ok(permit) = Arc::clone(&self.inner.slots).try_acquire_owned() else {
++            tracing::debug!(
++                "model request recovery hook notification dropped: queue full or closed"
++            );
++            return ModelRequestRecoveryDispatch::Rejected {
++                reason: "model request recovery hook queue is full or closed".to_string(),
++            };
++        };
++        let (start, ready) = oneshot::channel();
++        if self
++            .inner
++            .sender
++            .try_send(PendingModelRequestRecovery {
++                engine,
++                request,
++                ready,
++                _permit: permit,
++            })
++            .is_err()
++        {
 +            return ModelRequestRecoveryDispatch::Rejected {
 +                reason: "model request recovery hook queue is closed".to_string(),
 +            };
 +        }
-+        if state.queue.len() >= MODEL_REQUEST_RECOVERY_QUEUE_CAPACITY {
-+            state.dropped_full = state.dropped_full.saturating_add(1);
-+            let dropped = state.dropped_full;
-+            if dropped.is_power_of_two() {
-+                tracing::warn!(
-+                    dropped,
-+                    capacity = MODEL_REQUEST_RECOVERY_QUEUE_CAPACITY,
-+                    "model request recovery hook notifications dropped because the queue is full"
-+                );
-+            }
-+            return ModelRequestRecoveryDispatch::Rejected {
-+                reason: format!(
-+                    "model request recovery hook queue is full (capacity {MODEL_REQUEST_RECOVERY_QUEUE_CAPACITY})"
-+                ),
-+            };
-+        }
-+        let id = state.next_id;
-+        state.next_id = state.next_id.wrapping_add(1);
-+        state.queue.push_back(PendingModelRequestRecovery {
-+            id,
-+            engine,
-+            request,
-+            ready: false,
-+        });
-+        drop(state);
-+        self.inner.notify.notify_one();
 +        ModelRequestRecoveryDispatch::Queued {
-+            start: ModelRequestRecoveryStart {
-+                inner: Arc::clone(&self.inner),
-+                id,
-+                armed: true,
-+            },
++            start: ModelRequestRecoveryStart(start),
 +        }
 +    }
 +
-+    async fn run_actor(inner: Arc<ModelRequestRecoveryInner>) {
++    async fn run_actor(
++        inner: Arc<ModelRequestRecoveryInner>,
++        mut receiver: mpsc::Receiver<PendingModelRequestRecovery>,
++    ) {
 +        let mut shutdown = inner.shutdown.subscribe();
-+        loop {
-+            let notified = inner.notify.notified();
-+            let job = {
-+                let mut state = inner
-+                    .state
-+                    .lock()
-+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-+                if *shutdown.borrow() {
-+                    state.queue.clear();
-+                    None
-+                } else if state.queue.front().is_some_and(|job| job.ready) {
-+                    state.queue.pop_front()
-+                } else {
-+                    None
++        let run = async {
++            while let Some(job) = receiver.recv().await {
++                if job.ready.await.is_err() {
++                    continue;
 +                }
-+            };
-+            if *shutdown.borrow() {
-+                Self::mark_finished(&inner);
-+                return;
-+            }
-+            let Some(job) = job else {
-+                tokio::select! {
-+                    _ = shutdown.changed() => {
-+                        Self::mark_finished(&inner);
-+                        return;
-+                    }
-+                    _ = notified => {}
-+                }
-+                continue;
-+            };
-+
-+            let run =
-+                AssertUnwindSafe(job.engine.run_model_request_recovery(job.request)).catch_unwind();
-+            tokio::select! {
-+                _ = shutdown.changed() => {
-+                    Self::mark_finished(&inner);
-+                    return;
-+                }
-+                outcome = run => match outcome {
++                match AssertUnwindSafe(job.engine.run_model_request_recovery(job.request))
++                    .catch_unwind()
++                    .await
++                {
 +                    Ok(outcome) => {
 +                        for completed in outcome.hook_events {
 +                            job.engine.command_runtime.publish_completed(completed);
 +                        }
 +                    }
-+                    Err(_) => tracing::warn!(
-+                        "model request recovery hook dispatcher panicked"
-+                    ),
++                    Err(_) => tracing::warn!("model request recovery hook dispatcher panicked"),
 +                }
 +            }
++        };
++        tokio::select! {
++            biased;
++            _ = shutdown.wait_for(|closing| *closing) => {}
++            _ = run => {}
 +        }
-+    }
-+
-+    fn mark_finished(inner: &ModelRequestRecoveryInner) {
-+        let mut state = inner
-+            .state
-+            .lock()
-+            .unwrap_or_else(std::sync::PoisonError::into_inner);
-+        state.queue.clear();
-+        state.actor_started = false;
-+        state.finished = true;
-+        drop(state);
-+        inner.finished_notify.notify_waiters();
++        // Drop queued jobs and their permits before reporting shutdown complete.
++        drop(receiver);
++        inner.slots.close();
++        inner.finished.send_replace(true);
 +    }
 +
 +    async fn shutdown(&self) {
-+        let no_actor = {
-+            let mut state = self.lock_state();
-+            state.accepting = false;
-+            state.queue.clear();
-+            !state.actor_started
-+        };
 +        self.inner.shutdown.send_replace(true);
-+        self.inner.notify.notify_waiters();
-+        if no_actor {
-+            Self::mark_finished(&self.inner);
++        self.inner.slots.close();
++        if self
++            .inner
++            .receiver
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .take()
++            .is_some()
++        {
++            self.inner.finished.send_replace(true);
 +        }
-+        loop {
-+            let notified = self.inner.finished_notify.notified();
-+            if self.lock_state().finished {
-+                return;
-+            }
-+            notified.await;
-+        }
++        let mut finished = self.inner.finished.subscribe();
++        let _ = finished.wait_for(|finished| *finished).await;
 +    }
 +}
 +
-+pub struct ModelRequestRecoveryStart {
-+    inner: Arc<ModelRequestRecoveryInner>,
-+    id: u64,
-+    armed: bool,
-+}
++// Dropping an unstarted token cancels its notification; sending releases the
++// FIFO head only after Core has published the corresponding HookStarted event.
++pub struct ModelRequestRecoveryStart(oneshot::Sender<()>);
 +
 +impl ModelRequestRecoveryStart {
-+    pub fn start(mut self) {
-+        let mut state = self
-+            .inner
-+            .state
-+            .lock()
-+            .unwrap_or_else(std::sync::PoisonError::into_inner);
-+        if let Some(job) = state.queue.iter_mut().find(|job| job.id == self.id) {
-+            job.ready = true;
-+        }
-+        drop(state);
-+        self.armed = false;
-+        self.inner.notify.notify_waiters();
-+    }
-+}
-+
-+impl Drop for ModelRequestRecoveryStart {
-+    fn drop(&mut self) {
-+        if !self.armed {
-+            return;
-+        }
-+        let mut state = self
-+            .inner
-+            .state
-+            .lock()
-+            .unwrap_or_else(std::sync::PoisonError::into_inner);
-+        if let Some(index) = state.queue.iter().position(|job| job.id == self.id) {
-+            state.queue.remove(index);
-+        }
-+        drop(state);
-+        self.inner.notify.notify_waiters();
++    pub fn start(self) {
++        let _ = self.0.send(());
 +    }
 +}
 +
@@ -1320,7 +1274,7 @@ index 5a033f9c64dacaf031719e60c3c42d52b2d9eb07..a0ad1bda37e69da410f9efd90afba837
  
  #[derive(Default, Clone)]
  pub struct HooksConfig {
-@@ -65,6 +338,7 @@ pub struct Hooks {
+@@ -65,6 +243,7 @@ pub struct Hooks {
      engine: ClaudeHooksEngine,
      plugin_hook_sources: Vec<PluginHookSource>,
      plugin_hook_load_warnings: Vec<String>,
@@ -1328,7 +1282,7 @@ index 5a033f9c64dacaf031719e60c3c42d52b2d9eb07..a0ad1bda37e69da410f9efd90afba837
  }
  
  impl Hooks {
-@@ -77,9 +351,13 @@ impl Hooks {
+@@ -77,9 +256,13 @@ impl Hooks {
      ) -> anyhow::Result<(Self, Receiver<codex_protocol::protocol::HookCompletedEvent>)> {
          let (result_sender, result_receiver) = async_channel::unbounded();
          let environment = Arc::new(std::env::vars_os().collect());
@@ -1345,7 +1299,7 @@ index 5a033f9c64dacaf031719e60c3c42d52b2d9eb07..a0ad1bda37e69da410f9efd90afba837
          let required_load_errors = hooks.engine.required_load_errors();
          if !required_load_errors.is_empty() {
              anyhow::bail!(
-@@ -96,6 +374,7 @@ impl Hooks {
+@@ -96,6 +279,7 @@ impl Hooks {
              config,
              Arc::clone(&self.engine.mcp_executor),
              Arc::clone(&self.environment),
@@ -1353,7 +1307,7 @@ index 5a033f9c64dacaf031719e60c3c42d52b2d9eb07..a0ad1bda37e69da410f9efd90afba837
              |shell| self.engine.command_runtime.reconfigured(shell),
          )
      }
-@@ -119,6 +398,7 @@ impl Hooks {
+@@ -119,6 +303,7 @@ impl Hooks {
          config: HooksConfig,
          mcp_executor: Arc<dyn HookMcpExecutor>,
          environment: Arc<Vec<(OsString, OsString)>>,
@@ -1361,7 +1315,7 @@ index 5a033f9c64dacaf031719e60c3c42d52b2d9eb07..a0ad1bda37e69da410f9efd90afba837
          build_runtime: impl FnOnce(CommandShell) -> CommandHookRuntime,
      ) -> Self {
          let after_agent = config
-@@ -140,17 +420,21 @@ impl Hooks {
+@@ -140,17 +325,21 @@ impl Hooks {
              command_runtime,
              mcp_executor,
          );
@@ -1383,7 +1337,7 @@ index 5a033f9c64dacaf031719e60c3c42d52b2d9eb07..a0ad1bda37e69da410f9efd90afba837
          self.engine.command_runtime.shutdown().await;
      }
  
-@@ -259,6 +543,35 @@ impl Hooks {
+@@ -259,6 +448,35 @@ impl Hooks {
          self.engine.run_post_compact(request).await
      }
  
@@ -1419,7 +1373,7 @@ index 5a033f9c64dacaf031719e60c3c42d52b2d9eb07..a0ad1bda37e69da410f9efd90afba837
      pub fn preview_user_prompt_submit(
          &self,
          request: &UserPromptSubmitRequest,
-@@ -334,3 +647,181 @@ pub(crate) fn command_from_argv(
+@@ -334,3 +552,219 @@ pub(crate) fn command_from_argv(
      scrub_non_inheritable_env_vars(command.as_std_mut());
      Some(command)
  }
@@ -1527,30 +1481,37 @@ index 5a033f9c64dacaf031719e60c3c42d52b2d9eb07..a0ad1bda37e69da410f9efd90afba837
 +                dispatcher.enqueue(engine.clone(), request(&cwd, attempt)),
 +            ));
 +        }
-+        assert_eq!(dispatcher.lock_state().queue.len(), 64);
 +        assert!(matches!(
 +            dispatcher.enqueue(engine, request(&cwd, 65)),
 +            ModelRequestRecoveryDispatch::Rejected { .. }
 +        ));
-+        assert_eq!(dispatcher.lock_state().dropped_full, 1);
 +
 +        drop(starts);
-+        assert!(dispatcher.lock_state().queue.is_empty());
 +        dispatcher.shutdown().await;
 +        runtime.shutdown().await;
 +    }
 +
 +    #[tokio::test]
-+    async fn codex_patch_recovery_start_token_preserves_fifo_and_delays_execution() {
++    async fn codex_patch_recovery_sync_hooks_are_bounded_and_fifo() {
++        recovery_hooks_are_bounded_and_fifo(false).await;
++    }
++
++    #[tokio::test]
++    async fn codex_patch_recovery_async_hooks_are_bounded_and_fifo() {
++        recovery_hooks_are_bounded_and_fifo(true).await;
++    }
++
++    async fn recovery_hooks_are_bounded_and_fifo(async_hook: bool) {
 +        let temp = tempdir().expect("temporary directory");
 +        let output = temp.path().join("attempts.txt");
 +        let script = temp.path().join("hook.py");
++        let release = temp.path().join("release");
 +        let output_literal =
 +            serde_json::to_string(&output.display().to_string()).expect("serialize output path");
 +        std::fs::write(
 +            &script,
 +            format!(
-+                "import json, sys\npayload = json.load(sys.stdin)\nwith open({output_literal}, 'a', encoding='utf-8') as out:\n    out.write(str(payload['attempt']) + '\\n')\n"
++                "import json, sys, time\nfrom pathlib import Path\npayload = json.load(sys.stdin)\nwith open({output_literal}, 'a', encoding='utf-8') as out:\n    out.write(str(payload['attempt']) + '\\n')\nif payload['attempt'] == 1:\n    while not Path('release').exists():\n        time.sleep(0.01)\n"
 +            ),
 +        )
 +        .expect("write hook script");
@@ -1560,7 +1521,7 @@ index 5a033f9c64dacaf031719e60c3c42d52b2d9eb07..a0ad1bda37e69da410f9efd90afba837
 +            builtin: false,
 +            event_name: HookEventName::ModelRequestRecovery,
 +            matcher: Some("never-match".to_string()),
-+            timeout_sec: 5,
++            timeout_sec: 20,
 +            status_message: None,
 +            additional_context_limit: Default::default(),
 +            source_path: HandlerSourcePath::Local(cwd.join("hooks.json")),
@@ -1568,7 +1529,7 @@ index 5a033f9c64dacaf031719e60c3c42d52b2d9eb07..a0ad1bda37e69da410f9efd90afba837
 +            display_order: 0,
 +            kind: ConfiguredHandlerKind::Command {
 +                command: format!("python3 {}", script.display()),
-+                r#async: false,
++                r#async: async_hook,
 +                env: HashMap::new(),
 +            },
 +        };
@@ -1577,7 +1538,7 @@ index 5a033f9c64dacaf031719e60c3c42d52b2d9eb07..a0ad1bda37e69da410f9efd90afba837
 +        let dispatcher = ModelRequestRecoveryDispatcher::new(&runtime);
 +
 +        let first = queued_start(dispatcher.enqueue(engine.clone(), request(&cwd, 1)));
-+        let second = queued_start(dispatcher.enqueue(engine, request(&cwd, 2)));
++        let second = queued_start(dispatcher.enqueue(engine.clone(), request(&cwd, 2)));
 +        second.start();
 +        tokio::task::yield_now().await;
 +        assert!(
@@ -1586,7 +1547,32 @@ index 5a033f9c64dacaf031719e60c3c42d52b2d9eb07..a0ad1bda37e69da410f9efd90afba837
 +        );
 +
 +        first.start();
-+        for _ in 0..2 {
++        timeout(Duration::from_secs(10), async {
++            while !output.exists() {
++                tokio::time::sleep(Duration::from_millis(10)).await;
++            }
++        })
++        .await
++        .expect("first hook starts");
++        // Let the dispatcher run between submissions. An async handler must
++        // keep its notification's slot until the process actually completes.
++        let mut accepted = 2;
++        for attempt in 3..=256 {
++            if let ModelRequestRecoveryDispatch::Queued { start } =
++                dispatcher.enqueue(engine.clone(), request(&cwd, attempt))
++            {
++                start.start();
++                accepted += 1;
++            }
++            tokio::task::yield_now().await;
++        }
++        assert_eq!(accepted, MODEL_REQUEST_RECOVERY_QUEUE_CAPACITY);
++        assert_eq!(
++            std::fs::read_to_string(&output).expect("hook output"),
++            "1\n"
++        );
++        std::fs::write(release, "continue").expect("release first hook");
++        for _ in 0..accepted {
 +            timeout(Duration::from_secs(10), receiver.recv())
 +                .await
 +                .expect("hook completion timeout")
@@ -1594,10 +1580,16 @@ index 5a033f9c64dacaf031719e60c3c42d52b2d9eb07..a0ad1bda37e69da410f9efd90afba837
 +        }
 +        assert_eq!(
 +            std::fs::read_to_string(&output).expect("read hook output"),
-+            "1\n2\n"
++            (1..=accepted)
++                .map(|attempt| format!("{attempt}\n"))
++                .collect::<String>()
 +        );
 +
 +        dispatcher.shutdown().await;
++        assert!(matches!(
++            dispatcher.enqueue(engine, request(&cwd, 257)),
++            ModelRequestRecoveryDispatch::Rejected { .. }
++        ));
 +        runtime.shutdown().await;
 +    }
 +}

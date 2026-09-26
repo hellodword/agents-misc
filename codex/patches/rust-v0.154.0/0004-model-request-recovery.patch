@@ -1,13 +1,12 @@
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index 4aacc97d107f4effd31b789af57ed78f3899ee6d..fb63f5104353667495858b6761f8244d401ae036 100644
+index 4aacc97d107f4effd31b789af57ed78f3899ee6d..6bb0061331d50a4dad2215e2b05459eccfbcb037 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
-@@ -8,10 +8,17 @@ use crate::client_common::ResponseEvent;
+@@ -8,10 +8,16 @@ use crate::client_common::ResponseEvent;
  use crate::context::CompactionSummary;
  use crate::context::ContextualUserFragment;
  use crate::context::world_state::WorldState;
 +use crate::hook_runtime::ModelRequestFailure;
-+use crate::hook_runtime::ModelRequestHookContext;
  use crate::hook_runtime::PostCompactHookOutcome;
  use crate::hook_runtime::PreCompactHookOutcome;
 +use crate::hook_runtime::run_model_request_recovery_hooks;
@@ -20,6 +19,14 @@ index 4aacc97d107f4effd31b789af57ed78f3899ee6d..fb63f5104353667495858b6761f8244d
  use crate::responses_metadata::CodexResponsesMetadata;
  use crate::responses_metadata::CodexResponsesRequestKind;
  use crate::responses_metadata::CompactionTurnMetadata;
+@@ -35,6 +41,7 @@ use codex_context_fragments::AnnotatedContent;
+ use codex_context_fragments::set_annotated_content;
+ use codex_history::CodexHarnessMetadata;
+ use codex_history::ResponseItemEnvelope;
++use codex_hooks::ModelRequestOperation;
+ use codex_protocol::ResponseItemId;
+ use codex_protocol::error::CodexErr;
+ use codex_protocol::error::CodexErrorDetails;
 @@ -56,6 +63,7 @@ use codex_utils_output_truncation::TruncationPolicy;
  use codex_utils_output_truncation::approx_token_count;
  use codex_utils_output_truncation::truncate_text;
@@ -123,7 +130,7 @@ index 4aacc97d107f4effd31b789af57ed78f3899ee6d..fb63f5104353667495858b6761f8244d
 +                        &sess,
 +                        &turn_context,
 +                        ModelRequestFailure::new(
-+                            ModelRequestHookContext::local_compact(),
++                            ModelRequestOperation::LocalCompact,
 +                            observation.attempt,
 +                            &e,
 +                        ),
@@ -133,12 +140,12 @@ index 4aacc97d107f4effd31b789af57ed78f3899ee6d..fb63f5104353667495858b6761f8244d
                      // Trim from the beginning to preserve cache (prefix-based) and keep recent messages intact.
                      error!(
                          "Context window exceeded while compacting; removing oldest history item. Error: {e}"
-@@ -326,24 +366,89 @@ async fn run_compact_task_inner_impl(
+@@ -326,24 +366,90 @@ async fn run_compact_task_inner_impl(
                  }
                  sess.set_total_tokens_full(turn_context.as_ref()).await;
                  sess.track_turn_codex_error(turn_context.as_ref(), &e);
 +                let failure = ModelRequestFailure::new(
-+                    ModelRequestHookContext::local_compact(),
++                    ModelRequestOperation::LocalCompact,
 +                    observation.attempt,
 +                    &e,
 +                );
@@ -155,12 +162,13 @@ index 4aacc97d107f4effd31b789af57ed78f3899ee6d..fb63f5104353667495858b6761f8244d
 +                );
 +                if let Some(recovery) = observation.configured_recovery {
 +                    if recovery.should_retry() {
-+                        let delay = configured_retry_delay(&e, recovery);
++                        let delay =
++                            configured_retry_delay(&turn_context.config.codex_patch, &e, recovery);
 +                        run_model_request_recovery_hooks(
 +                            &sess,
 +                            &turn_context,
 +                            ModelRequestFailure::new(
-+                                ModelRequestHookContext::local_compact(),
++                                ModelRequestOperation::LocalCompact,
 +                                observation.attempt,
 +                                &e,
 +                            ),
@@ -178,7 +186,7 @@ index 4aacc97d107f4effd31b789af57ed78f3899ee6d..fb63f5104353667495858b6761f8244d
 +                        &sess,
 +                        &turn_context,
 +                        ModelRequestFailure::new(
-+                            ModelRequestHookContext::local_compact(),
++                            ModelRequestOperation::LocalCompact,
 +                            observation.attempt,
 +                            &e,
 +                        ),
@@ -194,7 +202,7 @@ index 4aacc97d107f4effd31b789af57ed78f3899ee6d..fb63f5104353667495858b6761f8244d
 +                    retries = retries.saturating_add(1);
                      let delay = backoff(retries);
 +                    let failure = ModelRequestFailure::new(
-+                        ModelRequestHookContext::local_compact(),
++                        ModelRequestOperation::LocalCompact,
 +                        observation.attempt,
 +                        &e,
 +                    );
@@ -217,7 +225,7 @@ index 4aacc97d107f4effd31b789af57ed78f3899ee6d..fb63f5104353667495858b6761f8244d
                  } else {
                      sess.track_turn_codex_error(turn_context.as_ref(), &e);
 +                    let failure = ModelRequestFailure::new(
-+                        ModelRequestHookContext::local_compact(),
++                        ModelRequestOperation::LocalCompact,
 +                        observation.attempt,
 +                        &e,
 +                    );
@@ -226,15 +234,14 @@ index 4aacc97d107f4effd31b789af57ed78f3899ee6d..fb63f5104353667495858b6761f8244d
                      sess.send_event(&turn_context, event).await;
                      return Err(e);
 diff --git a/codex-rs/core/src/compact_remote.rs b/codex-rs/core/src/compact_remote.rs
-index d1eb2124ebe70fdbbd0e5f712f1828719727415e..556f2920922ae9930b110aacc09501d67576587f 100644
+index d1eb2124ebe70fdbbd0e5f712f1828719727415e..23f58371c54faa8ded5b90e87884ebb6d3dfe48f 100644
 --- a/codex-rs/core/src/compact_remote.rs
 +++ b/codex-rs/core/src/compact_remote.rs
-@@ -15,10 +15,18 @@ use crate::compact_remote_history::history_item_groups;
+@@ -15,10 +15,17 @@ use crate::compact_remote_history::history_item_groups;
  use crate::context::world_state::WorldState;
  use crate::context_manager::ContextManager;
  use crate::context_manager::estimate_item_token_count;
 +use crate::hook_runtime::ModelRequestFailure;
-+use crate::hook_runtime::ModelRequestHookContext;
  use crate::hook_runtime::PostCompactHookOutcome;
  use crate::hook_runtime::PreCompactHookOutcome;
 +use crate::hook_runtime::run_model_request_recovery_hooks;
@@ -248,6 +255,14 @@ index d1eb2124ebe70fdbbd0e5f712f1828719727415e..556f2920922ae9930b110aacc09501d6
  use crate::responses_metadata::CompactionTurnMetadata;
  use crate::session::session::Session;
  use crate::session::step_context::StepContext;
+@@ -28,6 +35,7 @@ use codex_analytics::CompactionPhase;
+ use codex_analytics::CompactionReason;
+ use codex_analytics::CompactionTrigger;
+ use codex_history::ResponseItemEnvelope;
++use codex_hooks::ModelRequestOperation;
+ use codex_protocol::error::CodexErr;
+ use codex_protocol::error::Result as CodexResult;
+ use codex_protocol::items::ContextCompactionItem;
 @@ -58,6 +66,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
      initial_context_injection: InitialContextInjection,
      reason: CompactionReason,
@@ -409,7 +424,7 @@ index d1eb2124ebe70fdbbd0e5f712f1828719727415e..556f2920922ae9930b110aacc09501d6
              }
          }
      };
-@@ -312,6 +376,109 @@ async fn run_remote_compact_task_inner_impl(
+@@ -312,6 +376,110 @@ async fn run_remote_compact_task_inner_impl(
      Ok(())
  }
  
@@ -466,12 +481,13 @@ index d1eb2124ebe70fdbbd0e5f712f1828719727415e..556f2920922ae9930b110aacc09501d6
 +                    return Err(error);
 +                }
 +
-+                let delay = configured_retry_delay(&error, recovery);
++                let delay =
++                    configured_retry_delay(&turn_context.config.codex_patch, &error, recovery);
 +                run_model_request_recovery_hooks(
 +                    sess,
 +                    turn_context,
 +                    ModelRequestFailure::new(
-+                        ModelRequestHookContext::remote_compact(),
++                        ModelRequestOperation::RemoteCompact,
 +                        observation.attempt,
 +                        &error,
 +                    ),
@@ -492,7 +508,7 @@ index d1eb2124ebe70fdbbd0e5f712f1828719727415e..556f2920922ae9930b110aacc09501d6
 +    err: &CodexErr,
 +    attempt: u64,
 +) {
-+    let failure = ModelRequestFailure::new(ModelRequestHookContext::remote_compact(), attempt, err);
++    let failure = ModelRequestFailure::new(ModelRequestOperation::RemoteCompact, attempt, err);
 +    run_model_request_recovery_hooks(
 +        sess,
 +        turn_context,
@@ -511,7 +527,7 @@ index d1eb2124ebe70fdbbd0e5f712f1828719727415e..556f2920922ae9930b110aacc09501d6
 +    run_terminal_model_request_failure_hooks(
 +        sess,
 +        turn_context,
-+        ModelRequestFailure::new(ModelRequestHookContext::remote_compact(), attempt, err),
++        ModelRequestFailure::new(ModelRequestOperation::RemoteCompact, attempt, err),
 +    )
 +    .await;
 +}
@@ -520,15 +536,14 @@ index d1eb2124ebe70fdbbd0e5f712f1828719727415e..556f2920922ae9930b110aacc09501d6
      sess: &Session,
      compacted_history: Vec<ResponseItem>,
 diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
-index f02e2db678e6266204660a0e72a444047a0db626..0c29f182b20857efa8d323edca4b418571dbf79f 100644
+index f02e2db678e6266204660a0e72a444047a0db626..617a27be54595dcc3034141bbdfcdecce6f375ba 100644
 --- a/codex-rs/core/src/compact_remote_v2.rs
 +++ b/codex-rs/core/src/compact_remote_v2.rs
-@@ -17,10 +17,16 @@ use crate::compact_remote::should_keep_compacted_history_item;
+@@ -17,10 +17,15 @@ use crate::compact_remote::should_keep_compacted_history_item;
  use crate::compact_remote_history::HistoryItemGroup;
  use crate::compact_remote_history::history_item_groups;
  use crate::context_manager::estimate_item_token_count;
 +use crate::hook_runtime::ModelRequestFailure;
-+use crate::hook_runtime::ModelRequestHookContext;
  use crate::hook_runtime::PostCompactHookOutcome;
  use crate::hook_runtime::PreCompactHookOutcome;
 +use crate::hook_runtime::run_model_request_recovery_hooks;
@@ -540,6 +555,14 @@ index f02e2db678e6266204660a0e72a444047a0db626..0c29f182b20857efa8d323edca4b4185
  use crate::responses_metadata::CodexResponsesMetadata;
  use crate::responses_metadata::CompactionTurnMetadata;
  use crate::responses_retry::ResponsesStreamRequest;
+@@ -38,6 +43,7 @@ use codex_context_fragments::to_annotated_content;
+ use codex_features::Feature;
+ use codex_history::CodexHarnessMetadata;
+ use codex_history::ResponseItemEnvelope;
++use codex_hooks::ModelRequestOperation;
+ use codex_protocol::error::CodexErr;
+ use codex_protocol::error::CodexErrorDetails;
+ use codex_protocol::error::Result as CodexResult;
 @@ -87,6 +93,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
      initial_context_injection: InitialContextInjection,
      reason: CompactionReason,
@@ -694,7 +717,7 @@ index f02e2db678e6266204660a0e72a444047a0db626..0c29f182b20857efa8d323edca4b4185
              }
          }
      };
-@@ -362,6 +419,44 @@ async fn run_remote_compact_task_inner_impl(
+@@ -362,6 +419,36 @@ async fn run_remote_compact_task_inner_impl(
      Ok(())
  }
  
@@ -704,11 +727,7 @@ index f02e2db678e6266204660a0e72a444047a0db626..0c29f182b20857efa8d323edca4b4185
 +    err: &CodexErr,
 +    attempt: u64,
 +) {
-+    let failure = ModelRequestFailure::new(
-+        ModelRequestHookContext::remote_compaction_v2(),
-+        attempt,
-+        err,
-+    );
++    let failure = ModelRequestFailure::new(ModelRequestOperation::RemoteCompactV2, attempt, err);
 +    run_model_request_recovery_hooks(
 +        sess,
 +        turn_context,
@@ -727,11 +746,7 @@ index f02e2db678e6266204660a0e72a444047a0db626..0c29f182b20857efa8d323edca4b4185
 +    run_terminal_model_request_failure_hooks(
 +        sess,
 +        turn_context,
-+        ModelRequestFailure::new(
-+            ModelRequestHookContext::remote_compaction_v2(),
-+            attempt,
-+            err,
-+        ),
++        ModelRequestFailure::new(ModelRequestOperation::RemoteCompactV2, attempt, err),
 +    )
 +    .await;
 +}
@@ -739,7 +754,7 @@ index f02e2db678e6266204660a0e72a444047a0db626..0c29f182b20857efa8d323edca4b4185
  struct RemoteCompactionV2Output {
      compaction_output: ResponseItem,
      response_id: String,
-@@ -369,11 +464,13 @@ struct RemoteCompactionV2Output {
+@@ -369,11 +456,13 @@ struct RemoteCompactionV2Output {
  }
  
  async fn run_remote_compaction_request_v2(
@@ -754,7 +769,7 @@ index f02e2db678e6266204660a0e72a444047a0db626..0c29f182b20857efa8d323edca4b4185
  ) -> CodexResult<RemoteCompactionV2Output> {
      let turn_context = &step_context.turn;
      let max_retries = turn_context
-@@ -381,8 +478,10 @@ async fn run_remote_compaction_request_v2(
+@@ -381,8 +470,10 @@ async fn run_remote_compaction_request_v2(
          .info()
          .stream_max_retries()
          .min(MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES);
@@ -766,7 +781,7 @@ index f02e2db678e6266204660a0e72a444047a0db626..0c29f182b20857efa8d323edca4b4185
          let result = match client_session
              .stream(
                  prompt,
-@@ -402,18 +501,31 @@ async fn run_remote_compaction_request_v2(
+@@ -402,18 +493,31 @@ async fn run_remote_compaction_request_v2(
  
          match result {
              Ok(compaction_output) => return Ok(compaction_output),
@@ -854,10 +869,10 @@ index 581392fb57dff81df5411a95cede4765acefb2b6..74657e4307aed2aa79ff387877fef2a0
  mod realtime_history;
 diff --git a/codex-rs/core/src/model_request_failure_policy.rs b/codex-rs/core/src/model_request_failure_policy.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..de8cb1b48d945e1462718760a00abaaa96150d29
+index 0000000000000000000000000000000000000000..c435cc87dc83c89e9d02a9f528e2b7a0b3a3ac58
 --- /dev/null
 +++ b/codex-rs/core/src/model_request_failure_policy.rs
-@@ -0,0 +1,427 @@
+@@ -0,0 +1,446 @@
 +//! Shared opt-in recovery policy for model requests.
 +//!
 +//! The pinned producer state machines remain authoritative when a matching
@@ -875,9 +890,6 @@ index 0000000000000000000000000000000000000000..de8cb1b48d945e1462718760a00abaaa
 +use tokio_util::sync::CancellationToken;
 +
 +use crate::util::backoff;
-+
-+/// Local exponential backoff is bounded, but server-provided advice is not.
-+pub const MAX_LOCAL_BACKOFF: Duration = Duration::from_secs(60);
 +
 +/// Long waits are split into bounded sleeps so cancellation remains prompt.
 +const MAX_WAIT_CHUNK: Duration = Duration::from_secs(60);
@@ -1019,15 +1031,21 @@ index 0000000000000000000000000000000000000000..de8cb1b48d945e1462718760a00abaaa
 +    }
 +}
 +
-+/// Select a patch-managed delay. Provider advice is honored in full; only the
-+/// locally generated fallback is capped.
-+pub(crate) fn configured_retry_delay(error: &CodexErr, recovery: ConfiguredRecovery) -> Duration {
-+    error.retry_delay().unwrap_or_else(|| {
-+        // The local delay reaches the cap long before this bound. Limiting
-+        // the exponent also keeps an unlimited counter out of `powi`'s
-+        // narrowing conversion after extremely long sessions.
-+        backoff(recovery.failure_count.clamp(1, 64)).min(MAX_LOCAL_BACKOFF)
-+    })
++/// Bound both provider advice and local backoff with the same opt-in policy.
++pub(crate) fn configured_retry_delay(
++    config: &CodexPatchConfig,
++    error: &CodexErr,
++    recovery: ConfiguredRecovery,
++) -> Duration {
++    error
++        .recovery_retry_delay()
++        .unwrap_or_else(|| {
++            // The local delay reaches the cap long before this bound. Limiting
++            // the exponent also keeps an unlimited counter out of `powi`'s
++            // narrowing conversion after extremely long sessions.
++            backoff(recovery.failure_count.clamp(1, 64))
++        })
++        .min(config.recovery_max_wait())
 +}
 +
 +/// Wait cancellably, including before the first chunk and after the final one.
@@ -1201,17 +1219,33 @@ index 0000000000000000000000000000000000000000..de8cb1b48d945e1462718760a00abaaa
 +    }
 +
 +    #[test]
-+    fn codex_patch_provider_advice_is_not_truncated() {
++    fn codex_patch_one_cap_bounds_provider_advice_and_local_backoff() {
 +        let recovery = ConfiguredRecovery {
 +            class: RecoveryClass::ServerOverload,
-+            failure_count: 1,
++            failure_count: 64,
 +            limit: RecoveryLimit::Unlimited,
 +        };
-+        assert_eq!(
-+            configured_retry_delay(&overloaded(Some(120_000)), recovery),
-+            Duration::from_secs(120)
-+        );
-+        assert!(configured_retry_delay(&overloaded(None), recovery) <= MAX_LOCAL_BACKOFF);
++        for (cap, expected_max) in [(None, 120_000), (std::num::NonZeroU64::new(10_000), 10_000)] {
++            let config = CodexPatchConfig {
++                recovery_max_wait_ms: cap,
++                ..Default::default()
++            };
++            for (advice, expected) in [
++                (Some(0), 0),
++                (Some(250), 250),
++                (Some(u64::MAX), expected_max),
++                (None, expected_max),
++            ] {
++                assert_eq!(
++                    configured_retry_delay(&config, &overloaded(advice), recovery),
++                    Duration::from_millis(expected),
++                );
++            }
++            assert!(
++                !has_configured_recovery(&config, &overloaded(None)),
++                "a wait cap alone must not enable recovery"
++            );
++        }
 +    }
 +
 +    #[tokio::test(start_paused = true)]
@@ -1286,7 +1320,7 @@ index 0000000000000000000000000000000000000000..de8cb1b48d945e1462718760a00abaaa
 +    }
 +}
 diff --git a/codex-rs/core/src/responses_retry.rs b/codex-rs/core/src/responses_retry.rs
-index fb0505411e19db75d29d6ea16300825001cdd1c2..a8d671a20b386ed78c40a5d0dfad6f07a525cfbe 100644
+index fb0505411e19db75d29d6ea16300825001cdd1c2..03ea427e35c02fa06cb460a5c1cc0cc652caf02f 100644
 --- a/codex-rs/core/src/responses_retry.rs
 +++ b/codex-rs/core/src/responses_retry.rs
 @@ -1,17 +1,26 @@
@@ -1297,7 +1331,6 @@ index fb0505411e19db75d29d6ea16300825001cdd1c2..a8d671a20b386ed78c40a5d0dfad6f07
  
  use crate::client::ModelClientSession;
 +use crate::hook_runtime::ModelRequestFailure;
-+use crate::hook_runtime::ModelRequestHookContext;
 +use crate::hook_runtime::run_model_request_recovery_hooks;
 +use crate::model_request_failure_policy::ModelRequestRecoveryState;
 +use crate::model_request_failure_policy::configured_retry_delay;
@@ -1308,6 +1341,7 @@ index fb0505411e19db75d29d6ea16300825001cdd1c2..a8d671a20b386ed78c40a5d0dfad6f07
  use codex_client::RetryOperation;
  use codex_features::Feature;
 +use codex_hooks::ModelRequestNextAction;
++use codex_hooks::ModelRequestOperation;
  use codex_protocol::error::CodexErr;
  use codex_protocol::error::CodexErrorDetails;
  use codex_protocol::protocol::EventMsg;
@@ -1321,10 +1355,10 @@ index fb0505411e19db75d29d6ea16300825001cdd1c2..a8d671a20b386ed78c40a5d0dfad6f07
  }
  
 +impl ResponsesStreamRequest {
-+    fn hook_context(self) -> ModelRequestHookContext {
++    fn hook_context(self) -> ModelRequestOperation {
 +        match self {
-+            Self::Sampling => ModelRequestHookContext::sampling(),
-+            Self::RemoteCompactionV2 => ModelRequestHookContext::remote_compaction_v2(),
++            Self::Sampling => ModelRequestOperation::Sampling,
++            Self::RemoteCompactionV2 => ModelRequestOperation::RemoteCompactV2,
 +        }
 +    }
 +}
@@ -1413,7 +1447,7 @@ index fb0505411e19db75d29d6ea16300825001cdd1c2..a8d671a20b386ed78c40a5d0dfad6f07
 +    // policy and Hook surface.
 +    if observe_failure && let Some(recovery) = observation.configured_recovery {
 +        if recovery.should_retry() {
-+            let delay = configured_retry_delay(&err, recovery);
++            let delay = configured_retry_delay(&turn_context.config.codex_patch, &err, recovery);
 +            let failure = ModelRequestFailure::new(request.hook_context(), attempt, &err);
 +            warn!(
 +                turn_id = %turn_context.sub_id,
@@ -1571,19 +1605,10 @@ index fb0505411e19db75d29d6ea16300825001cdd1c2..a8d671a20b386ed78c40a5d0dfad6f07
      request: ResponsesStreamRequest,
      turn_context: &TurnContext,
 diff --git a/codex-rs/core/src/responses_retry_tests.rs b/codex-rs/core/src/responses_retry_tests.rs
-index b6465ded37cb6d7eccd5906cdc39e2b12dc3e1dd..20b9736d87e8b63491e900879131339de3b34f04 100644
+index b6465ded37cb6d7eccd5906cdc39e2b12dc3e1dd..ece90dd66c4b2dbe4f9ef8ba20f772d34c2d1e7b 100644
 --- a/codex-rs/core/src/responses_retry_tests.rs
 +++ b/codex-rs/core/src/responses_retry_tests.rs
-@@ -6,7 +6,7 @@ use std::time::Duration;
- use tracing_test::internal::MockWriter;
- 
- #[tokio::test]
--async fn sampling_retry_logs_stream_error_context() {
-+async fn codex_patch_sampling_retry_logs_stream_error_context() {
-     let (_session, turn_context) = make_session_and_context().await;
-     let buffer: &'static std::sync::Mutex<Vec<u8>> =
-         Box::leak(Box::new(std::sync::Mutex::new(Vec::new())));
-@@ -41,3 +41,35 @@ async fn sampling_retry_logs_stream_error_context() {
+@@ -41,3 +41,11 @@ async fn sampling_retry_logs_stream_error_context() {
          "sampling_error=stream disconnected before completion: websocket closed by server before response.completed"
      ));
  }
@@ -1594,30 +1619,6 @@ index b6465ded37cb6d7eccd5906cdc39e2b12dc3e1dd..20b9736d87e8b63491e900879131339d
 +    assert_eq!(state.begin_transport_retry(/*max_retries*/ 2), Some(1));
 +    assert_eq!(state.begin_transport_retry(/*max_retries*/ 2), Some(2));
 +    assert_eq!(state.begin_transport_retry(/*max_retries*/ 2), None);
-+}
-+
-+#[test]
-+fn codex_patch_transport_fallback_resets_only_the_original_transport_counter() {
-+    let mut state = super::ResponsesStreamRetryState::default();
-+
-+    let observation = state.recovery.observe_failure(
-+        "model-a/websocket",
-+        &codex_config::config_toml::CodexPatchConfig::default(),
-+        &CodexErr::Stream("disconnected".to_string()),
-+    );
-+    assert_eq!(observation.attempt, 1);
-+    assert_eq!(state.begin_transport_retry(/*max_retries*/ 1), Some(1));
-+    state.reset_transport_retries();
-+    assert_eq!(state.retries, 0);
-+    assert_eq!(state.failure_attempt(), 1);
-+
-+    let observation = state.recovery.observe_failure(
-+        "model-a/http",
-+        &codex_config::config_toml::CodexPatchConfig::default(),
-+        &CodexErr::Stream("disconnected".to_string()),
-+    );
-+    assert_eq!(observation.attempt, 2);
-+    assert_eq!(state.begin_transport_retry(/*max_retries*/ 1), Some(1));
 +}
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
 index 116e450033713479bba7cb76546066f4e662faab..e76f9f74ede3603a464e801b22bdc8d861b34e3f 100644
@@ -1632,15 +1633,14 @@ index 116e450033713479bba7cb76546066f4e662faab..e76f9f74ede3603a464e801b22bdc8d8
      .await
      .expect("compaction succeeds");
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 4719e1d891b208ce5910d6995d6d56fc4b298b6d..5123dec9039d754598bc695849bb66ddc6a2139e 100644
+index 4719e1d891b208ce5910d6995d6d56fc4b298b6d..e918d63fcdb5f8c338919bc352efb6c0c1e7ba2d 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -16,18 +16,22 @@ use crate::context::ContextualUserFragment;
+@@ -16,18 +16,21 @@ use crate::context::ContextualUserFragment;
  use crate::context::UserVerificationNotice;
  use crate::environment_selection::TurnEnvironmentSnapshot;
  use crate::feedback_tags;
 +use crate::hook_runtime::ModelRequestFailure;
-+use crate::hook_runtime::ModelRequestHookContext;
  use crate::hook_runtime::drain_async_hook_results;
  use crate::hook_runtime::inspect_pending_input;
  use crate::hook_runtime::record_additional_contexts;
@@ -1658,6 +1658,14 @@ index 4719e1d891b208ce5910d6995d6d56fc4b298b6d..5123dec9039d754598bc695849bb66dd
  use crate::plugins::build_plugin_injections;
  use crate::responses_metadata::CodexResponsesMetadata;
  use crate::responses_metadata::CodexResponsesRequestKind;
+@@ -77,6 +80,7 @@ use codex_extension_api::TurnInputEnvironment;
+ use codex_features::Feature;
+ use codex_file_system::FindUpErrorPolicy;
+ use codex_file_system::find_nearest_ancestor_with_markers;
++use codex_hooks::ModelRequestOperation;
+ use codex_login::CodexAuth;
+ use codex_model_provider::RemoteCompactionSupport;
+ use codex_protocol::ResponseItemId;
 @@ -531,6 +535,7 @@ pub(crate) async fn run_turn(
                          },
                          CompactionReason::ContextLimit,
@@ -1758,7 +1766,7 @@ index 4719e1d891b208ce5910d6995d6d56fc4b298b6d..5123dec9039d754598bc695849bb66dd
 +                            &err,
 +                        );
 +                        let failure = ModelRequestFailure::new(
-+                            ModelRequestHookContext::sampling(),
++                            ModelRequestOperation::Sampling,
 +                            attempt,
 +                            &err,
 +                        );
@@ -1794,7 +1802,7 @@ index 4719e1d891b208ce5910d6995d6d56fc4b298b6d..5123dec9039d754598bc695849bb66dd
 +                let attempt =
 +                    retry_state.record_terminal_failure(&turn_context, client_session, &err);
 +                let failure =
-+                    ModelRequestFailure::new(ModelRequestHookContext::sampling(), attempt, &err);
++                    ModelRequestFailure::new(ModelRequestOperation::Sampling, attempt, &err);
 +                run_terminal_model_request_failure_hooks(&sess, &turn_context, failure).await;
 +            }
              return Err(err);
@@ -1819,7 +1827,7 @@ index 4719e1d891b208ce5910d6995d6d56fc4b298b6d..5123dec9039d754598bc695849bb66dd
 +            }
 +            if !is_guardian_sampling {
 +                let failure = ModelRequestFailure::new(
-+                    ModelRequestHookContext::sampling(),
++                    ModelRequestOperation::Sampling,
 +                    retry_state.failure_attempt(),
 +                    &err,
 +                );
@@ -2003,7 +2011,7 @@ index 99e21134856a95ad25ba7f675b35dc06d62067d3..3334143a540576af2b49cd8418a77272
          };
          if let Err(err) = result
 diff --git a/codex-rs/core/tests/suite/compact.rs b/codex-rs/core/tests/suite/compact.rs
-index 09ae3e2cdd239a0ed34eb629b1cd2979a7e6d968..1fc7e5f9fecc7be911ed4c0ccecd6542c48d66b6 100644
+index 09ae3e2cdd239a0ed34eb629b1cd2979a7e6d968..61a13d2d6cbe80ab7bfbb73d9bc7a763820bc061 100644
 --- a/codex-rs/core/tests/suite/compact.rs
 +++ b/codex-rs/core/tests/suite/compact.rs
 @@ -1,5 +1,6 @@
@@ -2110,10 +2118,76 @@ index 09ae3e2cdd239a0ed34eb629b1cd2979a7e6d968..1fc7e5f9fecc7be911ed4c0ccecd6542
  fn local_compaction_provider(server: &wiremock::MockServer) -> ModelProviderInfo {
      let mut provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
      provider.name = "OpenAI-compatible test provider".to_string();
-@@ -505,6 +589,288 @@ fn format_labeled_requests_snapshot(
+@@ -505,6 +589,467 @@ fn format_labeled_requests_snapshot(
      )
  }
  
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn codex_patch_websocket_fallback_gets_a_fresh_http_recovery_budget() -> Result<()> {
++    skip_if_no_network!(Ok(()));
++    let server = start_mock_server().await;
++    let busy = wiremock::ResponseTemplate::new(503)
++        .insert_header("retry-after", "600")
++        .set_body_json(json!({"error": {"message": "temporarily unavailable"}}));
++    wiremock::Mock::given(wiremock::matchers::method("GET"))
++        .and(wiremock::matchers::path_regex(".*/responses$"))
++        .respond_with(busy.clone())
++        .mount(&server)
++        .await;
++    let http = mount_response_sequence(
++        &server,
++        vec![
++            busy,
++            sse_response(sse(vec![
++                ev_assistant_message("recovered", "done"),
++                ev_completed("response-done"),
++            ])),
++        ],
++    )
++    .await;
++    let base_url = format!("{}/v1", server.uri());
++    let mut builder = test_codex()
++        .with_pre_build_hook(write_model_request_failure_hooks)
++        .with_config(move |config| {
++            config.model_provider.base_url = Some(base_url);
++            config.model_provider.supports_websockets = true;
++            config.model_provider.request_max_retries = Some(0);
++            config.model_provider.stream_max_retries = Some(0);
++            config.codex_patch.transient_request_recovery_limit = Some(RecoveryLimit::Limited(1));
++            config.codex_patch.recovery_max_wait_ms = std::num::NonZeroU64::new(10);
++            trust_discovered_hooks(config);
++        });
++    let test = builder.build_with_auto_env(&server).await?;
++    test.submit_turn("recover across transports").await?;
++    let requests = server.received_requests().await.unwrap_or_default();
++    assert_eq!(
++        requests
++            .iter()
++            .filter(|request| request.method == http::Method::GET
++                && request.url.path().ends_with("/responses"))
++            .count(),
++        3,
++        "one prewarm and two visible websocket attempts"
++    );
++    assert_eq!(
++        http.requests().len(),
++        2,
++        "HTTP must receive its own retry after websocket exhaustion"
++    );
++    let hooks = wait_for_model_request_failure_inputs(&test.codex_home_path(), 3).await;
++    assert_eq!(
++        hooks.len(),
++        3,
++        "prewarm must not consume the visible budget or emit a hook"
++    );
++    for (index, action) in ["retry", "fallback", "retry"].into_iter().enumerate() {
++        assert_eq!(hooks[index]["hookEventName"], "ModelRequestRecovery");
++        assert_eq!(hooks[index]["nextAction"], action);
++        assert_eq!(hooks[index]["attempt"], index + 1);
++    }
++    Ok(())
++}
++
 +#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 +async fn codex_patch_unlimited_sampling_recovery_replaces_the_original_retry_budget() -> Result<()>
 +{
@@ -2123,7 +2197,7 @@ index 09ae3e2cdd239a0ed34eb629b1cd2979a7e6d968..1fc7e5f9fecc7be911ed4c0ccecd6542
 +    let request_log = mount_sse_sequence(
 +        &server,
 +        vec![
-+            server_overload_sse("capacity-1"),
++            server_overload_sse_with_retry_after("capacity-1", 600_000),
 +            server_overload_sse("capacity-2"),
 +            server_overload_sse("capacity-3"),
 +            sse(vec![
@@ -2139,6 +2213,7 @@ index 09ae3e2cdd239a0ed34eb629b1cd2979a7e6d968..1fc7e5f9fecc7be911ed4c0ccecd6542
 +    let mut builder = test_codex().with_config(move |config| {
 +        config.model_provider = provider;
 +        config.codex_patch.server_overload_recovery_limit = Some(RecoveryLimit::Unlimited);
++        config.codex_patch.recovery_max_wait_ms = std::num::NonZeroU64::new(10);
 +    });
 +    let test = builder.build_with_auto_env(&server).await?;
 +
@@ -2277,9 +2352,22 @@ index 09ae3e2cdd239a0ed34eb629b1cd2979a7e6d968..1fc7e5f9fecc7be911ed4c0ccecd6542
 +    Ok(())
 +}
 +
++#[test_case::test_case(503, "server_is_overloaded"; "overload")]
++#[test_case::test_case(503, "server_error"; "generic server")]
++#[test_case::test_case(429, "rate_limit_exceeded"; "rate limit")]
++#[test_case::test_case(429, "usage_limit_reached"; "usage limit")]
 +#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-+async fn codex_patch_legacy_remote_compact_retries_with_its_configured_budget() -> Result<()> {
++async fn codex_patch_legacy_remote_compact_retries_with_its_configured_budget(
++    status: u16,
++    code: &str,
++) -> Result<()> {
 +    skip_if_no_network!(Ok(()));
++    let category = match code {
++        "server_is_overloaded" => "serverOverloaded",
++        "usage_limit_reached" => "usageLimit",
++        "rate_limit_exceeded" => "rateLimit",
++        _ => "server",
++    };
 +
 +    let server = start_mock_server().await;
 +    let response_log = mount_sse_sequence(
@@ -2293,13 +2381,15 @@ index 09ae3e2cdd239a0ed34eb629b1cd2979a7e6d968..1fc7e5f9fecc7be911ed4c0ccecd6542
 +    let compact_log = mount_compact_response_sequence(
 +        &server,
 +        vec![
-+            wiremock::ResponseTemplate::new(503).set_body_json(json!({
-+                "error": {
-+                    "code": "server_is_overloaded",
-+                    "message": "capacity is temporarily limited",
-+                    "retry_after_ms": 0,
-+                }
-+            })),
++            wiremock::ResponseTemplate::new(status)
++                .insert_header("retry-after", "600")
++                .set_body_json(json!({
++                    "error": {
++                        "code": code,
++                        "type": code,
++                        "message": "capacity is temporarily limited",
++                    }
++                })),
 +            wiremock::ResponseTemplate::new(200)
 +                .insert_header("content-type", "application/json")
 +                .set_body_json(json!({
@@ -2314,10 +2404,16 @@ index 09ae3e2cdd239a0ed34eb629b1cd2979a7e6d968..1fc7e5f9fecc7be911ed4c0ccecd6542
 +    let mut builder = test_codex()
 +        .with_pre_build_hook(write_model_request_failure_hooks)
 +        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
-+        .with_config(|config| {
++        .with_config(move |config| {
 +            config.model_provider.request_max_retries = Some(0);
 +            config.model_provider.stream_max_retries = Some(0);
-+            config.codex_patch.server_overload_recovery_limit = Some(RecoveryLimit::Limited(1));
++            let limit = Some(RecoveryLimit::Limited(1));
++            match category {
++                "serverOverloaded" => config.codex_patch.server_overload_recovery_limit = limit,
++                "usageLimit" => config.codex_patch.usage_limit_recovery_limit = limit,
++                _ => config.codex_patch.transient_request_recovery_limit = limit,
++            }
++            config.codex_patch.recovery_max_wait_ms = std::num::NonZeroU64::new(10);
 +            set_test_compact_prompt(config);
 +            let _ = config.features.disable(Feature::RemoteCompactionV2);
 +            trust_discovered_hooks(config);
@@ -2342,6 +2438,7 @@ index 09ae3e2cdd239a0ed34eb629b1cd2979a7e6d968..1fc7e5f9fecc7be911ed4c0ccecd6542
 +    assert_eq!(hook_inputs.len(), 1);
 +    assert_eq!(hook_inputs[0]["hookEventName"], "ModelRequestRecovery");
 +    assert_eq!(hook_inputs[0]["operation"], "remoteCompact");
++    assert_eq!(hook_inputs[0]["error"]["category"], category);
 +    assert_eq!(hook_inputs[0]["nextAction"], "retry");
 +    Ok(())
 +}
@@ -2358,7 +2455,7 @@ index 09ae3e2cdd239a0ed34eb629b1cd2979a7e6d968..1fc7e5f9fecc7be911ed4c0ccecd6542
 +                ev_assistant_message("seed-message", "seed"),
 +                ev_completed("seed-response"),
 +            ]),
-+            server_overload_sse("remote-v2-overload"),
++            server_overload_sse_with_retry_after("remote-v2-overload", 600_000),
 +            remote_v2_compaction_response(),
 +        ],
 +    )
@@ -2371,6 +2468,7 @@ index 09ae3e2cdd239a0ed34eb629b1cd2979a7e6d968..1fc7e5f9fecc7be911ed4c0ccecd6542
 +            config.model_provider.stream_max_retries = Some(0);
 +            config.codex_patch.server_overload_recovery_limit = Some(RecoveryLimit::Limited(1));
 +            let _ = config.features.enable(Feature::RemoteCompactionV2);
++            config.codex_patch.recovery_max_wait_ms = std::num::NonZeroU64::new(10);
 +            trust_discovered_hooks(config);
 +        });
 +    let test = builder.build_with_auto_env(&server).await?;
@@ -2396,10 +2494,99 @@ index 09ae3e2cdd239a0ed34eb629b1cd2979a7e6d968..1fc7e5f9fecc7be911ed4c0ccecd6542
 +    Ok(())
 +}
 +
++#[test_case::test_case("unary", true; "configured unary timeout")]
++#[test_case::test_case("unary", false; "upstream unary timeout")]
++#[test_case::test_case("local", true; "local streaming unaffected")]
++#[test_case::test_case("v2", true; "v2 streaming unaffected")]
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn codex_patch_compact_timeout_is_applied_at_the_unary_boundary(
++    mode: &str,
++    configured: bool,
++) -> Result<()> {
++    skip_if_no_network!(Ok(()));
++    let server = start_mock_server().await;
++    let delay = std::time::Duration::from_millis(150);
++    let mut responses = vec![
++        sse_response(sse(vec![
++            ev_assistant_message("seed-message", "original history"),
++            ev_completed("seed-response"),
++        ]))
++        .set_delay(delay),
++    ];
++    if mode != "unary" {
++        let body = if mode == "v2" {
++            remote_v2_compaction_response()
++        } else {
++            sse(vec![
++                ev_assistant_message("summary", "compacted"),
++                ev_completed("compact-response"),
++            ])
++        };
++        responses.push(sse_response(body).set_delay(delay));
++    }
++    responses.push(sse_response(sse(vec![ev_completed("followup-response")])));
++    let response_log = mount_response_sequence(&server, responses).await;
++    if mode == "unary" {
++        mount_compact_response_sequence(&server, vec![wiremock::ResponseTemplate::new(200)
++            .set_body_json(json!({"output": [{"type": "compaction", "encrypted_content": "DELAYED_SUMMARY"}]}))
++            .set_delay(delay)]).await;
++    }
++    let local = mode == "local";
++    let v2 = mode == "v2";
++    let mut provider = if local {
++        local_compaction_provider(&server)
++    } else {
++        openai_model_provider(&server)
++    };
++    provider.request_max_retries = Some(0);
++    provider.stream_max_retries = Some(0);
++    let mut builder = test_codex()
++        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
++        .with_config(move |config| {
++            config.model_provider = provider;
++            config.codex_patch.responses_compact_timeout_ms =
++                configured.then(|| std::num::NonZeroU64::new(50).unwrap());
++            config.codex_patch.transient_request_recovery_limit = Some(RecoveryLimit::Limited(0));
++            if v2 {
++                let _ = config.features.enable(Feature::RemoteCompactionV2);
++            } else {
++                let _ = config.features.disable(Feature::RemoteCompactionV2);
++            }
++            set_test_compact_prompt(config);
++        });
++    let test = builder.build_with_auto_env(&server).await?;
++    test.submit_turn("seed timeout test").await?;
++    test.codex.submit(Op::Compact).await?;
++    let mut failed = false;
++    loop {
++        let event = wait_for_event(&test.codex, |event| {
++            matches!(event, EventMsg::Error(_) | EventMsg::TurnComplete(_))
++        })
++        .await;
++        match event {
++            EventMsg::Error(_) => failed = true,
++            EventMsg::TurnComplete(_) => break,
++            _ => unreachable!(),
++        }
++    }
++    assert_eq!(failed, mode == "unary" && configured);
++    test.submit_turn("after compaction").await?;
++    if failed {
++        let requests = response_log.requests();
++        let followup = requests.last().unwrap().body_json().to_string();
++        assert!(body_contains_text(&followup, "original history"));
++        assert!(
++            !followup.contains("DELAYED_SUMMARY"),
++            "a timed-out result must not replace history"
++        );
++    }
++    Ok(())
++}
++
  #[test_case::test_case(false, false; "checklist disabled")]
  #[test_case::test_case(true, false; "checklist enabled")]
  #[test_case::test_case(false, true; "custom instructions with checklist disabled")]
-@@ -2936,6 +3302,63 @@ async fn pre_sampling_legacy_remote_compact_falls_back_after_previous_model_inva
+@@ -2936,6 +3481,63 @@ async fn pre_sampling_legacy_remote_compact_falls_back_after_previous_model_inva
      assert_eq!(requests[1].body_json()["model"].as_str(), Some(next_model));
  }
  

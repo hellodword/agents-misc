@@ -1,5 +1,5 @@
 diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
-index 7bf981482f6ade394c484c5794f9bbdb42404b9b..c0da2c8c93b190a0e511d49dd91363a3c342b106 100644
+index 7bf981482f6ade394c484c5794f9bbdb42404b9b..81df4f4f12703f7d874721c9305a1d7c4079690f 100644
 --- a/codex-rs/config/src/config_toml.rs
 +++ b/codex-rs/config/src/config_toml.rs
 @@ -59,7 +59,9 @@ use schemars::JsonSchema;
@@ -12,7 +12,7 @@ index 7bf981482f6ade394c484c5794f9bbdb42404b9b..c0da2c8c93b190a0e511d49dd91363a3
  use serde_json::Value as JsonValue;
  
  const RESERVED_MODEL_PROVIDER_IDS: [&str; 5] = [
-@@ -149,10 +151,129 @@ pub struct OrchestratorFeatureToml {
+@@ -149,10 +151,137 @@ pub struct OrchestratorFeatureToml {
      pub enabled: Option<bool>,
  }
  
@@ -101,6 +101,10 @@ index 7bf981482f6ade394c484c5794f9bbdb42404b9b..c0da2c8c93b190a0e511d49dd91363a3
 +    #[serde(default, deserialize_with = "deserialize_optional_nonzero_u64")]
 +    #[schemars(range(min = 1))]
 +    pub responses_compact_timeout_ms: Option<NonZeroU64>,
++    /// Maximum wait per patch-managed retry; defaults to 120 seconds.
++    #[serde(default, deserialize_with = "deserialize_optional_nonzero_u64")]
++    #[schemars(range(min = 1))]
++    pub recovery_max_wait_ms: Option<NonZeroU64>,
 +    #[schemars(with = "Option<RecoveryLimitSchema>")]
 +    pub usage_limit_recovery_limit: Option<RecoveryLimit>,
 +    #[schemars(with = "Option<RecoveryLimitSchema>")]
@@ -126,6 +130,10 @@ index 7bf981482f6ade394c484c5794f9bbdb42404b9b..c0da2c8c93b190a0e511d49dd91363a3
 +}
 +
 +impl CodexPatchConfig {
++    pub fn recovery_max_wait(&self) -> std::time::Duration {
++        std::time::Duration::from_millis(self.recovery_max_wait_ms.map_or(120_000, NonZeroU64::get))
++    }
++
 +    pub fn responses_compact_timeout(&self) -> Option<std::time::Duration> {
 +        self.responses_compact_timeout_ms
 +            .map(|value| std::time::Duration::from_millis(value.get()))
@@ -142,7 +150,7 @@ index 7bf981482f6ade394c484c5794f9bbdb42404b9b..c0da2c8c93b190a0e511d49dd91363a3
      /// Optional override of model selection.
      pub model: Option<String>,
      /// Review model override used by the `/review` feature.
-@@ -989,6 +1110,72 @@ mod tests {
+@@ -989,6 +1118,78 @@ mod tests {
      const WORKSPACE_ID_A: &str = "123e4567-e89b-42d3-a456-426614174000";
      const WORKSPACE_ID_B: &str = "123e4567-e89b-42d3-a456-426614174001";
  
@@ -156,6 +164,7 @@ index 7bf981482f6ade394c484c5794f9bbdb42404b9b..c0da2c8c93b190a0e511d49dd91363a3
 +[codex_patch]
 +force_request_user_input_blocking = false
 +responses_compact_timeout_ms = 300000
++recovery_max_wait_ms = 10000
 +usage_limit_recovery_limit = 2
 +transient_request_recovery_limit = 3
 +server_overload_recovery_limit = "unlimited"
@@ -167,6 +176,7 @@ index 7bf981482f6ade394c484c5794f9bbdb42404b9b..c0da2c8c93b190a0e511d49dd91363a3
 +            Some(CodexPatchConfig {
 +                force_request_user_input_blocking: Some(false),
 +                responses_compact_timeout_ms: NonZeroU64::new(300_000),
++                recovery_max_wait_ms: NonZeroU64::new(10_000),
 +                usage_limit_recovery_limit: Some(RecoveryLimit::Limited(2)),
 +                transient_request_recovery_limit: Some(RecoveryLimit::Limited(3)),
 +                server_overload_recovery_limit: Some(RecoveryLimit::Unlimited),
@@ -205,6 +215,10 @@ index 7bf981482f6ade394c484c5794f9bbdb42404b9b..c0da2c8c93b190a0e511d49dd91363a3
 +        for source in [
 +            "[codex_patch]\nresponses_compact_timeout_ms = 0",
 +            "[codex_patch]\nresponses_compact_timeout_ms = -1",
++            "[codex_patch]\nrecovery_max_wait_ms = 0",
++            "[codex_patch]\nrecovery_max_wait_ms = -1",
++            "[codex_patch]\nrecovery_max_wait_ms = 1.5",
++            "[codex_patch]\nrecovery_max_wait_ms = \"120000\"",
 +            "[codex_patch]\nunknown_option = true",
 +        ] {
 +            toml::from_str::<ConfigToml>(source)
@@ -264,38 +278,10 @@ index a813022548c9e714d6ccf07c99513367f8bc78f2..c6826935015b65490ba00fd9e8a2180d
      ///
      /// This is used after exhausting the provider retry budget, to force subsequent requests onto
 diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
-index 348d169c69d605fdaed32d8a148192fbd42c6116..62b3fc71bea3bfffc194c6a05cf40d5948e1ab74 100644
+index 348d169c69d605fdaed32d8a148192fbd42c6116..3429abc5a955a1d07448b9eea6e17b6f7d6d6dfe 100644
 --- a/codex-rs/core/src/client_tests.rs
 +++ b/codex-rs/core/src/client_tests.rs
-@@ -9,6 +9,7 @@ use super::X_CODEX_PARENT_THREAD_ID_HEADER;
- use super::X_CODEX_TURN_METADATA_HEADER;
- use super::X_CODEX_WINDOW_ID_HEADER;
- use super::X_OPENAI_SUBAGENT_HEADER;
-+use super::compact_request_timeout;
- use crate::AttestationContext;
- use crate::AttestationProvider;
- use crate::GenerateAttestationFuture;
-@@ -96,6 +97,19 @@ use wiremock::matchers::path;
- const TEST_CHATGPT_ID_TOKEN: &str = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJlbWFpbCI6InVzZXJAZXhhbXBsZS5jb20iLCJlbWFpbF92ZXJpZmllZCI6dHJ1ZSwiaHR0cHM6Ly9hcGkub3BlbmFpLmNvbS9hdXRoIjp7ImNoYXRncHRfdXNlcl9pZCI6InVzZXItMTIzNDUiLCJ1c2VyX2lkIjoidXNlci0xMjM0NSIsImNoYXRncHRfcGxhbl90eXBlIjoicHJvIiwiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjb3VudC0xMjMifX0.c2ln";
- const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
- 
-+#[test]
-+fn codex_patch_compact_timeout_overrides_only_when_configured() {
-+    let stream_idle_timeout = Duration::from_secs(75);
-+    assert_eq!(
-+        compact_request_timeout(None, stream_idle_timeout),
-+        Duration::from_secs(300)
-+    );
-+    assert_eq!(
-+        compact_request_timeout(Some(Duration::from_secs(17)), stream_idle_timeout),
-+        Duration::from_secs(17)
-+    );
-+}
-+
- fn test_model_client(session_source: SessionSource) -> ModelClient {
-     test_model_client_with_thread_id(ThreadId::new(), session_source)
- }
-@@ -200,6 +214,7 @@ async fn compact_uses_bearer_after_agent_identity_session_fallback() -> anyhow::
+@@ -200,6 +200,7 @@ async fn compact_uses_bearer_after_agent_identity_session_fallback() -> anyhow::
                  effort: None,
                  summary: codex_protocol::config_types::ReasoningSummary::None,
                  service_tier: None,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import fcntl
 import hashlib
 import json
@@ -130,6 +131,10 @@ class MaintenanceManifest:
     @property
     def install_receipt(self) -> Path:
         return self.runtime_root / "patch-install-receipt.json"
+
+    @property
+    def last_export(self) -> Path:
+        return self.runtime_root / "last-export.json"
 
     def owner_for(self, path: str) -> PatchSpec:
         owners = [patch for patch in self.patches if patch.owns(path)]
@@ -670,7 +675,7 @@ def _index_path(src: Path) -> Path:
     return path if path.is_absolute() else src / path
 
 
-def _checkout_fingerprint(src: Path) -> tuple[str, bytes, str, str]:
+def _checkout_fingerprint(src: Path) -> tuple[str, bytes, str, str, str]:
     status = run(
         ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
         cwd=src,
@@ -681,6 +686,7 @@ def _checkout_fingerprint(src: Path) -> tuple[str, bytes, str, str]:
         _index_path(src).read_bytes(),
         git_output(src, ["rev-parse", "HEAD"]),
         git_output(src, ["remote", "get-url", "origin"]),
+        _tree_digest(src, _changed_paths(src)),
     )
 
 
@@ -1250,10 +1256,6 @@ def validate_cargo_lock_tree(
         lock_path.read_bytes(),
         workspace_version=workspace_version,
     )
-    if changed == 0:
-        raise PatchError(
-            "generated Cargo.lock contains no workspace version normalization"
-        )
     return changed
 
 
@@ -1430,14 +1432,17 @@ def check_patches(manifest: MaintenanceManifest, *, selector: str) -> dict[str, 
     ensure_pinned_head(src, manifest.upstream)
     ensure_origin(src, manifest.upstream)
     ensure_real_index_clean(src)
-    patches = list(validate_patch_directory(manifest))
     selected = commands_for_selector(manifest, selector)
     if not selected:
         raise PatchError(f"check selector {selector!r} has no declared commands")
     before = _checkout_fingerprint(src)
-    with maintenance_workspace(manifest):
+    with maintenance_workspace(manifest) as workspace:
         checkout = manifest.maintenance_checkout
-        apply_patch_series(checkout, patches, manifest=manifest)
+        paths = _copy_editing_tree(manifest, src, checkout, workspace / "source.index")
+        for path in paths:
+            manifest.owner_for(path)
+        run_generation_sequence(manifest, checkout, twice=False)
+        validate_cargo_lock_tree(manifest, checkout)
         commands = run_commands(manifest, checkout, selected)
     if _checkout_fingerprint(src) != before:
         raise PatchError("check changed the editing checkout")
@@ -1451,12 +1456,14 @@ def _validate_refresh_source_patch_directory(
     manifest: MaintenanceManifest,
 ) -> tuple[Path, ...]:
     patch_dir = manifest.patch_dir
-    if not patch_dir.exists():
-        return ()
-    if patch_dir.is_symlink() or not patch_dir.is_dir():
+    if patch_dir.is_symlink() or (patch_dir.exists() and not patch_dir.is_dir()):
         raise PatchError(f"installed patch path is not a real directory: {patch_dir}")
-    entries = tuple(sorted(patch_dir.iterdir(), key=lambda path: path.name))
-    if not entries or any(
+    entries = (
+        tuple(sorted(patch_dir.iterdir(), key=lambda path: path.name))
+        if patch_dir.exists()
+        else ()
+    )
+    if any(
         path.is_symlink()
         or not path.is_file()
         or PATCH_FILE_RE.fullmatch(path.name) is None
@@ -1465,6 +1472,16 @@ def _validate_refresh_source_patch_directory(
         raise PatchError(
             f"installed predecessor patch directory is not a flat patch set: {patch_dir}"
         )
+    # An earlier refresh is a valid baseline even before the maintainer commits it.
+    # A manual edit must still be preserved, including edits to an untracked set.
+    if manifest.last_export.exists():
+        exported = json.loads(manifest.last_export.read_text())
+        if dict(_patch_file_state(entries)) == exported:
+            return entries
+        if not entries and exported:
+            raise PatchError(
+                "installed patch directory was removed since the last export"
+            )
     relative = patch_dir.relative_to(manifest.root).as_posix()
     for args, description in (
         (["diff", "--quiet", "--exit-code"], "unstaged"),
@@ -1527,7 +1544,9 @@ def _copy_editing_tree(
         if not _is_declared_generated(manifest, path)
     ]
     if not paths:
-        raise PatchError("upstream worktree has no handwritten changes to refresh")
+        raise PatchError(
+            "editing checkout has no handwritten changes; apply or port the patch series first"
+        )
     diff = _temporary_index_diff(src, paths, index)
     applied = subprocess.run(
         ["git", "apply", "--binary", "-"],
@@ -1560,13 +1579,21 @@ def _file_digest(path: Path) -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _write_json_atomic(path: Path, payload: Any) -> None:
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    temporary.replace(path)
+
+
 def _recover_patch_install(manifest: MaintenanceManifest) -> dict[str, str] | None:
     receipt_path = manifest.install_receipt
     if not receipt_path.exists():
         return None
     try:
         receipt = json.loads(receipt_path.read_text())
-        if receipt.get("version") != 1 or not isinstance(receipt.get("paths"), list):
+        if receipt.get("version") not in {1, 2} or not isinstance(
+            receipt.get("paths"), list
+        ):
             raise ValueError("unsupported receipt structure")
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         raise PatchError(
@@ -1590,6 +1617,7 @@ def _recover_patch_install(manifest: MaintenanceManifest) -> dict[str, str] | No
         if (
             not isinstance(relative, str)
             or not relative.startswith(active_prefix)
+            or PATCH_FILE_RE.fullmatch(relative.removeprefix(active_prefix)) is None
             or (old is not None and not isinstance(old, str))
             or (new is not None and not isinstance(new, str))
         ):
@@ -1605,6 +1633,7 @@ def _recover_patch_install(manifest: MaintenanceManifest) -> dict[str, str] | No
     if all(current == new for _, _, new, current in entries):
         validate_patch_directory(manifest)
         installed = _patch_hashes(manifest, manifest.patch_dir)
+        _write_json_atomic(manifest.last_export, installed)
         receipt_path.unlink()
         return installed
     if not all(current in {old, new} for _, old, new, current in entries):
@@ -1613,23 +1642,35 @@ def _recover_patch_install(manifest: MaintenanceManifest) -> dict[str, str] | No
             f"preserved with receipt {receipt_path}"
         )
 
+    # Validate every backup before restoring any file. Version 2 also protects
+    # previous exports that have not been committed to the outer repository.
+    backups: dict[str, bytes] = {}
+    for raw, (relative, old, _, _) in zip(receipt["paths"], entries):
+        if old is None:
+            continue
+        if receipt["version"] == 2:
+            try:
+                restored = base64.b64decode(raw["oldContent"], validate=True)
+            except (KeyError, ValueError, TypeError) as exc:
+                raise PatchError(f"invalid patch backup for {relative}") from exc
+        else:
+            restored = subprocess.run(
+                ["git", "show", f"{current_head}:{relative}"],
+                cwd=manifest.root,
+                check=True,
+                stdout=subprocess.PIPE,
+            ).stdout
+        if hashlib.sha256(restored).hexdigest() != old:
+            raise PatchError(f"cannot restore interrupted patch path: {relative}")
+        backups[relative] = restored
+
     for relative, old, _, _ in entries:
         target = manifest.root / relative
         if old is None:
             target.unlink(missing_ok=True)
             continue
-        restored = subprocess.run(
-            ["git", "show", f"{current_head}:{relative}"],
-            cwd=manifest.root,
-            check=True,
-            stdout=subprocess.PIPE,
-        ).stdout
-        if hashlib.sha256(restored).hexdigest() != old:
-            raise PatchError(
-                f"outer Git HEAD cannot restore interrupted patch path: {relative}"
-            )
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(restored)
+        target.write_bytes(backups[relative])
     receipt_path.unlink()
     return None
 
@@ -1692,7 +1733,9 @@ def _install_patch_files(
         capture=True,
     ).stdout
     if not install_diff:
-        raise PatchError("candidate patch set is identical to the installed patch set")
+        installed = _patch_hashes(manifest, manifest.patch_dir)
+        _write_json_atomic(manifest.last_export, installed)
+        return installed
     install_patch = workspace / "install.patch"
     install_patch.write_text(install_diff)
 
@@ -1704,19 +1747,20 @@ def _install_patch_files(
                 "path": relative,
                 "old": _file_digest(manifest.root / relative),
                 "new": _file_digest(staged_dir / name),
+                "oldContent": (
+                    base64.b64encode((manifest.root / relative).read_bytes()).decode()
+                    if name in old_names
+                    else None
+                ),
             }
         )
-    manifest.install_receipt.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "rootHead": git_output(manifest.root, ["rev-parse", "HEAD"]),
-                "paths": records,
-            },
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n"
+    _write_json_atomic(
+        manifest.install_receipt,
+        {
+            "version": 2,
+            "rootHead": git_output(manifest.root, ["rev-parse", "HEAD"]),
+            "paths": records,
+        },
     )
     run(
         ["git", "apply", "--check", "--binary", str(install_patch)],
@@ -1730,9 +1774,11 @@ def _install_patch_files(
             "patch install stopped in a recoverable mixed state; rerun refresh "
             f"with receipt {manifest.install_receipt}"
         )
-    manifest.install_receipt.unlink()
     validate_patch_directory(manifest)
-    return _patch_hashes(manifest, manifest.patch_dir)
+    installed = _patch_hashes(manifest, manifest.patch_dir)
+    _write_json_atomic(manifest.last_export, installed)
+    manifest.install_receipt.unlink()
+    return installed
 
 
 def refresh_patches(manifest: MaintenanceManifest, *, dry_run: bool) -> dict[str, Any]:
@@ -1747,21 +1793,16 @@ def refresh_patches(manifest: MaintenanceManifest, *, dry_run: bool) -> dict[str
         cwd=manifest.root,
         capture=True,
     ).stdout
-    if not dry_run:
-        recovered = _recover_patch_install(manifest)
-        if recovered is not None:
-            return {
-                "ref": manifest.upstream.ref,
-                "revision": manifest.upstream.revision,
-                "dryRun": False,
-                "patches": [patch.file for patch in manifest.patches],
-                "installedSha256": recovered,
-                "recoveredInstall": True,
-            }
-    existing = () if dry_run else _validate_refresh_source_patch_directory(manifest)
-    existing_state = _patch_file_state(existing)
-
+    recovered = None
     with maintenance_workspace(manifest) as workspace:
+        if dry_run and manifest.install_receipt.exists():
+            raise PatchError(
+                "pending patch installation; rerun refresh without --dry-run to recover"
+            )
+        if not dry_run:
+            recovered = _recover_patch_install(manifest)
+        existing = _validate_refresh_source_patch_directory(manifest)
+        existing_state = _patch_file_state(existing)
         working = manifest.maintenance_checkout
         source_paths = _copy_editing_tree(
             manifest,
@@ -1812,8 +1853,15 @@ def refresh_patches(manifest: MaintenanceManifest, *, dry_run: bool) -> dict[str
         lock_versions = validate_cargo_lock_tree(manifest, working)
         patch_hashes = _patch_hashes(manifest, candidate)
         installed = None
+        if _checkout_fingerprint(src) != before_source:
+            raise PatchError(
+                "editing checkout changed during refresh; rerun with the latest source"
+            )
         if not dry_run:
-            if _patch_file_state(existing) != existing_state:
+            if (
+                _patch_file_state(_validate_refresh_source_patch_directory(manifest))
+                != existing_state
+            ):
                 raise PatchError(
                     "installed patch files changed while refresh was validating its candidate"
                 )
@@ -1839,6 +1887,7 @@ def refresh_patches(manifest: MaintenanceManifest, *, dry_run: bool) -> dict[str
         "generationDigest": first,
         "secondGenerationDigest": second,
         "changedWorkspaceVersions": lock_versions,
+        **({"recoveredInstall": True} if recovered is not None else {}),
     }
 
 

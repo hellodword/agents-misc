@@ -1,7 +1,7 @@
 [[patch]]
 file = "0001-codex-patch-config.patch"
 intent = "Define one optional downstream configuration namespace without changing upstream defaults."
-behavior = "Strict patch-only timeout, recovery-budget, and request-input options are parsed centrally; absent values preserve upstream behavior."
+behavior = "Strict patch-only timeout, recovery-budget, wait-cap, and request-input options are parsed centrally; recovery remains opt-in."
 source_files = [
   "codex-rs/config/src/config_toml.rs",
   "codex-rs/core/src/client.rs",
@@ -14,7 +14,7 @@ generated_files = []
 generated_prefixes = []
 tests = [
   ["cargo", "test", "--locked", "-p", "codex-config", "--lib", "codex_patch_"],
-  ["cargo", "test", "--locked", "-p", "codex-core", "--lib", "codex_patch_compact_timeout_overrides_only_when_configured"],
+  ["cargo", "test", "--locked", "-p", "codex-core", "--test", "all", "suite::compact::codex_patch_compact_timeout_", "--", "--test-threads=1"],
 ]
 
 [[patch]]
@@ -77,7 +77,7 @@ tests = [
 [[patch]]
 file = "0004-model-request-recovery.patch"
 intent = "Prevent configured recoverable model-request failures from terminating supported execution paths."
-behavior = "Sampling and compact operations apply per-target, per-category Core retry budgets, honor complete provider advice cancellably, and emit recovery or terminal hooks only for visible Core decisions."
+behavior = "Sampling and compact operations apply per-target, per-category Core retry budgets, cap provider advice and local backoff with one configurable maximum, and emit hooks only for visible Core decisions."
 source_files = [
   "codex-rs/core/src/compact.rs",
   "codex-rs/core/src/compact_remote.rs",

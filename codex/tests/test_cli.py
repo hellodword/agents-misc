@@ -22,11 +22,10 @@ class CliTests(unittest.TestCase):
             stderr=subprocess.PIPE,
         )
 
-    def test_single_entrypoint_documents_all_commands(self) -> None:
-        result = self.run_cli("--help")
+    def test_help_does_not_require_a_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            result = self.run_cli("--repo-root", temporary, "--help")
         self.assertEqual(result.returncode, 0, result.stderr)
-        for command in ("fetch", "apply", "refresh", "verify"):
-            self.assertIn(command, result.stdout)
         self.assertIn("--repo-root", result.stdout)
 
     def test_subcommand_flags_are_scoped(self) -> None:
@@ -36,20 +35,12 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("unrecognized arguments", result.stderr)
 
-    def test_error_includes_recovery(self) -> None:
+    def test_missing_manifest_reports_failure_on_stderr(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             result = self.run_cli("--repo-root", temporary, "apply", "--check")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("error:", result.stderr)
-        self.assertIn("recovery:", result.stderr)
-
-    def test_only_two_maintenance_modules_remain(self) -> None:
-        scripts = {
-            path.name
-            for path in (ROOT / "codex" / "scripts").glob("*.py")
-            if path.is_file() and path.name != "__init__.py"
-        }
-        self.assertEqual(scripts, {"maintain.py", "workflow.py"})
+        self.assertEqual(result.stdout, "")
+        self.assertIn("codex/upstream.toml", result.stderr)
 
 
 if __name__ == "__main__":

@@ -20,6 +20,9 @@ jobs:
     env:
       CACHIX_CACHE_NAME: hellodword-codex
       CACHIX_PUBLIC_KEY: hellodword-codex.cachix.org-1:0URmcnC9aynWh9+FJ2tf+HQloylGgZzPtrz3sttTTiQ=
+      CODEX_CARGO_JOBS: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
 
     steps:
       - uses: actions/checkout@v7
@@ -35,12 +38,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          nix build --accept-flake-config --no-link \
-            .#checks.x86_64-linux.codex-patch-contract \
-            .#checks.x86_64-linux.codex-behavior \
-            .#checks.x86_64-linux.codex-generation \
-            .#checks.x86_64-linux.codex-hooks \
-            .#checks.x86_64-linux.github-workflows
+          nix develop --accept-flake-config .#dev --command \
+            actionlint .github/workflows/build-codex.yml
+          nix develop --accept-flake-config .#dev --command \
+            python3 scripts/check-workflows.py --root .
+          nix develop --accept-flake-config .#codex --command \
+            python3 -m unittest discover -s codex/tests -p 'test_*.py'
+          nix develop --accept-flake-config .#codex --command \
+            ruff format --check tools/codex-hooks
+          nix develop --accept-flake-config .#codex --command \
+            ruff check tools/codex-hooks
+          nix develop --accept-flake-config .#codex --command \
+            python3 -m unittest discover -s tools/codex-hooks/tests -p 'test_*.py'
+          nix develop --accept-flake-config .#codex --command \
+            python3 codex/scripts/maintain.py fetch
+          nix develop --accept-flake-config .#codex --command \
+            python3 codex/scripts/maintain.py verify
 
   build:
     name: Build and push Cachix cache
