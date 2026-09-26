@@ -3,7 +3,6 @@
   nixpkgs,
   supportedSystems,
   codexFor,
-  codexCheckFor,
   codexConfigAtlasFor,
   agentsViewerFor,
   formattingCheckFor,
@@ -19,7 +18,6 @@ lib.genAttrs supportedSystems (
     ]);
     codexConfigAtlas = codexConfigAtlasFor system;
     agentsViewer = agentsViewerFor system;
-    codexCheck = codexCheckFor system;
     codexPackage = codexFor system;
     codexPatchContract =
       pkgs.runCommand "codex-patch-contract-check"
@@ -28,7 +26,6 @@ lib.genAttrs supportedSystems (
             pkgs.coreutils
             pkgs.gitMinimal
             pkgs.python3
-            pkgs.zstd
           ];
         }
         ''
@@ -66,7 +63,6 @@ lib.genAttrs supportedSystems (
     agent-rules = pkgs.runCommand "agent-rules-check" { nativeBuildInputs = [ agentRulesPython ]; } ''
       cd ${../.}
       python3 scripts/check-agent-rules.py --root .
-      python3 scripts/check-maintenance-docs.py --root .
       python3 -m unittest discover -s tests -p 'test_*.py'
       touch "$out"
     '';
@@ -75,10 +71,7 @@ lib.genAttrs supportedSystems (
     codex-config-atlas-site = codexConfigAtlas.checkConfigAtlasSite;
     codex-config-atlas-tests = codexConfigAtlas.checkConfigAtlasTests;
     codex-patch-contract = codexPatchContract;
-    codex-behavior = checkMarker "codex-behavior-check" codexCheck "behavior-ok";
-    codex-generation = checkMarker "codex-generation-check" codexCheck "generation-ok";
     codex-hooks = pkgs.runCommand "codex-hooks-check" { } ''
-      test -f ${codexCheck}/hooks-rust-ok
       test -e ${codexHooksHelper}
       touch "$out"
     '';

@@ -5,7 +5,14 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from codex.scripts.workflow import PatchError, load_manifest, validate_patch_directory
+from codex.scripts.workflow import (
+    PatchError,
+    _cargo_test_list_command,
+    _listed_rust_test_count,
+    commands_for_selector,
+    load_manifest,
+    upstream_build_env,
+)
 
 
 UPSTREAM = """
@@ -14,8 +21,7 @@ ref = "rust-v1.0.0"
 revision = "0123456789abcdef0123456789abcdef01234567"
 worktree = ".work/codex/rust-v1.0.0/src"
 generate_commands = [["python3", "-c", "pass"]]
-regression_commands = [["python3", "-c", "pass"]]
-validation_command = ["python3", "-c", "pass"]
+integration_commands = [["python3", "-c", "pass"]]
 """
 
 SOURCE_PATCH = """
@@ -74,6 +80,22 @@ class ManifestTests(unittest.TestCase):
             [patch.file for patch in manifest.patches],
             ["0001-source.patch", "0002-generated.patch"],
         )
+        self.assertEqual(
+            commands_for_selector(manifest, "0001"),
+            (("python3", "-c", "pass"),),
+        )
+        self.assertEqual(
+            commands_for_selector(manifest, "integration"),
+            (("python3", "-c", "pass"),),
+        )
+        with self.assertRaises(PatchError):
+            commands_for_selector(manifest, "unknown")
+        build_env = upstream_build_env(manifest)
+        self.assertEqual(build_env["CARGO_INCREMENTAL"], "1")
+        self.assertEqual(
+            build_env["CARGO_TARGET_DIR"],
+            str(manifest.worktree.parent / "cargo-target"),
+        )
 
     def test_unknown_and_missing_fields_are_rejected(self) -> None:
         self.assert_manifest_error(upstream=UPSTREAM + 'legacy = "no"\n')
@@ -122,8 +144,8 @@ class ManifestTests(unittest.TestCase):
         )
         self.assert_manifest_error(
             upstream=UPSTREAM.replace(
-                'validation_command = ["python3", "-c", "pass"]',
-                'validation_command = ["cargo", "check"]',
+                'integration_commands = [["python3", "-c", "pass"]]',
+                'integration_commands = [["cargo", "check"]]',
             )
         )
         self.assert_manifest_error(
@@ -133,68 +155,46 @@ class ManifestTests(unittest.TestCase):
             )
         )
 
-    def test_repository_manifest_has_direct_generators_and_final_lock_owner(
+    def test_cargo_test_listing_preserves_filters_and_detects_zero_matches(
         self,
     ) -> None:
-        manifest = load_manifest(require_patch_files=False)
-        commands = manifest.upstream.generate_commands
-        self.assertEqual(commands[0][:3], ("cargo", "tree", "--offline"))
         self.assertEqual(
-            commands[1][:4], ("cargo", "metadata", "--locked", "--offline")
-        )
-        self.assertFalse(any("just" in command for command in commands))
-        self.assertFalse(any("generate-proto.sh" in command for command in commands))
-        serialized_commands = "\n".join(" ".join(command) for command in commands)
-        self.assertIn("codex-rs/target/agents-misc-proto", serialized_commands)
-        cargo_commands = [command for command in commands[1:] if command[0] == "cargo"]
-        self.assertTrue(all("--locked" in command for command in cargo_commands))
-        schema_commands = [
-            command
-            for command in commands
-            if "schema_fixtures_tests::write_schema_fixtures_from_env" in command
-        ]
-        self.assertEqual(len(schema_commands), 2)
-        self.assertTrue(
-            all(
-                "CODEX_APP_SERVER_SCHEMA_ROOT=schema" in command
-                for command in schema_commands
-            )
-        )
-        self.assertEqual(manifest.patches[-1].file, "0007-generated-contracts.patch")
-        self.assertIn("codex-rs/Cargo.lock", manifest.patches[-1].generated_files)
-
-        recovery_tests = manifest.patches[4].tests
-        integration_filters = [
-            command[-1]
-            for command in recovery_tests
-            if command[:7]
-            == (
+            _cargo_test_list_command(
+                (
+                    "env",
+                    "RUST_MIN_STACK=8388608",
+                    "cargo",
+                    "test",
+                    "--locked",
+                    "-p",
+                    "codex-core",
+                    "filter",
+                    "--",
+                    "--exact",
+                )
+            ),
+            (
+                "env",
+                "RUST_MIN_STACK=8388608",
                 "cargo",
                 "test",
                 "--locked",
                 "-p",
                 "codex-core",
-                "--test",
-                "all",
-            )
-        ]
-        self.assertEqual(
-            integration_filters,
-            [
-                "request_error_precedes_persistent_wait_and_cancel_does_not_abnormally_stop",
-                "pre_sampling_legacy_remote_compact_reports_fallback_failure_and_returns_original_error",
-                "sampling_internal_http_retries_emit_one_visible_stop_decision",
-            ],
+                "filter",
+                "--",
+                "--list",
+                "--exact",
+            ),
         )
-        self.assertNotIn("compact", integration_filters)
-
-    def test_repository_patch_directory_matches_series_after_refresh(self) -> None:
-        manifest = load_manifest(require_patch_files=False)
-        expected = [patch.file for patch in manifest.patches]
-        if all((manifest.patch_dir / name).is_file() for name in expected):
-            self.assertEqual(
-                [path.name for path in validate_patch_directory(manifest)], expected
-            )
+        self.assertIsNone(_cargo_test_list_command(("cargo", "check", "--locked")))
+        self.assertEqual(
+            _listed_rust_test_count(
+                "3 tests, 0 benchmarks\n0 tests, 0 benchmarks\n1 test, 0 benchmarks\n"
+            ),
+            4,
+        )
+        self.assertEqual(_listed_rust_test_count("0 tests, 0 benchmarks\n"), 0)
 
 
 if __name__ == "__main__":

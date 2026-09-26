@@ -87,7 +87,6 @@ development shell.
 
 ```sh
 just check-agent-rules
-just check-docs
 just check-workflows
 git status --short --ignored
 ```

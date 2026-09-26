@@ -8,6 +8,7 @@ import argparse
 from workflow import (
     add_repo_root_argument,
     apply_patches,
+    check_patches,
     fetch_upstream,
     json_stdout,
     load_manifest,
@@ -36,6 +37,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="validate candidate patch hashes without changing tracked files",
     )
+    check = commands.add_parser(
+        "check", help="run focused tests for one patch or the integration group"
+    )
+    check.add_argument("selector", help="patch number/name or integration")
     commands.add_parser("verify", help="replay, regenerate, and run all declared gates")
     return parser
 
@@ -52,6 +57,8 @@ def main() -> int:
         result = apply_patches(manifest, check_only=args.check)
     elif args.command == "refresh":
         result = refresh_patches(manifest, dry_run=args.dry_run)
+    elif args.command == "check":
+        result = check_patches(manifest, selector=args.selector)
     else:
         result = verify_patches(manifest)
     json_stdout(

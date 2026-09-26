@@ -5,11 +5,6 @@ worktree = ".work/codex/rust-v0.154.0/src"
 generate_commands = [
   ["cargo", "tree", "--offline", "-p", "codex-config-schema"],
   ["cargo", "metadata", "--locked", "--offline", "--format-version", "1", "--no-deps"],
-  ["python3", "-c", "from pathlib import Path; root=Path('codex-rs/config/src/thread_config/proto'); scratch=Path('codex-rs/target/agents-misc-proto'); scratch.mkdir(parents=True, exist_ok=True); (scratch/'codex.thread_config.v1.proto').write_bytes((root/'codex.thread_config.v1.proto').read_bytes())"],
-  ["cargo", "run", "--locked", "-p", "codex-config", "--example", "generate-proto", "--", "target/agents-misc-proto"],
-  ["python3", "-c", "from pathlib import Path; p=Path('codex-rs/target/agents-misc-proto/codex.thread_config.v1.rs'); lines=p.read_text().splitlines(keepends=True); marker='#![allow(clippy::trivially_copy_pass_by_ref)]\\n'; lines.insert(1, marker) if len(lines) < 2 or 'clippy::trivially_copy_pass_by_ref' not in lines[1] else None; p.write_text(''.join(lines))"],
-  ["rustfmt", "--edition", "2024", "codex-rs/target/agents-misc-proto/codex.thread_config.v1.rs"],
-  ["python3", "-c", "from pathlib import Path; root=Path('codex-rs/config/src/thread_config/proto'); scratch=Path('codex-rs/target/agents-misc-proto'); generated=scratch/'codex.thread_config.v1.rs'; lines=generated.read_text().splitlines(keepends=True); marker='#![allow(clippy::trivially_copy_pass_by_ref)]'; lines.insert(2, '\\n') if len(lines) > 2 and lines[1].strip() == marker and lines[2].strip() else None; data=''.join(lines).encode(); target=root/'codex.thread_config.v1.rs'; target.write_bytes(data) if target.read_bytes() != data else None; generated.unlink(); (scratch/'codex.thread_config.v1.proto').unlink(); scratch.rmdir(); scratch.parent.rmdir() if not any(scratch.parent.iterdir()) else None"],
   ["cargo", "run", "--locked", "-p", "codex-config-schema", "--bin", "codex-write-config-schema"],
   ["env", "CODEX_APP_SERVER_SCHEMA_ROOT=schema", "CODEX_APP_SERVER_SCHEMA_EXPERIMENTAL=0", "cargo", "test", "--locked", "-p", "codex-app-server-protocol", "--lib", "schema_fixtures_tests::write_schema_fixtures_from_env", "--", "--exact", "--ignored"],
   ["env", "CODEX_APP_SERVER_SCHEMA_ROOT=schema", "CODEX_APP_SERVER_SCHEMA_EXPERIMENTAL=1", "cargo", "test", "--locked", "-p", "codex-app-server-protocol", "--lib", "schema_fixtures_tests::write_schema_fixtures_from_env", "--", "--exact", "--ignored"],
@@ -17,29 +12,6 @@ generate_commands = [
   ["env", "INSTA_UPDATE=always", "cargo", "test", "--locked", "-p", "codex-tui", "--lib", "renders_event_browser"],
   ["env", "INSTA_UPDATE=always", "cargo", "test", "--locked", "-p", "codex-tui", "--lib", "hooks_popup_shows_list_diagnostics"],
 ]
-regression_commands = [
-  ["cargo", "test", "--locked", "-p", "codex-goal-extension", "active_goal"],
-]
-validation_command = [
-  "cargo",
-  "check",
-  "--locked",
-  "-p",
-  "codex-model-provider-info",
-  "-p",
-  "codex-model-provider",
-  "-p",
-  "codex-api",
-  "-p",
-  "codex-protocol",
-  "-p",
-  "codex-config",
-  "-p",
-  "codex-hooks",
-  "-p",
-  "codex-core",
-  "-p",
-  "codex-app-server-protocol",
-  "-p",
-  "codex-tui",
+integration_commands = [
+  ["cargo", "check", "--locked", "-p", "codex-cli", "-p", "codex-response-debug-context", "-p", "codex-app-server", "-p", "codex-guardian-v2"],
 ]

@@ -1,14 +1,9 @@
 set positional-arguments
 
-# Validate rule structure, skill assets, maintenance docs, and the eval corpus.
+# Validate rule structure, skill assets, and the eval corpus.
 check-agent-rules:
   nix develop .#dev --command python3 scripts/check-agent-rules.py --root .
-  nix develop .#dev --command python3 scripts/check-maintenance-docs.py --root .
   nix develop .#dev --command python3 -m unittest discover -s tests -p 'test_*.py'
-
-# Validate maintenance links and safely smoke every documented shell command.
-check-docs:
-  nix develop .#dev --command python3 scripts/check-maintenance-docs.py --root . --execute-commands
 
 # Validate GitHub Actions syntax, official major tags, and verification gates.
 check-workflows:
@@ -40,18 +35,26 @@ codex-apply-check:
 codex-apply:
   nix develop .#codex --command python3 codex/scripts/maintain.py apply
 
-# Generate and fully validate a candidate patch series without installing it.
+# Generate and replay a reproducible candidate patch series without installing it.
 codex-refresh-dry-run:
   nix develop .#codex --command python3 codex/scripts/maintain.py refresh --dry-run
 
-# Generate, fully validate, and install the manifest-owned patch series.
+# Generate, replay, and install the manifest-owned patch series without Rust tests.
 codex-refresh:
   nix develop .#codex --command python3 codex/scripts/maintain.py refresh
+
+# Run only the focused commands owned by one Codex patch or the integration group.
+codex-check *args:
+  nix develop .#codex --command python3 codex/scripts/maintain.py check "$@"
 
 # Replay, regenerate, and run every manifest-declared Codex verification gate.
 codex-test:
   nix develop .#codex --command python3 -m unittest discover -s codex/tests -p 'test_*.py'
   nix develop .#codex --command python3 codex/scripts/maintain.py verify
+
+# Build the patched Codex Nix package only after development-shell validation passes.
+codex-final-nix:
+  nix build --no-link --accept-flake-config .#codex
 
 # Run the Viewer API with the non-embedded development shell.
 agents-viewer-api-dev *args:

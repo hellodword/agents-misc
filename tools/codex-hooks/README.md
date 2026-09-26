@@ -1,9 +1,9 @@
 # Codex hook helpers
 
-These two optional Python helpers transport the patched Codex `RequestError`
-and `AbnormalStop` events to a local desktop notification or an explicitly
-configured webhook. They are operational examples, not an authenticated
-network service.
+These two optional Python helpers transport the patched Codex
+`ModelRequestRecovery` and `ModelRequestFailed` events to a local desktop
+notification or an explicitly configured webhook. They are operational
+examples, not an authenticated network service.
 
 ## Data flow and authority
 
@@ -66,7 +66,7 @@ environment variables. Empty or omitted `events` handles every validated
 event.
 
 ```toml
-events = ["RequestError", "AbnormalStop"]
+events = ["ModelRequestRecovery", "ModelRequestFailed"]
 max_body_bytes = 2097152
 max_handler_concurrency = 8
 

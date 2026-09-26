@@ -29,9 +29,14 @@ DEFAULT_TIMEOUT_SEC = 1.5
 DEFAULT_PREVIEW_LIMIT = 500
 DEFAULT_MAX_STDIN_BYTES = 2 * 1024 * 1024
 DEFAULT_MAX_REQUEST_BYTES = 2 * 1024 * 1024
-MODEL_REQUEST_EVENTS = {"RequestError", "AbnormalStop"}
-MODEL_REQUEST_OPERATIONS = {"sampling", "localCompact", "remoteCompact"}
-MODEL_REQUEST_NEXT_ACTIONS = {"retry", "fallback", "stop"}
+MODEL_REQUEST_EVENTS = {"ModelRequestRecovery", "ModelRequestFailed"}
+MODEL_REQUEST_OPERATIONS = {
+    "sampling",
+    "localCompact",
+    "remoteCompact",
+    "remoteCompactV2",
+}
+MODEL_REQUEST_NEXT_ACTIONS = {"retry", "fallback"}
 MODEL_REQUEST_ERROR_CATEGORIES = {
     "transport",
     "timeout",
@@ -39,32 +44,25 @@ MODEL_REQUEST_ERROR_CATEGORIES = {
     "usageLimit",
     "contextWindow",
     "policy",
-    "sandbox",
     "invalidRequest",
     "server",
+    "serverOverloaded",
     "internal",
     "other",
 }
-REQUEST_ERROR_FIELDS = {
+MODEL_REQUEST_FIELDS = {
     "attempt",
     "cwd",
-    "endpointPath",
     "error",
     "hookEventName",
     "model",
-    "nextAction",
     "operation",
     "provider",
     "sessionId",
     "transcriptPath",
     "turnId",
 }
-ABNORMAL_STOP_FIELDS = REQUEST_ERROR_FIELDS | {
-    "approvalPolicy",
-    "goalMode",
-    "reason",
-    "sandboxMode",
-}
+MODEL_REQUEST_RECOVERY_FIELDS = MODEL_REQUEST_FIELDS | {"nextAction"}
 
 
 @dataclass(frozen=True)
@@ -260,14 +258,9 @@ def normalize_hook_payload(
         "toolUseId": payload.get("toolUseId"),
         "provider": payload.get("provider"),
         "operation": payload.get("operation"),
-        "endpointPath": payload.get("endpointPath"),
         "attempt": payload.get("attempt"),
         "nextAction": payload.get("nextAction"),
         "error": payload.get("error"),
-        "goalMode": payload.get("goalMode"),
-        "approvalPolicy": payload.get("approvalPolicy"),
-        "sandboxMode": payload.get("sandboxMode"),
-        "reason": payload.get("reason"),
         "stopHookActive": payload.get("stopHookActive"),
     }
 
@@ -301,7 +294,9 @@ def normalize_hook_payload(
 def validate_model_request_payload(payload: dict[str, Any]) -> None:
     event_name = payload.get("hookEventName")
     expected_fields = (
-        REQUEST_ERROR_FIELDS if event_name == "RequestError" else ABNORMAL_STOP_FIELDS
+        MODEL_REQUEST_RECOVERY_FIELDS
+        if event_name == "ModelRequestRecovery"
+        else MODEL_REQUEST_FIELDS
     )
     missing = sorted(expected_fields - set(payload))
     unknown = sorted(set(payload) - expected_fields)
@@ -309,40 +304,49 @@ def validate_model_request_payload(payload: dict[str, Any]) -> None:
         raise ValueError(f"{event_name} is missing fields: {', '.join(missing)}")
     if unknown:
         raise ValueError(f"{event_name} has unknown fields: {', '.join(unknown)}")
-    for field in ["sessionId", "turnId", "cwd", "model", "provider", "endpointPath"]:
+    for field in ["sessionId", "turnId", "cwd", "model", "provider"]:
         if not isinstance(payload.get(field), str):
             raise TypeError(f"{event_name} {field} must be a string")
     transcript_path = payload.get("transcriptPath")
     if transcript_path is not None and not isinstance(transcript_path, str):
         raise ValueError(f"{event_name} transcriptPath must be a string or null")
-    if payload.get("endpointPath") not in {"/responses", "/responses/compact"}:
-        raise ValueError(f"{event_name} endpointPath is invalid")
     operation = payload.get("operation")
     if operation not in MODEL_REQUEST_OPERATIONS:
         raise ValueError(f"{event_name} operation is invalid")
-    next_action = payload.get("nextAction")
-    if next_action not in MODEL_REQUEST_NEXT_ACTIONS:
-        raise ValueError(f"{event_name} nextAction is invalid")
+    if event_name == "ModelRequestRecovery":
+        next_action = payload.get("nextAction")
+        if next_action not in MODEL_REQUEST_NEXT_ACTIONS:
+            raise ValueError(f"{event_name} nextAction is invalid")
     attempt = payload.get("attempt")
-    if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 0:
-        raise ValueError(f"{event_name} attempt must be a non-negative integer")
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+        raise ValueError(f"{event_name} attempt must be a positive integer")
     error = payload.get("error")
     if not isinstance(error, dict):
         raise TypeError(f"{event_name} error must be an object")
-    if set(error) != {"category", "message"}:
-        raise ValueError(f"{event_name} error must contain only category and message")
+    required_error_fields = {"category", "message"}
+    allowed_error_fields = required_error_fields | {"code", "httpStatus"}
+    if not required_error_fields.issubset(error) or not set(error).issubset(
+        allowed_error_fields
+    ):
+        raise ValueError(
+            f"{event_name} error must contain category and message plus optional code and httpStatus"
+        )
     if error.get("category") not in MODEL_REQUEST_ERROR_CATEGORIES:
         raise ValueError(f"{event_name} error.category is invalid")
     if not isinstance(error.get("message"), str):
         raise TypeError(f"{event_name} error.message must be a string")
-    if event_name == "AbnormalStop":
-        if not isinstance(payload.get("goalMode"), bool):
-            raise ValueError("AbnormalStop goalMode must be a boolean")
-        for field in ["approvalPolicy", "sandboxMode"]:
-            if not isinstance(payload.get(field), str):
-                raise TypeError(f"AbnormalStop {field} must be a string")
-        if payload.get("reason") != "requestError":
-            raise ValueError("AbnormalStop reason is invalid")
+    if "code" in error and not isinstance(error["code"], str):
+        raise TypeError(f"{event_name} error.code must be a string")
+    if "httpStatus" in error:
+        status = error["httpStatus"]
+        if (
+            isinstance(status, bool)
+            or not isinstance(status, int)
+            or not 0 <= status <= 65535
+        ):
+            raise ValueError(
+                f"{event_name} error.httpStatus must be an unsigned 16-bit integer"
+            )
 
 
 def command_from_tool_input(value: Any) -> str | None:
@@ -371,10 +375,10 @@ def event_matches(event_name: str, events_spec: str) -> bool:
 
 def severity_for(summary: dict[str, Any]) -> str:
     event_name = summary.get("hookEventName")
-    if event_name == "AbnormalStop":
+    if event_name == "ModelRequestFailed":
         return "error"
-    if event_name == "RequestError":
-        return "warning" if summary.get("nextAction") != "stop" else "error"
+    if event_name == "ModelRequestRecovery":
+        return "warning"
     if event_name in {"PreToolUse", "PermissionRequest", "UserPromptSubmit"}:
         return "info"
     return "info"
@@ -382,13 +386,12 @@ def severity_for(summary: dict[str, Any]) -> str:
 
 def title_for(summary: dict[str, Any]) -> str:
     event_name = str(summary.get("hookEventName") or "Hook")
-    if event_name == "RequestError":
+    if event_name == "ModelRequestRecovery":
         next_action = summary.get("nextAction")
         if next_action in {"retry", "fallback"}:
-            return f"Codex request error: {next_action} after attempt {summary.get('attempt')}"
-        return "Codex request failed"
-    if event_name == "AbnormalStop":
-        return "Codex abnormal stop"
+            return f"Codex model request: {next_action} after attempt {summary.get('attempt')}"
+    if event_name == "ModelRequestFailed":
+        return f"Codex model request failed after attempt {summary.get('attempt')}"
     if event_name in {"PreToolUse", "PostToolUse", "PermissionRequest"}:
         tool_name = summary.get("toolName") or "tool"
         return f"Codex {event_name}: {tool_name}"
@@ -400,19 +403,23 @@ def title_for(summary: dict[str, Any]) -> str:
 
 def message_for(summary: dict[str, Any]) -> str:
     event_name = summary.get("hookEventName")
-    if event_name in {"RequestError", "AbnormalStop"}:
+    if event_name in MODEL_REQUEST_EVENTS:
         parts = [
             summary.get("provider"),
             summary.get("model"),
             summary.get("operation"),
-            summary.get("endpointPath"),
         ]
         context = " ".join(str(part) for part in parts if part)
         error_value = summary.get("error")
         error_fields = error_value if isinstance(error_value, dict) else {}
         error = ": ".join(
             str(part)
-            for part in [error_fields.get("category"), error_fields.get("message")]
+            for part in [
+                error_fields.get("category"),
+                error_fields.get("code"),
+                error_fields.get("httpStatus"),
+                error_fields.get("message"),
+            ]
             if part
         )
         return " - ".join(part for part in [context, error] if part)

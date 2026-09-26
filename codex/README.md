@@ -1,179 +1,185 @@
 # Codex pure-patch workspace
 
-This directory maintains one ordered, reproducible patch set over a pinned
-[`openai/codex`](https://github.com/openai/codex) revision. The applied
-upstream checkout is ignored runtime state; only the manifests and patch files
-are repository inputs.
+This directory maintains an ordered patch set over one pinned
+[`openai/codex`](https://github.com/openai/codex) revision. The upstream checkout
+and build cache are ignored runtime state; the durable inputs are
+[`upstream.toml`](upstream.toml), [`series.toml`](series.toml), the maintenance
+scripts, and the active patch directory.
 
-## Authority and layout
+`upstream.toml` pins the official repository and exact commit, then declares
+the upstream generators and focused integration checks. `series.toml` declares
+patch order, intent, exclusive path ownership, and patch-specific tests.
+`scripts/maintain.py` is the sole maintenance CLI.
 
-- [`upstream.toml`](upstream.toml) pins the official URL, tag, peeled commit,
-  ignored checkout, direct generator sequence, regression commands, and
-  cumulative Cargo validation command.
-- [`series.toml`](series.toml) defines patch order, behavior, exclusive
-  handwritten/generated ownership, and focused tests.
-- `scripts/maintain.py` is the sole maintenance CLI. `scripts/workflow.py`
-  contains its shared implementation.
+Run every public recipe from the repository root. Recipes enter
+`nix develop .#codex` themselves; do not nest Just inside that shell.
 
-The active patch directory is selected only by `upstream.toml`'s `ref`. A
-future upgrade may retain an older revision directory for history, but Nix and
-the maintenance CLI ignore every directory other than the active one.
+## Behavior carried by the patches
 
-```text
-codex/
-  upstream.toml
-  series.toml
-  patches/rust-v0.154.0/
-    0001-runtime-provider-config.patch
-    0002-typed-server-overload.patch
-    0003-failure-hook-contract.patch
-    0004-failure-hook-runtime.patch
-    0005-model-request-recovery.patch
-    0006-request-user-input-policy.patch
-    0007-generated-contracts.patch
-  scripts/
-    maintain.py
-    workflow.py
-  tests/
-.work/codex/rust-v0.154.0/src/  # ignored upstream checkout
+All downstream settings are optional and live under one table:
+
+```toml
+[codex_patch]
+force_request_user_input_blocking = true
+responses_compact_timeout_ms = 300000
+usage_limit_recovery_limit = 2
+transient_request_recovery_limit = 3
+server_overload_recovery_limit = "unlimited"
 ```
 
-Run public recipes at the repository root. Each recipe enters
-`nix develop .#codex` itself and invokes the bottom-level Python tool; never
-run Just from inside a Nix development shell.
+If the table or an individual value is absent, that behavior keeps the pinned
+upstream default. `force_request_user_input_blocking = true` changes blocking
+only at the Session emission boundary; missing or `false` preserves the value
+chosen by the producer. `responses_compact_timeout_ms` is a positive integer
+and applies only to the unary `/responses/compact` call. Without it, that call
+retains upstream's `4 × stream_idle_timeout` timeout.
 
-## Maintained series
+Recovery limits accept either a non-negative integer or the exact string
+`"unlimited"`. Zero disables downstream recovery for that category, an integer
+allows that many Core recovery rounds, and `"unlimited"` keeps recovering until
+success or cancellation. A configured category replaces the producer's Core
+budget from its first visible failure; lower HTTP-client retries remain
+internal. Budgets are tracked independently by request target and category and
+reset when transport fallback changes the target.
 
-| Order | Patch | Responsibility |
-| --- | --- | --- |
-| 1 | `0001-runtime-provider-config.patch` | Provider endpoint, timeout, overload, and request-input defaults plus stable thread-config transport. |
-| 2 | `0002-typed-server-overload.patch` | One strict overload classifier across HTTP, SSE, WebSocket, protocol, CLI, and debug boundaries. |
-| 3 | `0003-failure-hook-contract.patch` | Strict event-specific RequestError and AbnormalStop wire, matcher, parser, and schema contracts. |
-| 4 | `0004-failure-hook-runtime.patch` | Bounded/coalescing RequestError dispatch, synchronous terminal AbnormalStop handling, and active-goal lifecycle integration. |
-| 5 | `0005-model-request-recovery.patch` | Producer-specific bounded or persistent recovery, cancellable waits, and failure-hook ordering. |
-| 6 | `0006-request-user-input-policy.patch` | Session-boundary request-input blocking policy, independent of approval, MCP, and yolo behavior. |
-| 7 | `0007-generated-contracts.patch` | Cargo's normalized lock plus reproducible protobuf, config, app-server, hook-schema, snapshot, and zstd outputs only. |
+The overload classifier is shared by HTTP, raw SSE errors, and WebSocket
+errors. `server_is_overloaded` is accepted when the status is absent or 503;
+`slow_down` is accepted when the status is absent, 429, or the legacy 503.
+Contradictory code/status pairs are ordinary errors, while a bare 429 or 503 is
+handled by the transient category. Provider advice means an actual
+`Retry-After` header or the exact `error.retry_after_ms` field. Downstream
+recovery does not truncate that advice; long waits are chunked so cancellation
+remains responsive. Locally computed backoff remains capped at one minute.
 
-Every changed upstream path has exactly one owner. Patches 1–6 own handwritten
-source. The final patch has no handwritten owner and is the only patch allowed
-to contain generated files or binary hunks. `RecoveryDecision` remains in the
-producer/recovery layer; the hook runtime consumes explicit next-action and
-retry-budget fields, so patches 3 and 4 do not depend on patch 5.
+Configured recovery covers sampling plus local, legacy remote, and v2 remote
+compaction. It deliberately excludes guardian, prewarm, realtime, voice, and
+memory requests. Recoverable categories are `UsageLimitReached`, typed server
+overload, and the narrowly classified transient transport, I/O, timeout, 408,
+rate-limit/429, 5xx, or internal failures. It does not extend recovery to tool
+or runtime failures, install compacted history before success, or issue another
+request after cancellation.
 
-## Behavioral differences from upstream
+`ModelRequestRecovery` reports a Core decision to retry or fall back;
+`ModelRequestFailed` reports the terminal visible failure. They are
+observational model-request hooks, not `AbnormalStop`: a provider failure does
+not imply a session or goal lifecycle stop. Both expose the stable request
+identity, operation, attempt, and normalized error. Recovery adds only the
+next action; hook consumers do not receive wait duration, advice, budget, or
+endpoint details. Recovery delivery uses a bounded FIFO queue and never blocks
+the model request. A full queue drops that notification with an internal trace,
+not a user warning. Terminal hooks use normal hook completion semantics.
+Matchers are intentionally ignored for these two event types.
 
-`request_user_input_policy` defaults to `always_block`. When omitted, every
-emitted request-user-input call is blocking. `preserve_source` restores the
-producer's original blocking choice. This policy is enforced once at the
-Session emission boundary and is unrelated to `approval_policy`, installed MCP
-servers or skills, and `--yolo`.
+The current series separates configuration, overload typing, hook contracts,
+request recovery, forced request-input blocking, and generated contracts. Every
+changed upstream path has exactly one owner. Only the final entry may own
+generated files; it contains no handwritten source.
 
-For model-request failures, the producer first chooses retry, defer, fallback,
-or stop. RequestError runs immediately after that decision and before any
-retry/defer wait. AbnormalStop runs only for a final stop. Cancelling a wait
-does not start another request and does not emit AbnormalStop. Fallback and
-terminal tests lock the observable RequestError-before-AbnormalStop order.
+### Migration from the previous series
 
-## Generated ownership and Cargo.lock
+- Replace `request_user_input_policy = "always_block"` with
+  `codex_patch.force_request_user_input_blocking = true`; omit the new value or
+  set it to `false` for the old `preserve_source` behavior.
+- Move provider `compact_request_timeout_ms` to the global
+  `codex_patch.responses_compact_timeout_ms` setting.
+- Replace `server_overload_policy = "persistent"` with
+  `codex_patch.server_overload_recovery_limit = "unlimited"`; omit the new
+  value to retain upstream's bounded behavior.
+- Split `RequestError` consumers between `ModelRequestRecovery` and
+  `ModelRequestFailed`. Replace an `AbnormalStop` consumer with
+  `ModelRequestFailed` only when its actual concern was a terminal model
+  request; the new hook does not claim that the session or goal stopped.
 
-`upstream.toml` directly declares every generator; patches never modify an
-upstream generator script or upstream Justfile for repository maintenance. The
-workflow runs the full sequence twice and requires identical bytes and digest.
-Compressed app-server fixtures must decompress and parse as JSON.
+## Generated files and Cargo.lock
 
-Cargo normalizes `Cargo.lock` offline from the pinned dependency resolution,
-then every later Cargo generator and gate uses `--locked`. The final generated
-patch may change only local workspace package versions from `0.0.0` to the
-pinned release version. External sources, checksums, dependency edges, package
-sets, and manifests must remain identical.
+Generators are invoked directly from `upstream.toml`, never through upstream
+Just recipes. Refresh and verify run the sequence twice and require byte-stable
+output. The sequence owns the config schema, app-server schemas and compressed
+exports, hook input schemas, TUI snapshots, and Cargo's offline-normalized
+lockfile.
 
-The Nix package reuses the pinned external vendor payload while deriving its
-Cargo lock check from that generated patch. Package builds therefore validate
-the normalized lock without fetching or accepting a different dependency graph.
+The Cargo lock contract permits only local workspace package versions to move
+from upstream's development version to the pinned release version. External
+packages, sources, checksums, dependency edges, metadata, and the local package
+set must remain unchanged. Never hand-edit generated files or `Cargo.lock`.
 
-Never edit `Cargo.lock`, generated Rust/JSON/TypeScript, snapshots, or zstd
-hunks by hand. Change authoritative source in the ignored checkout and run the
-refresh workflow.
-
-## Public workflow
-
-The six durable entrypoints are:
+## Commands and cache behavior
 
 ```sh
 just codex-fetch
 just codex-apply-check
 just codex-apply
+just codex-check 0004
+just codex-check integration
 just codex-refresh-dry-run
 just codex-refresh
 just codex-test
+just codex-final-nix
 ```
 
-- `fetch` creates a missing checkout at the exact commit. An existing checkout
-  is only validated; dirty work is reported and never overwritten.
-- `apply --check` validates cumulative binary application in a disposable
-  clone. `apply` requires a clean pinned checkout, applies in place, and keeps
-  its `.git` directory and official origin URL unchanged.
-- `refresh --dry-run` builds and fully verifies a temporary candidate without
-  changing tracked files. Normal `refresh` additionally requires the active
-  patch directory to be clean in Git, then replaces only manifest-known patch
-  files. Unknown files are rejected, and existing patch contents are
-  fingerprinted so a concurrent edit cannot be overwritten during validation.
-- `verify` (the `codex-test` recipe) replays the installed series from the
-  fixed revision, validates zstd and Cargo.lock semantics, runs generation
-  twice, and executes the manifest's cumulative, focused, and regression
-  gates.
+- `fetch` creates or validates the exact upstream checkout without overwriting
+  local edits.
+- `apply-check` replays all patches in the fixed maintenance checkout without
+  touching the editing checkout. `apply` additionally requires a clean editing
+  checkout and applies there.
+- `codex-check <patch>` runs only that patch's declared tests;
+  `codex-check integration` runs the focused cross-crate compile boundary.
+  Each declared `cargo test` selection is also listed after execution and a
+  zero-test match is rejected instead of being treated as a passing check.
+- `refresh` copies handwritten editing changes into the fixed maintenance
+  checkout, discards stale edits to declared generated paths, runs generators
+  twice, partitions by declared ownership, replays the candidate, validates
+  digests and Cargo.lock semantics, then atomically updates only the patch
+  directory. It does not run the Rust test matrix. `--dry-run` performs the
+  same candidate work without installing patch files.
+- `codex-test` first runs the maintenance unit tests, then replays the installed
+  series, verifies two-pass generation has no drift, and runs all focused patch
+  and integration commands.
+- `codex-final-nix` is the only workflow step that builds `.#codex`; use it only
+  after development-shell validation passes. The Nix package is a consumer of
+  the installed patch set, not part of refresh.
 
-## Changing the patch set
+The maintenance checkout is fixed at
+`.work/codex/<ref>/maintenance/test-workspace/src` and protected by a lock.
+Cargo artifacts are shared at `.work/codex/<ref>/cargo-target`; incremental
+compilation is enabled because the maintenance checkout path is stable, so
+repeated checks, refreshes, and verification reuse both dependencies and local
+crate work. Generator rewrites that reproduce an identical tree keep prior file
+and directory modification times, avoiding false Cargo invalidation during the
+second determinism pass. Refresh resets only the disposable source checkout; it
+does not remove that target directory.
 
-1. Run `just codex-fetch` and `just codex-apply-check`; confirm the checkout is
-   at the exact revision, its real index is clean, and origin is the official
-   URL.
-2. Run `just codex-apply` when starting from a clean pinned checkout. Edit only
-   the ignored checkout and keep every path inside one `series.toml` owner.
-3. Run focused diagnostics through the matching Codex Nix shell, invoking the
-   bottom-level Cargo, Python, or generator command directly.
-4. Run `just codex-refresh-dry-run`, review its hashes, ownership, binary
-   classification, replay, double-generation digest, and test evidence.
-5. Run `just codex-refresh`, then `just codex-apply-check` and
-   `just codex-test`.
-6. Review the full patch contents and root repository diff. Stage only explicit
-   task paths.
+## Editing and upgrading
 
-No alternate lock, receipt, backup tree, checkout exchange, or fault-injection
-state exists. Temporary candidates are ignored and removed automatically; the
-outer Git repository is the recovery boundary for installed patch files.
+For an ordinary change:
 
-## Advancing upstream
+1. Run `just codex-fetch`, then apply the installed series to a clean editing
+   checkout if needed.
+2. Edit only the ignored checkout and keep each changed path within one
+   `series.toml` owner.
+3. Run the narrow `just codex-check <patch>` selector while iterating.
+4. Run `just codex-refresh-dry-run`, then `just codex-refresh`.
+5. Run `just codex-test`, inspect every patch and the outer repository diff,
+   then run `just codex-final-nix` as the final packaging boundary.
 
-An upgrade is an explicit manifest change:
-
-1. Verify the target tag and peeled commit, then update `url`, `ref`,
-   `revision`, and `worktree` coherently.
-2. Create the new active patch directory. Retain an older revision directory
-   only as inactive history; it must not participate in current application.
-3. Port the seven semantic responsibilities in order and update ownership only
-   where the source boundary genuinely changed.
-4. Regenerate Cargo.lock through Cargo offline, replay the full series, run the
-   two-pass generators and all behavior gates, and inspect the semantic zstd
-   diff.
-5. Only after those checks, validate the package:
-
-   ```sh
-   nix build --no-link --accept-flake-config .#codex
-   ```
-
-Do not infer an upgrade from a floating branch or newest-tag query.
+To advance upstream, verify the target tag and peeled commit, update `url`,
+`ref`, `revision`, and `worktree` coherently, then port the semantic boundaries
+in series order. Change ownership only where upstream moved a real source
+boundary. Regenerate through the declared tools, replay, run focused checks,
+and inspect generated and lockfile changes before the final Nix package build.
+An old patch directory may remain as inactive history, but application and Nix
+consumption select only the active `ref`.
 
 ## Failure recovery
 
-- Manifest, ownership, revision, or apply failure: correct the manifest or
-  handwritten source; do not edit a patch to bypass the gate.
-- Generator or behavior failure: classify it, fix the ignored checkout, and
-  rerun the narrow failing command before restarting the full workflow.
-- Interrupted refresh: no candidate is installed until all validation passes;
-  rerun refresh. Git recovers any previously installed tracked patch content.
-- Generated drift: fix authoritative source or the manifest generator; never
-  hand-edit generated output or Cargo.lock.
-- Nix download, cache, or container sandbox failure: record the environment
-  limitation and retry through pinned inputs. Do not install host tools or add
-  a project workaround for the container.
+- A manifest, ownership, or apply failure is fixed in authoritative source or
+  the manifest; do not edit a patch to bypass the check.
+- A failing Rust check should be rerun through its narrow `codex-check`
+  selector before the full verification command.
+- Refresh records a receipt immediately before patch installation. Rerunning
+  refresh completes or rolls back a recognized interrupted install; ambiguous
+  external edits are preserved and reported.
+- Generator drift is fixed in handwritten source or the declared generator,
+  never in generated output.
+- Environment or cache failures are diagnosed inside `nix develop .#codex`;
+  do not install host tools or replace the pinned workflow.

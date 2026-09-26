@@ -1,38 +1,26 @@
 [[patch]]
-file = "0001-runtime-provider-config.patch"
-intent = "Define provider network, overload, and request-input policy configuration at one shared boundary."
-behavior = "OpenAI and custom providers resolve validated endpoint, timeout, overload, and request-input defaults with stable thread-config transport."
+file = "0001-codex-patch-config.patch"
+intent = "Define one optional downstream configuration namespace without changing upstream defaults."
+behavior = "Strict patch-only timeout, recovery-budget, and request-input options are parsed centrally; absent values preserve upstream behavior."
 source_files = [
-  "codex-rs/app-server/src/request_processors/thread_processor_tests.rs",
   "codex-rs/config/src/config_toml.rs",
-  "codex-rs/config/src/thread_config.rs",
-  "codex-rs/config/src/thread_config/proto/codex.thread_config.v1.proto",
-  "codex-rs/config/src/thread_config/remote.rs",
   "codex-rs/core/src/client.rs",
   "codex-rs/core/src/client_tests.rs",
-  "codex-rs/core/src/config/config_tests.rs",
+  "codex-rs/core/src/compact_remote_request.rs",
   "codex-rs/core/src/config/mod.rs",
-  "codex-rs/core/tests/responses_headers.rs",
-  "codex-rs/core/tests/suite/client.rs",
-  "codex-rs/core/tests/suite/client_websockets.rs",
-  "codex-rs/core/tests/suite/stream_error_allows_next_turn.rs",
-  "codex-rs/core/tests/suite/stream_no_completed.rs",
-  "codex-rs/login/src/auth_env_telemetry.rs",
-  "codex-rs/model-provider/src/provider.rs",
 ]
-source_prefixes = ["codex-rs/model-provider-info/src/"]
+source_prefixes = []
 generated_files = []
 generated_prefixes = []
 tests = [
-  ["cargo", "test", "--locked", "-p", "codex-model-provider-info"],
-  ["cargo", "test", "--locked", "-p", "codex-config", "provider_network_config"],
-  ["cargo", "test", "--locked", "-p", "codex-core", "--lib", "provider_network_config"],
+  ["cargo", "test", "--locked", "-p", "codex-config", "--lib", "codex_patch_"],
+  ["cargo", "test", "--locked", "-p", "codex-core", "--lib", "codex_patch_compact_timeout_overrides_only_when_configured"],
 ]
 
 [[patch]]
 file = "0002-typed-server-overload.patch"
-intent = "Preserve typed overload metadata across HTTP, SSE, WebSocket, and protocol error boundaries."
-behavior = "All transports classify strict server-overload payloads once and retain retry advice without changing unrelated retryability."
+intent = "Classify provider overload consistently across HTTP, SSE, WebSocket, and protocol boundaries."
+behavior = "Only the accepted code/status combinations become typed overloads, while exact Retry-After advice and HTTP status remain available to recovery consumers."
 source_files = [
   "codex-rs/cli/src/doctor.rs",
   "codex-rs/codex-api/src/api_bridge.rs",
@@ -40,7 +28,8 @@ source_files = [
   "codex-rs/codex-api/src/endpoint/responses_websocket.rs",
   "codex-rs/codex-api/src/error.rs",
   "codex-rs/codex-api/src/sse/responses.rs",
-  "codex-rs/core/tests/suite/retry_after.rs",
+  "codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs",
+  "codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs",
   "codex-rs/protocol/src/error.rs",
   "codex-rs/protocol/src/error_tests.rs",
   "codex-rs/response-debug-context/src/lib.rs",
@@ -49,16 +38,14 @@ source_prefixes = []
 generated_files = []
 generated_prefixes = []
 tests = [
-  ["cargo", "test", "--locked", "-p", "codex-api", "server_overload"],
-  ["cargo", "test", "--locked", "-p", "codex-protocol", "typed_server_overload"],
-  ["cargo", "check", "--locked", "-p", "codex-response-debug-context"],
-  ["cargo", "check", "--locked", "-p", "codex-cli", "--bin", "codex"],
+  ["cargo", "test", "--locked", "-p", "codex-api", "--lib", "codex_patch_"],
+  ["cargo", "test", "--locked", "-p", "codex-protocol", "--lib", "codex_patch_"],
 ]
 
 [[patch]]
-file = "0003-failure-hook-contract.patch"
-intent = "Define strict event-specific RequestError and AbnormalStop wire and schema contracts."
-behavior = "Only supported inputs, operations, outputs, and matcher requirements survive source parsing and schema generation."
+file = "0003-model-request-hooks.patch"
+intent = "Expose observational hooks for model-request recovery decisions and terminal failures."
+behavior = "Recovery notifications use bounded FIFO dispatch without blocking requests; failed notifications retain normal hook completion semantics and both events expose only the stable minimal payload."
 source_files = [
   "codex-rs/analytics/src/events.rs",
   "codex-rs/app-server-protocol/src/protocol/v2/config.rs",
@@ -66,145 +53,78 @@ source_files = [
   "codex-rs/app-server/src/request_processors/config_processor.rs",
   "codex-rs/config/src/hook_config.rs",
   "codex-rs/config/src/requirements_layers/hooks.rs",
-  "codex-rs/hooks/src/engine/output_parser.rs",
-  "codex-rs/hooks/src/engine/schema_loader.rs",
-  "codex-rs/hooks/src/schema.rs",
-  "codex-rs/protocol/src/protocol.rs",
-]
-source_prefixes = ["codex-rs/hooks/src/events/"]
-generated_files = []
-generated_prefixes = []
-tests = [
-  ["cargo", "test", "--locked", "-p", "codex-hooks", "events"],
-  ["cargo", "test", "--locked", "-p", "codex-hooks", "output_parser"],
-  ["cargo", "test", "--locked", "-p", "codex-app-server-protocol", "hook"],
-]
-
-[[patch]]
-file = "0004-failure-hook-runtime.patch"
-intent = "Integrate bounded RequestError dispatch and synchronous AbnormalStop goal-lifecycle control."
-behavior = "Logical jobs preserve FIFO/coalescing bounds and completion on panic or shutdown, terminal failures preserve RequestError-before-AbnormalStop order, and active goals suppress exactly one error lifecycle."
-source_files = [
-  "codex-rs/app-server/src/bespoke_event_handling.rs",
-  "codex-rs/app-server/tests/suite/v2/thread_resume.rs",
   "codex-rs/core/src/hook_runtime.rs",
-  "codex-rs/core/src/session/tests.rs",
-  "codex-rs/core/src/tasks/lifecycle.rs",
-  "codex-rs/ext/extension-api/src/lib.rs",
-  "codex-rs/ext/extension-api/src/state.rs",
-  "codex-rs/ext/goal/src/extension.rs",
-  "codex-rs/ext/goal/tests/goal_extension_backend.rs",
   "codex-rs/hooks/src/engine/command_runner.rs",
   "codex-rs/hooks/src/engine/dispatcher.rs",
   "codex-rs/hooks/src/engine/mod.rs",
+  "codex-rs/hooks/src/events/common.rs",
+  "codex-rs/hooks/src/events/mod.rs",
+  "codex-rs/hooks/src/events/model_request.rs",
   "codex-rs/hooks/src/lib.rs",
   "codex-rs/hooks/src/registry.rs",
-  "codex-rs/tui/src/app/tests/session_lifecycle_requests.rs",
+  "codex-rs/hooks/src/schema.rs",
+  "codex-rs/protocol/src/protocol.rs",
   "codex-rs/tui/src/bottom_pane/hooks_browser_view.rs",
-  "codex-rs/tui/src/chatwidget/turn_runtime.rs",
-  "codex-rs/tui/src/history_cell/hook_cell.rs",
 ]
 source_prefixes = []
 generated_files = []
 generated_prefixes = []
 tests = [
-  ["cargo", "test", "--locked", "-p", "codex-hooks", "engine"],
-  ["cargo", "test", "--locked", "-p", "codex-hooks", "registry"],
-  ["cargo", "test", "--locked", "-p", "codex-core", "--lib", "hook_runtime"],
-  ["cargo", "test", "--locked", "-p", "codex-core", "active_goal"],
-  ["cargo", "test", "--locked", "-p", "codex-tui", "hook"],
+  ["cargo", "test", "--locked", "-p", "codex-hooks", "--lib", "codex_patch_"],
+  ["cargo", "test", "--locked", "-p", "codex-core", "--lib", "codex_patch_model_request_errors_map_to_stable_categories"],
 ]
 
 [[patch]]
-file = "0005-model-request-recovery.patch"
-intent = "Keep overload recovery producer-specific while sharing classification, advice, and cancellable delay selection."
-behavior = "RequestError follows each explicit strategy decision before retry/defer waits, persistent capacity waits without fallback, bounded producers retain pinned order, and cancellation issues no later request or AbnormalStop."
+file = "0004-model-request-recovery.patch"
+intent = "Prevent configured recoverable model-request failures from terminating supported execution paths."
+behavior = "Sampling and compact operations apply per-target, per-category Core retry budgets, honor complete provider advice cancellably, and emit recovery or terminal hooks only for visible Core decisions."
 source_files = [
   "codex-rs/core/src/compact.rs",
   "codex-rs/core/src/compact_remote.rs",
   "codex-rs/core/src/compact_remote_v2.rs",
   "codex-rs/core/src/compact_remote_v2_attempt.rs",
-  "codex-rs/core/src/compact_token_budget.rs",
   "codex-rs/core/src/lib.rs",
   "codex-rs/core/src/model_request_failure_policy.rs",
   "codex-rs/core/src/responses_retry.rs",
   "codex-rs/core/src/responses_retry_tests.rs",
+  "codex-rs/core/src/session/tests.rs",
   "codex-rs/core/src/session/turn.rs",
   "codex-rs/core/src/tasks/compact.rs",
   "codex-rs/core/tests/suite/compact.rs",
-  "codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs",
-  "codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs",
 ]
 source_prefixes = []
 generated_files = []
 generated_prefixes = []
 tests = [
-  ["cargo", "test", "--locked", "-p", "codex-core", "--lib", "model_request_failure_policy"],
-  ["cargo", "test", "--locked", "-p", "codex-core", "--lib", "responses_retry"],
-  ["cargo", "test", "--locked", "-p", "codex-core", "--test", "all", "request_error_precedes_persistent_wait_and_cancel_does_not_abnormally_stop"],
-  ["cargo", "test", "--locked", "-p", "codex-core", "--test", "all", "pre_sampling_legacy_remote_compact_reports_fallback_failure_and_returns_original_error"],
-  ["cargo", "test", "--locked", "-p", "codex-core", "--test", "all", "sampling_internal_http_retries_emit_one_visible_stop_decision"],
-  ["cargo", "test", "--locked", "-p", "codex-core", "--lib", "guardian_review_retries_transient_session_failure_then_approves"],
-  ["cargo", "test", "--locked", "-p", "codex-core", "--lib", "guardian_review_exhausts_three_failures_with_one_terminal_event"],
-  ["cargo", "test", "--locked", "-p", "codex-guardian-v2", "sampling"],
+  ["cargo", "test", "--locked", "-p", "codex-core", "--lib", "model_request_failure_policy::tests::codex_patch_"],
+  ["cargo", "test", "--locked", "-p", "codex-core", "--lib", "responses_retry::tests::codex_patch_"],
+  ["cargo", "test", "--locked", "-p", "codex-core", "--test", "all", "suite::compact::codex_patch_", "--", "--test-threads=1"],
 ]
 
 [[patch]]
-file = "0006-request-user-input-policy.patch"
-intent = "Enforce request-user-input blocking policy once at the Session emission boundary."
-behavior = "Missing policy forces emitted requests to block, while PreserveSource restores the producer's source-selected blocking value independently of approval or MCP behavior."
+file = "0005-force-request-user-input-blocking.patch"
+intent = "Offer an explicit downstream switch that forces request-user-input emission to block."
+behavior = "The Session boundary preserves producer-selected blocking unless the optional force flag is true."
 source_files = [
   "codex-rs/core/src/session/elicitation_holders_tests.rs",
   "codex-rs/core/src/session/mod.rs",
-  "codex-rs/core/src/tools/handlers/request_user_input_tests.rs",
-  "codex-rs/core/tests/suite/request_user_input.rs",
 ]
 source_prefixes = []
 generated_files = []
 generated_prefixes = []
 tests = [
-  ["cargo", "test", "--locked", "-p", "codex-core", "--lib", "request_user_input_policy"],
-  ["cargo", "test", "--locked", "-p", "codex-core", "--test", "all", "request_user_input"],
-  ["cargo", "test", "--locked", "-p", "codex-tui", "request_user_input"],
+  ["cargo", "test", "--locked", "-p", "codex-core", "--lib", "codex_patch_force_request_user_input_blocking_is_opt_in_at_session_boundary"],
 ]
 
 [[patch]]
-file = "0007-generated-contracts.patch"
-intent = "Own only reproducibly generated protobuf, config, app-server, hook, and snapshot contracts."
-behavior = "Consumers receive byte-stable generated artifacts and Cargo's offline-normalized lockfile; only local workspace versions change, never external sources, checksums, or dependency edges."
+file = "0006-generated-contracts.patch"
+intent = "Carry only deterministic generated contracts produced by the handwritten patches."
+behavior = "Config, app-server, hook, snapshot, and Cargo lock artifacts reproduce byte-for-byte; lock normalization may alter only local workspace versions."
 source_files = []
 source_prefixes = []
 generated_files = [
   "codex-rs/Cargo.lock",
-  "codex-rs/config/src/thread_config/proto/codex.thread_config.v1.rs",
   "codex-rs/core/config.schema.json",
-  "codex-rs/hooks/schema/generated/abnormal-stop.command.input.schema.json",
-  "codex-rs/hooks/schema/generated/abnormal-stop.command.output.schema.json",
-  "codex-rs/hooks/schema/generated/interrupt.command.input.schema.json",
-  "codex-rs/hooks/schema/generated/interrupt.command.output.schema.json",
-  "codex-rs/hooks/schema/generated/permission-request.command.input.schema.json",
-  "codex-rs/hooks/schema/generated/permission-request.command.output.schema.json",
-  "codex-rs/hooks/schema/generated/post-compact.command.input.schema.json",
-  "codex-rs/hooks/schema/generated/post-compact.command.output.schema.json",
-  "codex-rs/hooks/schema/generated/post-tool-use.command.input.schema.json",
-  "codex-rs/hooks/schema/generated/post-tool-use.command.output.schema.json",
-  "codex-rs/hooks/schema/generated/pre-compact.command.input.schema.json",
-  "codex-rs/hooks/schema/generated/pre-compact.command.output.schema.json",
-  "codex-rs/hooks/schema/generated/pre-tool-use.command.input.schema.json",
-  "codex-rs/hooks/schema/generated/pre-tool-use.command.output.schema.json",
-  "codex-rs/hooks/schema/generated/request-error.command.input.schema.json",
-  "codex-rs/hooks/schema/generated/request-error.command.output.schema.json",
-  "codex-rs/hooks/schema/generated/session-end.command.input.schema.json",
-  "codex-rs/hooks/schema/generated/session-start.command.input.schema.json",
-  "codex-rs/hooks/schema/generated/session-start.command.output.schema.json",
-  "codex-rs/hooks/schema/generated/stop.command.input.schema.json",
-  "codex-rs/hooks/schema/generated/stop.command.output.schema.json",
-  "codex-rs/hooks/schema/generated/subagent-start.command.input.schema.json",
-  "codex-rs/hooks/schema/generated/subagent-start.command.output.schema.json",
-  "codex-rs/hooks/schema/generated/subagent-stop.command.input.schema.json",
-  "codex-rs/hooks/schema/generated/subagent-stop.command.output.schema.json",
-  "codex-rs/hooks/schema/generated/user-prompt-submit.command.input.schema.json",
-  "codex-rs/hooks/schema/generated/user-prompt-submit.command.output.schema.json",
   "codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__hooks_browser_view__tests__hooks_browser_events.snap",
   "codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__hooks_browser_view__tests__hooks_browser_events_with_issues.snap",
   "codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__hooks_browser_view__tests__hooks_browser_events_with_review_column.snap",
@@ -212,8 +132,12 @@ generated_files = [
 ]
 generated_prefixes = [
   "codex-rs/app-server-protocol/schema/",
+  "codex-rs/hooks/schema/generated/",
 ]
 tests = [
-  ["cargo", "test", "--locked", "-p", "codex-app-server-protocol"],
-  ["cargo", "test", "--locked", "-p", "codex-config"],
+  ["cargo", "test", "--locked", "-p", "codex-core", "--lib", "config::schema::tests::config_schema_matches_fixture", "--", "--exact"],
+  ["cargo", "test", "--locked", "-p", "codex-hooks", "--lib", "schema::tests::generated_hook_schemas_match_fixtures", "--", "--exact"],
+  ["cargo", "test", "--locked", "-p", "codex-app-server-protocol", "--lib", "schema_fixtures_tests::"],
+  ["cargo", "test", "--locked", "-p", "codex-tui", "--lib", "renders_event_browser"],
+  ["cargo", "test", "--locked", "-p", "codex-tui", "--lib", "hooks_popup_shows_list_diagnostics"],
 ]

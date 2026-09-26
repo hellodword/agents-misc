@@ -11,7 +11,7 @@ Config may be TOML or JSON. By default, the server reads
 Example TOML:
 
     # Empty or omitted events means handle every received event.
-    events = ["AbnormalStop", "RequestError"]
+    events = ["ModelRequestRecovery", "ModelRequestFailed"]
 
     [notify_send]
     enabled = true

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import tempfile
 import textwrap
@@ -10,7 +11,10 @@ from pathlib import Path
 
 from codex.scripts.workflow import (
     PatchError,
+    _copy_editing_tree,
+    _preserve_unchanged_generated_mtimes,
     apply_patches,
+    clone_pinned_checkout,
     fetch_upstream,
     load_manifest,
     refresh_patches,
@@ -108,8 +112,7 @@ class PatchWorkflowTests(unittest.TestCase):
                 revision = "{self.revision}"
                 worktree = ".work/codex/rust-v1.0.0/src"
                 generate_commands = [["python3", "-c", {json.dumps(generate)}]]
-                regression_commands = [["python3", "-c", {json.dumps(feature_test)}]]
-                validation_command = ["python3", "-c", {json.dumps(validate)}]
+                integration_commands = [["python3", "-c", {json.dumps(validate)}]]
                 """
             ).lstrip()
         )
@@ -132,8 +135,8 @@ class PatchWorkflowTests(unittest.TestCase):
                 behavior = "Text and binary contracts follow the feature."
                 source_files = []
                 source_prefixes = []
-                generated_files = ["generated/schema.txt", "generated/schema.bin"]
-                generated_prefixes = []
+                generated_files = []
+                generated_prefixes = ["generated/"]
                 tests = [["python3", "-c", {json.dumps(validate)}]]
                 """
             ).lstrip()
@@ -161,12 +164,11 @@ class PatchWorkflowTests(unittest.TestCase):
             "",
         )
 
-    def test_refresh_produces_binary_cumulative_series_and_verify_replays_it(
+    def test_refresh_produces_cumulative_series_and_verify_replays_it(
         self,
     ) -> None:
         result = refresh_patches(self.manifest, dry_run=False)
         self.assertEqual(result["patchSha256"], result["installedSha256"])
-        self.assertIn("0002-generated-contract.patch", result["binaryPatches"])
         self.assertEqual(
             [path.name for path in validate_patch_directory(self.manifest)],
             ["0001-feature.patch", "0002-generated-contract.patch"],
@@ -174,6 +176,60 @@ class PatchWorkflowTests(unittest.TestCase):
         verified = verify_patches(self.manifest)
         self.assertEqual(
             verified["generationDigest"], verified["secondGenerationDigest"]
+        )
+
+    def test_generator_rewrites_preserve_mtime_only_for_identical_bytes(self) -> None:
+        target = self.manifest.worktree / "generated" / "schema.txt"
+        generated_dir = target.parent
+        original = target.read_bytes()
+        initial_ns = 1_600_000_000_000_000_000
+        rewritten_ns = initial_ns + 10_000_000_000
+        os.utime(target, ns=(initial_ns, initial_ns))
+        os.utime(generated_dir, ns=(initial_ns, initial_ns))
+
+        with _preserve_unchanged_generated_mtimes(
+            self.manifest, self.manifest.worktree
+        ):
+            target.unlink()
+            target.write_bytes(original)
+            os.utime(target, ns=(rewritten_ns, rewritten_ns))
+            os.utime(generated_dir, ns=(rewritten_ns, rewritten_ns))
+        self.assertEqual(target.stat().st_mtime_ns, initial_ns)
+        self.assertEqual(generated_dir.stat().st_mtime_ns, initial_ns)
+
+        with _preserve_unchanged_generated_mtimes(
+            self.manifest, self.manifest.worktree
+        ):
+            target.write_text("different\n")
+            os.utime(target, ns=(rewritten_ns, rewritten_ns))
+        self.assertEqual(target.stat().st_mtime_ns, rewritten_ns)
+
+        extra = generated_dir / "extra.txt"
+        with _preserve_unchanged_generated_mtimes(
+            self.manifest, self.manifest.worktree
+        ):
+            extra.write_text("new entry\n")
+            os.utime(generated_dir, ns=(rewritten_ns, rewritten_ns))
+        self.assertEqual(generated_dir.stat().st_mtime_ns, rewritten_ns)
+
+    def test_refresh_copy_ignores_stale_generated_edits(self) -> None:
+        generated = self.manifest.worktree / "generated" / "schema.txt"
+        generated.write_text("manually stale\n")
+        destination = self.base / "copy-destination"
+        clone_pinned_checkout(self.manifest, destination)
+
+        copied = _copy_editing_tree(
+            self.manifest,
+            self.manifest.worktree,
+            destination,
+            self.base / "copy.index",
+        )
+
+        self.assertEqual(copied, ["src/feature.txt"])
+        self.assertEqual((destination / "src" / "feature.txt").read_text(), "edited\n")
+        self.assertEqual(
+            (destination / "generated" / "schema.txt").read_text(),
+            "schema:base\n",
         )
 
     def test_refresh_dry_run_changes_no_tracked_or_patch_files(self) -> None:

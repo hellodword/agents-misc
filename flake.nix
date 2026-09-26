@@ -36,7 +36,6 @@
 
       inherit (codexProject)
         codexBaseFor
-        codexCheckFor
         codexFor
         patchOrder
         supportedSystems
@@ -97,7 +96,6 @@
           lib
           nixpkgs
           codexFor
-          codexCheckFor
           codexConfigAtlasFor
           agentsViewerFor
           supportedSystems

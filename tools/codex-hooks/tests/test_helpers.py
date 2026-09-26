@@ -40,13 +40,12 @@ server_module = load_module(
 )
 
 
-def request_error_payload(**overrides: object) -> dict[str, object]:
+def model_request_recovery_payload(**overrides: object) -> dict[str, object]:
     payload: dict[str, object] = {
         "attempt": 2,
         "cwd": "/workspace",
-        "endpointPath": "/responses",
         "error": {"category": "transport", "message": "connection reset"},
-        "hookEventName": "RequestError",
+        "hookEventName": "ModelRequestRecovery",
         "model": "gpt-test",
         "nextAction": "retry",
         "operation": "sampling",
@@ -61,7 +60,7 @@ def request_error_payload(**overrides: object) -> dict[str, object]:
 
 class ForwarderTests(unittest.TestCase):
     def test_model_request_summary_is_the_stable_camel_case_payload(self) -> None:
-        payload = request_error_payload()
+        payload = model_request_recovery_payload()
 
         summary = forwarder.normalize_hook_payload(payload, 500)
 
@@ -69,22 +68,24 @@ class ForwarderTests(unittest.TestCase):
         self.assertEqual(forwarder.severity_for(summary), "warning")
         self.assertEqual(
             forwarder.title_for(summary),
-            "Codex request error: retry after attempt 2",
+            "Codex model request: retry after attempt 2",
         )
         self.assertEqual(
             forwarder.message_for(summary),
-            "openai gpt-test sampling /responses - transport: connection reset",
+            "openai gpt-test sampling - transport: connection reset",
         )
 
     def test_model_request_rejects_old_unknown_and_invalid_fields(self) -> None:
         cases = [
-            request_error_payload(willRetry=True),
-            request_error_payload(nextAction="again"),
-            request_error_payload(attempt=-1),
-            request_error_payload(
+            model_request_recovery_payload(waitMs=1),
+            model_request_recovery_payload(nextAction="again"),
+            model_request_recovery_payload(attempt=0),
+            model_request_recovery_payload(
                 error={"category": "transport", "message": "x", "raw": {}}
             ),
-            request_error_payload(endpointPath="relative"),
+            model_request_recovery_payload(
+                error={"category": "sandbox", "message": "x"}
+            ),
         ]
         for payload in cases:
             with (
@@ -96,20 +97,42 @@ class ForwarderTests(unittest.TestCase):
         legacy = {"hook_event_name": "RequestError", "will_retry": True}
         self.assertEqual(forwarder.normalize_hook_payload(legacy, 500), {})
 
-    def test_abnormal_stop_requires_its_stable_fields(self) -> None:
-        payload = request_error_payload(
-            hookEventName="AbnormalStop",
-            nextAction="stop",
-            goalMode=True,
-            approvalPolicy="on-request",
-            sandboxMode="workspace-write",
-            reason="requestError",
+    def test_failed_event_omits_recovery_action_and_accepts_optional_error_details(
+        self,
+    ) -> None:
+        payload = model_request_recovery_payload(
+            hookEventName="ModelRequestFailed",
+            error={
+                "category": "serverOverloaded",
+                "code": "slow_down",
+                "httpStatus": 429,
+                "message": "capacity",
+            },
         )
+        payload.pop("nextAction")
 
         self.assertEqual(forwarder.normalize_hook_payload(payload, 500), payload)
         self.assertEqual(forwarder.severity_for(payload), "error")
-        with self.assertRaises(ValueError):
-            forwarder.normalize_hook_payload({**payload, "reason": "legacy"}, 500)
+        self.assertEqual(
+            forwarder.title_for(payload),
+            "Codex model request failed after attempt 2",
+        )
+        self.assertEqual(
+            forwarder.message_for(payload),
+            "openai gpt-test sampling - serverOverloaded: slow_down: 429: capacity",
+        )
+        for invalid_error in [
+            {"category": "server", "message": "x", "code": 1},
+            {"category": "server", "message": "x", "httpStatus": True},
+            {"category": "server", "message": "x", "httpStatus": 65536},
+        ]:
+            with (
+                self.subTest(error=invalid_error),
+                self.assertRaises((TypeError, ValueError)),
+            ):
+                forwarder.normalize_hook_payload(
+                    {**payload, "error": invalid_error}, 500
+                )
 
     def test_raw_payload_is_disabled_by_default_and_explicitly_enabled(self) -> None:
         with (
@@ -128,7 +151,7 @@ class ForwarderTests(unittest.TestCase):
         ):
             self.assertTrue(forwarder.load_options().include_raw)
 
-        raw_text = json.dumps(request_error_payload())
+        raw_text = json.dumps(model_request_recovery_payload())
         for include_raw in [False, True]:
             environment = (
                 {"CODEX_HOOK_FORWARDER_INCLUDE_RAW": "1"} if include_raw else {}
@@ -143,7 +166,7 @@ class ForwarderTests(unittest.TestCase):
                 self.assertEqual(forwarder.main(), 0)
                 forwarded = post_json.call_args.args[1]
                 self.assertEqual("rawPayload" in forwarded, include_raw)
-                self.assertEqual(forwarded["summary"], request_error_payload())
+                self.assertEqual(forwarded["summary"], model_request_recovery_payload())
 
     def test_options_and_forwarded_request_size_fail_closed(self) -> None:
         invalid = {
@@ -449,11 +472,11 @@ class NotifyServerTests(unittest.TestCase):
             "protocolVersion": 1,
             "source": "codex_hook_forwarder",
             "sentAt": 1,
-            "hookEventName": "RequestError",
+            "hookEventName": "ModelRequestRecovery",
             "severity": "warning",
             "title": "title",
             "message": "message",
-            "summary": {"hookEventName": "RequestError"},
+            "summary": {"hookEventName": "ModelRequestRecovery"},
         }
         server_module.validate_forwarded_message(valid)
         invalid = [
@@ -461,7 +484,7 @@ class NotifyServerTests(unittest.TestCase):
             {**valid, "unknown": True},
             {**valid, "protocolVersion": 2},
             {**valid, "sentAt": True},
-            {**valid, "summary": {"hookEventName": "AbnormalStop"}},
+            {**valid, "summary": {"hookEventName": "ModelRequestFailed"}},
             {**valid, "rawPayload": "raw"},
         ]
         for payload in invalid:

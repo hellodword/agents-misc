@@ -48,7 +48,6 @@ lib.genAttrs supportedSystems (
         ruff
         rustc
         rustfmt
-        zstd
       ];
       OPENSSL_INCLUDE_DIR = "${lib.getDev pkgs.openssl}/include";
       OPENSSL_LIB_DIR = "${lib.getLib pkgs.openssl}/lib";

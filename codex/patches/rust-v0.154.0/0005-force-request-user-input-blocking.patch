@@ -1,0 +1,126 @@
+diff --git a/codex-rs/core/src/session/elicitation_holders_tests.rs b/codex-rs/core/src/session/elicitation_holders_tests.rs
+index 2f85db1eecfbd9e883d4be4674e8ca46eb71d7e4..4db70b947a666277f0b538c20328089cb706879f 100644
+--- a/codex-rs/core/src/session/elicitation_holders_tests.rs
++++ b/codex-rs/core/src/session/elicitation_holders_tests.rs
+@@ -2,8 +2,10 @@ use std::collections::HashMap;
+ use std::sync::Arc;
+ 
+ use codex_core_plugins::PluginCommandAttribution;
++use codex_login::CodexAuth;
+ use codex_plugin::PluginId;
+ use codex_protocol::approvals::ExecApprovalKind;
++use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::ReviewDecision;
+ use codex_protocol::request_permissions::PermissionGrantScope;
+ use codex_protocol::request_permissions::RequestPermissionProfile;
+@@ -14,6 +16,7 @@ use codex_protocol::request_user_input::RequestUserInputResponse;
+ use tokio::sync::watch;
+ use tokio_util::sync::CancellationToken;
+ 
++use super::tests::make_session_and_context_with_auth_and_config_and_rx;
+ use super::tests::make_session_and_context_with_rx;
+ use crate::session::step_context::StepContext;
+ use crate::state::ActiveTurn;
+@@ -197,3 +200,80 @@ async fn request_user_input_holds_an_elicitation_until_response() {
+     request.await.expect("request user input task");
+     wait_until_released(&mut pause_state).await;
+ }
++
++async fn assert_request_user_input_policy_at_session_boundary(
++    force_blocking: Option<bool>,
++    source_is_blocking: bool,
++    expected_is_blocking: bool,
++) {
++    let (session, turn_context, events) = make_session_and_context_with_auth_and_config_and_rx(
++        CodexAuth::from_api_key("Test API Key"),
++        Vec::new(),
++        move |config| {
++            config.codex_patch.force_request_user_input_blocking = force_blocking;
++        },
++    )
++    .await;
++    *session.active_turn.lock().await = Some(ActiveTurn::default());
++
++    let request = tokio::spawn({
++        let session = Arc::clone(&session);
++        let turn_context = Arc::clone(&turn_context);
++        async move {
++            session
++                .request_user_input(
++                    turn_context.as_ref(),
++                    "policy-boundary".to_string(),
++                    RequestUserInputArgs {
++                        questions: Vec::new(),
++                        is_blocking: source_is_blocking,
++                        auto_resolution_ms: None,
++                    },
++                )
++                .await
++        }
++    });
++
++    let event = events.recv().await.expect("request user input event");
++    let EventMsg::RequestUserInput(event) = event.msg else {
++        panic!("expected request user input event");
++    };
++    assert_eq!(event.is_blocking, expected_is_blocking);
++
++    session
++        .notify_user_input_response(
++            &turn_context.sub_id,
++            RequestUserInputResponse {
++                answers: HashMap::new(),
++            },
++        )
++        .await;
++    assert!(request.await.expect("request user input task").is_some());
++}
++
++#[tokio::test]
++async fn codex_patch_force_request_user_input_blocking_is_opt_in_at_session_boundary() {
++    assert_request_user_input_policy_at_session_boundary(
++        /*force_blocking*/ None, /*source_is_blocking*/ false,
++        /*expected_is_blocking*/ false,
++    )
++    .await;
++    assert_request_user_input_policy_at_session_boundary(
++        Some(false),
++        /*source_is_blocking*/ false,
++        /*expected_is_blocking*/ false,
++    )
++    .await;
++    assert_request_user_input_policy_at_session_boundary(
++        Some(true),
++        /*source_is_blocking*/ false,
++        /*expected_is_blocking*/ true,
++    )
++    .await;
++    assert_request_user_input_policy_at_session_boundary(
++        Some(true),
++        /*source_is_blocking*/ true,
++        /*expected_is_blocking*/ true,
++    )
++    .await;
++}
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 8ffc144d028b4f339d0ff323bbc804659406bada..83f880c1390facf6673eaafb8dee6ce8cf177fee 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -2960,8 +2960,16 @@ impl Session {
+         &self,
+         turn_context: &TurnContext,
+         call_id: String,
+-        args: RequestUserInputArgs,
++        mut args: RequestUserInputArgs,
+     ) -> Option<AcceptedUserInputResponse> {
++        if turn_context
++            .config
++            .codex_patch
++            .force_request_user_input_blocking
++            .unwrap_or(false)
++        {
++            args.is_blocking = true;
++        }
+         let _elicitation = self.services.elicitations.register();
+         let sub_id = turn_context.sub_id.clone();
+         let (tx_response, rx_response) = oneshot::channel();

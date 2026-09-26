@@ -54,7 +54,7 @@ index e8d7c4743c5a9e827f5f020847dbc25da58f64ac..faca830581cd74aec70b5efdd597584b
  
                  if (status == http::StatusCode::BAD_REQUEST
 diff --git a/codex-rs/codex-api/src/api_bridge_tests.rs b/codex-rs/codex-api/src/api_bridge_tests.rs
-index 666dea886441e12479650e3839ddea7b9c56e1b6..8ef7ea18724c483f982439bb573fbe9c225e5fd8 100644
+index 666dea886441e12479650e3839ddea7b9c56e1b6..79a193dc4afd0162d110e5a0a8dae580018d94b7 100644
 --- a/codex-rs/codex-api/src/api_bridge_tests.rs
 +++ b/codex-rs/codex-api/src/api_bridge_tests.rs
 @@ -1,12 +1,13 @@
@@ -66,20 +66,30 @@ index 666dea886441e12479650e3839ddea7b9c56e1b6..8ef7ea18724c483f982439bb573fbe9c
  use pretty_assertions::assert_eq;
  
  #[test]
- fn map_api_error_maps_server_overloaded() {
+-fn map_api_error_maps_server_overloaded() {
 -    let err = map_api_error(ApiError::ServerOverloaded);
++fn codex_patch_map_api_error_maps_server_overloaded() {
 +    let err = map_api_error(ApiError::ServerOverloaded(ServerOverloadInfo::default()));
      assert!(matches!(err.details(), CodexErrorDetails::ServerOverloaded));
  }
  
-@@ -69,6 +70,71 @@ fn map_api_error_maps_server_overloaded_from_503_body() {
+@@ -52,7 +53,7 @@ fn map_api_error_preserves_retry_delay() {
+ }
+ 
+ #[test]
+-fn map_api_error_maps_server_overloaded_from_503_body() {
++fn codex_patch_map_api_error_maps_server_overloaded_from_503_body() {
+     let body = serde_json::json!({
+         "error": {
+             "code": "server_is_overloaded"
+@@ -69,6 +70,92 @@ fn map_api_error_maps_server_overloaded_from_503_body() {
      assert!(matches!(err.details(), CodexErrorDetails::ServerOverloaded));
  }
  
 +#[test]
-+fn map_api_error_preserves_typed_server_overload_code_and_retry_after_header() {
++fn codex_patch_map_api_error_preserves_exact_server_overload_advice() {
 +    let mut headers = HeaderMap::new();
-+    headers.insert("retry-after", http::HeaderValue::from_static("2.5"));
++    headers.insert("retry-after", http::HeaderValue::from_static("2"));
 +    let body = serde_json::json!({
 +        "error": {
 +            "code": "server_is_overloaded",
@@ -100,20 +110,20 @@ index 666dea886441e12479650e3839ddea7b9c56e1b6..8ef7ea18724c483f982439bb573fbe9c
 +        .expect("typed overload metadata should be retained");
 +    assert_eq!(info.code.as_deref(), Some("server_is_overloaded"));
 +    assert_eq!(info.message, "capacity is temporarily limited");
-+    assert_eq!(info.retry_after_ms, Some(2_500));
++    assert_eq!(info.retry_after_ms, Some(2_000));
 +    assert_eq!(
 +        err.retry_delay(),
-+        Some(std::time::Duration::from_millis(2_500))
++        Some(std::time::Duration::from_millis(2_000))
 +    );
 +    assert!(!err.is_retryable());
 +}
 +
 +#[test]
-+fn map_api_error_server_overload_accepts_slow_down_but_not_generic_503_text() {
++fn codex_patch_map_api_error_uses_the_overload_code_status_matrix() {
 +    let slow_down = serde_json::json!({
 +        "code": "slow_down",
 +        "message": "please retry",
-+        "retry_after": 3
++        "retry_after_ms": 3_000
 +    })
 +    .to_string();
 +    let err = map_api_error(ApiError::Transport(TransportError::Http {
@@ -128,6 +138,18 @@ index 666dea886441e12479650e3839ddea7b9c56e1b6..8ef7ea18724c483f982439bb573fbe9c
 +    assert_eq!(info.code.as_deref(), Some("slow_down"));
 +    assert_eq!(info.retry_after_ms, Some(3_000));
 +
++    let contradictory = map_api_error(ApiError::Transport(TransportError::Http {
++        status: http::StatusCode::TOO_MANY_REQUESTS,
++        url: None,
++        headers: None,
++        body: Some(serde_json::json!({"error": {"code": "server_is_overloaded"}}).to_string()),
++    }));
++    assert!(contradictory.server_overload_info().is_none());
++    assert_eq!(
++        contradictory.http_status_code_value(),
++        Some(http::StatusCode::TOO_MANY_REQUESTS.as_u16())
++    );
++
 +    let generic = map_api_error(ApiError::Transport(TransportError::Http {
 +        status: http::StatusCode::SERVICE_UNAVAILABLE,
 +        url: None,
@@ -139,13 +161,22 @@ index 666dea886441e12479650e3839ddea7b9c56e1b6..8ef7ea18724c483f982439bb573fbe9c
 +        generic.details(),
 +        CodexErrorDetails::ServerOverloaded
 +    ));
++
++    let bare_429 = map_api_error(ApiError::Transport(TransportError::Http {
++        status: http::StatusCode::TOO_MANY_REQUESTS,
++        url: None,
++        headers: None,
++        body: Some("rate limited".to_string()),
++    }));
++    assert!(bare_429.server_overload_info().is_none());
++    assert_eq!(bare_429.http_status_code_value(), Some(429));
 +}
 +
  #[test]
  fn map_api_error_maps_cloudflare_blocked_response_to_user_message() {
      let mut headers = HeaderMap::new();
 diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
-index 95d41e0d9154de47cdbc75f93e8aafa7fcf00966..7551b1a3d75d631a8e329bbdc3a7250d6fc7a324 100644
+index 95d41e0d9154de47cdbc75f93e8aafa7fcf00966..ca54e6775fb0bcdfead9a82034248cb08dda1ca7 100644
 --- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
 +++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
 @@ -6,6 +6,7 @@ use crate::common::SafetyBufferingTreatment;
@@ -156,17 +187,27 @@ index 95d41e0d9154de47cdbc75f93e8aafa7fcf00966..7551b1a3d75d631a8e329bbdc3a7250d
  use crate::provider::Provider;
  use crate::rate_limits::parse_rate_limit_event;
  use crate::safety_buffering::treatment_from_headers;
-@@ -650,10 +651,17 @@ fn map_wrapped_websocket_error_event(
-         return None;
+@@ -645,7 +646,18 @@ fn map_wrapped_websocket_error_event(
+         });
      }
  
+-    let status = StatusCode::from_u16(status?).ok()?;
++    let status = match status {
++        Some(status) => Some(StatusCode::from_u16(status).ok()?),
++        None => None,
++    };
 +    let mapped_headers = headers.as_ref().map(json_headers_to_http_headers);
 +    if let Ok(payload) = serde_json::from_str::<Value>(&original_payload)
-+        && let Some(info) = parse_server_overload(Some(status), mapped_headers.as_ref(), &payload)
++        && let Some(info) = parse_server_overload(status, mapped_headers.as_ref(), &payload)
 +    {
 +        return Some(ApiError::ServerOverloaded(info));
 +    }
 +
++    let status = status?;
+     if status.is_success() {
+         return None;
+     }
+@@ -653,7 +665,7 @@ fn map_wrapped_websocket_error_event(
      Some(ApiError::Transport(TransportError::Http {
          status,
          url: None,
@@ -175,12 +216,12 @@ index 95d41e0d9154de47cdbc75f93e8aafa7fcf00966..7551b1a3d75d631a8e329bbdc3a7250d
          body: Some(original_payload),
      }))
  }
-@@ -1057,6 +1065,33 @@ mod tests {
+@@ -1057,6 +1069,72 @@ mod tests {
          assert!(body.contains("The usage limit has been reached"));
      }
  
 +    #[test]
-+    fn parse_wrapped_websocket_server_overload_preserves_code_and_retry_after() {
++    fn codex_patch_wrapped_websocket_overload_preserves_exact_advice() {
 +        let payload = json!({
 +            "type": "error",
 +            "status": 503,
@@ -189,7 +230,7 @@ index 95d41e0d9154de47cdbc75f93e8aafa7fcf00966..7551b1a3d75d631a8e329bbdc3a7250d
 +                "message": "websocket capacity is temporarily limited"
 +            },
 +            "headers": {
-+                "Retry-After": "1.75"
++                "Retry-After": "2"
 +            }
 +        })
 +        .to_string();
@@ -203,14 +244,53 @@ index 95d41e0d9154de47cdbc75f93e8aafa7fcf00966..7551b1a3d75d631a8e329bbdc3a7250d
 +        };
 +        assert_eq!(info.code.as_deref(), Some("server_is_overloaded"));
 +        assert_eq!(info.message, "websocket capacity is temporarily limited");
-+        assert_eq!(info.retry_after_ms, Some(1_750));
++        assert_eq!(info.retry_after_ms, Some(2_000));
++    }
++
++    #[test]
++    fn codex_patch_wrapped_websocket_overload_is_classified_before_status_fallback() {
++        let payload = json!({
++            "type": "error",
++            "error": {
++                "code": "slow_down",
++                "message": "retry later",
++                "retry_after_ms": 750
++            }
++        })
++        .to_string();
++        let wrapped_error = parse_wrapped_websocket_error_event(&payload)
++            .expect("expected websocket overload payload to be parsed");
++        let api_error = map_wrapped_websocket_error_event(wrapped_error, payload)
++            .expect("typed overload does not require status");
++        let ApiError::ServerOverloaded(info) = api_error else {
++            panic!("expected typed websocket overload");
++        };
++        assert_eq!(info.retry_after_ms, Some(750));
++
++        let contradictory = json!({
++            "type": "error",
++            "status": 400,
++            "error": {"code": "slow_down", "message": "invalid request"}
++        })
++        .to_string();
++        let wrapped_error = parse_wrapped_websocket_error_event(&contradictory)
++            .expect("expected websocket error payload to be parsed");
++        let api_error = map_wrapped_websocket_error_event(wrapped_error, contradictory)
++            .expect("status-bearing error should map");
++        assert!(matches!(
++            api_error,
++            ApiError::Transport(TransportError::Http {
++                status: StatusCode::BAD_REQUEST,
++                ..
++            })
++        ));
 +    }
 +
      #[test]
      fn parse_wrapped_websocket_error_event_ignores_non_error_payloads() {
          let payload = json!({
 diff --git a/codex-rs/codex-api/src/error.rs b/codex-rs/codex-api/src/error.rs
-index d1d83cf401476593bce9bc918295044019a8b74d..b23731418ce781f965c158b5e523214df6688211 100644
+index d1d83cf401476593bce9bc918295044019a8b74d..7cca7e27b017fd5c976eaa33d436d0c272b6dac9 100644
 --- a/codex-rs/codex-api/src/error.rs
 +++ b/codex-rs/codex-api/src/error.rs
 @@ -1,7 +1,13 @@
@@ -236,7 +316,7 @@ index d1d83cf401476593bce9bc918295044019a8b74d..b23731418ce781f965c158b5e523214d
  }
  
  impl From<RateLimitError> for ApiError {
-@@ -49,3 +55,290 @@ impl From<RateLimitError> for ApiError {
+@@ -49,3 +55,244 @@ impl From<RateLimitError> for ApiError {
          Self::RateLimit(err.to_string())
      }
  }
@@ -263,12 +343,21 @@ index d1d83cf401476593bce9bc918295044019a8b74d..b23731418ce781f965c158b5e523214d
 +    payload: &Value,
 +    now: DateTime<Utc>,
 +) -> Option<ServerOverloadInfo> {
-+    if status.is_some_and(|status| status != StatusCode::SERVICE_UNAVAILABLE) {
-+        return None;
-+    }
 +    let error = payload.get("error").unwrap_or(payload);
 +    let code = error.get("code").and_then(Value::as_str)?;
-+    if !matches!(code, SERVER_OVERLOADED_CODE | SLOW_DOWN_CODE) {
++    let status_matches = match code {
++        SERVER_OVERLOADED_CODE => {
++            status.is_none_or(|status| status == StatusCode::SERVICE_UNAVAILABLE)
++        }
++        SLOW_DOWN_CODE => status.is_none_or(|status| {
++            matches!(
++                status,
++                StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
++            )
++        }),
++        _ => false,
++    };
++    if !status_matches {
 +        return None;
 +    }
 +
@@ -280,11 +369,11 @@ index d1d83cf401476593bce9bc918295044019a8b74d..b23731418ce781f965c158b5e523214d
 +        .to_string();
 +    let retry_after_ms = headers
 +        .and_then(|headers| retry_after_header_ms_at(headers, &now))
-+        .or_else(|| retry_after_value_ms_at(error, &now))
-+        .or_else(|| retry_after_value_ms_at(payload, &now));
++        .or_else(|| error.get("retry_after_ms").and_then(Value::as_u64));
 +
 +    Some(ServerOverloadInfo {
 +        code: Some(code.to_string()),
++        http_status: status.map(|status| status.as_u16()),
 +        message,
 +        retry_after_ms,
 +    })
@@ -297,75 +386,13 @@ index d1d83cf401476593bce9bc918295044019a8b74d..b23731418ce781f965c158b5e523214d
 +        .and_then(|value| parse_retry_after_at(value, now))
 +}
 +
-+fn retry_after_value_ms_at(value: &Value, now: &DateTime<Utc>) -> Option<u64> {
-+    let headers = value
-+        .get("headers")
-+        .and_then(Value::as_object)
-+        .and_then(|headers| {
-+            headers.iter().find_map(|(name, value)| {
-+                if !name.eq_ignore_ascii_case("retry-after") {
-+                    return None;
-+                }
-+                value
-+                    .as_str()
-+                    .map(str::to_string)
-+                    .or_else(|| Some(value.to_string()))
-+            })
-+        });
-+    headers
-+        .as_deref()
-+        .and_then(|value| parse_retry_after_at(value, now))
-+        .or_else(|| {
-+            value
-+                .get("retry_after_ms")
-+                .or_else(|| value.get("retryAfterMs"))
-+                .and_then(value_as_millis)
-+        })
-+        .or_else(|| {
-+            value
-+                .get("retry_after")
-+                .or_else(|| value.get("retryAfter"))
-+                .and_then(|value| value_as_seconds(value, now))
-+        })
-+}
-+
-+fn value_as_millis(value: &Value) -> Option<u64> {
-+    value
-+        .as_u64()
-+        .or_else(|| value.as_str()?.parse::<u64>().ok())
-+}
-+
-+fn value_as_seconds(value: &Value, now: &DateTime<Utc>) -> Option<u64> {
-+    if let Some(value) = value.as_u64() {
-+        return value.checked_mul(1000);
-+    }
-+    if let Some(value) = value.as_f64() {
-+        return seconds_as_millis(value);
-+    }
-+    parse_retry_after_at(value.as_str()?, now)
-+}
-+
 +fn parse_retry_after_at(value: &str, now: &DateTime<Utc>) -> Option<u64> {
-+    if let Some(value) = value.strip_suffix("ms") {
-+        return value.trim().parse::<u64>().ok();
-+    }
 +    value
 +        .trim()
-+        .parse::<f64>()
++        .parse::<u64>()
 +        .ok()
-+        .and_then(seconds_as_millis)
++        .and_then(|seconds| seconds.checked_mul(1000))
 +        .or_else(|| parse_imf_fixdate_at(value, now))
-+}
-+
-+fn seconds_as_millis(value: f64) -> Option<u64> {
-+    if !value.is_finite() || value < 0.0 {
-+        return None;
-+    }
-+    let rounded_ms = (value * 1000.0).round();
-+    if !rounded_ms.is_finite() || rounded_ms >= u64::MAX as f64 {
-+        return Some(u64::MAX);
-+    }
-+    Some(rounded_ms as u64)
 +}
 +
 +const IMF_FIXDATE_FORMAT: &str = "%a, %d %b %Y %H:%M:%S GMT";
@@ -407,7 +434,7 @@ index d1d83cf401476593bce9bc918295044019a8b74d..b23731418ce781f965c158b5e523214d
 +    }
 +
 +    #[test]
-+    fn server_overload_accepts_only_exact_codes_at_top_level_or_nested() {
++    fn codex_patch_server_overload_accepts_only_exact_codes() {
 +        for code in [SERVER_OVERLOADED_CODE, SLOW_DOWN_CODE] {
 +            for payload in [json!({"code": code}), json!({"error": {"code": code}})] {
 +                let info = overload_at(None, None, &payload).expect("exact code should match");
@@ -425,76 +452,83 @@ index d1d83cf401476593bce9bc918295044019a8b74d..b23731418ce781f965c158b5e523214d
 +    }
 +
 +    #[test]
-+    fn server_overload_requires_503_when_status_is_present() {
-+        let payload = json!({"error": {"code": SERVER_OVERLOADED_CODE}});
-+        assert!(overload_at(None, None, &payload).is_some());
-+        assert!(overload_at(Some(StatusCode::SERVICE_UNAVAILABLE), None, &payload).is_some());
-+        for status in [
-+            StatusCode::INTERNAL_SERVER_ERROR,
-+            StatusCode::TOO_MANY_REQUESTS,
++    fn codex_patch_server_overload_code_and_status_matrix_is_strict() {
++        for (code, accepted) in [
++            (
++                SERVER_OVERLOADED_CODE,
++                vec![None, Some(StatusCode::SERVICE_UNAVAILABLE)],
++            ),
++            (
++                SLOW_DOWN_CODE,
++                vec![
++                    None,
++                    Some(StatusCode::TOO_MANY_REQUESTS),
++                    Some(StatusCode::SERVICE_UNAVAILABLE),
++                ],
++            ),
 +        ] {
-+            assert!(overload_at(Some(status), None, &payload).is_none());
++            let payload = json!({"error": {"code": code}});
++            for status in [
++                None,
++                Some(StatusCode::BAD_REQUEST),
++                Some(StatusCode::TOO_MANY_REQUESTS),
++                Some(StatusCode::INTERNAL_SERVER_ERROR),
++                Some(StatusCode::SERVICE_UNAVAILABLE),
++            ] {
++                assert_eq!(
++                    overload_at(status, None, &payload).is_some(),
++                    accepted.contains(&status),
++                    "unexpected classification for {code} with {status:?}"
++                );
++            }
 +        }
 +    }
 +
 +    #[test]
-+    fn server_overload_retry_advice_precedence_is_header_nested_then_top_level() {
++    fn codex_patch_server_overload_uses_only_real_header_or_error_retry_after_ms() {
 +        let payload = json!({
 +            "error": {
 +                "code": SLOW_DOWN_CODE,
 +                "message": "capacity detail",
-+                "retry_after_ms": 2_000
++                "retry_after_ms": 2_000,
++                "retryAfterMs": 9_000,
++                "retry_after": 9,
++                "headers": {"Retry-After": "9"}
 +            },
 +            "retry_after_ms": 3_000
 +        });
 +        let mut headers = HeaderMap::new();
-+        headers.insert("retry-after", "1.25".parse().expect("valid header"));
++        headers.insert("retry-after", "1".parse().expect("valid header"));
 +
 +        let info = overload_at(None, Some(&headers), &payload).expect("typed overload");
 +        assert_eq!(info.code.as_deref(), Some(SLOW_DOWN_CODE));
 +        assert_eq!(info.message, "capacity detail");
-+        assert_eq!(info.retry_after_ms, Some(1_250));
++        assert_eq!(info.retry_after_ms, Some(1_000));
 +
 +        let info = overload_at(None, None, &payload).expect("typed overload");
 +        assert_eq!(info.retry_after_ms, Some(2_000));
 +
-+        let top_level = json!({
-+            "code": SLOW_DOWN_CODE,
-+            "message": "top-level detail",
-+            "retry_after_ms": 3_000
-+        });
-+        let info = overload_at(None, None, &top_level).expect("typed overload");
-+        assert_eq!(info.retry_after_ms, Some(3_000));
-+    }
-+
-+    #[test]
-+    fn server_overload_parses_seconds_fractional_seconds_and_milliseconds() {
-+        for (advice, expected_ms) in [("2", 2_000), ("2.5", 2_500), ("1250ms", 1_250)] {
++        for invalid in ["2.5", "1250ms"] {
 +            let mut headers = HeaderMap::new();
-+            headers.insert("retry-after", advice.parse().expect("valid header"));
-+            let payload = json!({"error": {"code": SERVER_OVERLOADED_CODE}});
++            headers.insert("retry-after", invalid.parse().expect("valid header"));
 +            let info = overload_at(None, Some(&headers), &payload).expect("typed overload");
-+            assert_eq!(info.retry_after_ms, Some(expected_ms));
++            assert_eq!(info.retry_after_ms, Some(2_000));
 +        }
 +
-+        let payload = json!({
-+            "error": {"code": SERVER_OVERLOADED_CODE, "retry_after": 1.75}
-+        });
++        let aliases_only = json!({"error": {
++            "code": SERVER_OVERLOADED_CODE,
++            "retryAfterMs": 1_000,
++            "retry_after": 1,
++            "headers": {"Retry-After": "1"}
++        }});
 +        assert_eq!(
-+            overload_at(None, None, &payload).and_then(|info| info.retry_after_ms),
-+            Some(1_750)
-+        );
-+
-+        let mut headers = HeaderMap::new();
-+        headers.insert("retry-after", "1e100".parse().expect("valid header"));
-+        assert_eq!(
-+            overload_at(None, Some(&headers), &payload).and_then(|info| info.retry_after_ms),
-+            Some(u64::MAX)
++            overload_at(None, None, &aliases_only).and_then(|info| info.retry_after_ms),
++            None
 +        );
 +    }
 +
 +    #[test]
-+    fn server_overload_http_date_is_strict_and_uses_fixed_clock() {
++    fn codex_patch_server_overload_retry_after_http_date_is_strict() {
 +        let now = fixed_now();
 +        let payload = json!({"error": {"code": SERVER_OVERLOADED_CODE}});
 +        for (retry_at, expected_ms) in [
@@ -528,7 +562,7 @@ index d1d83cf401476593bce9bc918295044019a8b74d..b23731418ce781f965c158b5e523214d
 +    }
 +}
 diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
-index e4f5f04d62b3834cef16cf222cb55f288ca50841..29f4fdcfa34f7836fc7257cb91c62967ad37625d 100644
+index e4f5f04d62b3834cef16cf222cb55f288ca50841..d2f25c7559834a2c0af26cd42b488d76e648190e 100644
 --- a/codex-rs/codex-api/src/sse/responses.rs
 +++ b/codex-rs/codex-api/src/sse/responses.rs
 @@ -3,6 +3,7 @@ use crate::common::ResponseStream;
@@ -539,29 +573,96 @@ index e4f5f04d62b3834cef16cf222cb55f288ca50841..29f4fdcfa34f7836fc7257cb91c62967
  use crate::rate_limits::parse_all_rate_limits;
  use crate::safety_buffering::treatment_from_headers;
  use crate::telemetry::SseTelemetry;
-@@ -417,8 +418,8 @@ pub fn process_responses_event(
+@@ -417,49 +418,51 @@ pub fn process_responses_event(
          "response.failed" => {
              if let Some(resp_val) = event.response {
                  let mut response_error = ApiError::Stream("response.failed event received".into());
 -                if let Some(error) = resp_val.get("error")
 -                    && let Ok(error) = serde_json::from_value::<Error>(error.clone())
-+                if let Some(error_value) = resp_val.get("error")
-+                    && let Ok(error) = serde_json::from_value::<Error>(error_value.clone())
-                 {
-                     if is_context_window_error(&error) {
-                         response_error = ApiError::ContextWindowExceeded;
-@@ -449,8 +450,8 @@ pub fn process_responses_event(
+-                {
+-                    if is_context_window_error(&error) {
+-                        response_error = ApiError::ContextWindowExceeded;
+-                    } else if is_quota_exceeded_error(&error) {
+-                        response_error = ApiError::QuotaExceeded;
+-                    } else if is_usage_not_included(&error) {
+-                        response_error = ApiError::UsageNotIncluded;
+-                    } else if is_cyber_policy_error(&error) {
+-                        let message = cyber_policy_message(error.message);
+-                        response_error = ApiError::CyberPolicy { message };
+-                    } else if error.code.as_deref() == Some("misalignment_policy_violation") {
+-                        let message = error
++                if let Some(error_value) = resp_val.get("error") {
++                    if let Some(info) = parse_server_overload(None, None, error_value) {
++                        response_error = ApiError::ServerOverloaded(info);
++                    } else if let Ok(error) = serde_json::from_value::<Error>(error_value.clone()) {
++                        if is_context_window_error(&error) {
++                            response_error = ApiError::ContextWindowExceeded;
++                        } else if is_quota_exceeded_error(&error) {
++                            response_error = ApiError::QuotaExceeded;
++                        } else if is_usage_not_included(&error) {
++                            response_error = ApiError::UsageNotIncluded;
++                        } else if is_cyber_policy_error(&error) {
++                            let message = cyber_policy_message(error.message);
++                            response_error = ApiError::CyberPolicy { message };
++                        } else if error.code.as_deref() == Some("misalignment_policy_violation") {
++                            let message = error
                              .message
-                             .unwrap_or_else(|| "Invalid request.".to_string());
-                         response_error = ApiError::InvalidRequest { message };
+                             .filter(|message| !message.trim().is_empty())
+                             .unwrap_or_else(|| {
+                                 "This request was blocked due to a misalignment policy violation."
+                                     .to_string()
+                             });
+-                        response_error = ApiError::MisalignmentPolicyViolation {
+-                            message,
+-                            misalignment: error.misalignment.and_then(|details| {
+-                                serde_json::from_value::<MisalignmentErrorDetails>(details).ok()
+-                            }),
+-                        };
+-                    } else if matches!(error.code.as_deref(), Some("invalid_prompt" | "bio_policy"))
+-                    {
+-                        let message = error
+-                            .message
+-                            .unwrap_or_else(|| "Invalid request.".to_string());
+-                        response_error = ApiError::InvalidRequest { message };
 -                    } else if is_server_overloaded_error(&error) {
 -                        response_error = ApiError::ServerOverloaded;
-+                    } else if let Some(info) = parse_server_overload(None, None, error_value) {
-+                        response_error = ApiError::ServerOverloaded(info);
-                     } else {
-                         let delay = try_parse_retry_after(&error);
-                         let message = error.message.unwrap_or_default();
-@@ -724,11 +725,6 @@ fn is_cyber_policy_error(error: &Error) -> bool {
+-                    } else {
+-                        let delay = try_parse_retry_after(&error);
+-                        let message = error.message.unwrap_or_default();
+-                        response_error = match error.code.as_deref() {
+-                            Some("rate_limit_exceeded") => {
+-                                ApiError::RateLimitExceeded { message, delay }
+-                            }
+-                            _ => ApiError::Retryable { message, delay },
+-                        };
++                            response_error = ApiError::MisalignmentPolicyViolation {
++                                message,
++                                misalignment: error.misalignment.and_then(|details| {
++                                    serde_json::from_value::<MisalignmentErrorDetails>(details).ok()
++                                }),
++                            };
++                        } else if matches!(
++                            error.code.as_deref(),
++                            Some("invalid_prompt" | "bio_policy")
++                        ) {
++                            let message = error
++                                .message
++                                .unwrap_or_else(|| "Invalid request.".to_string());
++                            response_error = ApiError::InvalidRequest { message };
++                        } else {
++                            let delay = try_parse_retry_after(&error);
++                            let message = error.message.unwrap_or_default();
++                            response_error = match error.code.as_deref() {
++                                Some("rate_limit_exceeded") => {
++                                    ApiError::RateLimitExceeded { message, delay }
++                                }
++                                _ => ApiError::Retryable { message, delay },
++                            };
++                        }
+                     }
+                 }
+                 return Err(ResponsesEventError::Api(response_error));
+@@ -724,11 +727,6 @@ fn is_cyber_policy_error(error: &Error) -> bool {
      error.code.as_deref() == Some("cyber_policy")
  }
  
@@ -573,19 +674,19 @@ index e4f5f04d62b3834cef16cf222cb55f288ca50841..29f4fdcfa34f7836fc7257cb91c62967
  fn cyber_policy_fallback_message() -> String {
      "This request has been flagged for possible cybersecurity risk.".to_string()
  }
-@@ -1155,6 +1151,30 @@ mod tests {
+@@ -1155,6 +1153,33 @@ mod tests {
          }
      }
  
 +    #[tokio::test]
-+    async fn failed_response_server_overload_preserves_typed_advice() {
++    async fn codex_patch_failed_response_classifies_raw_server_overload_before_full_error() {
 +        for (code, retry_after_ms) in [("server_is_overloaded", 1_250_u64), ("slow_down", 2_000)] {
 +            let event = json!({
 +                "type": "response.failed",
 +                "response": {
 +                    "error": {
 +                        "code": code,
-+                        "message": "capacity is temporarily limited",
++                        "message": {"not": "a valid Error message"},
 +                        "retry_after_ms": retry_after_ms
 +                    }
 +                }
@@ -596,7 +697,10 @@ index e4f5f04d62b3834cef16cf222cb55f288ca50841..29f4fdcfa34f7836fc7257cb91c62967
 +                panic!("unexpected overload events for {code}: {events:?}");
 +            };
 +            assert_eq!(info.code.as_deref(), Some(code));
-+            assert_eq!(info.message, "capacity is temporarily limited");
++            assert_eq!(
++                info.message,
++                "Selected model is at capacity. Please try a different model."
++            );
 +            assert_eq!(info.retry_after_ms, Some(retry_after_ms));
 +        }
 +    }
@@ -604,127 +708,46 @@ index e4f5f04d62b3834cef16cf222cb55f288ca50841..29f4fdcfa34f7836fc7257cb91c62967
      #[tokio::test]
      async fn context_window_error_is_fatal() {
          let raw_error = r#"{"type":"response.failed","sequence_number":3,"response":{"id":"resp_5c66275b97b9baef1ed95550adb3b7ec13b17aafd1d2f11b","object":"response","created_at":1759510079,"status":"failed","background":false,"error":{"code":"context_length_exceeded","message":"Your input exceeds the context window of this model. Please adjust your input and try again."},"usage":null,"user":null,"metadata":{}}}"#;
-diff --git a/codex-rs/core/tests/suite/retry_after.rs b/codex-rs/core/tests/suite/retry_after.rs
-index c24d510049e7774bb00de852135847de3debaec7..5dffff66bd29d298adedc37eecc8865e3d0f9c88 100644
---- a/codex-rs/core/tests/suite/retry_after.rs
-+++ b/codex-rs/core/tests/suite/retry_after.rs
-@@ -5,6 +5,7 @@ use codex_client::run_with_retry;
- use codex_http_client::Request;
- use codex_http_client::TransportError;
- use codex_login::CodexAuth;
-+use codex_model_provider_info::ServerOverloadPolicy;
- use codex_protocol::protocol::CodexErrorInfo;
- use codex_protocol::protocol::EventMsg;
- use codex_protocol::protocol::Op;
-@@ -363,6 +364,7 @@ async fn responses_http_overload_without_retry_after_exhausts_request_retries()
-         .with_config(|config| {
-             config.model_provider.request_max_retries = Some(2);
-             config.model_provider.stream_max_retries = Some(2);
-+            config.model_provider.server_overload_policy = ServerOverloadPolicy::Bounded;
-         })
-         .build_with_auto_env(&server)
-         .await?;
-@@ -835,6 +837,7 @@ async fn compact_v2_overload_without_retry_after_exhausts_request_retries() -> R
-         .with_config(|config| {
-             config.model_provider.request_max_retries = Some(2);
-             config.model_provider.stream_max_retries = Some(2);
-+            config.model_provider.server_overload_policy = ServerOverloadPolicy::Bounded;
-         })
-         .build_with_auto_env(&server)
-         .await?;
-@@ -1176,9 +1179,9 @@ async fn sse_rate_limit_message_with_retry_after_uses_server_advised_retry_delay
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs b/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs
+index 9b60a471ebb6b07c1c39c02285163e6412c39cca..57b6bc5872eefec737a6e19aed3589e993f09a00 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs
+@@ -50,7 +50,7 @@ pub(super) fn sampler_failure_reason(error: &LunaSamplerError) -> &'static str {
+             ApiError::CyberPolicy { .. } | ApiError::MisalignmentPolicyViolation { .. } => {
+                 "policy_error"
+             }
+-            ApiError::ServerOverloaded => "server_overloaded",
++            ApiError::ServerOverloaded(_) => "server_overloaded",
+         },
+     }
  }
- 
- // TODO(anp) respect Retry-After
--/// A streamed backend overload remains terminal despite an enclosing retry header.
-+/// Bounded streamed overload remains terminal despite an enclosing retry header.
- #[tokio::test(flavor = "current_thread")]
--async fn sse_overload_with_retry_after_is_terminal() -> Result<()> {
-+async fn bounded_sse_overload_with_retry_after_is_terminal() -> Result<()> {
-     skip_if_no_network!(Ok(()));
- 
-     let mut telemetry = RetryTelemetryCapture::install();
-@@ -1197,6 +1200,7 @@ async fn sse_overload_with_retry_after_is_terminal() -> Result<()> {
-         .with_config(|config| {
-             config.model_provider.request_max_retries = Some(2);
-             config.model_provider.stream_max_retries = Some(2);
-+            config.model_provider.server_overload_policy = ServerOverloadPolicy::Bounded;
-         })
-         .build_with_auto_env(&server)
-         .await?;
-@@ -1249,9 +1253,9 @@ async fn sse_overload_with_retry_after_is_terminal() -> Result<()> {
-     Ok(())
- }
- 
--/// A streamed backend overload without retry advice must complete with one terminal error.
-+/// Bounded streamed overload without retry advice completes with one terminal error.
- #[tokio::test(flavor = "current_thread")]
--async fn sse_overload_without_retry_after_is_terminal() -> Result<()> {
-+async fn bounded_sse_overload_without_retry_after_is_terminal() -> Result<()> {
-     skip_if_no_network!(Ok(()));
- 
-     let mut telemetry = RetryTelemetryCapture::install();
-@@ -1269,6 +1273,7 @@ async fn sse_overload_without_retry_after_is_terminal() -> Result<()> {
-         .with_config(|config| {
-             config.model_provider.request_max_retries = Some(2);
-             config.model_provider.stream_max_retries = Some(2);
-+            config.model_provider.server_overload_policy = ServerOverloadPolicy::Bounded;
-         })
-         .build_with_auto_env(&server)
-         .await?;
-@@ -1604,9 +1609,9 @@ async fn websocket_rate_limit_without_retry_after_is_terminal() -> Result<()> {
- }
- 
- // TODO(anp) respect Retry-After
--/// Websocket overloads remain terminal despite a nested retry header.
-+/// Bounded websocket overloads remain terminal despite a nested retry header.
- #[tokio::test(flavor = "current_thread")]
--async fn websocket_overload_with_nested_retry_after_is_terminal() -> Result<()> {
-+async fn bounded_websocket_overload_with_nested_retry_after_is_terminal() -> Result<()> {
-     skip_if_no_network!(Ok(()));
- 
-     let mut telemetry = RetryTelemetryCapture::install();
-@@ -1630,6 +1635,7 @@ async fn websocket_overload_with_nested_retry_after_is_terminal() -> Result<()>
-         .with_config(|config| {
-             config.model_provider.request_max_retries = Some(2);
-             config.model_provider.stream_max_retries = Some(2);
-+            config.model_provider.server_overload_policy = ServerOverloadPolicy::Bounded;
-         })
-         .build_with_websocket_server(&server)
-         .await?;
-@@ -1686,9 +1692,9 @@ async fn websocket_overload_with_nested_retry_after_is_terminal() -> Result<()>
-     Ok(())
- }
- 
--/// Headerless websocket overloads must neither reconnect nor fall back to HTTP.
-+/// Headerless bounded websocket overloads neither reconnect nor fall back to HTTP.
- #[tokio::test(flavor = "current_thread")]
--async fn websocket_overload_without_retry_after_is_terminal() -> Result<()> {
-+async fn bounded_websocket_overload_without_retry_after_is_terminal() -> Result<()> {
-     skip_if_no_network!(Ok(()));
- 
-     let mut telemetry = RetryTelemetryCapture::install();
-@@ -1711,6 +1717,7 @@ async fn websocket_overload_without_retry_after_is_terminal() -> Result<()> {
-         .with_config(|config| {
-             config.model_provider.request_max_retries = Some(2);
-             config.model_provider.stream_max_retries = Some(2);
-+            config.model_provider.server_overload_policy = ServerOverloadPolicy::Bounded;
-         })
-         .build_with_websocket_server(&server)
-         .await?;
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
+index 993e2d48d7322b3b37d981b45e8fa57f3ba3470b..95a8a4787f0500950e141984210ad01acb567f12 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
+@@ -208,7 +208,7 @@ impl LunaSampler {
+                 ApiError::Retryable { .. }
+                 | ApiError::RateLimitExceeded { .. }
+                 | ApiError::Stream(_)
+-                | ApiError::ServerOverloaded,
++                | ApiError::ServerOverloaded(_),
+             )
+             | LunaSamplerError::Api(ApiError::Transport(
+                 TransportError::RetryLimit
 diff --git a/codex-rs/protocol/src/error.rs b/codex-rs/protocol/src/error.rs
-index be0192f61aa580ea6660084d0464504900da24ef..f0e880c5879b00081a53fd3312f311829fb60ee6 100644
+index be0192f61aa580ea6660084d0464504900da24ef..0388805a99559a9e0cf15d4a9c1f552bd1cf33bd 100644
 --- a/codex-rs/protocol/src/error.rs
 +++ b/codex-rs/protocol/src/error.rs
-@@ -20,6 +20,7 @@ use codex_http_client::HttpError;
+@@ -20,6 +20,8 @@ use codex_http_client::HttpError;
  use codex_utils_string::truncate_middle_chars;
  use codex_utils_string::truncate_middle_with_token_budget;
  use http::StatusCode;
-+use serde::{Deserialize, Serialize};
++use serde::Deserialize;
++use serde::Serialize;
  use serde_json;
  use std::fmt;
  use std::io;
-@@ -30,6 +31,26 @@ use tokio::task::JoinError;
+@@ -30,6 +32,28 @@ use tokio::task::JoinError;
  
  pub type Result<T> = std::result::Result<T, CodexErr>;
  
@@ -736,6 +759,8 @@ index be0192f61aa580ea6660084d0464504900da24ef..f0e880c5879b00081a53fd3312f31182
 +pub struct ServerOverloadInfo {
 +    /// The provider's machine-readable overload code, when supplied.
 +    pub code: Option<String>,
++    /// HTTP status when the transport supplied one.
++    pub http_status: Option<u16>,
 +    /// The provider's diagnostic message (never inferred from text).
 +    pub message: String,
 +    /// Server advice from `Retry-After` or the response body, in milliseconds.
@@ -751,7 +776,7 @@ index be0192f61aa580ea6660084d0464504900da24ef..f0e880c5879b00081a53fd3312f31182
  /// Limit UI error messages to a reasonable size while keeping useful context.
  const ERROR_MESSAGE_UI_MAX_BYTES: usize = 2 * 1024;
  
-@@ -71,6 +92,7 @@ pub enum SandboxErr {
+@@ -71,6 +95,7 @@ pub enum SandboxErr {
  pub struct CodexErr {
      details: CodexErrorDetails,
      retry_delay: Option<Duration>,
@@ -759,7 +784,7 @@ index be0192f61aa580ea6660084d0464504900da24ef..f0e880c5879b00081a53fd3312f31182
  }
  
  /// The semantic category and diagnostic payload for a [`CodexErr`].
-@@ -225,6 +247,7 @@ impl From<CodexErrorDetails> for CodexErr {
+@@ -225,6 +250,7 @@ impl From<CodexErrorDetails> for CodexErr {
          Self {
              details,
              retry_delay: None,
@@ -767,7 +792,7 @@ index be0192f61aa580ea6660084d0464504900da24ef..f0e880c5879b00081a53fd3312f31182
          }
      }
  }
-@@ -289,6 +312,7 @@ macro_rules! codex_err_unit_constructors {
+@@ -289,6 +315,7 @@ macro_rules! codex_err_unit_constructors {
              pub const $variant: Self = Self {
                  details: CodexErrorDetails::$variant,
                  retry_delay: None,
@@ -775,7 +800,7 @@ index be0192f61aa580ea6660084d0464504900da24ef..f0e880c5879b00081a53fd3312f31182
              };
          )*
      };
-@@ -363,11 +387,27 @@ impl CodexErr {
+@@ -363,11 +390,27 @@ impl CodexErr {
          details.into()
      }
  
@@ -804,17 +829,18 @@ index be0192f61aa580ea6660084d0464504900da24ef..f0e880c5879b00081a53fd3312f31182
          match self.details() {
              CodexErrorDetails::TurnAborted
 diff --git a/codex-rs/protocol/src/error_tests.rs b/codex-rs/protocol/src/error_tests.rs
-index ca0b7b2cff5f31e77f8a64b7c3feb982746c5d6c..741a195694295e7deb42a001a666facb954c1b83 100644
+index ca0b7b2cff5f31e77f8a64b7c3feb982746c5d6c..e37f7bf4ba60f82d5e25a9a9562bbebf9a1d246d 100644
 --- a/codex-rs/protocol/src/error_tests.rs
 +++ b/codex-rs/protocol/src/error_tests.rs
-@@ -178,6 +178,21 @@ fn server_overloaded_maps_to_protocol() {
+@@ -178,6 +178,22 @@ fn server_overloaded_maps_to_protocol() {
      );
  }
  
 +#[test]
-+fn typed_server_overload_preserves_advice_without_changing_retryability() {
++fn codex_patch_typed_server_overload_preserves_advice_without_changing_retryability() {
 +    let info = ServerOverloadInfo {
 +        code: Some("slow_down".to_string()),
++        http_status: Some(429),
 +        message: "capacity is temporarily limited".to_string(),
 +        retry_after_ms: Some(1_250),
 +    };
@@ -833,7 +859,7 @@ diff --git a/codex-rs/response-debug-context/src/lib.rs b/codex-rs/response-debu
 index 42825a7c986ddacc71eb01c74c209840043988da..18a45696abbb3418b853b1d06ddae5dd3f63532c 100644
 --- a/codex-rs/response-debug-context/src/lib.rs
 +++ b/codex-rs/response-debug-context/src/lib.rs
-@@ -85,6 +85,6 @@ pub fn telemetry_api_error_message(error: &ApiError) -> String {
+@@ -85,7 +85,7 @@ pub fn telemetry_api_error_message(error: &ApiError) -> String {
          ApiError::InvalidRequest { .. } => "invalid request".to_string(),
          ApiError::CyberPolicy { .. } => "cyber policy".to_string(),
          ApiError::MisalignmentPolicyViolation { .. } => "misalignment policy violation".to_string(),
@@ -841,3 +867,4 @@ index 42825a7c986ddacc71eb01c74c209840043988da..18a45696abbb3418b853b1d06ddae5dd
 +        ApiError::ServerOverloaded(_) => "server overloaded".to_string(),
      }
  }
+ 

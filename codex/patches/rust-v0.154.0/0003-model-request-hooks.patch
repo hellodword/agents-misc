@@ -1,0 +1,1862 @@
+diff --git a/codex-rs/analytics/src/events.rs b/codex-rs/analytics/src/events.rs
+index 613d1eb0abd174319ec6dee9350ae5173d93b801..60d68216d28ccb1e2726287ce9b758f7d4a4eedf 100644
+--- a/codex-rs/analytics/src/events.rs
++++ b/codex-rs/analytics/src/events.rs
+@@ -1413,6 +1413,8 @@ fn analytics_hook_event_name(event_name: HookEventName) -> &'static str {
+         HookEventName::PostToolUse => "PostToolUse",
+         HookEventName::PreCompact => "PreCompact",
+         HookEventName::PostCompact => "PostCompact",
++        HookEventName::ModelRequestRecovery => "ModelRequestRecovery",
++        HookEventName::ModelRequestFailed => "ModelRequestFailed",
+         HookEventName::SessionStart => "SessionStart",
+         HookEventName::SessionEnd => "SessionEnd",
+         HookEventName::UserPromptSubmit => "UserPromptSubmit",
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/config.rs b/codex-rs/app-server-protocol/src/protocol/v2/config.rs
+index 5e5f58d5799a0aaaf9640efcabc16952f88a76bf..04612e019fc10cf87e6677d766c2f71c36e328ca 100644
+--- a/codex-rs/app-server-protocol/src/protocol/v2/config.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/config.rs
+@@ -595,6 +595,12 @@ pub struct ManagedHooksRequirements {
+     #[serde(rename = "PostCompact")]
+     #[ts(rename = "PostCompact")]
+     pub post_compact: Vec<ConfiguredHookMatcherGroup>,
++    #[serde(rename = "ModelRequestRecovery", default)]
++    #[ts(rename = "ModelRequestRecovery")]
++    pub model_request_recovery: Vec<ConfiguredHookMatcherGroup>,
++    #[serde(rename = "ModelRequestFailed", default)]
++    #[ts(rename = "ModelRequestFailed")]
++    pub model_request_failed: Vec<ConfiguredHookMatcherGroup>,
+     #[serde(rename = "SessionStart")]
+     #[ts(rename = "SessionStart")]
+     pub session_start: Vec<ConfiguredHookMatcherGroup>,
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/hook.rs b/codex-rs/app-server-protocol/src/protocol/v2/hook.rs
+index b2f944e1ae88f0aa63ead7c19a4e765a0b4e6f3d..b9eb5ef6414c210708d9c9b81b276c1d01003f67 100644
+--- a/codex-rs/app-server-protocol/src/protocol/v2/hook.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/hook.rs
+@@ -17,7 +17,7 @@ use serde::Serialize;
+ 
+ v2_enum_from_core!(
+     pub enum HookEventName from CoreHookEventName {
+-        PreToolUse, PermissionRequest, PostToolUse, PreCompact, PostCompact, SessionStart, SessionEnd, UserPromptSubmit, SubagentStart, SubagentStop, Stop, Interrupt
++        PreToolUse, PermissionRequest, PostToolUse, PreCompact, PostCompact, ModelRequestRecovery, ModelRequestFailed, SessionStart, SessionEnd, UserPromptSubmit, SubagentStart, SubagentStop, Stop, Interrupt
+     }
+ );
+ 
+diff --git a/codex-rs/app-server/src/request_processors/config_processor.rs b/codex-rs/app-server/src/request_processors/config_processor.rs
+index df9c503101234eb1605ec51644bee40770ebf1e8..c2a535d44f152f1bffb50b516b5a63daec400fb5 100644
+--- a/codex-rs/app-server/src/request_processors/config_processor.rs
++++ b/codex-rs/app-server/src/request_processors/config_processor.rs
+@@ -629,6 +629,8 @@ fn map_hooks_requirements_to_api(hooks: ManagedHooksRequirementsToml) -> Managed
+         post_tool_use,
+         pre_compact,
+         post_compact,
++        model_request_recovery,
++        model_request_failed,
+         session_start,
+         session_end,
+         user_prompt_submit,
+@@ -646,6 +648,8 @@ fn map_hooks_requirements_to_api(hooks: ManagedHooksRequirementsToml) -> Managed
+         post_tool_use: map_hook_matcher_groups_to_api(post_tool_use),
+         pre_compact: map_hook_matcher_groups_to_api(pre_compact),
+         post_compact: map_hook_matcher_groups_to_api(post_compact),
++        model_request_recovery: map_hook_matcher_groups_to_api(model_request_recovery),
++        model_request_failed: map_hook_matcher_groups_to_api(model_request_failed),
+         session_start: map_hook_matcher_groups_to_api(session_start),
+         session_end: map_hook_matcher_groups_to_api(session_end),
+         user_prompt_submit: map_hook_matcher_groups_to_api(user_prompt_submit),
+diff --git a/codex-rs/config/src/hook_config.rs b/codex-rs/config/src/hook_config.rs
+index 7575fa5fcb1042cc380812308f62b8378540ad2a..c58e47a925e1467d58f31c9bdbaef149c2df5d79 100644
+--- a/codex-rs/config/src/hook_config.rs
++++ b/codex-rs/config/src/hook_config.rs
+@@ -44,6 +44,10 @@ pub struct HookEventsToml {
+     pub pre_compact: Vec<MatcherGroup>,
+     #[serde(rename = "PostCompact", default)]
+     pub post_compact: Vec<MatcherGroup>,
++    #[serde(rename = "ModelRequestRecovery", default)]
++    pub model_request_recovery: Vec<MatcherGroup>,
++    #[serde(rename = "ModelRequestFailed", default)]
++    pub model_request_failed: Vec<MatcherGroup>,
+     #[serde(rename = "SessionStart", default)]
+     pub session_start: Vec<MatcherGroup>,
+     #[serde(rename = "SessionEnd", default)]
+@@ -68,6 +72,8 @@ impl HookEventsToml {
+             post_tool_use,
+             pre_compact,
+             post_compact,
++            model_request_recovery,
++            model_request_failed,
+             session_start,
+             session_end,
+             user_prompt_submit,
+@@ -81,6 +87,8 @@ impl HookEventsToml {
+             && post_tool_use.is_empty()
+             && pre_compact.is_empty()
+             && post_compact.is_empty()
++            && model_request_recovery.is_empty()
++            && model_request_failed.is_empty()
+             && session_start.is_empty()
+             && session_end.is_empty()
+             && user_prompt_submit.is_empty()
+@@ -97,6 +105,8 @@ impl HookEventsToml {
+             post_tool_use,
+             pre_compact,
+             post_compact,
++            model_request_recovery,
++            model_request_failed,
+             session_start,
+             session_end,
+             user_prompt_submit,
+@@ -111,6 +121,8 @@ impl HookEventsToml {
+             post_tool_use,
+             pre_compact,
+             post_compact,
++            model_request_recovery,
++            model_request_failed,
+             session_start,
+             session_end,
+             user_prompt_submit,
+@@ -125,12 +137,12 @@ impl HookEventsToml {
+         .sum()
+     }
+ 
+-    pub fn into_matcher_groups(mut self) -> [(HookEventName, Vec<MatcherGroup>); 12] {
++    pub fn into_matcher_groups(mut self) -> [(HookEventName, Vec<MatcherGroup>); 14] {
+         self.matcher_groups_mut()
+             .map(|(event, groups)| (event, std::mem::take(groups)))
+     }
+ 
+-    pub fn matcher_groups_mut(&mut self) -> [(HookEventName, &mut Vec<MatcherGroup>); 12] {
++    pub fn matcher_groups_mut(&mut self) -> [(HookEventName, &mut Vec<MatcherGroup>); 14] {
+         use HookEventName as Event;
+ 
+         [
+@@ -139,6 +151,11 @@ impl HookEventsToml {
+             (Event::PostToolUse, &mut self.post_tool_use),
+             (Event::PreCompact, &mut self.pre_compact),
+             (Event::PostCompact, &mut self.post_compact),
++            (
++                Event::ModelRequestRecovery,
++                &mut self.model_request_recovery,
++            ),
++            (Event::ModelRequestFailed, &mut self.model_request_failed),
+             (Event::SessionStart, &mut self.session_start),
+             (Event::SessionEnd, &mut self.session_end),
+             (Event::UserPromptSubmit, &mut self.user_prompt_submit),
+diff --git a/codex-rs/config/src/requirements_layers/hooks.rs b/codex-rs/config/src/requirements_layers/hooks.rs
+index 01ed3eab47f0a5d45eeaa9a95d7240efeea633d6..51b65766cfc1b2f6f5e3365b324efdcd56cadcd5 100644
+--- a/codex-rs/config/src/requirements_layers/hooks.rs
++++ b/codex-rs/config/src/requirements_layers/hooks.rs
+@@ -209,6 +209,8 @@ fn append_hook_events(existing: &mut HookEventsToml, incoming: HookEventsToml) -
+         post_tool_use,
+         pre_compact,
+         post_compact,
++        model_request_recovery,
++        model_request_failed,
+         session_start,
+         session_end,
+         user_prompt_submit,
+@@ -224,6 +226,8 @@ fn append_hook_events(existing: &mut HookEventsToml, incoming: HookEventsToml) -
+     changed |= append_vec(&mut existing.post_tool_use, post_tool_use);
+     changed |= append_vec(&mut existing.pre_compact, pre_compact);
+     changed |= append_vec(&mut existing.post_compact, post_compact);
++    changed |= append_vec(&mut existing.model_request_recovery, model_request_recovery);
++    changed |= append_vec(&mut existing.model_request_failed, model_request_failed);
+     changed |= append_vec(&mut existing.session_start, session_start);
+     changed |= append_vec(&mut existing.session_end, session_end);
+     changed |= append_vec(&mut existing.user_prompt_submit, user_prompt_submit);
+diff --git a/codex-rs/core/src/hook_runtime.rs b/codex-rs/core/src/hook_runtime.rs
+index e17f1508e7ffdb313af4c444d36dc4248e4d680b..dea17f6889d58c32196e71001a1d7f56e38c8968 100644
+--- a/codex-rs/core/src/hook_runtime.rs
++++ b/codex-rs/core/src/hook_runtime.rs
+@@ -29,6 +29,8 @@ use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
+ use codex_otel::HOOK_RUN_DURATION_METRIC;
+ use codex_otel::HOOK_RUN_METRIC;
+ use codex_plugin::ExecutorPluginHookSource;
++use codex_protocol::error::CodexErr;
++use codex_protocol::error::CodexErrorDetails;
+ use codex_protocol::items::FunctionCallOutputItem;
+ use codex_protocol::items::TurnItem;
+ use codex_protocol::items::UserMessageItem;
+@@ -79,6 +81,54 @@ pub(crate) enum PreToolUseHookResult {
+     Blocked(String),
+ }
+ 
++#[derive(Debug, Clone, Copy)]
++pub(crate) struct ModelRequestHookContext {
++    operation: codex_hooks::ModelRequestOperation,
++}
++
++impl ModelRequestHookContext {
++    pub(crate) fn sampling() -> Self {
++        Self {
++            operation: codex_hooks::ModelRequestOperation::Sampling,
++        }
++    }
++
++    pub(crate) fn local_compact() -> Self {
++        Self {
++            operation: codex_hooks::ModelRequestOperation::LocalCompact,
++        }
++    }
++
++    pub(crate) fn remote_compact() -> Self {
++        Self {
++            operation: codex_hooks::ModelRequestOperation::RemoteCompact,
++        }
++    }
++
++    pub(crate) fn remote_compaction_v2() -> Self {
++        Self {
++            operation: codex_hooks::ModelRequestOperation::RemoteCompactV2,
++        }
++    }
++}
++
++#[derive(Debug, Clone)]
++pub(crate) struct ModelRequestFailure {
++    context: ModelRequestHookContext,
++    attempt: u64,
++    error: codex_hooks::ModelRequestError,
++}
++
++impl ModelRequestFailure {
++    pub(crate) fn new(context: ModelRequestHookContext, attempt: u64, error: &CodexErr) -> Self {
++        Self {
++            context,
++            attempt: attempt.max(1),
++            error: model_request_error_payload(error),
++        }
++    }
++}
++
+ struct ContextInjectingHookOutcome {
+     hook_events: Vec<HookCompletedEvent>,
+     outcome: HookRuntimeOutcome,
+@@ -589,6 +639,72 @@ pub(crate) async fn run_post_compact_hooks(
+     }
+ }
+ 
++pub(crate) async fn run_model_request_recovery_hooks(
++    sess: &Arc<Session>,
++    turn_context: &Arc<TurnContext>,
++    failure: ModelRequestFailure,
++    next_action: codex_hooks::ModelRequestNextAction,
++) {
++    let request = codex_hooks::ModelRequestRecoveryRequest {
++        session_id: sess.session_id().into(),
++        turn_id: turn_context.sub_id.clone(),
++        transcript_path: sess.hook_transcript_path().await,
++        #[allow(deprecated)]
++        cwd: turn_context.cwd.clone(),
++        model: turn_context.model_info().slug.clone(),
++        provider: turn_context.config.model_provider_id.clone(),
++        operation: failure.context.operation,
++        attempt: failure.attempt,
++        next_action,
++        error: failure.error,
++    };
++    let hooks = sess.hooks();
++    let preview_runs = hooks.preview_model_request_recovery(&request);
++    if preview_runs.is_empty() {
++        return;
++    }
++
++    match hooks.enqueue_model_request_recovery(request) {
++        codex_hooks::ModelRequestRecoveryDispatch::Queued { start } => {
++            emit_hook_started_events(sess, turn_context, preview_runs).await;
++            start.start();
++        }
++        codex_hooks::ModelRequestRecoveryDispatch::Rejected { reason } => {
++            tracing::debug!(%reason, "model request recovery hook notification was dropped");
++        }
++    }
++}
++
++pub(crate) async fn run_terminal_model_request_failure_hooks(
++    sess: &Arc<Session>,
++    turn_context: &Arc<TurnContext>,
++    failure: ModelRequestFailure,
++) {
++    let request = codex_hooks::ModelRequestFailedRequest {
++        session_id: sess.session_id().into(),
++        turn_id: turn_context.sub_id.clone(),
++        transcript_path: sess.hook_transcript_path().await,
++        #[allow(deprecated)]
++        cwd: turn_context.cwd.clone(),
++        model: turn_context.model_info().slug.clone(),
++        provider: turn_context.config.model_provider_id.clone(),
++        operation: failure.context.operation,
++        attempt: failure.attempt,
++        error: failure.error,
++    };
++    let hooks = sess.hooks();
++    let preview_runs = hooks.preview_model_request_failed(&request);
++    if !preview_runs.is_empty() {
++        emit_hook_started_events(sess, turn_context, preview_runs).await;
++    }
++
++    let mut outcome = hooks.run_model_request_failed(request).await;
++    if !outcome.hook_events.is_empty() {
++        emit_hook_completed_events(sess, turn_context, std::mem::take(&mut outcome.hook_events))
++            .await;
++    }
++}
++
+ #[instrument(level = "trace", skip_all)]
+ pub(crate) async fn run_legacy_after_agent_hook(
+     sess: &Arc<Session>,
+@@ -965,6 +1081,8 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str);
+         HookEventName::PostToolUse => "PostToolUse",
+         HookEventName::PreCompact => "PreCompact",
+         HookEventName::PostCompact => "PostCompact",
++        HookEventName::ModelRequestRecovery => "ModelRequestRecovery",
++        HookEventName::ModelRequestFailed => "ModelRequestFailed",
+         HookEventName::SessionStart => "SessionStart",
+         HookEventName::SessionEnd => "SessionEnd",
+         HookEventName::UserPromptSubmit => "UserPromptSubmit",
+@@ -1005,6 +1123,77 @@ fn hook_run_metric_tags(run: &HookRunSummary) -> [(&'static str, &'static str);
+     ]
+ }
+ 
++fn model_request_error_category(error: &CodexErr) -> codex_hooks::ModelRequestErrorCategory {
++    use codex_hooks::ModelRequestErrorCategory as Category;
++
++    match error.details() {
++        CodexErrorDetails::Stream(_)
++        | CodexErrorDetails::ResponseStreamFailed(_)
++        | CodexErrorDetails::ConnectionFailed(_)
++        | CodexErrorDetails::Io(_) => Category::Transport,
++        CodexErrorDetails::Timeout | CodexErrorDetails::RequestTimeout => Category::Timeout,
++        CodexErrorDetails::UnexpectedStatus(response) => match response.status.as_u16() {
++            408 => Category::Timeout,
++            429 => Category::RateLimit,
++            500..=599 => Category::Server,
++            _ => Category::InvalidRequest,
++        },
++        CodexErrorDetails::RetryLimit(error) => match error.status.as_u16() {
++            408 => Category::Timeout,
++            429 => Category::RateLimit,
++            500..=599 => Category::Server,
++            _ => Category::Other,
++        },
++        CodexErrorDetails::RateLimitExceeded(_) => Category::RateLimit,
++        CodexErrorDetails::SessionBudgetExceeded
++        | CodexErrorDetails::UsageLimitReached(_)
++        | CodexErrorDetails::QuotaExceeded
++        | CodexErrorDetails::UsageNotIncluded => Category::UsageLimit,
++        CodexErrorDetails::ContextWindowExceeded => Category::ContextWindow,
++        CodexErrorDetails::CyberPolicy { .. }
++        | CodexErrorDetails::MisalignmentPolicyViolation { .. } => Category::Policy,
++        CodexErrorDetails::Sandbox(_) | CodexErrorDetails::LandlockSandboxExecutableNotProvided => {
++            Category::Other
++        }
++        #[cfg(target_os = "linux")]
++        CodexErrorDetails::LandlockRuleset(_) | CodexErrorDetails::LandlockPathFd(_) => {
++            Category::Other
++        }
++        CodexErrorDetails::InvalidRequest(_)
++        | CodexErrorDetails::InvalidImageRequest()
++        | CodexErrorDetails::UnsupportedOperation(_)
++        | CodexErrorDetails::RefreshTokenFailed(_)
++        | CodexErrorDetails::ToolCollision(_) => Category::InvalidRequest,
++        CodexErrorDetails::ServerOverloaded => Category::ServerOverloaded,
++        CodexErrorDetails::InternalServerError => Category::Server,
++        CodexErrorDetails::SessionConfiguredNotFirstEvent
++        | CodexErrorDetails::InternalAgentDied
++        | CodexErrorDetails::Fatal(_)
++        | CodexErrorDetails::Json(_)
++        | CodexErrorDetails::TokioJoin(_)
++        | CodexErrorDetails::EnvVar(_) => Category::Internal,
++        CodexErrorDetails::TurnAborted
++        | CodexErrorDetails::ThreadNotFound(_)
++        | CodexErrorDetails::AgentLimitReached { .. }
++        | CodexErrorDetails::Spawn
++        | CodexErrorDetails::Interrupted => Category::Other,
++    }
++}
++
++fn model_request_error_payload(error: &CodexErr) -> codex_hooks::ModelRequestError {
++    let overload = error.server_overload_info();
++    codex_hooks::ModelRequestError {
++        category: model_request_error_category(error),
++        code: overload.and_then(|info| info.code.clone()),
++        http_status: overload
++            .and_then(|info| info.http_status)
++            .or_else(|| error.http_status_code_value()),
++        message: overload
++            .map(|info| info.message.clone())
++            .unwrap_or_else(|| error.to_string()),
++    }
++}
++
+ fn hook_permission_mode(turn_context: &TurnContext) -> String {
+     match turn_context.approval_policy() {
+         AskForApproval::Never => "bypassPermissions",
+@@ -1047,10 +1236,15 @@ fn compaction_trigger_label(value: CompactionTrigger) -> &'static str {
+ mod tests {
+     use std::sync::Arc;
+ 
++    use codex_hooks::ModelRequestErrorCategory;
+     use codex_otel::HOOK_RUN_DURATION_METRIC;
+     use codex_otel::HOOK_RUN_METRIC;
+     use codex_otel::MetricsClient;
+     use codex_otel::MetricsConfig;
++    use codex_protocol::error::CodexErr;
++    use codex_protocol::error::CodexErrorDetails;
++    use codex_protocol::error::ServerOverloadInfo;
++    use codex_protocol::error::UnexpectedResponseError;
+     use codex_protocol::models::ContentItem;
+     use codex_protocol::protocol::HookEventName;
+     use codex_protocol::protocol::HookExecutionMode;
+@@ -1070,12 +1264,94 @@ mod tests {
+     use super::emit_hook_started_events;
+     use super::hook_run_analytics_payload;
+     use super::hook_run_metric_tags;
++    use super::model_request_error_category;
++    use super::model_request_error_payload;
+     use crate::session::tests::make_session_and_context;
+     use crate::session::tests::make_session_and_context_with_rx;
+     use codex_protocol::protocol::HookCompletedEvent;
+     use codex_protocol::protocol::HookRunSummary;
+     use codex_utils_absolute_path::test_support::PathBufExt;
+     use codex_utils_absolute_path::test_support::test_path_buf;
++    use http::StatusCode;
++
++    fn unexpected_status(status: StatusCode) -> CodexErr {
++        CodexErrorDetails::UnexpectedStatus(UnexpectedResponseError {
++            status,
++            body: String::new(),
++            user_message: None,
++            url: None,
++            cf_ray: None,
++            request_id: None,
++            identity_authorization_error: None,
++            identity_error_code: None,
++        })
++        .into()
++    }
++
++    #[test]
++    fn codex_patch_model_request_errors_map_to_stable_categories() {
++        for (error, category) in [
++            (
++                CodexErr::Stream("disconnected".to_string()),
++                ModelRequestErrorCategory::Transport,
++            ),
++            (CodexErr::RequestTimeout, ModelRequestErrorCategory::Timeout),
++            (
++                unexpected_status(StatusCode::TOO_MANY_REQUESTS),
++                ModelRequestErrorCategory::RateLimit,
++            ),
++            (
++                CodexErr::QuotaExceeded,
++                ModelRequestErrorCategory::UsageLimit,
++            ),
++            (
++                CodexErr::ContextWindowExceeded,
++                ModelRequestErrorCategory::ContextWindow,
++            ),
++            (
++                CodexErrorDetails::CyberPolicy {
++                    message: "blocked".to_string(),
++                }
++                .into(),
++                ModelRequestErrorCategory::Policy,
++            ),
++            (
++                CodexErr::InvalidRequest("bad input".to_string()),
++                ModelRequestErrorCategory::InvalidRequest,
++            ),
++            (
++                unexpected_status(StatusCode::SERVICE_UNAVAILABLE),
++                ModelRequestErrorCategory::Server,
++            ),
++            (
++                CodexErr::server_overloaded(ServerOverloadInfo {
++                    code: Some("slow_down".to_string()),
++                    http_status: Some(429),
++                    message: "capacity".to_string(),
++                    retry_after_ms: None,
++                }),
++                ModelRequestErrorCategory::ServerOverloaded,
++            ),
++            (
++                CodexErr::InternalAgentDied,
++                ModelRequestErrorCategory::Internal,
++            ),
++            (CodexErr::TurnAborted, ModelRequestErrorCategory::Other),
++        ] {
++            assert_eq!(model_request_error_category(&error), category);
++        }
++
++        let overload = CodexErr::server_overloaded(ServerOverloadInfo {
++            code: Some("slow_down".to_string()),
++            http_status: Some(429),
++            message: "capacity".to_string(),
++            retry_after_ms: Some(2_000),
++        });
++        let payload = model_request_error_payload(&overload);
++        assert_eq!(payload.code.as_deref(), Some("slow_down"));
++        assert_eq!(payload.http_status, Some(429));
++        assert_eq!(payload.message, "capacity");
++    }
+ 
+     #[test]
+     fn additional_context_messages_stay_separate_and_ordered() {
+diff --git a/codex-rs/hooks/src/engine/command_runner.rs b/codex-rs/hooks/src/engine/command_runner.rs
+index b68474f0cfa9c4e5a208bfd0de4ae9fddd5821b6..2a04599bcb156f233166f913ab9843791be6e5db 100644
+--- a/codex-rs/hooks/src/engine/command_runner.rs
++++ b/codex-rs/hooks/src/engine/command_runner.rs
+@@ -176,6 +176,33 @@ impl CommandHookRuntime {
+         });
+     }
+ 
++    /// Track session-owned work that manages its own concurrency.
++    ///
++    /// Unlike individual async hooks, an owner task must not hold one of the
++    /// async-hook permits for its whole lifetime. It still lives in the same
++    /// `JoinSet`, so session shutdown can join or abort it with the rest of the
++    /// hook runtime.
++    pub(crate) fn schedule_owned_task(
++        &self,
++        task: impl Future<Output = ()> + Send + 'static,
++    ) -> bool {
++        if tokio::runtime::Handle::try_current().is_err() {
++            return false;
++        }
++        let mut state = self.lock_state();
++        if state.concurrency_limit.is_closed() {
++            return false;
++        }
++
++        while state.tasks.try_join_next().is_some() {}
++        state.tasks.spawn(task);
++        true
++    }
++
++    pub(crate) fn publish_completed(&self, completed: HookCompletedEvent) {
++        let _ = self.result_sender.try_send(completed);
++    }
++
+     pub(crate) async fn shutdown(&self) {
+         let mut tasks = {
+             let mut state = self.lock_state();
+diff --git a/codex-rs/hooks/src/engine/dispatcher.rs b/codex-rs/hooks/src/engine/dispatcher.rs
+index c5ee0d2ce1da03ec07b08f9ba692088142673e99..d0b353c397e51ecf0e88a5f2b98847880eab2926 100644
+--- a/codex-rs/hooks/src/engine/dispatcher.rs
++++ b/codex-rs/hooks/src/engine/dispatcher.rs
+@@ -67,9 +67,11 @@ pub(crate) fn select_handlers_for_matcher_inputs(
+                         .any(|input| matches_matcher(handler.matcher.as_deref(), Some(input)))
+                 }
+             }
+-            HookEventName::UserPromptSubmit | HookEventName::Stop | HookEventName::Interrupt => {
+-                true
+-            }
++            HookEventName::UserPromptSubmit
++            | HookEventName::ModelRequestRecovery
++            | HookEventName::ModelRequestFailed
++            | HookEventName::Stop
++            | HookEventName::Interrupt => true,
+         })
+         .cloned()
+         .collect()
+@@ -263,6 +265,8 @@ pub(crate) fn scope_for_event(event_name: HookEventName) -> HookScope {
+         | HookEventName::PostToolUse
+         | HookEventName::PreCompact
+         | HookEventName::PostCompact
++        | HookEventName::ModelRequestRecovery
++        | HookEventName::ModelRequestFailed
+         | HookEventName::UserPromptSubmit
+         | HookEventName::SubagentStop
+         | HookEventName::Stop
+@@ -277,6 +281,8 @@ pub(crate) fn hook_event_name_label(event_name: HookEventName) -> &'static str {
+         HookEventName::PostToolUse => "PostToolUse",
+         HookEventName::PreCompact => "PreCompact",
+         HookEventName::PostCompact => "PostCompact",
++        HookEventName::ModelRequestRecovery => "ModelRequestRecovery",
++        HookEventName::ModelRequestFailed => "ModelRequestFailed",
+         HookEventName::SessionStart => "SessionStart",
+         HookEventName::SessionEnd => "SessionEnd",
+         HookEventName::UserPromptSubmit => "UserPromptSubmit",
+@@ -626,6 +632,27 @@ mod tests {
+         assert_eq!(selected[1].display_order, 1);
+     }
+ 
++    #[test]
++    fn codex_patch_model_request_notifications_ignore_matchers() {
++        for event_name in [
++            HookEventName::ModelRequestRecovery,
++            HookEventName::ModelRequestFailed,
++        ] {
++            let handlers = vec![
++                make_handler(event_name, Some("["), "echo first", 0),
++                make_handler(event_name, Some("never"), "echo second", 1),
++            ];
++            let selected = select_handlers(&handlers, event_name, /*matcher_input*/ None);
++            assert_eq!(
++                selected
++                    .iter()
++                    .map(|handler| handler.display_order)
++                    .collect::<Vec<_>>(),
++                vec![0, 1]
++            );
++        }
++    }
++
+     #[test]
+     fn select_handlers_preserves_declaration_order() {
+         let handlers = vec![
+diff --git a/codex-rs/hooks/src/engine/mod.rs b/codex-rs/hooks/src/engine/mod.rs
+index deaf29679a8ce5b35af474d4309b52a8a3a72ff7..6364f250318d6c117d702496a17403b3d0087bc6 100644
+--- a/codex-rs/hooks/src/engine/mod.rs
++++ b/codex-rs/hooks/src/engine/mod.rs
+@@ -11,6 +11,9 @@ use crate::events::compact::PreCompactRequest;
+ use crate::events::compact::StatelessHookOutcome;
+ use crate::events::interrupt::InterruptOutcome;
+ use crate::events::interrupt::InterruptRequest;
++use crate::events::model_request::ModelRequestFailedRequest;
++use crate::events::model_request::ModelRequestRecoveryRequest;
++use crate::events::model_request::NotificationHookOutcome;
+ use crate::events::permission_request::PermissionRequestOutcome;
+ use crate::events::permission_request::PermissionRequestRequest;
+ use crate::events::post_tool_use::PostToolUseOutcome;
+@@ -171,6 +174,10 @@ impl ConfiguredHandler {
+             codex_protocol::protocol::HookEventName::PostToolUse => "post-tool-use",
+             codex_protocol::protocol::HookEventName::PreCompact => "pre-compact",
+             codex_protocol::protocol::HookEventName::PostCompact => "post-compact",
++            codex_protocol::protocol::HookEventName::ModelRequestRecovery => {
++                "model-request-recovery"
++            }
++            codex_protocol::protocol::HookEventName::ModelRequestFailed => "model-request-failed",
+             codex_protocol::protocol::HookEventName::SessionStart => "session-start",
+             codex_protocol::protocol::HookEventName::SessionEnd => "session-end",
+             codex_protocol::protocol::HookEventName::UserPromptSubmit => "user-prompt-submit",
+@@ -442,6 +449,34 @@ impl ClaudeHooksEngine {
+         crate::events::compact::run_post(self, request).await
+     }
+ 
++    pub(crate) fn preview_model_request_recovery(
++        &self,
++        request: &ModelRequestRecoveryRequest,
++    ) -> Vec<HookRunSummary> {
++        crate::events::model_request::preview_model_request_recovery(&self.handlers, request)
++    }
++
++    pub(crate) async fn run_model_request_recovery(
++        &self,
++        request: ModelRequestRecoveryRequest,
++    ) -> NotificationHookOutcome {
++        crate::events::model_request::run_model_request_recovery(self, request).await
++    }
++
++    pub(crate) fn preview_model_request_failed(
++        &self,
++        request: &ModelRequestFailedRequest,
++    ) -> Vec<HookRunSummary> {
++        crate::events::model_request::preview_model_request_failed(&self.handlers, request)
++    }
++
++    pub(crate) async fn run_model_request_failed(
++        &self,
++        request: ModelRequestFailedRequest,
++    ) -> NotificationHookOutcome {
++        crate::events::model_request::run_model_request_failed(self, request).await
++    }
++
+     pub(crate) fn preview_user_prompt_submit(
+         &self,
+         request: &UserPromptSubmitRequest,
+diff --git a/codex-rs/hooks/src/events/common.rs b/codex-rs/hooks/src/events/common.rs
+index 7b4c4dcab31e9e5747594c39ec582fb0c49f4095..71b311451a893f4459d5f684c06f485a2ec32293 100644
+--- a/codex-rs/hooks/src/events/common.rs
++++ b/codex-rs/hooks/src/events/common.rs
+@@ -123,7 +123,11 @@ pub(crate) fn matcher_pattern_for_event(
+         | HookEventName::SubagentStop
+         | HookEventName::PreCompact
+         | HookEventName::PostCompact => matcher,
+-        HookEventName::UserPromptSubmit | HookEventName::Stop | HookEventName::Interrupt => None,
++        HookEventName::UserPromptSubmit
++        | HookEventName::ModelRequestRecovery
++        | HookEventName::ModelRequestFailed
++        | HookEventName::Stop
++        | HookEventName::Interrupt => None,
+     }
+ }
+ 
+@@ -274,6 +278,14 @@ mod tests {
+             matcher_pattern_for_event(HookEventName::Interrupt, Some("^interrupted$")),
+             None
+         );
++        assert_eq!(
++            matcher_pattern_for_event(HookEventName::ModelRequestRecovery, Some("^retry$")),
++            None
++        );
++        assert_eq!(
++            matcher_pattern_for_event(HookEventName::ModelRequestFailed, Some("^failed$")),
++            None
++        );
+     }
+ 
+     #[test]
+diff --git a/codex-rs/hooks/src/events/mod.rs b/codex-rs/hooks/src/events/mod.rs
+index 3d5ea1baad17c0b3814a59aa19c8b23feae49ed8..04335442d95df76b9c4417c3765ae518c7bd3bee 100644
+--- a/codex-rs/hooks/src/events/mod.rs
++++ b/codex-rs/hooks/src/events/mod.rs
+@@ -1,6 +1,7 @@
+ pub(crate) mod common;
+ pub mod compact;
+ pub mod interrupt;
++pub mod model_request;
+ pub mod permission_request;
+ pub mod post_tool_use;
+ pub mod pre_tool_use;
+diff --git a/codex-rs/hooks/src/events/model_request.rs b/codex-rs/hooks/src/events/model_request.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..aca785dfd79d0b03984b22f915abf23b59f52865
+--- /dev/null
++++ b/codex-rs/hooks/src/events/model_request.rs
+@@ -0,0 +1,259 @@
++use std::path::PathBuf;
++
++use codex_protocol::ThreadId;
++use codex_protocol::protocol::HookCompletedEvent;
++use codex_protocol::protocol::HookEventName;
++use codex_protocol::protocol::HookOutputEntry;
++use codex_protocol::protocol::HookOutputEntryKind;
++use codex_protocol::protocol::HookRunStatus;
++use codex_protocol::protocol::HookRunSummary;
++use codex_utils_absolute_path::AbsolutePathBuf;
++use schemars::JsonSchema;
++use serde::Deserialize;
++use serde::Serialize;
++
++use super::common;
++use crate::engine::ClaudeHooksEngine;
++use crate::engine::ConfiguredHandler;
++use crate::engine::HandlerRunResult;
++use crate::engine::dispatcher;
++use crate::schema::ModelRequestFailedCommandInput;
++use crate::schema::ModelRequestRecoveryCommandInput;
++use crate::schema::NullableString;
++
++pub(crate) const MODEL_REQUEST_RECOVERY_QUEUE_CAPACITY: usize = 64;
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, JsonSchema)]
++#[serde(rename_all = "camelCase")]
++pub enum ModelRequestOperation {
++    Sampling,
++    LocalCompact,
++    RemoteCompact,
++    RemoteCompactV2,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, JsonSchema)]
++#[serde(rename_all = "camelCase")]
++pub enum ModelRequestNextAction {
++    Retry,
++    Fallback,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, JsonSchema)]
++#[serde(rename_all = "camelCase")]
++pub enum ModelRequestErrorCategory {
++    Transport,
++    Timeout,
++    RateLimit,
++    UsageLimit,
++    ContextWindow,
++    Policy,
++    InvalidRequest,
++    Server,
++    ServerOverloaded,
++    Internal,
++    Other,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
++#[serde(rename_all = "camelCase")]
++#[schemars(deny_unknown_fields)]
++pub struct ModelRequestError {
++    pub category: ModelRequestErrorCategory,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub code: Option<String>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub http_status: Option<u16>,
++    pub message: String,
++}
++
++#[derive(Debug, Clone)]
++pub struct ModelRequestRecoveryRequest {
++    pub session_id: ThreadId,
++    pub turn_id: String,
++    pub transcript_path: Option<PathBuf>,
++    pub cwd: AbsolutePathBuf,
++    pub model: String,
++    pub provider: String,
++    pub operation: ModelRequestOperation,
++    pub attempt: u64,
++    pub next_action: ModelRequestNextAction,
++    pub error: ModelRequestError,
++}
++
++#[derive(Debug, Clone)]
++pub struct ModelRequestFailedRequest {
++    pub session_id: ThreadId,
++    pub turn_id: String,
++    pub transcript_path: Option<PathBuf>,
++    pub cwd: AbsolutePathBuf,
++    pub model: String,
++    pub provider: String,
++    pub operation: ModelRequestOperation,
++    pub attempt: u64,
++    pub error: ModelRequestError,
++}
++
++#[derive(Debug, Default, Clone)]
++pub struct NotificationHookOutcome {
++    pub hook_events: Vec<HookCompletedEvent>,
++}
++
++#[derive(Debug, Default)]
++struct NotificationHandlerData;
++
++pub(crate) fn preview_model_request_recovery(
++    handlers: &[ConfiguredHandler],
++    _request: &ModelRequestRecoveryRequest,
++) -> Vec<HookRunSummary> {
++    preview(handlers, HookEventName::ModelRequestRecovery)
++}
++
++pub(crate) async fn run_model_request_recovery(
++    engine: &ClaudeHooksEngine,
++    request: ModelRequestRecoveryRequest,
++) -> NotificationHookOutcome {
++    let input_json = serde_json::to_string(&ModelRequestRecoveryCommandInput {
++        session_id: request.session_id.to_string(),
++        turn_id: request.turn_id.clone(),
++        transcript_path: NullableString::from_path(request.transcript_path),
++        cwd: request.cwd.display().to_string(),
++        hook_event_name: "ModelRequestRecovery".to_string(),
++        model: request.model,
++        provider: request.provider,
++        operation: request.operation,
++        attempt: request.attempt,
++        error: request.error,
++        next_action: request.next_action,
++    });
++    run_notification(
++        engine,
++        HookEventName::ModelRequestRecovery,
++        input_json,
++        request.cwd,
++        request.turn_id,
++    )
++    .await
++}
++
++pub(crate) fn preview_model_request_failed(
++    handlers: &[ConfiguredHandler],
++    _request: &ModelRequestFailedRequest,
++) -> Vec<HookRunSummary> {
++    preview(handlers, HookEventName::ModelRequestFailed)
++}
++
++pub(crate) async fn run_model_request_failed(
++    engine: &ClaudeHooksEngine,
++    request: ModelRequestFailedRequest,
++) -> NotificationHookOutcome {
++    let input_json = serde_json::to_string(&ModelRequestFailedCommandInput {
++        session_id: request.session_id.to_string(),
++        turn_id: request.turn_id.clone(),
++        transcript_path: NullableString::from_path(request.transcript_path),
++        cwd: request.cwd.display().to_string(),
++        hook_event_name: "ModelRequestFailed".to_string(),
++        model: request.model,
++        provider: request.provider,
++        operation: request.operation,
++        attempt: request.attempt,
++        error: request.error,
++    });
++    run_notification(
++        engine,
++        HookEventName::ModelRequestFailed,
++        input_json,
++        request.cwd,
++        request.turn_id,
++    )
++    .await
++}
++
++fn preview(handlers: &[ConfiguredHandler], event_name: HookEventName) -> Vec<HookRunSummary> {
++    select(handlers, event_name)
++        .into_iter()
++        .map(|handler| dispatcher::running_summary(&handler))
++        .collect()
++}
++
++fn select(handlers: &[ConfiguredHandler], event_name: HookEventName) -> Vec<ConfiguredHandler> {
++    dispatcher::select_handlers(handlers, event_name, /*matcher_input*/ None)
++}
++
++async fn run_notification(
++    engine: &ClaudeHooksEngine,
++    event_name: HookEventName,
++    input_json: Result<String, serde_json::Error>,
++    cwd: AbsolutePathBuf,
++    turn_id: String,
++) -> NotificationHookOutcome {
++    let matched = select(&engine.handlers, event_name);
++    if matched.is_empty() {
++        return NotificationHookOutcome::default();
++    }
++    let input_json = match input_json {
++        Ok(input_json) => input_json,
++        Err(error) => {
++            return NotificationHookOutcome {
++                hook_events: common::serialization_failure_hook_events(
++                    matched,
++                    Some(turn_id),
++                    format!("failed to serialize {event_name:?} hook input: {error}"),
++                ),
++            };
++        }
++    };
++    let results = dispatcher::execute_handlers(
++        engine,
++        matched,
++        input_json,
++        cwd.as_path(),
++        Some(turn_id),
++        parse_notification_completed,
++    )
++    .await;
++    NotificationHookOutcome {
++        hook_events: results.into_iter().map(|result| result.completed).collect(),
++    }
++}
++
++fn parse_notification_completed(
++    handler: &ConfiguredHandler,
++    run_result: HandlerRunResult,
++    turn_id: Option<String>,
++) -> dispatcher::ParsedHandler<NotificationHandlerData> {
++    let mut entries = Vec::new();
++    let status = if let Some(error) = run_result.error.as_deref() {
++        entries.push(HookOutputEntry {
++            kind: HookOutputEntryKind::Error,
++            text: error.to_string(),
++        });
++        HookRunStatus::Failed
++    } else if let Some(code) = run_result.exit_code
++        && code != 0
++    {
++        entries.push(HookOutputEntry {
++            kind: HookOutputEntryKind::Error,
++            text: common::trimmed_non_empty(&run_result.stderr)
++                .unwrap_or_else(|| format!("hook exited with code {code}")),
++        });
++        HookRunStatus::Failed
++    } else if run_result.exit_code.is_none() {
++        entries.push(HookOutputEntry {
++            kind: HookOutputEntryKind::Error,
++            text: "hook process terminated without an exit code".to_string(),
++        });
++        HookRunStatus::Failed
++    } else {
++        HookRunStatus::Completed
++    };
++
++    dispatcher::ParsedHandler {
++        completed: HookCompletedEvent {
++            turn_id,
++            run: dispatcher::completed_summary(handler, &run_result, status, entries),
++        },
++        data: NotificationHandlerData,
++        completion_order: 0,
++    }
++}
+diff --git a/codex-rs/hooks/src/lib.rs b/codex-rs/hooks/src/lib.rs
+index 6abc173535b23b5ee6bd057fd3f49d9b82ea7fe0..364049991fd2b0eabafeefab3f241bd506d68942 100644
+--- a/codex-rs/hooks/src/lib.rs
++++ b/codex-rs/hooks/src/lib.rs
+@@ -20,12 +20,14 @@ pub use engine::dispatcher::hook_execution_mode_label;
+ pub use engine::dispatcher::hook_handler_type_label;
+ pub use events::common::SubagentHookContext;
+ /// Hook event names as they appear in hooks JSON and config files.
+-pub const HOOK_EVENT_NAMES: [&str; 12] = [
++pub const HOOK_EVENT_NAMES: [&str; 14] = [
+     "PreToolUse",
+     "PermissionRequest",
+     "PostToolUse",
+     "PreCompact",
+     "PostCompact",
++    "ModelRequestRecovery",
++    "ModelRequestFailed",
+     "SessionStart",
+     "SessionEnd",
+     "UserPromptSubmit",
+@@ -58,6 +60,12 @@ pub use events::compact::PreCompactRequest;
+ pub use events::compact::StatelessHookOutcome;
+ pub use events::interrupt::InterruptOutcome;
+ pub use events::interrupt::InterruptRequest;
++pub use events::model_request::ModelRequestError;
++pub use events::model_request::ModelRequestErrorCategory;
++pub use events::model_request::ModelRequestFailedRequest;
++pub use events::model_request::ModelRequestNextAction;
++pub use events::model_request::ModelRequestOperation;
++pub use events::model_request::ModelRequestRecoveryRequest;
+ pub use events::permission_request::PermissionRequestDecision;
+ pub use events::permission_request::PermissionRequestOutcome;
+ pub use events::permission_request::PermissionRequestRequest;
+@@ -82,6 +90,8 @@ pub use mcp::HookMcpExecutor;
+ pub use registry::HookListOutcome;
+ pub use registry::Hooks;
+ pub use registry::HooksConfig;
++pub use registry::ModelRequestRecoveryDispatch;
++pub use registry::ModelRequestRecoveryStart;
+ pub use registry::list_hooks;
+ pub use schema::write_schema_fixtures;
+ pub use types::Hook;
+@@ -99,6 +109,8 @@ pub fn hook_event_key_label(event_name: HookEventName) -> &'static str {
+         HookEventName::PostToolUse => "post_tool_use",
+         HookEventName::PreCompact => "pre_compact",
+         HookEventName::PostCompact => "post_compact",
++        HookEventName::ModelRequestRecovery => "model_request_recovery",
++        HookEventName::ModelRequestFailed => "model_request_failed",
+         HookEventName::SessionStart => "session_start",
+         HookEventName::SessionEnd => "session_end",
+         HookEventName::UserPromptSubmit => "user_prompt_submit",
+diff --git a/codex-rs/hooks/src/registry.rs b/codex-rs/hooks/src/registry.rs
+index 5a033f9c64dacaf031719e60c3c42d52b2d9eb07..a0ad1bda37e69da410f9efd90afba8376a85e4e7 100644
+--- a/codex-rs/hooks/src/registry.rs
++++ b/codex-rs/hooks/src/registry.rs
+@@ -8,6 +8,9 @@ use crate::events::compact::PreCompactRequest;
+ use crate::events::compact::StatelessHookOutcome;
+ use crate::events::interrupt::InterruptOutcome;
+ use crate::events::interrupt::InterruptRequest;
++use crate::events::model_request::MODEL_REQUEST_RECOVERY_QUEUE_CAPACITY;
++use crate::events::model_request::ModelRequestFailedRequest;
++use crate::events::model_request::ModelRequestRecoveryRequest;
+ use crate::events::permission_request::PermissionRequestOutcome;
+ use crate::events::permission_request::PermissionRequestRequest;
+ use crate::events::post_tool_use::PostToolUseOutcome;
+@@ -33,10 +36,280 @@ use codex_plugin::ExecutorPluginHookSource;
+ use codex_plugin::PluginHookSource;
+ use codex_protocol::ThreadId;
+ use codex_protocol::shell_environment::scrub_non_inheritable_env_vars;
++use futures::FutureExt;
++use std::collections::VecDeque;
+ use std::ffi::OsString;
++use std::panic::AssertUnwindSafe;
+ use std::sync::Arc;
++use std::sync::Mutex;
+ use std::time::Duration;
+ use tokio::process::Command;
++use tokio::sync::Notify;
++use tokio::sync::watch;
++
++struct PendingModelRequestRecovery {
++    id: u64,
++    engine: ClaudeHooksEngine,
++    request: ModelRequestRecoveryRequest,
++    ready: bool,
++}
++
++struct ModelRequestRecoveryState {
++    queue: VecDeque<PendingModelRequestRecovery>,
++    next_id: u64,
++    dropped_full: u64,
++    accepting: bool,
++    actor_started: bool,
++    finished: bool,
++}
++
++struct ModelRequestRecoveryInner {
++    state: Mutex<ModelRequestRecoveryState>,
++    notify: Notify,
++    finished_notify: Notify,
++    shutdown: watch::Sender<bool>,
++}
++
++#[derive(Clone)]
++struct ModelRequestRecoveryDispatcher {
++    inner: Arc<ModelRequestRecoveryInner>,
++    runtime: CommandHookRuntime,
++}
++
++impl ModelRequestRecoveryDispatcher {
++    fn new(runtime: &CommandHookRuntime) -> Self {
++        let (shutdown, _) = watch::channel(false);
++        Self {
++            inner: Arc::new(ModelRequestRecoveryInner {
++                state: Mutex::new(ModelRequestRecoveryState {
++                    queue: VecDeque::new(),
++                    next_id: 0,
++                    dropped_full: 0,
++                    accepting: true,
++                    actor_started: false,
++                    finished: false,
++                }),
++                notify: Notify::new(),
++                finished_notify: Notify::new(),
++                shutdown,
++            }),
++            runtime: runtime.clone(),
++        }
++    }
++
++    fn lock_state(&self) -> std::sync::MutexGuard<'_, ModelRequestRecoveryState> {
++        self.inner
++            .state
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++    }
++
++    fn ensure_actor(&self) -> bool {
++        let mut state = self.lock_state();
++        if !state.accepting {
++            return false;
++        }
++        if state.actor_started {
++            return true;
++        }
++        let inner = Arc::clone(&self.inner);
++        if !self
++            .runtime
++            .schedule_owned_task(async move { Self::run_actor(inner).await })
++        {
++            state.accepting = false;
++            state.finished = true;
++            drop(state);
++            self.inner.finished_notify.notify_waiters();
++            return false;
++        }
++        state.actor_started = true;
++        true
++    }
++
++    fn enqueue(
++        &self,
++        engine: ClaudeHooksEngine,
++        request: ModelRequestRecoveryRequest,
++    ) -> ModelRequestRecoveryDispatch {
++        if !self.ensure_actor() {
++            return ModelRequestRecoveryDispatch::Rejected {
++                reason: "model request recovery hook queue is closed".to_string(),
++            };
++        }
++        let mut state = self.lock_state();
++        if !state.accepting {
++            return ModelRequestRecoveryDispatch::Rejected {
++                reason: "model request recovery hook queue is closed".to_string(),
++            };
++        }
++        if state.queue.len() >= MODEL_REQUEST_RECOVERY_QUEUE_CAPACITY {
++            state.dropped_full = state.dropped_full.saturating_add(1);
++            let dropped = state.dropped_full;
++            if dropped.is_power_of_two() {
++                tracing::warn!(
++                    dropped,
++                    capacity = MODEL_REQUEST_RECOVERY_QUEUE_CAPACITY,
++                    "model request recovery hook notifications dropped because the queue is full"
++                );
++            }
++            return ModelRequestRecoveryDispatch::Rejected {
++                reason: format!(
++                    "model request recovery hook queue is full (capacity {MODEL_REQUEST_RECOVERY_QUEUE_CAPACITY})"
++                ),
++            };
++        }
++        let id = state.next_id;
++        state.next_id = state.next_id.wrapping_add(1);
++        state.queue.push_back(PendingModelRequestRecovery {
++            id,
++            engine,
++            request,
++            ready: false,
++        });
++        drop(state);
++        self.inner.notify.notify_one();
++        ModelRequestRecoveryDispatch::Queued {
++            start: ModelRequestRecoveryStart {
++                inner: Arc::clone(&self.inner),
++                id,
++                armed: true,
++            },
++        }
++    }
++
++    async fn run_actor(inner: Arc<ModelRequestRecoveryInner>) {
++        let mut shutdown = inner.shutdown.subscribe();
++        loop {
++            let notified = inner.notify.notified();
++            let job = {
++                let mut state = inner
++                    .state
++                    .lock()
++                    .unwrap_or_else(std::sync::PoisonError::into_inner);
++                if *shutdown.borrow() {
++                    state.queue.clear();
++                    None
++                } else if state.queue.front().is_some_and(|job| job.ready) {
++                    state.queue.pop_front()
++                } else {
++                    None
++                }
++            };
++            if *shutdown.borrow() {
++                Self::mark_finished(&inner);
++                return;
++            }
++            let Some(job) = job else {
++                tokio::select! {
++                    _ = shutdown.changed() => {
++                        Self::mark_finished(&inner);
++                        return;
++                    }
++                    _ = notified => {}
++                }
++                continue;
++            };
++
++            let run =
++                AssertUnwindSafe(job.engine.run_model_request_recovery(job.request)).catch_unwind();
++            tokio::select! {
++                _ = shutdown.changed() => {
++                    Self::mark_finished(&inner);
++                    return;
++                }
++                outcome = run => match outcome {
++                    Ok(outcome) => {
++                        for completed in outcome.hook_events {
++                            job.engine.command_runtime.publish_completed(completed);
++                        }
++                    }
++                    Err(_) => tracing::warn!(
++                        "model request recovery hook dispatcher panicked"
++                    ),
++                }
++            }
++        }
++    }
++
++    fn mark_finished(inner: &ModelRequestRecoveryInner) {
++        let mut state = inner
++            .state
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        state.queue.clear();
++        state.actor_started = false;
++        state.finished = true;
++        drop(state);
++        inner.finished_notify.notify_waiters();
++    }
++
++    async fn shutdown(&self) {
++        let no_actor = {
++            let mut state = self.lock_state();
++            state.accepting = false;
++            state.queue.clear();
++            !state.actor_started
++        };
++        self.inner.shutdown.send_replace(true);
++        self.inner.notify.notify_waiters();
++        if no_actor {
++            Self::mark_finished(&self.inner);
++        }
++        loop {
++            let notified = self.inner.finished_notify.notified();
++            if self.lock_state().finished {
++                return;
++            }
++            notified.await;
++        }
++    }
++}
++
++pub struct ModelRequestRecoveryStart {
++    inner: Arc<ModelRequestRecoveryInner>,
++    id: u64,
++    armed: bool,
++}
++
++impl ModelRequestRecoveryStart {
++    pub fn start(mut self) {
++        let mut state = self
++            .inner
++            .state
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if let Some(job) = state.queue.iter_mut().find(|job| job.id == self.id) {
++            job.ready = true;
++        }
++        drop(state);
++        self.armed = false;
++        self.inner.notify.notify_waiters();
++    }
++}
++
++impl Drop for ModelRequestRecoveryStart {
++    fn drop(&mut self) {
++        if !self.armed {
++            return;
++        }
++        let mut state = self
++            .inner
++            .state
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if let Some(index) = state.queue.iter().position(|job| job.id == self.id) {
++            state.queue.remove(index);
++        }
++        drop(state);
++        self.inner.notify.notify_waiters();
++    }
++}
++
++pub enum ModelRequestRecoveryDispatch {
++    Queued { start: ModelRequestRecoveryStart },
++    Rejected { reason: String },
++}
+ 
+ #[derive(Default, Clone)]
+ pub struct HooksConfig {
+@@ -65,6 +338,7 @@ pub struct Hooks {
+     engine: ClaudeHooksEngine,
+     plugin_hook_sources: Vec<PluginHookSource>,
+     plugin_hook_load_warnings: Vec<String>,
++    model_request_recovery_dispatcher: ModelRequestRecoveryDispatcher,
+ }
+ 
+ impl Hooks {
+@@ -77,9 +351,13 @@ impl Hooks {
+     ) -> anyhow::Result<(Self, Receiver<codex_protocol::protocol::HookCompletedEvent>)> {
+         let (result_sender, result_receiver) = async_channel::unbounded();
+         let environment = Arc::new(std::env::vars_os().collect());
+-        let hooks = Self::from_config(config, mcp_executor, Arc::clone(&environment), |shell| {
+-            CommandHookRuntime::new(shell, environment, thread_id, result_sender)
+-        });
++        let hooks = Self::from_config(
++            config,
++            mcp_executor,
++            Arc::clone(&environment),
++            None,
++            |shell| CommandHookRuntime::new(shell, environment, thread_id, result_sender),
++        );
+         let required_load_errors = hooks.engine.required_load_errors();
+         if !required_load_errors.is_empty() {
+             anyhow::bail!(
+@@ -96,6 +374,7 @@ impl Hooks {
+             config,
+             Arc::clone(&self.engine.mcp_executor),
+             Arc::clone(&self.environment),
++            Some(self.model_request_recovery_dispatcher.clone()),
+             |shell| self.engine.command_runtime.reconfigured(shell),
+         )
+     }
+@@ -119,6 +398,7 @@ impl Hooks {
+         config: HooksConfig,
+         mcp_executor: Arc<dyn HookMcpExecutor>,
+         environment: Arc<Vec<(OsString, OsString)>>,
++        model_request_recovery_dispatcher: Option<ModelRequestRecoveryDispatcher>,
+         build_runtime: impl FnOnce(CommandShell) -> CommandHookRuntime,
+     ) -> Self {
+         let after_agent = config
+@@ -140,17 +420,21 @@ impl Hooks {
+             command_runtime,
+             mcp_executor,
+         );
++        let model_request_recovery_dispatcher = model_request_recovery_dispatcher
++            .unwrap_or_else(|| ModelRequestRecoveryDispatcher::new(&engine.command_runtime));
+         Self {
+             environment,
+             after_agent,
+             engine,
+             plugin_hook_sources: config.plugin_hook_sources,
+             plugin_hook_load_warnings: config.plugin_hook_load_warnings,
++            model_request_recovery_dispatcher,
+         }
+     }
+ 
+     /// Abort and join outstanding async hooks during session shutdown.
+     pub async fn shutdown(&self) {
++        self.model_request_recovery_dispatcher.shutdown().await;
+         self.engine.command_runtime.shutdown().await;
+     }
+ 
+@@ -259,6 +543,35 @@ impl Hooks {
+         self.engine.run_post_compact(request).await
+     }
+ 
++    pub fn preview_model_request_recovery(
++        &self,
++        request: &ModelRequestRecoveryRequest,
++    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
++        self.engine.preview_model_request_recovery(request)
++    }
++
++    pub fn enqueue_model_request_recovery(
++        &self,
++        request: ModelRequestRecoveryRequest,
++    ) -> ModelRequestRecoveryDispatch {
++        self.model_request_recovery_dispatcher
++            .enqueue(self.engine.clone(), request)
++    }
++
++    pub fn preview_model_request_failed(
++        &self,
++        request: &ModelRequestFailedRequest,
++    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
++        self.engine.preview_model_request_failed(request)
++    }
++
++    pub async fn run_model_request_failed(
++        &self,
++        request: ModelRequestFailedRequest,
++    ) -> crate::events::model_request::NotificationHookOutcome {
++        self.engine.run_model_request_failed(request).await
++    }
++
+     pub fn preview_user_prompt_submit(
+         &self,
+         request: &UserPromptSubmitRequest,
+@@ -334,3 +647,181 @@ pub(crate) fn command_from_argv(
+     scrub_non_inheritable_env_vars(command.as_std_mut());
+     Some(command)
+ }
++
++#[cfg(test)]
++mod model_request_recovery_tests {
++    use super::*;
++    use crate::engine::ConfiguredHandler;
++    use crate::engine::ConfiguredHandlerKind;
++    use crate::engine::HandlerSourcePath;
++    use crate::events::model_request::ModelRequestError;
++    use crate::events::model_request::ModelRequestErrorCategory;
++    use crate::events::model_request::ModelRequestNextAction;
++    use crate::events::model_request::ModelRequestOperation;
++    use crate::mcp::HookMcpCall;
++    use codex_protocol::protocol::HookEventName;
++    use codex_protocol::protocol::HookSource;
++    use codex_utils_absolute_path::AbsolutePathBuf;
++    use futures::FutureExt;
++    use futures::future::BoxFuture;
++    use std::collections::HashMap;
++    use tempfile::tempdir;
++    use tokio::time::timeout;
++
++    struct NoopMcpExecutor;
++
++    impl HookMcpExecutor for NoopMcpExecutor {
++        fn execute(&self, _call: HookMcpCall) -> BoxFuture<'_, anyhow::Result<String>> {
++            async { Ok(String::new()) }.boxed()
++        }
++    }
++
++    fn runtime() -> (
++        CommandHookRuntime,
++        async_channel::Receiver<codex_protocol::protocol::HookCompletedEvent>,
++    ) {
++        let (sender, receiver) = async_channel::unbounded();
++        (
++            CommandHookRuntime::new(
++                CommandShell {
++                    program: String::new(),
++                    args: Vec::new(),
++                },
++                Arc::new(std::env::vars_os().collect()),
++                ThreadId::new(),
++                sender,
++            ),
++            receiver,
++        )
++    }
++
++    fn engine(runtime: CommandHookRuntime, handlers: Vec<ConfiguredHandler>) -> ClaudeHooksEngine {
++        let mut engine = ClaudeHooksEngine::new(
++            /*enabled*/ true,
++            /*bypass_hook_trust*/ true,
++            /*config_layer_stack*/ None,
++            Vec::new(),
++            Vec::new(),
++            runtime,
++            Arc::new(NoopMcpExecutor),
++        );
++        engine.handlers = handlers;
++        engine
++    }
++
++    fn request(cwd: &AbsolutePathBuf, attempt: u64) -> ModelRequestRecoveryRequest {
++        ModelRequestRecoveryRequest {
++            session_id: ThreadId::new(),
++            turn_id: "turn-1".to_string(),
++            transcript_path: None,
++            cwd: cwd.clone(),
++            model: "gpt-test".to_string(),
++            provider: "test".to_string(),
++            operation: ModelRequestOperation::Sampling,
++            attempt,
++            next_action: ModelRequestNextAction::Retry,
++            error: ModelRequestError {
++                category: ModelRequestErrorCategory::Transport,
++                code: None,
++                http_status: None,
++                message: "disconnected".to_string(),
++            },
++        }
++    }
++
++    fn queued_start(dispatch: ModelRequestRecoveryDispatch) -> ModelRequestRecoveryStart {
++        match dispatch {
++            ModelRequestRecoveryDispatch::Queued { start } => start,
++            ModelRequestRecoveryDispatch::Rejected { reason } => {
++                panic!("unexpected rejection: {reason}")
++            }
++        }
++    }
++
++    #[tokio::test]
++    async fn codex_patch_recovery_queue_bounds_pending_notifications_without_coalescing() {
++        let cwd = AbsolutePathBuf::current_dir().expect("current directory");
++        let (runtime, _receiver) = runtime();
++        let engine = engine(runtime.clone(), Vec::new());
++        let dispatcher = ModelRequestRecoveryDispatcher::new(&runtime);
++        let mut starts = Vec::new();
++
++        for attempt in 1..=MODEL_REQUEST_RECOVERY_QUEUE_CAPACITY as u64 {
++            starts.push(queued_start(
++                dispatcher.enqueue(engine.clone(), request(&cwd, attempt)),
++            ));
++        }
++        assert_eq!(dispatcher.lock_state().queue.len(), 64);
++        assert!(matches!(
++            dispatcher.enqueue(engine, request(&cwd, 65)),
++            ModelRequestRecoveryDispatch::Rejected { .. }
++        ));
++        assert_eq!(dispatcher.lock_state().dropped_full, 1);
++
++        drop(starts);
++        assert!(dispatcher.lock_state().queue.is_empty());
++        dispatcher.shutdown().await;
++        runtime.shutdown().await;
++    }
++
++    #[tokio::test]
++    async fn codex_patch_recovery_start_token_preserves_fifo_and_delays_execution() {
++        let temp = tempdir().expect("temporary directory");
++        let output = temp.path().join("attempts.txt");
++        let script = temp.path().join("hook.py");
++        let output_literal =
++            serde_json::to_string(&output.display().to_string()).expect("serialize output path");
++        std::fs::write(
++            &script,
++            format!(
++                "import json, sys\npayload = json.load(sys.stdin)\nwith open({output_literal}, 'a', encoding='utf-8') as out:\n    out.write(str(payload['attempt']) + '\\n')\n"
++            ),
++        )
++        .expect("write hook script");
++        let cwd = AbsolutePathBuf::try_from(temp.path().to_path_buf())
++            .expect("absolute temporary directory");
++        let handler = ConfiguredHandler {
++            builtin: false,
++            event_name: HookEventName::ModelRequestRecovery,
++            matcher: Some("never-match".to_string()),
++            timeout_sec: 5,
++            status_message: None,
++            additional_context_limit: Default::default(),
++            source_path: HandlerSourcePath::Local(cwd.join("hooks.json")),
++            source: HookSource::User,
++            display_order: 0,
++            kind: ConfiguredHandlerKind::Command {
++                command: format!("python3 {}", script.display()),
++                r#async: false,
++                env: HashMap::new(),
++            },
++        };
++        let (runtime, receiver) = runtime();
++        let engine = engine(runtime.clone(), vec![handler]);
++        let dispatcher = ModelRequestRecoveryDispatcher::new(&runtime);
++
++        let first = queued_start(dispatcher.enqueue(engine.clone(), request(&cwd, 1)));
++        let second = queued_start(dispatcher.enqueue(engine, request(&cwd, 2)));
++        second.start();
++        tokio::task::yield_now().await;
++        assert!(
++            !output.exists(),
++            "a later ready job must not pass the FIFO head"
++        );
++
++        first.start();
++        for _ in 0..2 {
++            timeout(Duration::from_secs(10), receiver.recv())
++                .await
++                .expect("hook completion timeout")
++                .expect("hook completion channel");
++        }
++        assert_eq!(
++            std::fs::read_to_string(&output).expect("read hook output"),
++            "1\n2\n"
++        );
++
++        dispatcher.shutdown().await;
++        runtime.shutdown().await;
++    }
++}
+diff --git a/codex-rs/hooks/src/schema.rs b/codex-rs/hooks/src/schema.rs
+index 5558b6665bf4a05d622f7d814b984c885e98db74..65a5f528aa861bb5dfd2c547967f5aa74dbd0e9f 100644
+--- a/codex-rs/hooks/src/schema.rs
++++ b/codex-rs/hooks/src/schema.rs
+@@ -13,6 +13,9 @@ use std::path::Path;
+ use std::path::PathBuf;
+ 
+ use crate::events::common::SubagentHookContext;
++use crate::events::model_request::ModelRequestError;
++use crate::events::model_request::ModelRequestNextAction;
++use crate::events::model_request::ModelRequestOperation;
+ 
+ const GENERATED_DIR: &str = "generated";
+ const POST_TOOL_USE_INPUT_FIXTURE: &str = "post-tool-use.command.input.schema.json";
+@@ -21,6 +24,9 @@ const PERMISSION_REQUEST_INPUT_FIXTURE: &str = "permission-request.command.input
+ const PERMISSION_REQUEST_OUTPUT_FIXTURE: &str = "permission-request.command.output.schema.json";
+ const POST_COMPACT_INPUT_FIXTURE: &str = "post-compact.command.input.schema.json";
+ const POST_COMPACT_OUTPUT_FIXTURE: &str = "post-compact.command.output.schema.json";
++const MODEL_REQUEST_RECOVERY_INPUT_FIXTURE: &str =
++    "model-request-recovery.command.input.schema.json";
++const MODEL_REQUEST_FAILED_INPUT_FIXTURE: &str = "model-request-failed.command.input.schema.json";
+ const PRE_TOOL_USE_INPUT_FIXTURE: &str = "pre-tool-use.command.input.schema.json";
+ const PRE_TOOL_USE_OUTPUT_FIXTURE: &str = "pre-tool-use.command.output.schema.json";
+ const PRE_COMPACT_INPUT_FIXTURE: &str = "pre-compact.command.input.schema.json";
+@@ -110,6 +116,10 @@ pub(crate) enum HookEventNameWire {
+     PreCompact,
+     #[serde(rename = "PostCompact")]
+     PostCompact,
++    #[serde(rename = "ModelRequestRecovery")]
++    ModelRequestRecovery,
++    #[serde(rename = "ModelRequestFailed")]
++    ModelRequestFailed,
+     #[serde(rename = "SessionStart")]
+     SessionStart,
+     #[serde(rename = "UserPromptSubmit")]
+@@ -381,6 +391,45 @@ pub(crate) struct PostCompactCommandInput {
+     pub trigger: String,
+ }
+ 
++#[derive(Debug, Clone, Serialize, JsonSchema)]
++#[serde(rename_all = "camelCase")]
++#[serde(deny_unknown_fields)]
++#[schemars(rename = "model-request-recovery.command.input")]
++pub(crate) struct ModelRequestRecoveryCommandInput {
++    pub session_id: String,
++    pub turn_id: String,
++    pub transcript_path: NullableString,
++    pub cwd: String,
++    #[schemars(schema_with = "model_request_recovery_hook_event_name_schema")]
++    pub hook_event_name: String,
++    pub model: String,
++    pub provider: String,
++    pub operation: ModelRequestOperation,
++    #[schemars(range(min = 1))]
++    pub attempt: u64,
++    pub error: ModelRequestError,
++    pub next_action: ModelRequestNextAction,
++}
++
++#[derive(Debug, Clone, Serialize, JsonSchema)]
++#[serde(rename_all = "camelCase")]
++#[serde(deny_unknown_fields)]
++#[schemars(rename = "model-request-failed.command.input")]
++pub(crate) struct ModelRequestFailedCommandInput {
++    pub session_id: String,
++    pub turn_id: String,
++    pub transcript_path: NullableString,
++    pub cwd: String,
++    #[schemars(schema_with = "model_request_failed_hook_event_name_schema")]
++    pub hook_event_name: String,
++    pub model: String,
++    pub provider: String,
++    pub operation: ModelRequestOperation,
++    #[schemars(range(min = 1))]
++    pub attempt: u64,
++    pub error: ModelRequestError,
++}
++
+ #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+ #[serde(rename_all = "camelCase")]
+ #[serde(deny_unknown_fields)]
+@@ -665,6 +714,14 @@ pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {
+         &generated_dir.join(POST_COMPACT_OUTPUT_FIXTURE),
+         schema_json::<PostCompactCommandOutputWire>()?,
+     )?;
++    write_schema(
++        &generated_dir.join(MODEL_REQUEST_RECOVERY_INPUT_FIXTURE),
++        schema_json::<ModelRequestRecoveryCommandInput>()?,
++    )?;
++    write_schema(
++        &generated_dir.join(MODEL_REQUEST_FAILED_INPUT_FIXTURE),
++        schema_json::<ModelRequestFailedCommandInput>()?,
++    )?;
+     write_schema(
+         &generated_dir.join(PRE_COMPACT_INPUT_FIXTURE),
+         schema_json::<PreCompactCommandInput>()?,
+@@ -812,6 +869,14 @@ fn post_compact_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+     string_const_schema("PostCompact")
+ }
+ 
++fn model_request_recovery_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
++    string_const_schema("ModelRequestRecovery")
++}
++
++fn model_request_failed_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
++    string_const_schema("ModelRequestFailed")
++}
++
+ fn pre_tool_use_hook_event_name_schema(_gen: &mut SchemaGenerator) -> Schema {
+     string_const_schema("PreToolUse")
+ }
+@@ -890,6 +955,10 @@ mod tests {
+     use super::INTERRUPT_INPUT_FIXTURE;
+     use super::INTERRUPT_OUTPUT_FIXTURE;
+     use super::InterruptCommandInput;
++    use super::MODEL_REQUEST_FAILED_INPUT_FIXTURE;
++    use super::MODEL_REQUEST_RECOVERY_INPUT_FIXTURE;
++    use super::ModelRequestFailedCommandInput;
++    use super::ModelRequestRecoveryCommandInput;
+     use super::NullableString;
+     use super::PERMISSION_REQUEST_INPUT_FIXTURE;
+     use super::PERMISSION_REQUEST_OUTPUT_FIXTURE;
+@@ -931,6 +1000,10 @@ mod tests {
+     use super::schema_json;
+     use super::write_schema_fixtures;
+     use crate::events::common::SubagentHookContext;
++    use crate::events::model_request::ModelRequestError;
++    use crate::events::model_request::ModelRequestErrorCategory;
++    use crate::events::model_request::ModelRequestNextAction;
++    use crate::events::model_request::ModelRequestOperation;
+     use pretty_assertions::assert_eq;
+     use schemars::JsonSchema;
+     use serde_json::Value;
+@@ -957,6 +1030,12 @@ mod tests {
+             POST_COMPACT_OUTPUT_FIXTURE => {
+                 include_str!("../schema/generated/post-compact.command.output.schema.json")
+             }
++            MODEL_REQUEST_RECOVERY_INPUT_FIXTURE => {
++                include_str!("../schema/generated/model-request-recovery.command.input.schema.json")
++            }
++            MODEL_REQUEST_FAILED_INPUT_FIXTURE => {
++                include_str!("../schema/generated/model-request-failed.command.input.schema.json")
++            }
+             PRE_COMPACT_INPUT_FIXTURE => {
+                 include_str!("../schema/generated/pre-compact.command.input.schema.json")
+             }
+@@ -1043,6 +1122,8 @@ mod tests {
+             PERMISSION_REQUEST_OUTPUT_FIXTURE,
+             POST_COMPACT_INPUT_FIXTURE,
+             POST_COMPACT_OUTPUT_FIXTURE,
++            MODEL_REQUEST_RECOVERY_INPUT_FIXTURE,
++            MODEL_REQUEST_FAILED_INPUT_FIXTURE,
+             PRE_COMPACT_INPUT_FIXTURE,
+             PRE_COMPACT_OUTPUT_FIXTURE,
+             PRE_TOOL_USE_INPUT_FIXTURE,
+@@ -1069,6 +1150,68 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn codex_patch_model_request_notification_inputs_have_the_minimal_contract() {
++        let error = ModelRequestError {
++            category: ModelRequestErrorCategory::RateLimit,
++            code: Some("rate_limit_exceeded".to_string()),
++            http_status: Some(429),
++            message: "slow down".to_string(),
++        };
++        let recovery = serde_json::to_value(ModelRequestRecoveryCommandInput {
++            session_id: "session-1".to_string(),
++            turn_id: "turn-1".to_string(),
++            transcript_path: NullableString::from_path(None),
++            cwd: "/tmp".to_string(),
++            hook_event_name: "ModelRequestRecovery".to_string(),
++            model: "gpt-test".to_string(),
++            provider: "openai".to_string(),
++            operation: ModelRequestOperation::RemoteCompactV2,
++            attempt: 3,
++            error: error.clone(),
++            next_action: ModelRequestNextAction::Fallback,
++        })
++        .expect("serialize recovery input");
++        assert_eq!(
++            recovery,
++            json!({
++                "sessionId": "session-1",
++                "turnId": "turn-1",
++                "transcriptPath": null,
++                "cwd": "/tmp",
++                "hookEventName": "ModelRequestRecovery",
++                "model": "gpt-test",
++                "provider": "openai",
++                "operation": "remoteCompactV2",
++                "attempt": 3,
++                "error": {
++                    "category": "rateLimit",
++                    "code": "rate_limit_exceeded",
++                    "httpStatus": 429,
++                    "message": "slow down"
++                },
++                "nextAction": "fallback"
++            })
++        );
++
++        let failed = serde_json::to_value(ModelRequestFailedCommandInput {
++            session_id: "session-1".to_string(),
++            turn_id: "turn-1".to_string(),
++            transcript_path: NullableString::from_path(None),
++            cwd: "/tmp".to_string(),
++            hook_event_name: "ModelRequestFailed".to_string(),
++            model: "gpt-test".to_string(),
++            provider: "openai".to_string(),
++            operation: ModelRequestOperation::Sampling,
++            attempt: 4,
++            error,
++        })
++        .expect("serialize failed input");
++        assert!(failed.get("nextAction").is_none());
++        assert!(failed.get("retryBudget").is_none());
++        assert!(failed.get("endpointPath").is_none());
++    }
++
+     #[test]
+     fn hook_specific_output_event_names_are_event_specific_in_output_schemas() {
+         assert_output_hook_event_name_const::<PermissionRequestCommandOutputWire>(
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 66e431551ddfda9e61b19ee6b8ae61ea046a2817..29c0de958de0fb6d5ed8026f09c337324b285633 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -1579,6 +1579,8 @@ pub enum HookEventName {
+     PostToolUse,
+     PreCompact,
+     PostCompact,
++    ModelRequestRecovery,
++    ModelRequestFailed,
+     SessionStart,
+     SessionEnd,
+     UserPromptSubmit,
+diff --git a/codex-rs/tui/src/bottom_pane/hooks_browser_view.rs b/codex-rs/tui/src/bottom_pane/hooks_browser_view.rs
+index 88318fb08adad1165eb1f64201802152a1608a32..8f2eee956253f4c23c6418c0a595a30bbfe0da62 100644
+--- a/codex-rs/tui/src/bottom_pane/hooks_browser_view.rs
++++ b/codex-rs/tui/src/bottom_pane/hooks_browser_view.rs
+@@ -773,6 +773,8 @@ fn event_label(event_name: HookEventName) -> &'static str {
+         HookEventName::PostToolUse => "PostToolUse",
+         HookEventName::PreCompact => "PreCompact",
+         HookEventName::PostCompact => "PostCompact",
++        HookEventName::ModelRequestRecovery => "ModelRequestRecovery",
++        HookEventName::ModelRequestFailed => "ModelRequestFailed",
+         HookEventName::SessionStart => "SessionStart",
+         HookEventName::SessionEnd => "SessionEnd",
+         HookEventName::UserPromptSubmit => "UserPromptSubmit",
+@@ -790,6 +792,8 @@ fn event_description(event_name: HookEventName) -> &'static str {
+         HookEventName::PostToolUse => "After a tool executes",
+         HookEventName::PreCompact => "Before context compaction",
+         HookEventName::PostCompact => "After context compaction",
++        HookEventName::ModelRequestRecovery => "When a model request will retry or fall back",
++        HookEventName::ModelRequestFailed => "When a model request terminates the operation",
+         HookEventName::SessionStart => "When a new session starts",
+         HookEventName::SessionEnd => "Right before a session ends",
+         HookEventName::UserPromptSubmit => "When the user submits a prompt",
