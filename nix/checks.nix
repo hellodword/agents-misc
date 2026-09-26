@@ -2,7 +2,6 @@
   lib,
   nixpkgs,
   supportedSystems,
-  codexFor,
   codexConfigAtlasFor,
   agentsViewerFor,
   formattingCheckFor,
@@ -13,12 +12,10 @@ lib.genAttrs supportedSystems (
   let
     pkgs = import nixpkgs { inherit system; };
     agentRulesPython = pkgs.python3.withPackages (pythonPackages: [
-      pythonPackages.jsonschema
       pythonPackages.pyyaml
     ]);
     codexConfigAtlas = codexConfigAtlasFor system;
     agentsViewer = agentsViewerFor system;
-    codexPackage = codexFor system;
     codexPatchContract =
       pkgs.runCommand "codex-patch-contract-check"
         {
@@ -62,8 +59,9 @@ lib.genAttrs supportedSystems (
     formatting = formattingCheckFor system;
     agent-rules = pkgs.runCommand "agent-rules-check" { nativeBuildInputs = [ agentRulesPython ]; } ''
       cd ${../.}
+      export PYTHONDONTWRITEBYTECODE=1
       python3 scripts/check-agent-rules.py --root .
-      python3 -m unittest discover -s tests -p 'test_*.py'
+      python3 -m unittest tests.test_check_agent_rules
       touch "$out"
     '';
     codex-config-atlas-registry = codexConfigAtlas.checkConfigAtlasRegistry;
@@ -82,35 +80,6 @@ lib.genAttrs supportedSystems (
       checkMarker "agents-viewer-bindings-check" agentsViewer.checks.rust
         "bindings-ok";
     agents-viewer-web = agentsViewer.checks.web;
-    agent-evals =
-      pkgs.runCommand "agent-evals-check"
-        {
-          nativeBuildInputs = [
-            agentRulesPython
-            codexPackage
-            pkgs.ruff
-          ];
-        }
-        ''
-          cd ${../.}
-          export PYTHONDONTWRITEBYTECODE=1
-          export RUFF_CACHE_DIR="$TMPDIR/ruff-cache"
-          ruff format --check tools/agent_evals tests/test_agent_evals.py
-          ruff check tools/agent_evals tests/test_agent_evals.py
-          python3 -m unittest tests.test_agent_evals
-          python3 -m tools.agent_evals preflight \
-            --root ${../.} \
-            --codex-bin ${codexPackage}/bin/codex \
-            --model gpt-5.6-luna \
-            --reasoning-effort high \
-            --judge-model gpt-5.6-luna \
-            --judge-reasoning-effort high \
-            --approval-policy never \
-            --sandbox-mode read-only \
-            --timeout 60 \
-            > "$TMPDIR/preflight.json"
-          touch "$out"
-        '';
     github-workflows =
       pkgs.runCommand "github-workflows-check"
         {

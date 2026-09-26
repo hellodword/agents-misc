@@ -3,44 +3,24 @@
 ## Distribution boundary
 
 - Only `AGENTS.md` and `.agents/**` belong to the distributed payload.
-- Do not reference this repository's maintenance overlay, checker, tests, or Just/Nix checks from the payload.
+- Keep local payload links and symlink targets within that boundary. Do not link to this repository's maintenance overlay, checker, tests, or Just/Nix checks from the payload.
 - Consumers provide project facts and constraints through `.project-agent/project.md` and its direct links.
 
-## Rules
+## Rules and skills
 
-- Keep exactly the flat shared rules named in `.agents/rules/index.md`.
-- Write each rule as plain Markdown with exactly one H1 and no YAML frontmatter.
-- Link every non-index rule from `index.md`.
-- Put all routing decisions in the index. Do not add hidden metadata or recursive loading behavior.
-
-## Skills and owned files
-
-- Give each skill only `name` and `description` YAML frontmatter.
-- Match `name` to the directory and follow the Agent Skills lowercase/hyphen naming rules.
-- Make each description explain what the skill does, when to use it, and an important exclusion.
-- Keep each `SKILL.md` below 500 lines and use imperative workflow language.
-- Put supporting material only under that skill's `assets/`, `references/`, or `scripts/` directory.
-- Link every supporting file directly from its owning `SKILL.md`; do not leave orphan files.
-- Use JSON Schema only for machine-produced or machine-consumed output contracts.
-
-## Routing and evaluation
-
-- Update the relevant JSONL eval cases whenever route behavior or a skill description changes.
-- Keep every eval ID globally unique.
-- Give every skill at least one positive and one near-miss negative case in the skill corpus.
-- CI validates corpus structure and coverage only; it must not use nondeterministic model output as a gate.
+- Keep shared rules as flat Markdown files and route every non-index rule and skill directly from `.agents/rules/index.md`.
+- Put routing decisions in the index. Do not add hidden metadata, recursive instruction loading, or duplicate inventories.
+- Give each skill only `name` and `description` YAML frontmatter. Match the name to its directory and use lowercase letters, digits, and single hyphens.
+- Describe the task a skill helps with and any exclusion needed to prevent misrouting. Keep the entrypoint concise and move substantial conditional guidance to owned references.
+- Put supporting files under the skill's `assets/`, `references/`, or `scripts/` directory, and link each file directly from `SKILL.md`.
+- Keep simple defaults in rules. Use human-readable templates for reports intended for people; add machine contracts only for actual program consumers.
 
 ## Validation
 
-Run:
+- For payload or checker changes, run `just check-agent-rules` or `nix build --no-link .#checks.x86_64-linux.agent-rules`. Do not repeat the same tests through both entrypoints.
+- Keep workflow validation separate: run `just check-workflows` or its `github-workflows` Nix check when that boundary changes.
+- Format changed files with the repository formatter and review its diff.
+- For changed Nix output or check wiring, run `nix flake check --no-build --no-write-lock-file` and build the affected checks. Use the full repository gate when the changed boundaries require it.
+- Review skill descriptions and routes together. Check only structural invariants mechanically; do not test prose or source-code spelling.
 
-```sh
-nix fmt
-nix develop .#dev --command python3 scripts/check-agent-rules.py --root .
-nix develop .#dev --command python3 -m unittest discover -s tests -p 'test_*.py'
-nix build --no-link .#checks.x86_64-linux.agent-rules
-nix flake check
-git status --short --ignored
-```
-
-Review formatter changes, the final diff, ignored artifacts, and the distribution boundary before finishing. Do not delete pre-existing ignored artifacts unless the task created them or the user explicitly authorizes their removal. The hygiene requirement is that the task leaves no new temporary artifacts; disclose relevant pre-existing ignored roots in the final report.
+Review the final diff and `git status --short --ignored`. Keep temporary diagnostics under confirmed ignored paths and remove task-created diagnostics before finishing. Preserve and disclose relevant pre-existing ignored work.

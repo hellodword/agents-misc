@@ -30,9 +30,19 @@ Use exactly: `layout`, `hierarchy`, `spacing`, `alignment`, `typography`, `color
 
 ## Review constraints
 
-- Use `visual-review-finding/v1` for batch output and `visual-review-synthesis/v1` for synthesis.
 - Cite stable screenshot IDs and visible evidence.
 - Avoid subjective preferences without product evidence.
 - Prefer issues reproduced across viewports, locales, themes, or states.
 - Mark unresolved trade-offs as needing human decision.
 - Treat synthesis as proposed findings; review does not authorize implementation.
+
+## Finding template
+
+Use a short Markdown entry for each finding:
+
+- **Screenshot / location:** Screenshot ID and affected area.
+- **Severity:** P0, P1, P2, or P3 from the shared scale.
+- **Evidence:** The visible issue and relevant viewport, state, or other context.
+- **Recommendation:** A concrete improvement supported by that evidence.
+
+For the combined report, merge duplicates while retaining their screenshot references. List unresolved conflicts and rejected findings separately when present.

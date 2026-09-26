@@ -10,9 +10,9 @@ description: Review screenshots in consistent batches, synthesize evidence-based
 3. Copy and complete [the shared rubric](assets/rubric.md) once for the run. Keep its severity scale and category taxonomy identical across batches.
 4. Record a stable screenshot ID, route/component, viewport, locale, theme, UI state, file path, image hash, capture command, timestamp, source revision, and fixture notes for every capture.
 5. Batch by page family, component family, or user flow. Default to no more than one family and four screenshots per batch.
-6. When platform and task policy allow native delegation, delegate independent batches with the same rubric and schema. Otherwise review the batches sequentially in the main context. Never invent adapter commands or vendor-specific flags.
-7. Validate each batch against [the finding schema](assets/finding.schema.json). Tie every finding to screenshot evidence and keep subjective preference out unless the product context supports it.
-8. Merge duplicates and conflicts across batches, then validate the result against [the synthesis schema](assets/synthesis.schema.json).
+6. When platform and task policy allow native delegation, delegate independent batches with the same rubric and reporting template. Otherwise review the batches sequentially in the main context. Never invent adapter commands or vendor-specific flags.
+7. Report each batch as concise Markdown findings using the rubric's template: screenshot/location, severity, visible evidence, and recommendation. Keep subjective preference out unless the product context supports it.
+8. Merge duplicate findings across batches, retain their screenshot references, and summarize rejected findings and unresolved conflicts for the reader.
 9. Keep contradictory evidence as a human decision unless synthesis resolves it from the shared rubric and captures.
 10. Do not implement per-batch findings directly. For review-only work, report proposals and stop. Implement only when the user also requested changes or later authorizes the exact findings.
 11. Use image editing only for an explicitly requested review mockup or exploratory screenshot edit. Keep it in the temporary run directory and translate accepted ideas into code/design-system changes before implementation.

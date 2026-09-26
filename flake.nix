@@ -83,7 +83,6 @@
       apps = import ./nix/apps.nix {
         inherit
           lib
-          nixpkgs
           codexConfigAtlasFor
           codexFor
           agentsViewerFor
@@ -95,7 +94,6 @@
         inherit
           lib
           nixpkgs
-          codexFor
           codexConfigAtlasFor
           agentsViewerFor
           supportedSystems
@@ -108,7 +106,6 @@
           lib
           nixpkgs
           codexBaseFor
-          codexFor
           supportedSystems
           ;
       };

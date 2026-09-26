@@ -1,15 +1,14 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
-import json
-import shutil
+import io
 import tempfile
 import unittest
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = REPO_ROOT / "scripts" / "check-agent-rules.py"
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "check-agent-rules.py"
 SPEC = importlib.util.spec_from_file_location("check_agent_rules", SCRIPT)
 assert SPEC and SPEC.loader
 CHECKER = importlib.util.module_from_spec(SPEC)
@@ -18,370 +17,217 @@ SPEC.loader.exec_module(CHECKER)
 
 class CheckAgentRulesTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
-        shutil.copyfile(REPO_ROOT / "AGENTS.md", self.root / "AGENTS.md")
-        shutil.copyfile(REPO_ROOT / "README.md", self.root / "README.md")
-        for relative in (
-            "codex/README.md",
-            "tools/codex-hooks/README.md",
-            "tools/codex-config-atlas/README.md",
-            "tools/agents-viewer/README.md",
-        ):
-            destination = self.root / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(REPO_ROOT / relative, destination)
-        shutil.copytree(
-            REPO_ROOT / ".agents",
-            self.root / ".agents",
-            copy_function=shutil.copyfile,
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name) / "repo"
+        self.write(
+            "AGENTS.md", "# Instructions\nRead [the index](.agents/rules/index.md).\n"
         )
-        shutil.copytree(
-            REPO_ROOT / "tests" / "evals",
-            self.root / "tests" / "evals",
-            copy_function=shutil.copyfile,
+        self.write(
+            ".agents/rules/index.md",
+            "# Routes\n[Connections](connections.md)\n[Demo](../skills/demo/SKILL.md)\n",
         )
-        overlay = self.root / ".project-agent"
-        overlay.mkdir()
-        shutil.copyfile(REPO_ROOT / ".project-agent" / "project.md", overlay / "project.md")
-        for path in self.root.rglob("*"):
-            path.chmod(path.stat().st_mode | 0o200)
+        self.write(".agents/rules/connections.md", "# Connection defaults\n")
+        self.write_skill("demo")
 
-    def tearDown(self) -> None:
-        self.temporary.cleanup()
+    def write(self, relative: str, text: str) -> Path:
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def write_skill(self, name: str, body: str = "# Useful guidance\n") -> Path:
+        return self.write(
+            f".agents/skills/{name}/SKILL.md",
+            f"---\nname: {name}\ndescription: Reuse a project practice for the relevant task.\n---\n{body}",
+        )
 
     def errors(self) -> list[str]:
         return CHECKER.check_repository(self.root)
 
-    def skill(self, name: str = "ai-visual-review") -> Path:
-        return self.root / ".agents" / "skills" / name / "SKILL.md"
+    def assert_fails(self, fragment: str) -> None:
+        errors = self.errors()
+        self.assertTrue(any(fragment in error for error in errors), errors)
 
-    def replace_skill_frontmatter(self, name: str, frontmatter: str) -> None:
-        path = self.skill(name)
-        text = path.read_text(encoding="utf-8")
-        end = text.index("\n---\n", 4)
-        path.write_text(f"---\n{frontmatter}\n---\n{text[end + 5:]}", encoding="utf-8")
-
-    def write_skill_with_line_count(self, name: str, line_count: int) -> None:
-        lines = [
-            "---",
-            f"name: {name}",
-            "description: Exercise the line limit; use only in this test and not for production.",
-            "---",
-            "# Test Skill",
-        ]
-        lines.extend("Do the test." for _ in range(line_count - len(lines)))
-        self.skill(name).write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    def test_valid_target_tree_passes(self) -> None:
+    def test_minimal_payload_needs_no_maintenance_files(self) -> None:
         self.assertEqual([], self.errors())
 
-    def test_agents_over_16_kib_fails(self) -> None:
-        (self.root / "AGENTS.md").write_text("x" * (16 * 1024 + 1), encoding="utf-8")
-        self.assertTrue(any("exceeds 16384" in error for error in self.errors()))
+    def test_rule_and_skill_inventory_follows_files_and_index(self) -> None:
+        self.write(".agents/rules/new-rule.md", "# Another rule\n")
+        (self.root / ".agents/skills/demo").rename(self.root / ".agents/skills/renamed")
+        self.write_skill("renamed")
+        self.write(
+            ".agents/rules/index.md",
+            "[Connections](connections.md)\n[New](new-rule.md)\n[Renamed](../skills/renamed/SKILL.md)\n",
+        )
+        self.assertEqual([], self.errors())
+        self.write_skill("another")
+        self.write(".agents/rules/unrouted.md", "# Unrouted\n")
+        errors = "\n".join(self.errors())
+        self.assertIn("missing routed Markdown link", errors)
+        self.assertIn("another/SKILL.md", errors)
+        self.assertIn("unrouted.md", errors)
 
-    def test_rule_yaml_frontmatter_fails(self) -> None:
-        path = self.root / ".agents" / "rules" / "defaults.md"
-        path.write_text("---\nname: old\n---\n" + path.read_text(encoding="utf-8"), encoding="utf-8")
-        self.assertTrue(any("rule YAML frontmatter" in error for error in self.errors()))
+    def test_readme_and_other_repository_content_are_outside_the_check(self) -> None:
+        self.write("README.md", "[missing](absent.md)\n")
+        self.write(".project-agent/project.md", "[missing](also-absent.md)\n")
+        self.assertEqual([], self.errors())
 
-    def test_h1_inside_fenced_example_is_ignored(self) -> None:
-        path = self.root / ".agents" / "rules" / "defaults.md"
-        path.write_text(
-            path.read_text(encoding="utf-8") + "\n```md\n# Example only\n```\n",
-            encoding="utf-8",
+    def test_empty_or_missing_entrypoint_fails(self) -> None:
+        path = self.write("AGENTS.md", " \n\t")
+        self.assert_fails("entrypoint must be a non-empty")
+        path.unlink()
+        self.assert_fails("entrypoint must be a non-empty")
+
+    def test_unreadable_markdown_is_reported(self) -> None:
+        (self.root / "AGENTS.md").write_bytes(b"\xff")
+        self.assert_fails("readable UTF-8")
+
+    def test_missing_index_fails(self) -> None:
+        (self.root / ".agents/rules/index.md").unlink()
+        self.assert_fails("index must be a non-empty")
+
+    def test_unowned_payload_file_fails(self) -> None:
+        self.write(".agents/stray.txt", "orphan")
+        self.assert_fails("must belong to rules or skills")
+
+    def test_nested_rule_directory_fails(self) -> None:
+        self.write(".agents/rules/nested/rule.md", "# Rule\n")
+        self.assert_fails("rules must be flat Markdown files")
+
+    def test_missing_skill_entrypoint_fails(self) -> None:
+        (self.root / ".agents/skills/demo/SKILL.md").unlink()
+        self.assert_fails("readable SKILL.md is required")
+
+    def test_malformed_skill_metadata_is_reported(self) -> None:
+        for metadata in (
+            "name: [broken",
+            "- name\n- description",
+            "name: demo",
+            "name: demo\ndescription: null",
+            "name: demo\ndescription: ' '",
+            "name: demo\ndescription: ok\nextra: true",
+            "name: demo\ndescription: ok\n1: unsupported",
+        ):
+            with self.subTest(metadata=metadata):
+                self.write(
+                    ".agents/skills/demo/SKILL.md", f"---\n{metadata}\n---\n# Skill\n"
+                )
+                self.assertTrue(self.errors())
+
+    def test_skill_name_must_be_valid_and_match_the_directory(self) -> None:
+        for name, expected in (
+            ("Bad_Name", "invalid skill name"),
+            ("different", "must match"),
+        ):
+            with self.subTest(name=name):
+                self.write(
+                    ".agents/skills/demo/SKILL.md",
+                    f"---\nname: {name}\ndescription: Useful guidance.\n---\n# Skill\n",
+                )
+                self.assert_fails(expected)
+
+    def test_skill_without_frontmatter_fails(self) -> None:
+        self.write(".agents/skills/demo/SKILL.md", "# Skill\n")
+        self.assert_fails("missing YAML frontmatter")
+
+    def test_resources_need_direct_owner_links(self) -> None:
+        self.write(".agents/skills/demo/assets/examples/sample.txt", "sample")
+        self.assert_fails("orphan skill resource")
+        self.write_skill("demo", "[Sample](assets/examples/sample.txt)\n")
+        self.assertEqual([], self.errors())
+
+    def test_unsupported_skill_entry_fails(self) -> None:
+        self.write(".agents/skills/demo/extra.txt", "unexpected")
+        self.assert_fails("unsupported skill-local entry")
+
+    def test_broken_local_link_fails(self) -> None:
+        self.write_skill("demo", "[Missing](references/absent.md)\n")
+        self.assert_fails("cannot resolve payload path")
+
+    def test_examples_external_links_and_fragments_do_not_require_local_files(
+        self,
+    ) -> None:
+        self.write_skill(
+            "demo",
+            "```md\n[Example](absent.md)\n```\n[Docs](https://example.invalid/docs)\n[Section](#heading)\n",
         )
         self.assertEqual([], self.errors())
 
-    def test_rule_subdirectory_fails(self) -> None:
-        nested = self.root / ".agents" / "rules" / "old"
-        nested.mkdir()
-        (nested / "rule.md").write_text("# Old\n", encoding="utf-8")
-        self.assertTrue(any("rule directories are not allowed" in error for error in self.errors()))
-
-    def test_index_missing_rule_fails(self) -> None:
-        path = self.root / ".agents" / "rules" / "index.md"
-        text = path.read_text(encoding="utf-8").replace("[defaults](defaults.md)", "defaults")
-        path.write_text(text, encoding="utf-8")
-        self.assertTrue(any("missing routed Markdown link" in error and "defaults.md" in error for error in self.errors()))
-
-    def test_index_missing_skill_fails(self) -> None:
-        path = self.root / ".agents" / "rules" / "index.md"
-        text = path.read_text(encoding="utf-8").replace(
-            "[atomic-commit](../skills/atomic-commit/SKILL.md)", "atomic commit"
+    def test_image_links_and_encoded_filenames_are_owned_resources(self) -> None:
+        self.write(".agents/skills/demo/assets/image.svg", "<svg />")
+        self.write(".agents/skills/demo/assets/two words.txt", "example")
+        self.write_skill(
+            "demo",
+            '![Image](assets/image.svg)\n[File](assets/two%20words.txt "Example")\n',
         )
-        path.write_text(text, encoding="utf-8")
-        self.assertTrue(any("missing routed Markdown link" in error and "atomic-commit" in error for error in self.errors()))
-
-    def test_broken_local_markdown_link_fails(self) -> None:
-        path = self.root / "README.md"
-        path.write_text(path.read_text(encoding="utf-8") + "\n[broken](missing.md)\n", encoding="utf-8")
-        self.assertTrue(any("broken local Markdown link" in error for error in self.errors()))
-
-    def test_skill_extra_metadata_fails(self) -> None:
-        self.replace_skill_frontmatter(
-            "atomic-commit",
-            "name: atomic-commit\ndescription: Commit an authorized change; do not auto-trigger.\nmetadata: {}",
-        )
-        self.assertTrue(any("extra=['metadata']" in error for error in self.errors()))
-
-    def test_skill_invalid_name_fails(self) -> None:
-        self.replace_skill_frontmatter(
-            "atomic-commit",
-            "name: Atomic_Commit\ndescription: Commit an authorized change; do not auto-trigger.",
-        )
-        self.assertTrue(any("invalid Agent Skills name" in error for error in self.errors()))
-
-    def test_skill_directory_name_mismatch_fails(self) -> None:
-        self.replace_skill_frontmatter(
-            "atomic-commit",
-            "name: browser-e2e\ndescription: Commit an authorized change; do not auto-trigger.",
-        )
-        self.assertTrue(any("must match name" in error for error in self.errors()))
-
-    def test_skill_empty_description_fails(self) -> None:
-        self.replace_skill_frontmatter("atomic-commit", 'name: atomic-commit\ndescription: ""')
-        self.assertTrue(any("description must be a non-empty string" in error for error in self.errors()))
-
-    def test_skill_description_too_long_fails(self) -> None:
-        self.replace_skill_frontmatter(
-            "atomic-commit",
-            f'name: atomic-commit\ndescription: "{"x" * 1025}"',
-        )
-        self.assertTrue(any("description exceeds 1024" in error for error in self.errors()))
-
-    def test_skill_with_499_lines_passes(self) -> None:
-        self.write_skill_with_line_count("atomic-commit", 499)
         self.assertEqual([], self.errors())
 
-    def test_skill_with_500_lines_fails(self) -> None:
-        self.write_skill_with_line_count("atomic-commit", 500)
-        self.assertTrue(any("SKILL.md must stay below 500 lines" in error for error in self.errors()))
+    def test_links_cannot_escape_the_payload(self) -> None:
+        self.write("README.md", "not distributed")
+        (self.root.parent / "outside.md").write_text("outside", encoding="utf-8")
+        for target in ("README.md", "../outside.md", "..%2Foutside.md", "/README.md"):
+            with self.subTest(target=target):
+                self.write("AGENTS.md", f"[Outside]({target})\n")
+                self.assert_fails("escapes the distributed payload")
 
-    def test_orphan_skill_asset_fails(self) -> None:
-        path = self.root / ".agents" / "skills" / "atomic-commit" / "assets" / "orphan.md"
-        path.parent.mkdir()
-        path.write_text("# Orphan\n", encoding="utf-8")
-        self.assertTrue(any("orphan skill-local file" in error for error in self.errors()))
+    def test_file_uris_are_not_distributable(self) -> None:
+        self.write("AGENTS.md", f"[Outside]({(self.root / 'README.md').as_uri()})\n")
+        self.assert_fails("file URI is not a distributable link")
 
-    def test_invalid_json_schema_fails(self) -> None:
-        path = self.root / ".agents" / "skills" / "ai-visual-review" / "assets" / "finding.schema.json"
-        value = json.loads(path.read_text(encoding="utf-8"))
-        value["type"] = "not-a-json-type"
-        path.write_text(json.dumps(value), encoding="utf-8")
-        self.assertTrue(any("invalid Draft 2020-12 schema" in error for error in self.errors()))
+    def test_external_file_symlink_is_rejected_before_reading(self) -> None:
+        outside = self.root.parent / "outside.md"
+        outside.write_bytes(b"\xff")
+        (self.root / ".agents/rules/external.md").symlink_to(outside)
+        errors = "\n".join(self.errors())
+        self.assertIn("escapes the distributed payload", errors)
+        self.assertNotIn("UTF-8", errors)
 
-    def test_payload_maintenance_leak_fails(self) -> None:
-        path = self.root / ".agents" / "rules" / "defaults.md"
-        path.write_text(path.read_text(encoding="utf-8") + "\nRun scripts/check-agent-rules.py.\n", encoding="utf-8")
-        self.assertTrue(any("maintenance-only marker" in error for error in self.errors()))
-
-    def test_duplicate_eval_id_fails(self) -> None:
-        source = self.root / "tests" / "evals" / "routing.jsonl"
-        duplicate = source.read_text(encoding="utf-8").splitlines()[0]
-        target = self.root / "tests" / "evals" / "safety.jsonl"
-        target.write_text(target.read_text(encoding="utf-8") + duplicate + "\n", encoding="utf-8")
-        self.assertTrue(any("duplicate eval id" in error for error in self.errors()))
-
-    def test_invalid_eval_rule_fails(self) -> None:
-        path = self.root / "tests" / "evals" / "oracles" / "routing.jsonl"
-        lines = path.read_text(encoding="utf-8").splitlines()
-        record = json.loads(lines[0])
-        record["expected_rules"][0] = ".agents/rules/missing.md"
-        lines[0] = json.dumps(record)
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        self.assertTrue(any("unknown rule path" in error for error in self.errors()))
-
-    def test_invalid_forbidden_eval_rule_fails(self) -> None:
-        path = self.root / "tests" / "evals" / "oracles" / "routing.jsonl"
-        lines = path.read_text(encoding="utf-8").splitlines()
-        record = json.loads(lines[0])
-        record["forbidden_rules"] = [".agents/rules/missing.md"]
-        lines[0] = json.dumps(record)
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        self.assertTrue(any("unknown rule path" in error for error in self.errors()))
-
-    def test_duplicate_forbidden_eval_rule_fails(self) -> None:
-        path = self.root / "tests" / "evals" / "oracles" / "routing.jsonl"
-        lines = path.read_text(encoding="utf-8").splitlines()
-        record = json.loads(lines[0])
-        record["forbidden_rules"] = [
-            ".agents/rules/formatting.md",
-            ".agents/rules/formatting.md",
-        ]
-        lines[0] = json.dumps(record)
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        self.assertTrue(
-            any("forbidden_rules contains duplicates" in error for error in self.errors())
+    def test_external_directory_symlink_is_rejected_before_traversing(self) -> None:
+        outside = self.root.parent / "external"
+        outside.mkdir()
+        (outside / "SKILL.md").write_bytes(b"\xff")
+        (self.root / ".agents/skills/external").symlink_to(
+            outside, target_is_directory=True
         )
+        errors = "\n".join(self.errors())
+        self.assertIn("escapes the distributed payload", errors)
+        self.assertNotIn("UTF-8", errors)
 
-    def test_expected_and_forbidden_eval_rule_overlap_fails(self) -> None:
-        path = self.root / "tests" / "evals" / "oracles" / "routing.jsonl"
-        lines = path.read_text(encoding="utf-8").splitlines()
-        record = json.loads(lines[0])
-        record["forbidden_rules"] = [record["expected_rules"][0]]
-        lines[0] = json.dumps(record)
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        self.assertTrue(
-            any("rules cannot be expected and forbidden" in error for error in self.errors())
+    def test_payload_root_symlink_cannot_escape(self) -> None:
+        outside = self.root.parent / "outside"
+        (self.root / ".agents").rename(outside)
+        (self.root / ".agents").symlink_to(outside, target_is_directory=True)
+        self.assert_fails("escapes the distributed payload")
+
+    def test_internal_file_symlink_remains_distributable(self) -> None:
+        resource = self.write(".agents/skills/demo/assets/source.txt", "example")
+        resource.with_name("alias.txt").symlink_to("source.txt")
+        self.write_skill(
+            "demo", "[Source](assets/source.txt)\n[Alias](assets/alias.txt)\n"
         )
+        self.assertEqual([], self.errors())
 
-    def test_missing_forbidden_rules_field_fails(self) -> None:
-        path = self.root / "tests" / "evals" / "oracles" / "routing.jsonl"
-        lines = path.read_text(encoding="utf-8").splitlines()
-        record = json.loads(lines[0])
-        del record["forbidden_rules"]
-        lines[0] = json.dumps(record)
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        self.assertTrue(any("eval oracle fields must contain" in error for error in self.errors()))
+    def test_directory_symlink_cycle_is_reported(self) -> None:
+        assets = self.root / ".agents/skills/demo/assets"
+        assets.mkdir()
+        (assets / "loop").symlink_to(".", target_is_directory=True)
+        self.assert_fails("directory symlink cycle")
 
-    def test_non_list_forbidden_rules_fails(self) -> None:
-        path = self.root / "tests" / "evals" / "oracles" / "routing.jsonl"
-        lines = path.read_text(encoding="utf-8").splitlines()
-        record = json.loads(lines[0])
-        record["forbidden_rules"] = ".agents/rules/formatting.md"
-        lines[0] = json.dumps(record)
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        self.assertTrue(
-            any("forbidden_rules must be an array of strings" in error for error in self.errors())
-        )
-
-    def test_empty_eval_task_fails(self) -> None:
-        path = self.root / "tests" / "evals" / "routing.jsonl"
-        lines = path.read_text(encoding="utf-8").splitlines()
-        record = json.loads(lines[0])
-        record["task"] = " "
-        lines[0] = json.dumps(record)
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        self.assertTrue(any("task must be a non-empty string" in error for error in self.errors()))
-
-    def test_case_and_oracle_ids_must_match(self) -> None:
-        path = self.root / "tests" / "evals" / "oracles" / "routing.jsonl"
-        lines = path.read_text(encoding="utf-8").splitlines()
-        record = json.loads(lines[0])
-        record["id"] = "different-id"
-        lines[0] = json.dumps(record)
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        self.assertTrue(any("case/oracle IDs must match" in error for error in self.errors()))
-
-    def test_safety_oracle_requires_behavior(self) -> None:
-        path = self.root / "tests" / "evals" / "oracles" / "safety.jsonl"
-        lines = path.read_text(encoding="utf-8").splitlines()
-        record = json.loads(lines[0])
-        del record["behavior"]
-        lines[0] = json.dumps(record)
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        self.assertTrue(any("safety eval requires behavior" in error for error in self.errors()))
-
-    def test_behavior_criteria_must_not_be_empty(self) -> None:
-        path = self.root / "tests" / "evals" / "oracles" / "safety.jsonl"
-        lines = path.read_text(encoding="utf-8").splitlines()
-        record = json.loads(lines[0])
-        record["behavior"]["criteria"] = []
-        lines[0] = json.dumps(record)
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        self.assertTrue(any("criteria must contain" in error for error in self.errors()))
-
-    def test_positive_skill_oracle_requires_baseline(self) -> None:
-        path = self.root / "tests" / "evals" / "oracles" / "skills.jsonl"
-        lines = path.read_text(encoding="utf-8").splitlines()
-        record = json.loads(lines[0])
-        del record["baseline_disabled_skills"]
-        lines[0] = json.dumps(record)
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        self.assertTrue(
-            any("positive skill eval requires behavior and baseline" in error for error in self.errors())
-        )
-
-    def test_safety_oracle_rejects_skill_baseline(self) -> None:
-        path = self.root / "tests" / "evals" / "oracles" / "safety.jsonl"
-        lines = path.read_text(encoding="utf-8").splitlines()
-        record = json.loads(lines[0])
-        record["baseline_disabled_skills"] = record["expected_skills"]
-        lines[0] = json.dumps(record)
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        self.assertTrue(
-            any("safety eval must not define a baseline" in error for error in self.errors())
-        )
-
-    def test_runtime_contract_tool_shape_is_schema_validated(self) -> None:
-        path = self.root / "tests" / "evals" / "codex-runtime-contract.json"
-        value = json.loads(path.read_text(encoding="utf-8"))
-        value["codex_versions"]["codex-cli 0.144.1"]["allowed_tools"][0][
-            "unexpected"
-        ] = True
-        path.write_text(json.dumps(value), encoding="utf-8")
-        self.assertTrue(
-            any("runtime contract schema failure" in error for error in self.errors())
-        )
-
-    def test_missing_rule_coverage_fails(self) -> None:
-        path = self.root / "tests" / "evals" / "oracles" / "routing.jsonl"
-        lines = path.read_text(encoding="utf-8").splitlines()
-        for index, line in enumerate(lines):
-            record = json.loads(line)
-            record["expected_rules"] = [
-                rule
-                for rule in record["expected_rules"]
-                if rule != ".agents/rules/flutter-rust.md"
-            ]
-            lines[index] = json.dumps(record)
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        self.assertTrue(
-            any(
-                "eval corpus missing rule coverage" in error
-                and "flutter-rust.md" in error
-                for error in self.errors()
-            )
-        )
-
-    def test_invalid_eval_skill_fails(self) -> None:
-        path = self.root / "tests" / "evals" / "oracles" / "skills.jsonl"
-        lines = path.read_text(encoding="utf-8").splitlines()
-        record = json.loads(lines[0])
-        record["expected_skills"] = ["missing-skill"]
-        lines[0] = json.dumps(record)
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        self.assertTrue(any("unknown skill name" in error for error in self.errors()))
-
-    def test_expected_and_forbidden_eval_skill_overlap_fails(self) -> None:
-        path = self.root / "tests" / "evals" / "oracles" / "skills.jsonl"
-        lines = path.read_text(encoding="utf-8").splitlines()
-        record = json.loads(lines[0])
-        record["forbidden_skills"] = [record["expected_skills"][0]]
-        lines[0] = json.dumps(record)
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        self.assertTrue(
-            any("skills cannot be expected and forbidden" in error for error in self.errors())
-        )
-
-    def test_missing_skill_positive_coverage_fails(self) -> None:
-        path = self.root / "tests" / "evals" / "oracles" / "skills.jsonl"
-        records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-        for record in records:
-            record["expected_skills"] = [
-                name for name in record["expected_skills"] if name != "ai-visual-review"
-            ]
-        path.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
-        self.assertTrue(any("missing positive coverage: ai-visual-review" in error for error in self.errors()))
-
-    def test_missing_skill_negative_coverage_fails(self) -> None:
-        path = self.root / "tests" / "evals" / "oracles" / "skills.jsonl"
-        records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-        for record in records:
-            record["forbidden_skills"] = [
-                name for name in record["forbidden_skills"] if name != "ai-visual-review"
-            ]
-        path.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
-        self.assertTrue(any("missing negative coverage: ai-visual-review" in error for error in self.errors()))
-
-    def test_recreated_manifest_fails(self) -> None:
-        (self.root / ".agents" / "manifest.json").write_text("{}\n", encoding="utf-8")
-        self.assertTrue(any("deleted metadata or global catalog path" in error for error in self.errors()))
-
-    def test_recreated_global_catalog_fails(self) -> None:
-        (self.root / ".agents" / "templates").mkdir()
-        self.assertTrue(any("deleted metadata or global catalog path" in error for error in self.errors()))
+    def test_cli_exit_status_and_diagnostics(self) -> None:
+        for text, status, message in (
+            ("# Instructions\n", 0, "check passed"),
+            ("", 1, "check failed"),
+        ):
+            with self.subTest(status=status):
+                self.write("AGENTS.md", text)
+                output = io.StringIO()
+                with (
+                    contextlib.redirect_stdout(output),
+                    contextlib.redirect_stderr(output),
+                ):
+                    self.assertEqual(status, CHECKER.main(["--root", str(self.root)]))
+                self.assertIn(message, output.getvalue())
 
 
 if __name__ == "__main__":

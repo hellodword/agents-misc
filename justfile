@@ -1,27 +1,15 @@
 set positional-arguments
 
-# Validate rule structure, skill assets, and the eval corpus.
+# Validate the distributed rules, skill metadata, and local references.
 check-agent-rules:
-  nix develop .#dev --command python3 scripts/check-agent-rules.py --root .
-  nix develop .#dev --command python3 -m unittest discover -s tests -p 'test_*.py'
+  nix develop .#dev --command python3 -B scripts/check-agent-rules.py --root .
+  nix develop .#dev --command python3 -B -m unittest tests.test_check_agent_rules
 
 # Validate GitHub Actions syntax, official major tags, and verification gates.
 check-workflows:
   nix develop .#dev --command actionlint .github/workflows/*.yml
   nix develop .#dev --command python3 scripts/check-workflows.py --root .
   nix develop .#dev --command python3 -m unittest tests.test_check_workflows
-
-# Seed the independent Agent eval ChatGPT credential vault.
-agent-evals-auth-init *args:
-  nix develop .#agent-evals --command python3 -m tools.agent_evals auth-init "$@"
-
-# Verify Agent eval prompt sources and the versioned no-execution-tool surface.
-agent-evals-preflight *args:
-  nix develop .#agent-evals --command python3 -m tools.agent_evals preflight "$@"
-
-# Run isolated Codex route, behavior, judge, and certification evals.
-agent-evals *args:
-  nix develop .#agent-evals --command python3 -m tools.agent_evals run "$@"
 
 # Fetch or validate the pinned upstream Codex checkout without overwriting edits.
 codex-fetch:

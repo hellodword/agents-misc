@@ -254,135 +254,17 @@ This recipe is an explicit exception for a one-use GitHub-hosted Ubuntu runner. 
     nix config show trusted-users
 ```
 
-## 4. Inherit reviewed input-flake caches
+## 4. Configure reviewed caches explicitly
 
-Use this only for explicitly reviewed inputs and cache endpoints. Never inherit URLs or public keys from an unreviewed pull request or ref.
+Confirm each complete cache URL and public key with the cache owner, then record those literal values in the project's configuration. Do not infer trust from a name substring or inherit cache settings from dependency flakes.
 
-Define the collector in project flake code. `inputNames` is an allowlist; each value is a list of URL substrings allowed for that input.
-
-```nix
-collectInputNixConfig =
-  {
-    inputs,
-    inputNames,
-  }:
-  let
-    selectedInputs = lib.filterAttrs (
-      name: value:
-      builtins.hasAttr name inputNames
-      && value ? outPath
-      && builtins.pathExists (value.outPath + "/flake.nix")
-    ) (removeAttrs inputs [ "self" ]);
-
-    configs = lib.mapAttrsToList (
-      name: input:
-      let
-        flake = import (input.outPath + "/flake.nix");
-      in
-      {
-        inherit name;
-        config = flake.nixConfig or { };
-      }
-    ) selectedInputs;
-
-    asList = value: if builtins.isList value then value else [ value ];
-    allowed = name: value:
-      lib.any (substring: lib.hasInfix substring value) (asList inputNames.${name});
-    readList = name: attribute: config:
-      lib.filter (allowed name) (asList (config.${attribute} or [ ]));
-    collect = attributes:
-      lib.unique (
-        lib.flatten (
-          map (
-            { name, config }:
-            lib.flatten (map (attribute: readList name attribute config) attributes)
-          ) configs
-        )
-      );
-    substituters = collect [
-      "substituters"
-      "extra-substituters"
-      "trusted-substituters"
-      "extra-trusted-substituters"
-    ];
-    trustedPublicKeys = collect [
-      "trusted-public-keys"
-      "extra-trusted-public-keys"
-    ];
-  in
-  {
-    inherit substituters trustedPublicKeys;
-    settings =
-      (lib.optionalAttrs (substituters != [ ]) {
-        extra-substituters = substituters;
-      })
-      // (lib.optionalAttrs (trustedPublicKeys != [ ]) {
-        extra-trusted-public-keys = trustedPublicKeys;
-      });
-  };
-```
-
-Export the reviewed result as `lib.<system>.inheritedNixConfig`. If generated images must contain the cache configuration, inject it after module defaults:
+For a project flake, replace these example strings with the reviewed values:
 
 ```nix
-{
-  config = lib.optionalAttrs (inheritedNixConfig.settings != { }) {
-    nix.settings = lib.mapAttrs (_: value: lib.mkAfter value) inheritedNixConfig.settings;
-  };
-}
+nixConfig = {
+  extra-substituters = [ "https://cache.example.org" ];
+  extra-trusted-public-keys = [ "cache.example.org-1:REPLACE_WITH_FULL_PUBLIC_KEY" ];
+};
 ```
 
-In CI, evaluate only the reviewed checkout and do not update its lockfile. Read the two lists, merge them with current `extra-*` entries from `/etc/nix/nix.conf`, preserve first occurrence, and restart the daemon:
-
-```bash
-set -euo pipefail
-eval_args=(
-  --extra-experimental-features nix-command
-  --extra-experimental-features flakes
-  --no-write-lock-file
-)
-
-nix eval --json "${eval_args[@]}" .#lib.x86_64-linux.inheritedNixConfig >/dev/null
-
-flake_list() {
-  nix eval --raw "${eval_args[@]}" \
-    ".#lib.x86_64-linux.inheritedNixConfig.$1" \
-    --apply 'builtins.concatStringsSep " "'
-}
-conf_values() {
-  awk -v key="$1" '
-    $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
-      sub(/^[^=]*=/, "")
-      print
-    }
-  ' /etc/nix/nix.conf
-}
-unique_words() {
-  printf '%s\n' "$*" | awk '
-    {
-      for (i = 1; i <= NF; i++) if (!seen[$i]++) values[++count] = $i
-    }
-    END {
-      for (i = 1; i <= count; i++) printf "%s%s", (i == 1 ? "" : " "), values[i]
-      if (count > 0) printf "\n"
-    }
-  '
-}
-
-merged_substituters="$(unique_words \
-  "$(conf_values extra-substituters)" \
-  "$(flake_list substituters)")"
-merged_keys="$(unique_words \
-  "$(conf_values extra-trusted-public-keys)" \
-  "$(flake_list trustedPublicKeys)")"
-
-sudo sed -i \
-  -e '/^[[:space:]]*extra-substituters[[:space:]]*=/d' \
-  -e '/^[[:space:]]*extra-trusted-public-keys[[:space:]]*=/d' \
-  /etc/nix/nix.conf
-{
-  [[ -z "$merged_substituters" ]] || echo "extra-substituters = $merged_substituters"
-  [[ -z "$merged_keys" ]] || echo "extra-trusted-public-keys = $merged_keys"
-} | sudo tee -a /etc/nix/nix.conf >/dev/null
-sudo systemctl restart nix-daemon.service
-```
+For the hosted-runner installer above, pass the same reviewed values through its cache inputs. Keep existing project caches unless their removal is part of the task.

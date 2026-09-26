@@ -2,7 +2,6 @@
   lib,
   nixpkgs,
   codexBaseFor,
-  codexFor,
   supportedSystems,
 }:
 
@@ -11,13 +10,11 @@ lib.genAttrs supportedSystems (
   let
     pkgs = import nixpkgs { inherit system; };
     codexBasePackage = codexBaseFor system;
-    codexPackage = codexFor system;
     codexPkgConfig = pkgs.writeShellScriptBin "pkg-config" ''
       export PKG_CONFIG_PATH="${lib.getDev pkgs.openssl}/lib/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
       exec ${lib.getExe pkgs.pkg-config} "$@"
     '';
     agentRulesPython = pkgs.python3.withPackages (pythonPackages: [
-      pythonPackages.jsonschema
       pythonPackages.pyyaml
     ]);
     devShell = pkgs.mkShell {
@@ -82,20 +79,11 @@ lib.genAttrs supportedSystems (
         PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
       }
     );
-    agentEvalsShell = pkgs.mkShell {
-      packages = [
-        codexPackage
-        pkgs.coreutils
-        pkgs.ruff
-        agentRulesPython
-      ];
-    };
   in
   {
     dev = devShell;
     default = devShell;
     codex = codexShell;
     agents-viewer = agentsViewerShell;
-    agent-evals = agentEvalsShell;
   }
 )
