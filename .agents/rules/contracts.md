@@ -1,31 +1,29 @@
 # Contracts and Compatibility
 
-## Classify before changing
+## Identify consumers before imposing compatibility
 
-Classify an API, config, CLI, database schema, persisted format, generated interface, protocol, or documented behavior as:
+For an API, config, CLI, schema, persisted format, or generated interface, inspect who consumes it, whether producer and consumer upgrade together, and what stability is promised.
 
-- **internal**: unexported, undocumented, unpersisted, and without a durable consumer;
-- **durable/local**: persisted, documented, generated, or consumed by local users or automation;
-- **public/external**: consumed outside the repository or published interface.
+- Internal details whose consumers can be updated together can change within the task's scope. Being exported, documented, or generated does not alone make an interface durable.
+- External consumers, independently upgraded clients or automation, explicit stability promises, and data that must remain readable or writable create compatibility obligations.
+- When consumers are unclear, inspect call sites, release boundaries, documentation, and persisted-data use. Ask only if an unresolved compatibility decision affects the requested result or needs authorization.
 
-Treat an unknown classification as durable/local. Preserve durable and public behavior unless the user explicitly authorizes the exact breaking contract and operation. Apply that authorization only to its stated scope, then update documentation, examples, tests, and migration or recovery guidance.
+Preserve required compatibility unless the user authorizes the specific break. That authorization includes necessary consumer, documentation, and validation updates within its scope. For persisted data, establish which existing data must remain usable and validate the chosen transition. Migration and recovery methods follow the project and task; destructive real-data operations retain the root authorization and recovery requirements.
 
-## HTTP and structured data
+## New interfaces
 
-- For a greenfield JSON HTTP API, maintain a Markdown contract covering methods, paths, authentication, request/response bodies, errors, pagination, and compatibility.
-- Use this error envelope:
+- For a new JSON HTTP API, document methods, paths, authentication, bodies, errors, and relevant pagination or compatibility behavior in Markdown.
+- Prefer the following error shape, with `details` only when the interface defines it:
 
 ```json
 { "error": { "code": "stable_code", "message": "Safe message", "details": {} } }
 ```
 
-- Include `details` only when the contract defines it; do not leak internal state.
-- Reject unknown config fields by default. Do not invent environment-variable overrides without an explicit contract.
-- Validate external data at the boundary and preserve unknown fields only when forward-compatible passthrough is deliberate and tested.
+- Choose unknown-field handling for each interface. Rejecting unknown config keys can catch typos; extensible protocols and forward-compatible passthrough may need different behavior. Preserve an existing interface's policy.
+- Define config precedence when config sources are needed; do not invent environment overrides without a use case.
 
-## Time, dates, locale, and Unicode
+## Time and normalization
 
-- Represent instants as UTC RFC 3339 with millisecond precision, for example `2026-07-15T12:34:56.789Z`.
-- Model calendar dates separately from instants; do not apply a timezone to a date-only value.
-- Store machine-readable values independently of localized presentation.
-- Normalize Unicode, case, whitespace, filenames, or paths only when the contract defines the normalization and collision behavior.
+- Prefer UTC RFC 3339 for instants in new JSON interfaces. Choose precision and internal representation to preserve required information; do not impose milliseconds everywhere.
+- Distinguish calendar dates from instants, and stored values from localized presentation.
+- Define case, whitespace, Unicode, filename, or path normalization and collision behavior at the relevant interface. Do not silently change an existing contract's normalization.

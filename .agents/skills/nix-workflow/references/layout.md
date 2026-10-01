@@ -1,70 +1,42 @@
 # Nix Layout Reference
 
-Read this only when creating or reorganizing Nix, Just, script, check, or formatter layout. Create only files with real behavior.
+Use the repository's established layout. The examples below are starting points for interfaces the project has adopted, not a directory checklist.
 
-## Ordinary project
+## Development environment
 
-```text
-flake.nix
-flake.lock
-justfile
-```
+A minimal new setup uses `flake.nix`, its generated `flake.lock`, and a default development shell. Add a `justfile` for useful shared commands. Keep tool setup in the shell; introduce `nix/` or named shells when reuse or isolation needs them.
 
-Expose one `devShells.<system>.default` and enter it with `nix develop`. Include the tools needed to build, run, test, format, lint, generate code, and exercise browser flows in that shell. Add `scripts/` only for durable complex orchestration, and add `nix/` only when reusable Nix logic would otherwise obscure the flake's input and output wiring.
+A development shell does not imply packages, apps, checks, formatter, modules, or overlays. These require an explicit user or project choice.
 
-Do not add packages, apps, checks, formatter, modules, overlays, or named development shells to an ordinary development-environment flake without an exact user request or an applicable project-wide Nix contract.
+## Adopted product outputs
 
-## Project-wide Nix interface
+| Output               | Purpose                                                         |
+| -------------------- | --------------------------------------------------------------- |
+| `packages`           | Buildable products                                              |
+| `apps`               | Runnable wrappers                                               |
+| `devShells`          | Project tools, with named environments when isolation is useful |
+| `checks`             | Adopted validation exposed through Nix                          |
+| `formatter`          | An adopted `nix fmt` entrypoint                                 |
+| Modules and overlays | Nix interfaces that the product supplies                        |
 
-```text
-flake.nix
-flake.lock
-nix/
-  packages.nix
-  apps.nix
-  dev-shells.nix
-  checks.nix
-  formatter.nix
-  modules/
-  overlays/
-tests/
-scripts/
-treefmt.nix
-```
+Keep `flake.nix` focused on inputs and output wiring when implementation grows. Extract only useful modules, for example `nix/packages.nix` or `nix/checks.nix`. A pure Nix product does not require Just.
 
-Use only the entries that represent actual project interfaces. An applicable project instruction may make Nix the project-wide interface; a pure Nix product has that boundary by definition. A `justfile` remains optional for a pure Nix product. Add module, overlay, template, script, check, and formatter files only when exported or durable behavior exists.
+## Just commands
 
-## Output ownership
+Recipes may compose and may run inside or outside the shell. Make it clear which layer enters the environment, and avoid cycles such as a recipe entering a shell that invokes the same recipe again.
 
-- `packages`: buildable products.
-- `apps`: runnable wrappers.
-- `devShells.default`: the ordinary reproducible development environment; named shells require an explicit isolation contract.
-- `checks`: stable validation used by `nix flake check`.
-- `formatter`: an explicitly adopted `nix fmt` entrypoint; prefer treefmt-nix when one interface coordinates multiple languages.
-- `overlays` and modules: public pure-Nix interfaces only when the project provides them.
-
-## Just command surface
-
-Give a recipe only to a stable project-level command that multiple contributors run repeatedly and that benefits from one environment, argument, or semantic entrypoint. A durable script does not automatically need a recipe. Keep one-off diagnostics, CI-internal steps, subsystem-private implementation, and obvious direct commands out of the menu.
+For a command designed to enter the shell itself:
 
 ```just
-# Run focused tests in the default development shell.
+# Run project tests through the development environment.
 test:
   nix develop --command go test ./...
-
-# Build the adopted Nix product interface.
-build:
-  nix build .#default
-
-# Run the adopted Nix validation interface.
-check:
-  nix flake check
 ```
 
-The `build` and `check` recipes apply only when those Nix outputs are project interfaces. Invoke recipes directly, for example with `just test`. When already inside the development shell, run the underlying tool or script instead of Just.
+An environment-independent recipe may instead call the tool directly and be invoked as `nix develop --command just test` or from an entered shell. Follow one understandable convention for each command. Move complex orchestration into a reusable script when useful; do not impose command-count limits.
 
-Keep a recipe to at most three simple linear command invocations. Do not create a `dev` alias, call or depend on another recipe, invoke Just through `nix develop`, or place loops, parsing, branching, retries, traps, cleanup, complex quoting, or stateful orchestration in a recipe.
+Expose `nix build .#<output>` through Just only for an adopted product output. A general `check` recipe need not mean `nix flake check`; prefer focused development-shell commands when those are the project's checks.
 
-## treefmt-nix
+## Formatting
 
-When Nix owns a multi-language formatting interface, evaluate one treefmt-nix module per supported system and export its wrapper as `formatter.<system>`. Add the evaluation check to `checks.<system>` only when formatting validation is also an adopted Nix interface. Configure only formatters the repository uses, and rely on formatter defaults unless product conventions require overrides.
+An ordinary shell can provide ecosystem formatters. When the project explicitly adopts a shared Nix formatting interface, prefer treefmt-nix for multiple languages, exporting its wrapper as `formatter.<system>`. Add its check only if Nix formatting validation is also adopted. Configure the languages present and preserve formatter defaults unless conventions require overrides.

@@ -1,9 +1,10 @@
 # Dependencies
 
-- Prefer the standard library and existing project dependencies when they meet the requirement clearly.
-- Add the smallest dependency that solves a current need; do not add a framework for speculative use.
+- Choose dependencies for fitness, quality, trusted provenance, reliable maintenance, ecosystem reputation, and total maintenance cost. A mature library can be preferable to substantial custom code.
+- Reuse suitable existing dependencies and the standard library, without treating dependency count or zero dependencies as a goal. Avoid speculative additions.
 - Verify changing facts through official documentation, the authoritative registry, the project lockfile, and current local tool output.
-- Before adding or updating a dependency, verify its exact package name, compatible version, maintenance status, license compatibility, install scripts, telemetry, binary downloads, and material transitive dependencies.
+- For an addition or update, check the authoritative source and package name, version compatibility, maintenance signals, and license fit. Low stars or infrequent commits alone do not disqualify a mature project.
+- Deepen review of install scripts, binary downloads, telemetry, or transitive dependencies when permissions, provenance, unusual behavior, known advisories, or the deployment context warrant it. Do not turn every routine update into a full supply-chain audit.
 - Preserve the project's declared dependency tool.
 - Apply the `AGENTS.md` dependency-lockfile prohibition to every active dependency lockfile; this rule defines no additional manual-edit exception.
 - For a direct dependency change, edit the authoritative manifest or input, such as `Cargo.toml`, `flake.nix`, or `package.json`, then run the repository's documented dependency command or declared dependency tool.

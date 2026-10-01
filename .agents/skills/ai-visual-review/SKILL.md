@@ -1,19 +1,15 @@
 ---
 name: ai-visual-review
-description: Review screenshots in consistent batches, synthesize evidence-based visual findings, and optionally create review mockups. Use only when the user explicitly asks for AI visual review, screenshot QA, design critique, or screenshot-based mockups; do not trigger for ordinary screenshots, browser tests, or implementation review.
+description: Review screenshots with a consistent rubric and synthesize evidence-based visual findings. Use only when the user explicitly asks for AI visual review, screenshot QA, design critique, or screenshot-based mockups; do not trigger for ordinary screenshots, browser tests, or implementation review.
 ---
 
 # AI Visual Review
 
-1. Confirm that the user explicitly requested screenshot-based visual review, QA, critique, or a review mockup. Keep a review-only request non-mutating.
-2. Create temporary output under a confirmed ignored `tmp/agent/visual-review/<run-id>/` path. Do not commit captures, batches, findings, traces, or edited images.
-3. Copy and complete [the shared rubric](assets/rubric.md) once for the run. Keep its severity scale and category taxonomy identical across batches.
-4. Record a stable screenshot ID, route/component, viewport, locale, theme, UI state, file path, image hash, capture command, timestamp, source revision, and fixture notes for every capture.
-5. Batch by page family, component family, or user flow. Default to no more than one family and four screenshots per batch.
-6. When platform and task policy allow native delegation, delegate independent batches with the same rubric and reporting template. Otherwise review the batches sequentially in the main context. Never invent adapter commands or vendor-specific flags.
-7. Report each batch as concise Markdown findings using the rubric's template: screenshot/location, severity, visible evidence, and recommendation. Keep subjective preference out unless the product context supports it.
-8. Merge duplicate findings across batches, retain their screenshot references, and summarize rejected findings and unresolved conflicts for the reader.
-9. Keep contradictory evidence as a human decision unless synthesis resolves it from the shared rubric and captures.
-10. Do not implement per-batch findings directly. For review-only work, report proposals and stop. Implement only when the user also requested changes or later authorizes the exact findings.
-11. Use image editing only for an explicitly requested review mockup or exploratory screenshot edit. Keep it in the temporary run directory and translate accepted ideas into code/design-system changes before implementation.
-12. Report screenshots reviewed, batches, proposed findings, duplicates/rejections, human decisions, proposed implementation, files changed, and validation.
+1. Establish the requested review scope and whether implementation is also authorized. Keep a review-only request non-mutating with respect to the product.
+2. Use the task's temporary workspace for review captures and mockups. Distinguish these outputs from intentionally maintained visual test baselines.
+3. Read [the shared rubric](assets/rubric.md) and apply its severity scale and categories consistently. Fill in product context relevant to the findings; a small review does not require a copied report template.
+4. Give each screenshot a stable reference and record enough context to locate or reproduce an issue, such as route, viewport, theme, or UI state. Add revision, capture command, fixtures, or hashes when provenance matters.
+5. Group larger reviews by user flow or related views, with batches small enough to inspect reliably. Compare related screenshots together and merge duplicate findings while preserving references.
+6. Report visible evidence, severity, and a concrete recommendation. Distinguish subjective preferences and uncertainties; keep unresolved conflicts visible when the captures cannot resolve them.
+7. Implement findings only within existing user authorization. Use image editing for requested mockups.
+8. Summarize the views reviewed, actionable findings, and material gaps. Report changes and validation when implementation was included.

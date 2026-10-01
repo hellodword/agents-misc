@@ -1,29 +1,29 @@
-# Nix and Just
+# Nix Development Environments and Outputs
 
-Apply this rule when Nix/Just is established, explicitly requested, or used as a greenfield default.
+The usual working environment is a Nix-based devcontainer. Prefer project development shells for required tools so work can proceed without changing the host.
 
-## Ownership and compatibility
+## Autonomous environment work
 
-- Classify Nix as an ordinary development environment, a project-wide product interface, or the implementation language of a pure Nix product.
-- Treat an exact user request, an applicable project overlay or project document, or the pure Nix classification as authority for the outputs within its scope. A pre-existing output establishes only its own contract and does not authorize unrelated outputs.
-- Preserve established shell names and public flake outputs unless the task explicitly changes them.
-- For greenfield work, set `nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable"`; let the project's own `flake.lock` pin the revision. Do not align `nixpkgs` to an unrelated container revision.
+- Add missing tools to the appropriate project shell and retry the affected command. If no flake exists, creating a minimal development shell is authorized as part of the task; retain useful project configuration.
+- Start a new ordinary project with `devShells.<system>.default`. Preserve existing shell names and structure. Add a named shell when real toolchain or environment isolation requires it, without creating shells for symmetry.
+- Prefer existing locked inputs when adequate. For a new flake, prefer `github:NixOS/nixpkgs/nixos-unstable` and let the generated `flake.lock` pin it. Update inputs through Nix when needed; do not align them to an unrelated container revision.
+- Run tools through `nix develop --command <command>` or inside an entered shell. Select an established named shell explicitly, for example `nix develop .#dev --command <command>`.
+- Diagnose host, device, container, display, filesystem, or permission limitations when a project tool declaration cannot solve them. Ordinary missing executables do not need a separate troubleshooting workflow.
 
-## Development environment
+## Nix product outputs require an explicit choice
 
-- When establishing an ordinary Nix workflow, expose one `devShells.<system>.default` and enter it with `nix develop`. Include every tool needed for normal build, run, test, formatting, lint, code generation, and browser-test work in that shell.
-- Add a named development shell only when the user or an applicable project contract requires an isolated environment. Extend the default shell for ordinary tool additions.
-- Do not expose packages, apps, checks, formatter, modules, or overlays merely because the repository uses a Nix development shell.
+- A development shell does not authorize adding packages, apps, checks, formatter, modules, or overlays. Add these only when the user or project explicitly adopts the interface; pure Nix products may expose outputs required by their stated product scope.
+- An existing output authorizes maintaining that interface, not unrelated outputs. Preserve its consumer contract.
+- Keep flake wiring understandable. Extract reusable logic under `nix/` when useful; do not create empty structure. Ecosystem formatters can live in the shell without a flake formatter or check.
+- Just can run inside or outside the shell. Compose recipes when helpful and keep environment entry clear; avoid accidental recursion between Just and `nix develop`. Move orchestration into scripts when its complexity or testing needs justify that choice.
 
-## Product outputs and commands
+## Browser and source handling
 
-- When Nix is an explicitly adopted project-wide interface or the project is a pure Nix product, expose only the packages, apps, checks, formatter, modules, and overlays with real consumers.
-- Keep `flake.nix` focused on inputs, supported systems, and output wiring. Put reusable implementation under `nix/`; do not create empty modules for layout symmetry.
-- Use treefmt-nix when an explicitly Nix-managed multi-language formatting interface needs one formatter entrypoint and check. An ordinary development shell may contain ecosystem formatters without exposing a flake formatter.
-- Invoke Just directly, outside `nix develop`. Let a recipe call `nix develop --command <tool-or-script>` or an explicitly adopted Nix output; do not add a `dev` alias, invoke Just through `nix develop`, or compose recipes through other recipes.
-- Put durable complex orchestration in checked-in scripts. A script receives a Just recipe only when the command independently qualifies as a stable shared project entrypoint.
-- For Playwright and other durable browser E2E, prefer `pkgs.chromium` from the project's locked nixpkgs and pass `lib.getExe` through explicit project configuration. Do not discover a host browser through `PATH` or silently download one. Use `pkgs.google-chrome` only when branded Chrome is required, its supported systems fit the project, and the unfree dependency is explicitly authorized.
-- Do not use a `path:` flake reference to bypass Git source filtering in a Git worktree.
-- If a durable, non-secret, non-temporary, non-ignored untracked file is required by a Git-backed flake, use only `git add -N -- <file>`, leave intent-to-add in place, and report it.
-- Run focused output validation first; use `nix flake show` for public output changes and `nix flake check` for broad flake/check wiring.
-- Treat `nix fmt` as mutating and review its diff.
+- For project-owned Playwright E2E, prefer Chromium from locked nixpkgs with an explicit executable path. The browser skill covers provisioning and compatibility validation. Branded Google Chrome requires a product need and authorization for the unfree dependency.
+- Do not use a `path:` flake reference to bypass Git source filtering. If a required durable file is untracked, use the root rule's exact-path intent-to-add procedure and report it.
+
+## Focused validation
+
+- For a shell tool change, verify the tool and retry the command in that shell. Routine code, documentation, or tool additions do not call for `nix build` or a full `nix flake check`.
+- For an adopted product output, validate the affected output. Evaluate broader flake/check wiring only when that boundary changes or project policy requires it; choose targeted builds before a full repository gate.
+- Treat `nix fmt` as mutating and scope formatting to the changed files where supported.

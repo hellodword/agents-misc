@@ -2,29 +2,37 @@
 
 ## Purpose and priority
 
-This file is the shared entrypoint for coding agents. Shared rules and workflows live under `.agents/`; project facts and mandatory product constraints belong in a project overlay.
+This file is the shared entrypoint for coding agents. Shared rules and workflows live under `.agents/`. An optional, project-owned `.project-agent/project.md` entrypoint records scoped requirements and locates project context.
 
 Apply instructions in this order:
 
 1. Platform, system, and developer instructions.
-2. Explicit user instructions for the current task, subject to the absolute safety boundaries below.
-3. Absolute safety rules in this file.
-4. Project overlay rules within their declared scope.
+2. Explicit user instructions for the current task, within the safety and authorization boundaries below.
+3. Safety and authorization rules in this file.
+4. Explicit project requirements within their declared scope.
 5. Established local repository conventions in the touched area.
 6. Routed shared rules, then generic shared defaults.
 7. Greenfield defaults, only when the repository or scoped subproject is new and unconstrained.
 
-Higher priority wins. Within one priority, prefer the narrower scope. One authoritative, machine-enforced declaration can establish a convention, such as a package-manager declaration, lockfile, toolchain file, formatter config, CI config, or project command. Otherwise require two independent, consistent signals from project docs, matching files, neighboring code, or validation commands. Ignore stale, generated, vendored, and unrelated evidence.
+Higher priority wins. Within one priority, prefer the narrower scope. Judge repository evidence by authority, relevance, and recency. A declared toolchain, lockfile, formatter config, CI command, or generated schema can be authoritative for the behavior it owns. Resolve conflicting evidence by inspecting the relevant consumer or command; do not require a fixed number of signals or dismiss evidence merely because it is generated.
 
-Shared language, framework, database, package-manager, locale, test-runner, formatter, and toolchain choices apply only to greenfield work or a project that already adopted them. When evidence cannot decide a public contract, persistent-data behavior, dependency, security policy, or long-term technology choice, ask the user. For a local reversible detail, use the smallest convention-aligned change and report a material assumption.
+Distinguish requirements from descriptive facts. A document's location does not make a factual claim authoritative; verify changeable details against their owning configuration or command. An explicit scoped requirement remains a constraint when implementation diverges; investigate the mismatch before treating the requirement as obsolete.
 
-## Deterministic loading
+Shared technology preferences apply to new unconstrained choices and projects that already adopted them. Preserve established choices unless the task calls for changing them. Investigate uncertainty before asking the user. Make ordinary reversible implementation choices autonomously; ask when an unresolved choice materially changes the requested outcome, required compatibility, or authorization. Report material assumptions.
+
+## Project context
+
+- Use `.project-agent/project.md` for concise scoped requirements and navigation to existing authoritative sources. No README or fixed documentation layout is required. Prefer links over duplicating versions, dependencies, or commands owned by another source.
+- Create or update project context when useful to the task and based on confirmed, durable facts, requirements, decisions, or navigation. Keep temporary progress, investigations, and unconfirmed assumptions in task records. Do not scaffold an entry merely because it is absent.
+- Record authorization already established by the user or applicable project policy. Do not edit instructions to grant yourself authorization for an otherwise blocked operation. Ordinary task-scoped documentation maintenance needs no separate approval; the specific authorization and exception sources below still apply.
+
+## Targeted loading
 
 1. Read this file first.
-2. If `.project-agent/project.md` exists, read it before changing or relying on project behavior.
-3. Read only links that `project.md` directly marks as required for the current task. Do not recursively scan overlay, contract, or documentation directories.
+2. If `.project-agent/project.md` exists, read it before changing or relying on project behavior. Otherwise use existing code, configuration, and documentation to establish project context.
+3. Follow task-relevant project references through further documents as needed for requirements or evidence. Preserve each requirement's scope and revisit relevant guidance when a new boundary appears. Avoid bulk directory reads, cycles, and rereading unchanged context.
 4. Before changing tracked code, configuration, or data, read [.agents/rules/index.md](.agents/rules/index.md).
-5. Match the index routing table once and load every listed rule and skill whose condition is true. Do not recursively discover companions or hidden dependencies.
+5. Load the index routes that match work actually being performed. When a new boundary becomes relevant, load its route then. Avoid rereading unchanged guidance or loading workflows from incidental keywords.
 6. Read a skill-local asset or reference only when its `SKILL.md` directly instructs you to do so.
 
 Never infer unseen instructions from a filename or directory name.
@@ -35,19 +43,14 @@ Never infer unseen instructions from a filename or directory name.
 2. Read applicable contracts and authoritative configuration before relying on behavior.
 3. Make the smallest semantic change that satisfies the request and preserves unrelated work.
 4. Select validation for each touched boundary; run focused checks before broader repository checks.
-5. Re-run the narrowest failing command and classify failures as introduced, pre-existing, or environment-caused.
+5. Investigate failures as introduced, pre-existing, or environment-caused. Retry after a relevant change or to gather useful evidence; avoid unchanged retries that teach nothing.
 6. Review the final diff and repository state.
 7. Report changed files, validation results, known limitations, and commit status.
 
-## Absolute safety
+## Safety and authorization
 
-- Never expose or commit secrets, credentials, private keys, real user data, local databases, logs, coverage, browser profiles, or machine-specific files.
-- Keep screenshots, traces, captures, databases, backups, and other review/runtime artifacts under confirmed ignored paths.
-- Treat external input as untrusted and validate it at its trust boundary.
-- Never trust client-provided identity, roles, permissions, ownership, prices, or authorization decisions; enforce them server-side.
-- Never interpolate untrusted input into SQL or shell commands. Use parameterized queries, structured process arguments, or reject the operation.
-- Prevent path traversal and unsafe uploads with contract-defined validation and containment checks.
-- Normalize case, whitespace, Unicode, filenames, or paths only when the applicable contract defines normalization.
+- Never expose or commit secrets, credentials, private keys, real user data, or machine-private state.
+- Keep local runtime state and temporary review output out of commits. Synthetic fixtures, visual golden baselines, and required generated sources may be tracked project inputs after checking for sensitive content.
 - Never silently overwrite, reset, or destroy real user data. Destructive real-data work requires explicit authorization for that exact operation and a verified recovery path.
 - Never weaken, split, skip, or delete tests merely to hide failures.
 - Never use global installs, host package managers, curl/wget-to-shell installers, or system-level environment mutation by default.
@@ -58,7 +61,9 @@ Never infer unseen instructions from a filename or directory name.
 - Never use `git add .`, `git add -A`, `git add --all`, or an equivalent bulk-staging operation. Stage explicit paths only.
 - Preserve unrelated user changes. Never reset or overwrite them to simplify the task.
 
-The following require explicit authorization for the specific operation: destructive or irreversible actions; breaking a public API, CLI, config, database, persisted-data, or generated contract; weakening authentication or authorization; deleting or resetting real data; adding a dependency with restrictive or incompatible license obligations; publishing; deploying; pushing; releasing; or creating external resources. Authorization applies only to the named operation.
+Task authorization includes the ordinary reversible work needed to deliver it: implementation, tests, documentation, project development tools, and necessary adaptations to existing CI. It does not authorize unrelated changes or external effects. Reuse authorization already given; do not ask again for the same operation.
+
+The following require explicit authorization for the specific operation: destructive or irreversible actions; breaking a contract with external or durable consumers or an explicit stability promise; weakening authentication or authorization; deleting or resetting real data; adding a dependency with restrictive or incompatible license obligations; publishing; deploying; pushing; releasing; or creating external resources. New CI workflows, additional Nix product outputs, and third-party GitHub Actions retain the explicit-choice requirements in their routed rules. Authorization applies only to its stated scope.
 
 Do not commit unless the user requests it, the task explicitly enables auto-commit, or a project policy directly enables it. Before any authorized commit, review status and diff, exclude unrelated or ignored files, and stage only explicit task paths.
 
@@ -72,17 +77,22 @@ Verify changing external facts through official documentation, registries, lockf
 
 A project-owned workflow may use the `nix-workflow` skill's GitHub-hosted Ubuntu recipes when that workflow explicitly adopts them. On a one-use GitHub-hosted Ubuntu runner only, those recipes may use `apt`, the official Nix installation script, and documented disk preparation. Never apply this exception on a developer machine or self-hosted runner.
 
-## Temporary files
+## Temporary workspace and retention
 
-Put one-off scripts and diagnostics in a confirmed ignored `tmp/agent/<task-id>/` directory and clean them up when the task ends. If no ignored project path is confirmed, use the system temporary directory. Promote a script to `scripts/` only when it is durable, reusable project behavior.
+- For agent-created scratch, prefer an established ignored workspace scratch directory; otherwise use `tmp/agent/<task-id>/` at the repository root. Reuse the task directory when resuming work and organize subdirectories as needed.
+- Reuse effective ignore rules. When none covers the default location, first verify that root `tmp/` is available for scratch work, contains no tracked content, and that the new rule will not obscure existing user files. Then create the task directory and add `/tmp/` to the root `.gitignore` as ordinary authorized setup work.
+- Use the system temporary directory when directory usage conflicts, ignore configuration cannot be safely updated, the workspace is not writable, or there is no Git repository.
+- When establishing workspace scratch or local runtime output locations, confirm they are untracked and ignored. Reuse that verification until the location or relevant configuration changes. Preserve configured tool output and cache locations.
+- Clean up only clearly task-owned files that have no remaining purpose. Retain artifacts needed for review, delivery, reproduction, or task recovery. A turn ending, budget exhaustion, or task completion alone is not a cleanup trigger; being ignored does not make a file disposable.
+- Preserve unrelated files and useful caches. Record paths and purposes for retained artifacts needed to review the result or resume work, without maintaining an inventory of every temporary file.
 
 ## Final report
 
-Report:
+Summarize:
 
 - files changed and user-visible behavior;
 - validation commands and outcomes;
 - known limitations or unverified boundaries;
 - commit status.
 
-When relevant, also report the overlay files used, data recovery or migration handling, generated-artifact decisions, formatter churn, and exact intent-to-add or deferred staging paths.
+Include recovery handling, generated-output decisions, formatter churn, or other provenance when material to the result. Always disclose exact intent-to-add paths if used.

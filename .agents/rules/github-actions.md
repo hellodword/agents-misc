@@ -1,6 +1,6 @@
 # GitHub Actions
 
-Add or change a GitHub Actions workflow only when the user explicitly requests that workflow change.
+Create a new GitHub Actions workflow only when the user or project explicitly requests it. Necessary adaptations to an existing workflow are included in task authorization, such as matching CI's Node version to a requested project upgrade.
 
 - For a new workflow, default to `push` on `master` plus `workflow_dispatch`; do not add a pull-request trigger without a requirement.
 - Declare the minimum job/workflow permissions and raise them only for a documented step.

@@ -5,14 +5,10 @@ description: Maintain ordered, reproducible patches against a pinned upstream re
 
 # Pure Patch Workflow
 
-1. Record the upstream name, URL, and exact immutable revision or tag in `<upstream>/upstream.yaml`.
-2. Fetch only the required source into `.work/<upstream>/<revision>/src`, using shallow Git when metadata is needed or a recorded immutable archive otherwise.
-3. Confirm `.work/` is ignored and never stage the upstream checkout.
-4. Use the repository's Nix development shell and thin Just commands when already adopted. Call upstream-native build and test commands inside that environment.
-5. Keep patches under `<upstream>/patches/<revision>/` and record order in a `series` file.
-6. Generate patches from a clean, pinned upstream base and avoid machine paths, timestamps, unrelated formatting, or generated files not required by upstream convention.
-7. Default parallel build jobs to `max(1, nproc - 1)`. Lower the limit only for an upstream constraint or observed resource/stability failure.
-8. Preserve caches while iterating; do not trigger full rebuilds or delete caches without evidence.
-9. On an upstream upgrade, create a new revision directory and preserve the previous patch set.
-10. Validate patch application from the clean pinned base, then run upstream-native focused tests/builds.
-11. Report revision, worktree, patch directory, series order, environment, job limit, cache state, commands, and limitations.
+1. Follow the repository's upstream manifest, patch layout, ordering, and replay commands. Record an exact upstream commit or immutable source digest; do not rely on a movable tag alone.
+2. For a new workspace without conventions, use an upstream manifest, ignored `.work/<upstream>/<revision>/src`, and ordered patches under `<upstream>/patches/<revision>/` with a `series` file. Existing equivalent layouts need no conversion.
+3. Fetch the required source into a confirmed ignored work directory. Never stage the upstream checkout. Use the established development shell and upstream-native build/test commands.
+4. Generate patches from a clean pinned base. Keep ordering explicit and exclude machine paths, incidental timestamps, unrelated formatting, and generated changes not needed by upstream conventions.
+5. Choose build parallelism from available CPU and memory, upstream limits, and observed resource use. Use a conservative limit for memory-heavy builds; do not wait for an out-of-memory failure before reducing it.
+6. Preserve useful caches and prior patch history. Follow the repository's revision policy during upgrades; avoid full rebuilds or cache deletion without evidence.
+7. Validate replay from the clean pinned base and run affected upstream tests or builds. Report the revision, patch changes, replay result, validation, and material resource limitations.

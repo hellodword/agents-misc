@@ -21,6 +21,6 @@ Preserve an existing project's language and command framework.
 - Define command name, subcommands, positional arguments, flags, defaults, stdin, stdout, stderr, and exit status.
 - For greenfield behavior, start with flags and arguments. Do not create config files or environment overrides without a requirement.
 - Put the primary result on stdout and human diagnostics on stderr. Keep structured output free of progress text.
-- Return 0 for success, 2 for usage or input errors, and 1 for runtime failure.
+- For a new CLI, return 0 for success, 2 for usage or input errors, and 1 for runtime failure. Preserve an established exit-status contract.
 - Preserve scriptable output and existing precedence. Treat renames, defaults, output, exit codes, config, and environment behavior as compatibility-sensitive.
 - Validate parsing, representative output, stderr, exit status, and precedence when those behaviors change.

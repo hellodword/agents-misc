@@ -7,11 +7,11 @@ Use this reference when a project provisions its Playwright browser through Nix.
 - Let the project-owned `flake.lock` pin the nixpkgs revision and therefore the browser build.
 - Let the established package-manager lock pin `@playwright/test` or `playwright`.
 - Do not add a second handwritten browser version string. Update Nix inputs only through Nix and dependency locks only through their owning package manager.
-- Playwright documents custom `executablePath` use as a compatibility risk compared with its bundled browsers. Run a focused real-browser smoke flow after either lock changes; report incompatibility instead of falling back to a host or downloaded browser.
+- Playwright documents custom `executablePath` use as a compatibility risk compared with its bundled browsers. Run a focused real-browser smoke flow on initial setup or relevant browser, Playwright, or launch-configuration changes. Unrelated lockfile changes do not need that smoke test. Resolve incompatibility through supported input/dependency updates or configuration changes, without a silent browser fallback.
 
 ## Development shell
 
-When the project has no explicit shell-isolation contract, add the browser path to `devShells.default` with the other development tools. Preserve an established named shell when it already owns the E2E contract. This excerpt shows only the browser settings:
+Add browser settings to the appropriate development shell. Start with `devShells.default` for a new setup, preserve established named shells, and isolate environments when there is a concrete need. This excerpt shows only the browser settings:
 
 ```nix
 default = pkgs.mkShell {
@@ -22,7 +22,7 @@ default = pkgs.mkShell {
 
 `pkgs.chromium` is the default free Chrome-family browser. If the product specifically requires branded Google Chrome, first verify the project's supported systems and obtain explicit authorization for the unfree dependency, then import nixpkgs with a narrow `allowUnfreePredicate` and use `pkgs.google-chrome`. Do not broaden unfree acceptance for unrelated packages.
 
-Run dependency installation and E2E through the same default shell so the download policy and executable path are present:
+Run dependency installation and E2E through the same selected shell so the download policy and executable path are present. For a default shell:
 
 ```sh
 nix develop --command npm ci
@@ -50,7 +50,7 @@ The helper requires an absolute executable path from `PLAYWRIGHT_NIX_BROWSER_PAT
 
 ## Focused validation
 
-Run these in order, adapting the shell and package command names to the project:
+For provisioning or compatibility work, verify the executable and smoke flow, adapting the shell and package command names to the project:
 
 ```sh
 nix develop --command bash -c 'test -x "$PLAYWRIGHT_NIX_BROWSER_PATH"'
@@ -58,4 +58,4 @@ nix develop --command bash -c '"$PLAYWRIGHT_NIX_BROWSER_PATH" --version'
 nix develop --command npm run e2e -- --grep @smoke
 ```
 
-Run `nix flake check` only when checks or broad flake wiring are established project interfaces. Record the locked nixpkgs input, selected browser attribute and reported version, locked Playwright version, development shell, display mode, and smoke-flow result. A browser-version command alone does not validate Playwright compatibility.
+Broader flake checks are needed only for affected adopted output/check wiring or a project gate. For compatibility work, record the browser and Playwright versions, relevant shell/launch configuration, and smoke-flow result. A browser-version command alone does not validate Playwright compatibility.

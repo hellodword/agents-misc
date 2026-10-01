@@ -2,8 +2,7 @@
 
 ## Greenfield React application
 
-- Use React Router Framework Mode with `ssr: false`, TypeScript strict mode, npm, and a committed npm lockfile.
-- Use shadcn/ui when a component library helps, while keeping accessible semantics and project-owned styling tokens.
+- Use TypeScript strict mode with accessible semantics and project-owned styling tokens. The new-project route owns the initial framework and package-manager choices.
 - Produce a static single-page application. Pre-render known SEO or content routes; retain a correct SPA fallback for all other client routes.
 - In a Go or Rust monorepo, proxy `/api` during development. In production, let the backend or reverse proxy serve `build/client` with static assets and the correct SPA fallback.
 - Use ESLint with React Hooks rules, Prettier defaults, Vitest, and React Testing Library.
