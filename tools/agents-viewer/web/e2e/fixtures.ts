@@ -227,8 +227,14 @@ async function startServer(
 export const test = base.extend<Runtime & Options>({
   password: ["", { option: true }],
   browser: [
-    async ({}, use) => {
-      const browser = await chromium.launch(nixBrowserLaunchOptions());
+    async ({ launchOptions, headless, channel }, use) => {
+      const browser = await chromium.launch(
+        nixBrowserLaunchOptions(process.env, {
+          ...launchOptions,
+          headless,
+          channel,
+        }),
+      );
       try {
         await use(browser);
       } finally {

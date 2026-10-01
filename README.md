@@ -24,6 +24,8 @@ Rust-to-TypeScript binding. No other generated tree is a durable source input.
 
 Only [AGENTS.md](AGENTS.md) and `.agents/**` are distributed. Consuming repositories provide both at their root and normally mount or copy them read-only. The external distribution system chooses and records a Git commit, version, or tag; this repository does not maintain a payload version or consumer lock.
 
+The payload includes the [Agent Rules Kit MIT license notice](.agents/LICENSE.agent-rules-kit), a real-file copy of this repository's authoritative [LICENSE](LICENSE). It covers this kit, not the consuming project or independently added rules and skills. Keep the notice with redistributed copies; do not replace a consuming project's license with it.
+
 Repository maintenance files such as `.project-agent/**`, the checker, tests, Just recipes, and Nix checks are not part of the payload. The separately maintained `codex/**`, `tools/**`, and `.github/**` trees are outside the distributed rules-kit payload; their own guides define their contracts.
 
 ## Loading model
@@ -42,13 +44,7 @@ Imported source snapshots are read-only. Apply changes through their owning impo
 For public API work, read the [HTTP contract](../contracts/http.md).
 ```
 
-Agents read the entrypoint when present and follow task-relevant references through further project documents as needed for requirements or evidence. Preserve each requirement's scope, revisit guidance when work reaches a new boundary, and avoid bulk scans, cycles, or repeated reads. Shared rules and skills retain their explicit routing through [.agents/rules/index.md](.agents/rules/index.md).
-
-Keep descriptive facts distinct from requirements. Read versions, dependency choices, and executable commands from their authoritative configuration or tooling instead of copying them into the entrypoint. A stale version summary does not override current configuration; an explicit compatibility requirement still constrains implementation when the two disagree.
-
-Agents may create or maintain the entry when current work confirms useful, durable requirements, decisions, facts, or navigation. Temporary progress and investigations belong in task records. Project instructions may record established authorization; editing them does not itself authorize another operation or widen the specific exception sources in `AGENTS.md`.
-
-The shared kit records personal preferences and operational boundaries. Prefer repository evidence and proportionate validation over generic tutorials, fixed procedure counts, or repeated approval requests. In the usual Nix-based devcontainer, an agent may add required tools or create a minimal project development shell. Additional Nix product outputs still require an explicit user or project choice.
+The [project-context policy](AGENTS.md#project-context) defines how to maintain that entrypoint and distinguish requirements from descriptive facts. The [loading policy](AGENTS.md#targeted-loading) applies to every repository task, including read-only work, and routes shared rules and skills through [.agents/rules/index.md](.agents/rules/index.md).
 
 ### This repository
 
@@ -63,6 +59,8 @@ The local [.project-agent/project.md](.project-agent/project.md) covers all comp
 
 Keep supporting files beside their owning skill and link them directly from `SKILL.md`. Do not create global template or reference catalogs. Keep each substantive preference in one rule; skills supply workflow decisions instead of repeating those defaults.
 
+[AGENTS.md](AGENTS.md#safety-and-authorization) owns global safety and authorization, [dependencies](.agents/rules/dependencies.md) owns dependency-update operations, [Nix](.agents/rules/nix.md) owns environment and output policy, and [formatting](.agents/rules/formatting.md) owns formatter policy. The [maintenance rules](.project-agent/rules/maintenance.md) define this repository's structural conventions.
+
 ## Changes to earlier guidance
 
 | Earlier entry                                      | Current home or behavior                                                                                                                     |
@@ -75,6 +73,8 @@ Keep supporting files beside their owning skill and link them directly from `SKI
 | `compatibility-review`                             | Consumer-based decisions in [contracts](.agents/rules/contracts.md)                                                                          |
 | `generated-artifacts-review`                       | Role-based ownership and proportionate validation in [generated assets](.agents/rules/generated-artifacts.md)                                |
 | `standalone-final-execution-plan` and its template | [long-task-plan](.agents/skills/long-task-plan/SKILL.md), triggered by an explicit request to plan autonomous long execution                 |
+| `nix-browser-e2e` and its helper                   | Browser policy in the [Nix rule](.agents/rules/nix.md#project-owned-playwright-browsers); projects use native Playwright configuration       |
+| Shared GitHub-hosted Nix recipes                   | Removed; runner setup is project-owned, including this repository's existing guarded action                                                  |
 
 Old entrypoints have no forwarding aliases. The kit supplies no dedicated SQLite migration or backup workflow; projects decide those methods. Database and library choices are preferences with justified alternatives, and dependency quality matters more than dependency count.
 
@@ -90,11 +90,15 @@ For rules-kit changes, run `just check-agent-rules` or its equivalent Nix check:
 nix build --no-link .#checks.x86_64-linux.agent-rules
 ```
 
-The checker validates the distributed entrypoint, directory layout, skill metadata, index coverage, local links, and resource ownership. It scans every distributed Markdown file and rejects symlinks. Local references must remain inside `AGENTS.md` and `.agents/**`. It does not validate consumer overlay links, project document chains, or instruction semantics. Its tests use a minimal synthetic payload and do not depend on the other repository components.
+The checker validates the distributed entrypoint, license notice, directory layout, skill metadata, index coverage, local links, and resource ownership. It scans distributed `.md` and `.markdown` files case-insensitively and rejects symlinks and duplicate YAML fields. Prescribed entrypoint names remain exact: `AGENTS.md`, `index.md`, and `SKILL.md`. Local references must remain inside `AGENTS.md` and `.agents/**`. It does not validate consumer overlay links, project document chains, or instruction semantics. Its tests use a minimal synthetic payload and do not depend on the other repository components.
+
+Both maintenance entrypoints enable `--check-license-copy` to compare the distributed notice with this repository's root `LICENSE` byte for byte. A standalone invocation of `scripts/check-agent-rules.py --root <consumer>` checks the payload without comparing the consuming project's license.
 
 Use the [supported Markdown link syntax](#supported-markdown-links) for distributed files. Review project navigation separately when changing it.
 
 Workflow validation is independent: use `just check-workflows` or `nix build --no-link .#checks.x86_64-linux.github-workflows` when changing that boundary. Choose the local entrypoint or the equivalent Nix check instead of repeating the same tests through both.
+
+The [Agent Rules CI workflow](.github/workflows/check-agent-rules.yml) runs the same kit check on pushes to `master` and manual dispatches, using the repository-owned Nix setup action.
 
 Format the changed files with the repository formatter. For Nix output or check wiring changes, evaluate the flake with `nix flake check --no-build --no-write-lock-file` and build the affected checks. A full flake check is for changes that need the repository-wide delivery gate; routine rules-kit edits use the focused check above. Accept flake-provided configuration only under the applicable trust policy.
 
@@ -108,4 +112,4 @@ These conventions apply to the distributed Markdown files scanned by `scripts/ch
 - Write paths directly, without whitespace, parentheses, angle brackets, quotes, backslash escapes, percent encoding, query strings, or link titles. Paths are relative to the source document; a leading `/` refers to the repository root. References must point to an existing distributed file or directory.
 - Reference-style definitions, full references such as `[text][id]`, and collapsed references such as `[text][]` are errors; rewrite them as inline links.
 - Put Markdown examples in backtick-delimited inline code or backtick/tilde fenced code blocks so they are excluded from link checking. Skill frontmatter is validated as metadata rather than scanned for links.
-- External URLs are not fetched, fragment identifiers are not checked against headings, and native HTML links are outside the checker scope. `file:` URLs are rejected.
+- External URLs, including protocol-relative URLs, are not fetched; fragment identifiers are not checked against headings, and native HTML links are outside the checker scope. `file:` URLs, absolute Windows drive paths, and backslash UNC paths are rejected.

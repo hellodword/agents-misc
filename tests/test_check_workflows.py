@@ -24,6 +24,8 @@ class CheckWorkflowsTests(unittest.TestCase):
             self.root / ".github",
             copy_function=shutil.copyfile,
         )
+        # copytree preserves read-only Nix store directory modes.
+        (self.root / ".github" / "workflows").chmod(0o755)
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -42,6 +44,33 @@ class CheckWorkflowsTests(unittest.TestCase):
 
     def test_valid_workflows_pass(self) -> None:
         self.assertEqual([], self.errors())
+
+    def test_missing_agent_rules_workflow_fails(self) -> None:
+        self.workflow("check-agent-rules.yml").unlink()
+        self.assertTrue(
+            any(
+                "check-agent-rules.yml: invalid workflow YAML" in error
+                for error in self.errors()
+            )
+        )
+
+    def test_agent_rules_workflow_requires_nix_setup_before_commands(self) -> None:
+        path = self.workflow("check-agent-rules.yml")
+        original = path.read_text(encoding="utf-8")
+        setup = "      - uses: ./.github/actions/setup-nix\n"
+        self.assertIn(setup, original)
+        for replacement in (
+            original.replace(setup, ""),
+            original.replace(setup, "") + "\n" + setup,
+        ):
+            with self.subTest(workflow=replacement):
+                path.write_text(replacement, encoding="utf-8")
+                self.assertTrue(
+                    any(
+                        "check-agent-rules.yml: job 'verify' must use" in error
+                        for error in self.errors()
+                    )
+                )
 
     def test_codex_cache_job_without_verification_fails(self) -> None:
         self.replace("build-codex.yml", "    needs: verify\n", "")

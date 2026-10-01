@@ -279,6 +279,11 @@ downloads. Tests never search `PATH`, connect to an existing browser, or fall
 back to a host browser. Browser profiles, screenshots, traces, databases, build
 output, and other runtime artifacts stay in ignored or temporary locations.
 
+Configure launch behavior through Playwright's native `use.launchOptions`;
+`use.headless`, `use.channel`, and runner options such as `--headed` retain
+Playwright's precedence. The required Nix executable path remains authoritative.
+The Viewer fixture adds no container-based sandbox or shared-memory overrides.
+
 The Nix package contains one executable with the Web UI embedded:
 
 ```bash

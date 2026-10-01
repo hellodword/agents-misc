@@ -3,6 +3,7 @@
 ## Distribution boundary
 
 - Only `AGENTS.md` and `.agents/**` belong to the distributed payload.
+- Root `LICENSE` is the authoritative license text for this kit. Keep `.agents/LICENSE.agent-rules-kit` as a byte-identical real-file copy; the maintenance entrypoints enable `--check-license-copy`. Default payload validation must remain independent of a consuming repository's license.
 - Use real files and directories; the checker rejects every symlink, including links within the payload. Keep local links within the distribution boundary. Do not link to this repository's maintenance overlay, checker, tests, or Just/Nix checks from the payload.
 
 ## Rules and skills
@@ -14,6 +15,10 @@
 - Put supporting files under the skill's `assets/`, `references/`, or `scripts/` directory, and link each file directly from `SKILL.md`.
 - Keep simple defaults in rules. Use human-readable templates for reports intended for people; add machine contracts only for actual program consumers.
 - Keep substantive preferences in one place. Use skills for workflow decisions that benefit from guidance, without repeating rules or basic model capabilities. Route by actual work, and check that incidental keywords do not trigger unrelated workflows.
+
+## Repository CI
+
+The repository has adopted [.github/actions/setup-nix](../../.github/actions/setup-nix/action.yml) for its Nix workflows, including [Agent Rules CI](../../.github/workflows/check-agent-rules.yml). Its existing use of `apt` and the official Nix installer is authorized only on one-use GitHub-hosted Ubuntu runners. Preserve its environment guards; this authorization does not apply to developer machines or self-hosted runners. Runner setup remains owned by that action, outside the shared payload.
 
 ## Markdown links
 

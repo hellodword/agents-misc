@@ -60,7 +60,7 @@ lib.genAttrs supportedSystems (
     agent-rules = pkgs.runCommand "agent-rules-check" { nativeBuildInputs = [ agentRulesPython ]; } ''
       cd ${../.}
       export PYTHONDONTWRITEBYTECODE=1
-      python3 scripts/check-agent-rules.py --root .
+      python3 scripts/check-agent-rules.py --root . --check-license-copy
       python3 -m unittest tests.test_check_agent_rules
       touch "$out"
     '';

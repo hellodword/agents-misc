@@ -4,6 +4,8 @@
 
 This file is the shared entrypoint for coding agents. Shared rules and workflows live under `.agents/`. An optional, project-owned `.project-agent/project.md` entrypoint records scoped requirements and locates project context.
 
+The [Agent Rules Kit license notice](.agents/LICENSE.agent-rules-kit) accompanies this shared payload. It does not license the consuming project or independently added rules and skills.
+
 Apply instructions in this order:
 
 1. Platform, system, and developer instructions.
@@ -31,7 +33,7 @@ Shared technology preferences apply to new unconstrained choices and projects th
 1. Read this file first.
 2. If `.project-agent/project.md` exists, read it before changing or relying on project behavior. Otherwise use existing code, configuration, and documentation to establish project context.
 3. Follow task-relevant project references through further documents as needed for requirements or evidence. Preserve each requirement's scope and revisit relevant guidance when a new boundary appears. Avoid bulk directory reads, cycles, and rereading unchanged context.
-4. Before changing tracked code, configuration, or data, read [.agents/rules/index.md](.agents/rules/index.md).
+4. At the start of every repository task, confirm that [.agents/rules/index.md](.agents/rules/index.md) has been read. This includes read-only review, planning, documentation, new files, and commit work; reuse unchanged guidance already in context.
 5. Load the index routes that match work actually being performed. When a new boundary becomes relevant, load its route then. Avoid rereading unchanged guidance or loading workflows from incidental keywords.
 6. Read a skill-local asset or reference only when its `SKILL.md` directly instructs you to do so.
 
@@ -56,7 +58,7 @@ Never infer unseen instructions from a filename or directory name.
 - Never use global installs, host package managers, curl/wget-to-shell installers, or system-level environment mutation by default.
 - Treat a dependency lockfile as tool-generated data when the active project's dependency tooling consumes it to record or pin a resolved dependency, toolchain, input graph, or integrity metadata. This includes `Cargo.lock`, `flake.lock`, `package-lock.json`, and equivalent files.
 - Never modify dependency-lockfile content with `apply_patch`, a text editor, search and replace, or an ad hoc script. This prohibition covers versions, checksums, sources, dependency edges, metadata, and merge-conflict hunks.
-- Change authoritative manifests or inputs when required, then update the lockfile only through the repository's documented command or the project's declared dependency tool. A supported command that intentionally updates only the lockfile is allowed.
+- Update dependency lockfiles only through the repository's documented command or the project's declared dependency tool.
 - If the declared command is unavailable or fails, diagnose or report the blocker instead of editing the lockfile. Manual content editing is allowed only when `.project-agent/project.md`, a contract it directly marks as required, or official documentation published by the dependency-tool maintainer explicitly requires that exact operation for that exact lockfile. Read and verify the exception source before editing; memory, inferred conventions, and a user request alone are not exceptions.
 - Never use `git add .`, `git add -A`, `git add --all`, or an equivalent bulk-staging operation. Stage explicit paths only.
 - Preserve unrelated user changes. Never reset or overwrite them to simplify the task.
@@ -72,10 +74,6 @@ As a special non-content-staging operation, `git add -N -- <file>` is allowed wh
 Preserve deliberately tracked `.vscode/**` and `.devcontainer/**` configuration when relevant. Do not share new machine-local editor or container configuration unless the user requests it.
 
 Verify changing external facts through official documentation, registries, lockfiles, package managers, or current local tool output. Do not rely on memory for versions, action majors, package names, advisories, CLI flags, registry metadata, or maintenance status.
-
-### Narrow GitHub-hosted Nix exception
-
-A project-owned workflow may use the `nix-workflow` skill's GitHub-hosted Ubuntu recipes when that workflow explicitly adopts them. On a one-use GitHub-hosted Ubuntu runner only, those recipes may use `apt`, the official Nix installation script, and documented disk preparation. Never apply this exception on a developer machine or self-hosted runner.
 
 ## Temporary workspace and retention
 

@@ -27,11 +27,38 @@ CODE_PATTERN = re.compile(
 UNSUPPORTED_TARGET_PATTERN = re.compile(r"[\s()<>\"'\\`\[\]\x00-\x1f\x7f]")
 FRONTMATTER_PATTERN = re.compile(r"\A---\r?\n(.*?)\r?\n---(?:\r?\n|\Z)", re.DOTALL)
 RESOURCE_DIRS = {"assets", "references", "scripts"}
+MARKDOWN_SUFFIXES = {".md", ".markdown"}
+LICENSE_NOTICE = "LICENSE.agent-rules-kit"
+WINDOWS_PATH_PATTERN = re.compile(r"^(?:[a-zA-Z]:[\\/]|\\\\)")
+
+
+class UniqueKeyLoader(yaml.SafeLoader):
+    def construct_mapping(self, node, deep=False):
+        mapping = super().construct_mapping(node, deep=deep)
+        seen = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in seen:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    f"duplicate field: {key!r}",
+                    key_node.start_mark,
+                )
+            seen.add(key)
+        return mapping
 
 
 def _payload_paths(root: Path, errors: list[str]) -> set[Path]:
     paths: set[Path] = set()
-    pending = [root / ".agents", root / "AGENTS.md"]
+    try:
+        # Inspect actual names even on a case-insensitive filesystem.
+        pending = [
+            path for path in root.iterdir() if path.name in {".agents", "AGENTS.md"}
+        ]
+    except OSError as exc:
+        errors.append(f"{root}: cannot inspect repository: {exc}")
+        return paths
     while pending:
         path = pending.pop()
         try:
@@ -59,6 +86,21 @@ def _read_text(path: Path, errors: list[str]) -> str | None:
         return None
 
 
+def _license_bytes(path: Path, errors: list[str]) -> bytes | None:
+    if path.is_symlink() or not path.is_file():
+        errors.append(f"{path}: required license notice must be a real file")
+        return None
+    try:
+        content = path.read_bytes()
+        if not content.decode("utf-8").strip():
+            errors.append(f"{path}: license notice must not be empty")
+            return None
+        return content
+    except (OSError, UnicodeDecodeError) as exc:
+        errors.append(f"{path}: license notice must be readable UTF-8: {exc}")
+        return None
+
+
 def _prose(text: str) -> str:
     """Mask code examples without changing source line numbers."""
     lines: list[str] = []
@@ -80,7 +122,11 @@ def _prose(text: str) -> str:
         else:
             lines.append(line)
     return CODE_PATTERN.sub(
-        lambda match: re.sub(r"[^\n]", " ", match[0]), "".join(lines)
+        # Keep escaped backslashes visible so local Windows paths are rejected.
+        lambda match: match[0]
+        if match[0] == r"\\"
+        else re.sub(r"[^\n]", " ", match[0]),
+        "".join(lines),
     )
 
 
@@ -102,8 +148,14 @@ def _local_links(
                 f"{location}: reference-style links are unsupported; use [text](path)"
             )
             continue
+        url_target = target.lstrip().removeprefix("<")
+        if WINDOWS_PATH_PATTERN.match(url_target):
+            errors.append(
+                f"{location}: Windows local path is not a distributable link: {target}"
+            )
+            continue
         try:
-            parts = urlsplit(target.lstrip().removeprefix("<"))
+            parts = urlsplit(url_target)
         except ValueError as exc:
             errors.append(f"{location}: invalid link {target!r}: {exc}")
             continue
@@ -147,7 +199,7 @@ def _validate_metadata(path: Path, text: str, errors: list[str]) -> None:
         errors.append(f"{path}: missing YAML frontmatter")
         return
     try:
-        metadata = yaml.safe_load(match.group(1))
+        metadata = yaml.load(match.group(1), Loader=UniqueKeyLoader)
     except yaml.YAMLError as exc:
         errors.append(f"{path}: invalid YAML frontmatter: {exc}")
         return
@@ -178,13 +230,13 @@ def _validate_metadata(path: Path, text: str, errors: list[str]) -> None:
         )
 
 
-def check_repository(root: Path) -> list[str]:
+def check_repository(root: Path, *, check_license_copy: bool = False) -> list[str]:
     root = root.resolve()
     errors: list[str] = []
     paths = _payload_paths(root, errors)
     documents: dict[Path, str] = {}
     for path in sorted(paths):
-        if path.is_file() and path.suffix == ".md":
+        if path.is_file() and path.suffix.lower() in MARKDOWN_SUFFIXES:
             text = _read_text(path, errors)
             if text is not None:
                 documents[path] = text
@@ -195,12 +247,29 @@ def check_repository(root: Path) -> list[str]:
     agents = root / ".agents"
     rules = agents / "rules"
     skills = agents / "skills"
+    license_path = agents / LICENSE_NOTICE
+    # Do not read through a rejected payload symlink or its parent directory.
+    if license_path not in paths:
+        errors.append(f"{license_path}: required license notice is missing")
+        notice = None
+    else:
+        notice = _license_bytes(license_path, errors)
+    if check_license_copy:
+        authoritative_notice = _license_bytes(root / "LICENSE", errors)
+        if (
+            notice is not None
+            and authoritative_notice is not None
+            and notice != authoritative_notice
+        ):
+            errors.append(f"{license_path}: license copy must match {root / 'LICENSE'}")
     for directory in (agents, rules, skills):
         if directory not in paths or not directory.is_dir():
             errors.append(f"{directory}: required directory is missing")
     for path in sorted(path for path in paths if path.parent == agents):
-        if path not in (rules, skills):
-            errors.append(f"{path}: payload entries must belong to rules or skills")
+        if path not in (rules, skills, license_path):
+            errors.append(
+                f"{path}: payload entries must belong to rules or skills, except {LICENSE_NOTICE}"
+            )
 
     links = {
         path: _local_links(root, path, text, paths, errors)
@@ -211,7 +280,7 @@ def check_repository(root: Path) -> list[str]:
         errors.append(f"{index}: index must be a non-empty Markdown file")
     routed: set[Path] = set()
     for path in sorted(path for path in paths if path.parent == rules):
-        if not path.is_file() or path.suffix != ".md":
+        if not path.is_file() or path.suffix.lower() not in MARKDOWN_SUFFIXES:
             errors.append(f"{path}: rules must be flat Markdown files")
         elif path != index:
             routed.add(path)
@@ -247,8 +316,13 @@ def main(argv: list[str] | None = None) -> int:
         default=Path.cwd(),
         help="repository root (default: current directory)",
     )
+    parser.add_argument(
+        "--check-license-copy",
+        action="store_true",
+        help="also compare the kit license notice with root LICENSE (kit maintenance only)",
+    )
     args = parser.parse_args(argv)
-    errors = check_repository(args.root)
+    errors = check_repository(args.root, check_license_copy=args.check_license_copy)
     if errors:
         for error in errors:
             print(f"error: {error}", file=sys.stderr)

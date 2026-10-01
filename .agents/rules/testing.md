@@ -17,7 +17,6 @@ Choose validation from changed behavior, risk, existing coverage, and project ga
 - Avoid real network access outside an explicit integration scope. Use small synthetic fixtures, never real user data.
 - Add a regression test when it durably protects meaningful behavior or risk. Reuse existing coverage; trivial reversible fixes do not always justify a new test.
 - Do not set an arbitrary coverage percentage. Cover important decisions, contracts, failures, and regressions.
-- Never weaken, split, skip, or delete tests to hide a failure.
 - Attribute failures as introduced, pre-existing, or environment-caused with evidence. Retry the narrow command after a relevant change or to resolve uncertainty, rather than repeating an unchanged failure mechanically.
 - For Go changes involving goroutines, channels, mutexes, atomics, shared maps, slices or caches, workers, concurrent HTTP handlers, database connection lifecycle, context cancellation, timers, watchers, or signals, run the affected package or command with `go test -race`. If the race detector is unavailable in the declared environment, report that limitation instead of silently substituting an ordinary test.
 - Use browser E2E only for browser-specific behavior, a primary browser flow, or a regression that cannot be covered below that boundary.

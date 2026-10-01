@@ -2,7 +2,7 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import { findNixBrowser } from "./browser";
+import { findNixBrowser, nixBrowserLaunchOptions } from "./browser";
 
 const temporaryDirectories: string[] = [];
 
@@ -45,5 +45,48 @@ describe("the Nix browser contract", () => {
     expect(findNixBrowser({ PLAYWRIGHT_NIX_BROWSER_PATH: browser })).toBe(
       realpathSync(browser),
     );
+  });
+
+  test("preserves explicit sandbox, headed mode, and custom launch options", () => {
+    const browser = temporaryBrowser(0o700);
+    const options = {
+      chromiumSandbox: true,
+      headless: false,
+      channel: "chromium",
+      args: ["--lang=zh-CN"],
+      slowMo: 50,
+    };
+    const result = nixBrowserLaunchOptions(
+      { PLAYWRIGHT_NIX_BROWSER_PATH: browser },
+      options,
+    );
+    expect(result).toEqual({
+      ...options,
+      executablePath: realpathSync(browser),
+    });
+    expect(options.args).toEqual(["--lang=zh-CN"]);
+  });
+
+  test("leaves unspecified launch policy to Playwright", () => {
+    const browser = temporaryBrowser(0o700);
+    const options = nixBrowserLaunchOptions({
+      PLAYWRIGHT_NIX_BROWSER_PATH: browser,
+    });
+    expect(options.headless).toBeUndefined();
+    expect(options.chromiumSandbox).toBeUndefined();
+    expect(options.args).toBeUndefined();
+  });
+
+  test("keeps the required Nix executable even when launch options name another", () => {
+    const browser = temporaryBrowser(0o700);
+    expect(
+      nixBrowserLaunchOptions(
+        { PLAYWRIGHT_NIX_BROWSER_PATH: browser },
+        { executablePath: "/host/chromium" },
+      ).executablePath,
+    ).toBe(realpathSync(browser));
+    expect(() =>
+      nixBrowserLaunchOptions({}, { executablePath: browser }),
+    ).toThrow(/PLAYWRIGHT_NIX_BROWSER_PATH is unset/);
   });
 });

@@ -13,6 +13,7 @@ import yaml
 
 
 WORKFLOWS = {
+    "check-agent-rules.yml": (),
     "build-codex.yml": (("build", "verify"),),
     "build-agents-viewer.yml": (("build", "verify"),),
     "publish-codex-config-atlas-pages.yml": (

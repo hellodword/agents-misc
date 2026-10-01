@@ -14,16 +14,21 @@ The usual working environment is a Nix-based devcontainer. Prefer project develo
 
 - A development shell does not authorize adding packages, apps, checks, formatter, modules, or overlays. Add these only when the user or project explicitly adopts the interface; pure Nix products may expose outputs required by their stated product scope.
 - An existing output authorizes maintaining that interface, not unrelated outputs. Preserve its consumer contract.
-- Keep flake wiring understandable. Extract reusable logic under `nix/` when useful; do not create empty structure. Ecosystem formatters can live in the shell without a flake formatter or check.
+- Keep flake wiring understandable. Extract reusable logic under `nix/` when useful; do not create empty structure.
 - Just can run inside or outside the shell. Compose recipes when helpful and keep environment entry clear; avoid accidental recursion between Just and `nix develop`. Move orchestration into scripts when its complexity or testing needs justify that choice.
 
-## Browser and source handling
+## Project-owned Playwright browsers
 
-- For project-owned Playwright E2E, prefer Chromium from locked nixpkgs with an explicit executable path. The browser skill covers provisioning and compatibility validation. Branded Google Chrome requires a product need and authorization for the unfree dependency.
+- Preserve an existing browser source and project policy; ordinary test runs do not call for a migration. For a new Playwright setup in a Nix project, prefer Chromium from locked nixpkgs when the target platform supports it. Branded Google Chrome requires a product need and authorization for the unfree dependency.
+- When using a Nix browser, set an explicit executable path through the project's native Playwright configuration and preserve its existing configuration interface. Fail clearly when that executable is unavailable; do not silently fall back to another browser. No shared helper or new environment-variable convention is required.
+- Run an actual project browser smoke flow on initial provisioning and relevant browser, Playwright, or launch-configuration changes. Separately pinned versions do not establish compatibility; resolve mismatches through the owning inputs or project configuration.
+- Follow the framework and project sandbox settings. For a trusted local E2E flow with an actual sandbox launch failure, inspect project requirements and container limitations; use native `chromiumSandbox: false` in project configuration when needed. If the project explicitly requires an enabled sandbox, fix the environment or report the blocker. Container detection alone does not justify overriding that policy.
+
+## Source handling
+
 - Do not use a `path:` flake reference to bypass Git source filtering. If a required durable file is untracked, use the root rule's exact-path intent-to-add procedure and report it.
 
 ## Focused validation
 
 - For a shell tool change, verify the tool and retry the command in that shell. Routine code, documentation, or tool additions do not call for `nix build` or a full `nix flake check`.
 - For an adopted product output, validate the affected output. Evaluate broader flake/check wiring only when that boundary changes or project policy requires it; choose targeted builds before a full repository gate.
-- Treat `nix fmt` as mutating and scope formatting to the changed files where supported.

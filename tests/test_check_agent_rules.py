@@ -20,6 +20,7 @@ class CheckAgentRulesTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name) / "repo"
+        self.write(".agents/LICENSE.agent-rules-kit", "Synthetic kit license notice.\n")
         self.write(
             "AGENTS.md", "# Instructions\nRead [the index](.agents/rules/index.md).\n"
         )
@@ -54,6 +55,49 @@ class CheckAgentRulesTests(unittest.TestCase):
         self.write(".project-agent/project.md", "[missing](also-absent.md)\n")
         self.assertEqual([], self.errors())
 
+    def test_consuming_project_license_is_independent(self) -> None:
+        self.write("LICENSE", "An independent consuming project license.\n")
+        self.assertEqual([], self.errors())
+
+    def test_maintenance_license_check_requires_an_identical_real_file(self) -> None:
+        license_path = self.root / "LICENSE"
+        notice = (self.root / ".agents/LICENSE.agent-rules-kit").read_bytes()
+        for content, expected in (
+            (None, "required license notice"),
+            (notice + b"\n", "license copy must match"),
+            (notice.replace(b"\n", b"\r\n"), "license copy must match"),
+            (notice, None),
+        ):
+            with self.subTest(content=content):
+                if content is not None:
+                    license_path.write_bytes(content)
+                errors = CHECKER.check_repository(self.root, check_license_copy=True)
+                if expected is None:
+                    self.assertEqual([], errors)
+                else:
+                    self.assertTrue(any(expected in error for error in errors), errors)
+        license_path.unlink()
+        license_path.symlink_to(self.root / ".agents/LICENSE.agent-rules-kit")
+        errors = CHECKER.check_repository(self.root, check_license_copy=True)
+        self.assertTrue(any("must be a real file" in error for error in errors), errors)
+
+    def test_license_copy_flag_changes_cli_validation_only_when_requested(self) -> None:
+        self.write("LICENSE", "Independent project license.\n")
+        for flags, status, message in (
+            ([], 0, "check passed"),
+            (["--check-license-copy"], 1, "license copy must match"),
+        ):
+            with self.subTest(flags=flags):
+                output = io.StringIO()
+                with (
+                    contextlib.redirect_stdout(output),
+                    contextlib.redirect_stderr(output),
+                ):
+                    self.assertEqual(
+                        status, CHECKER.main(["--root", str(self.root), *flags])
+                    )
+                self.assertIn(message, output.getvalue())
+
     def test_rule_and_skill_inventory_follows_files_and_index(self) -> None:
         self.write(".agents/rules/new-rule.md", "# Another rule\n")
         (self.root / ".agents/skills/demo").rename(self.root / ".agents/skills/renamed")
@@ -70,9 +114,10 @@ class CheckAgentRulesTests(unittest.TestCase):
         self.assertIn("another/SKILL.md", errors)
         self.assertIn("unrouted.md", errors)
 
-    def test_required_documents_must_be_present_and_readable(self) -> None:
+    def test_required_files_must_be_present_and_readable(self) -> None:
         for relative in (
             "AGENTS.md",
+            ".agents/LICENSE.agent-rules-kit",
             ".agents/rules/index.md",
             ".agents/skills/demo/SKILL.md",
         ):
@@ -86,6 +131,19 @@ class CheckAgentRulesTests(unittest.TestCase):
                         path.write_bytes(content)
                     self.assert_fails(str(path))
             path.write_bytes(original)
+
+    def test_entrypoint_names_remain_case_sensitive(self) -> None:
+        for relative in (
+            "AGENTS.md",
+            ".agents/rules/index.md",
+            ".agents/skills/demo/SKILL.md",
+        ):
+            with self.subTest(path=relative):
+                path = self.root / relative
+                renamed = path.with_name(path.name.swapcase())
+                path.rename(renamed)
+                self.assert_fails(str(path))
+                renamed.rename(path)
 
     def test_unowned_payload_file_fails(self) -> None:
         self.write(".agents/stray.txt", "orphan")
@@ -123,6 +181,18 @@ class CheckAgentRulesTests(unittest.TestCase):
                 )
                 self.assert_fails(expected)
 
+    def test_duplicate_metadata_fields_fail_even_with_a_valid_last_value(self) -> None:
+        for metadata in (
+            "name: other\nname: demo\ndescription: Useful guidance.",
+            "name: demo\ndescription: ''\ndescription: Useful guidance.",
+            "name: demo\nname: demo\ndescription: Useful guidance.",
+        ):
+            with self.subTest(metadata=metadata):
+                self.write(
+                    ".agents/skills/demo/SKILL.md", f"---\n{metadata}\n---\n# Skill\n"
+                )
+                self.assert_fails("duplicate field")
+
     def test_skill_without_frontmatter_fails(self) -> None:
         self.write(".agents/skills/demo/SKILL.md", "# Skill\n")
         self.assert_fails("missing YAML frontmatter")
@@ -157,6 +227,27 @@ class CheckAgentRulesTests(unittest.TestCase):
         self.assertEqual([], self.errors())
         self.write(".agents/rules/connections.md", "---\n[Missing](absent.md)\n---\n")
         self.assert_fails("connections.md:2:")
+
+    def test_markdown_extensions_are_scanned_case_insensitively(self) -> None:
+        index = self.root / ".agents/rules/index.md"
+        routes = index.read_text(encoding="utf-8")
+        for suffix in (".md", ".MD", ".markdown", ".MarkDown"):
+            for directory in (".agents/rules", ".agents/skills/demo/references"):
+                relative = f"{directory}/extra{suffix}"
+                with self.subTest(path=relative):
+                    if directory == ".agents/rules":
+                        index.write_text(
+                            routes + f"[Extra](extra{suffix})\n", encoding="utf-8"
+                        )
+                    else:
+                        self.write_skill("demo", f"[Extra](references/extra{suffix})\n")
+                    path = self.write(relative, "# Extra\n")
+                    self.assertEqual([], self.errors())
+                    self.write(relative, "# Extra\n[Missing](absent.md)\n")
+                    self.assert_fails(f"{path}:2: missing local target")
+                    path.unlink()
+                    index.write_text(routes, encoding="utf-8")
+                    self.write_skill("demo")
 
     def test_code_examples_are_skipped_without_hiding_real_links(self) -> None:
         for example in (
@@ -237,6 +328,22 @@ class CheckAgentRulesTests(unittest.TestCase):
     def test_file_uris_are_not_distributable(self) -> None:
         self.write("AGENTS.md", f"[Outside]({(self.root / 'README.md').as_uri()})\n")
         self.assert_fails("file URI is not a distributable link")
+
+    def test_windows_local_paths_are_not_external_urls(self) -> None:
+        for target in (
+            r"C:\Users\someone\private.md",
+            "c:/Users/someone/private.md",
+            r"C:\\Users\\someone\\private.md",
+            r"\\server\share\private.md",
+            r"<C:\Users\someone\private.md>",
+        ):
+            with self.subTest(target=target):
+                self.write("AGENTS.md", f"[Private]({target})\n")
+                self.assert_fails("Windows local path is not a distributable link")
+
+    def test_escaped_backslashes_do_not_hide_following_links(self) -> None:
+        self.write("AGENTS.md", r"\\[Missing](.agents/rules/absent.md)" + "\n")
+        self.assert_fails("missing local target")
 
     def test_file_symlinks_are_rejected_without_reading_the_target(self) -> None:
         outside = self.root.parent / "outside.md"

@@ -1,28 +1,8 @@
-import {
-  accessSync,
-  constants,
-  existsSync,
-  readFileSync,
-  realpathSync,
-  statfsSync,
-  statSync,
-} from "node:fs";
+import { accessSync, constants, realpathSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
+import type { LaunchOptions } from "@playwright/test";
 
 export const NIX_BROWSER_PATH_VARIABLE = "PLAYWRIGHT_NIX_BROWSER_PATH";
-
-const CONTAINER_MARKERS = [
-  "/.dockerenv",
-  "/run/.containerenv",
-  "/var/run/.containerenv",
-] as const;
-const ONE_GIB = 1024n * 1024n * 1024n;
-
-export type NixBrowserLaunchOptions = {
-  executablePath: string;
-  headless: boolean;
-  args: string[];
-};
 
 function isExecutable(path: string): boolean {
   try {
@@ -64,47 +44,12 @@ export function findNixBrowser(
   return resolved;
 }
 
-export function isContainer(): boolean {
-  if (CONTAINER_MARKERS.some((path) => existsSync(path))) return true;
-  for (const file of ["/proc/1/cgroup", "/proc/self/cgroup"]) {
-    try {
-      if (
-        /(docker|containerd|kubepods|podman|lxc)/i.test(
-          readFileSync(file, "utf8"),
-        )
-      ) {
-        return true;
-      }
-    } catch {
-      // Missing cgroup files are normal outside Linux containers.
-    }
-  }
-  return false;
-}
-
-function sharedMemoryBytes(): bigint | undefined {
-  try {
-    const stats = statfsSync("/dev/shm", { bigint: true });
-    return BigInt(stats.bsize) * BigInt(stats.blocks);
-  } catch {
-    return undefined;
-  }
-}
-
 export function nixBrowserLaunchOptions(
   environment: NodeJS.ProcessEnv = process.env,
-): NixBrowserLaunchOptions {
-  const args: string[] = [];
-  if (isContainer()) {
-    args.push("--no-sandbox");
-    const bytes = sharedMemoryBytes();
-    if (bytes !== undefined && bytes < ONE_GIB) {
-      args.push("--disable-dev-shm-usage");
-    }
-  }
+  options: LaunchOptions = {},
+): LaunchOptions {
   return {
+    ...options,
     executablePath: findNixBrowser(environment),
-    headless: true,
-    args,
   };
 }
