@@ -50,6 +50,8 @@ class CheckAgentRulesTests(unittest.TestCase):
         self.assertTrue(any(fragment in error for error in errors), errors)
 
     def test_minimal_payload_needs_no_maintenance_files(self) -> None:
+        self.write("README.md", "[missing](absent.md)\n")
+        self.write(".project-agent/project.md", "[missing](also-absent.md)\n")
         self.assertEqual([], self.errors())
 
     def test_rule_and_skill_inventory_follows_files_and_index(self) -> None:
@@ -68,24 +70,22 @@ class CheckAgentRulesTests(unittest.TestCase):
         self.assertIn("another/SKILL.md", errors)
         self.assertIn("unrouted.md", errors)
 
-    def test_readme_and_other_repository_content_are_outside_the_check(self) -> None:
-        self.write("README.md", "[missing](absent.md)\n")
-        self.write(".project-agent/project.md", "[missing](also-absent.md)\n")
-        self.assertEqual([], self.errors())
-
-    def test_empty_or_missing_entrypoint_fails(self) -> None:
-        path = self.write("AGENTS.md", " \n\t")
-        self.assert_fails("entrypoint must be a non-empty")
-        path.unlink()
-        self.assert_fails("entrypoint must be a non-empty")
-
-    def test_unreadable_markdown_is_reported(self) -> None:
-        (self.root / "AGENTS.md").write_bytes(b"\xff")
-        self.assert_fails("readable UTF-8")
-
-    def test_missing_index_fails(self) -> None:
-        (self.root / ".agents/rules/index.md").unlink()
-        self.assert_fails("index must be a non-empty")
+    def test_required_documents_must_be_present_and_readable(self) -> None:
+        for relative in (
+            "AGENTS.md",
+            ".agents/rules/index.md",
+            ".agents/skills/demo/SKILL.md",
+        ):
+            path = self.root / relative
+            original = path.read_bytes()
+            for content in (None, b" \n\t", b"\xff"):
+                with self.subTest(path=relative, content=content):
+                    if content is None:
+                        path.unlink()
+                    else:
+                        path.write_bytes(content)
+                    self.assert_fails(str(path))
+            path.write_bytes(original)
 
     def test_unowned_payload_file_fails(self) -> None:
         self.write(".agents/stray.txt", "orphan")
@@ -94,10 +94,6 @@ class CheckAgentRulesTests(unittest.TestCase):
     def test_nested_rule_directory_fails(self) -> None:
         self.write(".agents/rules/nested/rule.md", "# Rule\n")
         self.assert_fails("rules must be flat Markdown files")
-
-    def test_missing_skill_entrypoint_fails(self) -> None:
-        (self.root / ".agents/skills/demo/SKILL.md").unlink()
-        self.assert_fails("readable SKILL.md is required")
 
     def test_malformed_skill_metadata_is_reported(self) -> None:
         for metadata in (
@@ -141,32 +137,99 @@ class CheckAgentRulesTests(unittest.TestCase):
         self.write(".agents/skills/demo/extra.txt", "unexpected")
         self.assert_fails("unsupported skill-local entry")
 
-    def test_broken_local_link_fails(self) -> None:
-        self.write_skill("demo", "[Missing](references/absent.md)\n")
-        self.assert_fails("cannot resolve payload path")
+    def test_links_in_rules_and_skill_references_report_source_lines(self) -> None:
+        self.write_skill("demo", "[Guide](references/guide.md)\n")
+        self.write(".agents/skills/demo/references/guide.md", "# Guide\n")
+        for relative in (
+            ".agents/rules/connections.md",
+            ".agents/skills/demo/references/guide.md",
+        ):
+            self.write(relative, "# Guide\n\n[Missing](absent.md)\n")
+            self.assert_fails(f"{self.root / relative}:3:")
+            self.write(relative, "# Guide\n")
+        self.assertEqual([], self.errors())
 
-    def test_examples_external_links_and_fragments_do_not_require_local_files(
-        self,
-    ) -> None:
+    def test_skill_frontmatter_does_not_hide_links_in_other_documents(self) -> None:
+        self.write(
+            ".agents/skills/demo/SKILL.md",
+            "---\nname: demo\ndescription: '[Example](absent.md)'\n---\n# Skill\n",
+        )
+        self.assertEqual([], self.errors())
+        self.write(".agents/rules/connections.md", "---\n[Missing](absent.md)\n---\n")
+        self.assert_fails("connections.md:2:")
+
+    def test_code_examples_are_skipped_without_hiding_real_links(self) -> None:
+        for example in (
+            "`[Example](absent.md)`",
+            "``[Example](absent.md) with a ` inside``",
+            "`multiline\n[Example](absent.md)`",
+            "```md\n[Example](absent.md)\n[Reference][id]\n```",
+            "~~~~md\n~~~\n[Example](absent.md)\n[id]: absent.md\n~~~~~",
+            "> ```md\n> [Example](absent.md)\n> ```",
+            "````md\n```\n[Example](absent.md)\n````",
+            "```[Example](absent.md)```",
+            r"\[Example](absent.md)",
+        ):
+            with self.subTest(example=example):
+                self.write("AGENTS.md", example + "\n[Rules](.agents/rules/index.md)\n")
+                self.assertEqual([], self.errors())
+                self.write("AGENTS.md", example + "\n[Missing](absent.md)\n")
+                line_number = example.count("\n") + 2
+                self.assert_fails(f"AGENTS.md:{line_number}:")
+
+    def test_external_links_fragments_and_html_links_are_not_resolved(self) -> None:
         self.write_skill(
             "demo",
-            "```md\n[Example](absent.md)\n```\n[Docs](https://example.invalid/docs)\n[Section](#heading)\n",
+            "[Docs](https://example.invalid/docs)\n[CDN](//example.invalid/a.png)\n"
+            '[Section](#heading%20name)\n<a href="absent.md">HTML</a>\n',
         )
         self.assertEqual([], self.errors())
 
-    def test_image_links_and_encoded_filenames_are_owned_resources(self) -> None:
+    def test_images_and_plain_paths_with_fragments_are_owned_resources(self) -> None:
         self.write(".agents/skills/demo/assets/image.svg", "<svg />")
-        self.write(".agents/skills/demo/assets/two words.txt", "example")
+        self.write(".agents/skills/demo/references/指南.md", "# Guide")
         self.write_skill(
             "demo",
-            '![Image](assets/image.svg)\n[File](assets/two%20words.txt "Example")\n',
+            "![Image](assets/image.svg)\n[File](references/指南.md#section)\n"
+            "[Rules](/.agents/rules/index.md)\n",
         )
         self.assertEqual([], self.errors())
+
+    def test_unsupported_local_link_syntax_is_reported(self) -> None:
+        for target in (
+            ".agents/rules/two words.md",
+            ".agents/rules/index.md(extra)",
+            "<.agents/rules/index.md>",
+            '.agents/rules/index.md "Title"',
+            ".agents/rules/two%20words.md",
+            "..%2Foutside.md",
+            ".agents/rules/index.md?view=1",
+            r".agents\rules\index.md",
+            "",
+        ):
+            with self.subTest(target=target):
+                self.write("AGENTS.md", f"[Example]({target})\n")
+                self.assert_fails("AGENTS.md:1: unsupported local link")
+        self.write("AGENTS.md", "[Example](.agents/rules/index.md\n")
+        self.assert_fails("AGENTS.md:1: unsupported local link")
+
+    def test_reference_links_and_definitions_require_inline_links(self) -> None:
+        for text in (
+            "[Example][guide]",
+            "[Example][]",
+            "[Example]\n[guide]",
+            "![Image][guide]",
+            "[guide]: .agents/rules/index.md",
+            "> [guide]: .agents/rules/index.md",
+        ):
+            with self.subTest(text=text):
+                self.write("AGENTS.md", text + "\n")
+                self.assert_fails("AGENTS.md:1: reference-style")
 
     def test_links_cannot_escape_the_payload(self) -> None:
         self.write("README.md", "not distributed")
         (self.root.parent / "outside.md").write_text("outside", encoding="utf-8")
-        for target in ("README.md", "../outside.md", "..%2Foutside.md", "/README.md"):
+        for target in ("README.md", "../outside.md", "../absent.md", "/README.md"):
             with self.subTest(target=target):
                 self.write("AGENTS.md", f"[Outside]({target})\n")
                 self.assert_fails("escapes the distributed payload")
@@ -175,44 +238,41 @@ class CheckAgentRulesTests(unittest.TestCase):
         self.write("AGENTS.md", f"[Outside]({(self.root / 'README.md').as_uri()})\n")
         self.assert_fails("file URI is not a distributable link")
 
-    def test_external_file_symlink_is_rejected_before_reading(self) -> None:
+    def test_file_symlinks_are_rejected_without_reading_the_target(self) -> None:
         outside = self.root.parent / "outside.md"
         outside.write_bytes(b"\xff")
-        (self.root / ".agents/rules/external.md").symlink_to(outside)
-        errors = "\n".join(self.errors())
-        self.assertIn("escapes the distributed payload", errors)
-        self.assertNotIn("UTF-8", errors)
+        alias = self.root / ".agents/rules/alias.md"
+        for target in ("connections.md", outside, "missing.md", "alias.md"):
+            with self.subTest(target=target):
+                alias.symlink_to(target)
+                errors = "\n".join(self.errors())
+                self.assertIn(f"{alias}: symlinks", errors)
+                self.assertNotIn("UTF-8", errors)
+                alias.unlink()
 
-    def test_external_directory_symlink_is_rejected_before_traversing(self) -> None:
+    def test_directory_symlinks_are_rejected_without_traversal(self) -> None:
         outside = self.root.parent / "external"
         outside.mkdir()
         (outside / "SKILL.md").write_bytes(b"\xff")
-        (self.root / ".agents/skills/external").symlink_to(
-            outside, target_is_directory=True
-        )
-        errors = "\n".join(self.errors())
-        self.assertIn("escapes the distributed payload", errors)
-        self.assertNotIn("UTF-8", errors)
+        alias = self.root / ".agents/skills/alias"
+        for target in ("demo", outside, "."):
+            with self.subTest(target=target):
+                alias.symlink_to(target, target_is_directory=True)
+                errors = "\n".join(self.errors())
+                self.assertIn(f"{alias}: symlinks", errors)
+                self.assertNotIn("UTF-8", errors)
+                alias.unlink()
 
-    def test_payload_root_symlink_cannot_escape(self) -> None:
-        outside = self.root.parent / "outside"
-        (self.root / ".agents").rename(outside)
-        (self.root / ".agents").symlink_to(outside, target_is_directory=True)
-        self.assert_fails("escapes the distributed payload")
-
-    def test_internal_file_symlink_remains_distributable(self) -> None:
-        resource = self.write(".agents/skills/demo/assets/source.txt", "example")
-        resource.with_name("alias.txt").symlink_to("source.txt")
-        self.write_skill(
-            "demo", "[Source](assets/source.txt)\n[Alias](assets/alias.txt)\n"
-        )
-        self.assertEqual([], self.errors())
-
-    def test_directory_symlink_cycle_is_reported(self) -> None:
-        assets = self.root / ".agents/skills/demo/assets"
-        assets.mkdir()
-        (assets / "loop").symlink_to(".", target_is_directory=True)
-        self.assert_fails("directory symlink cycle")
+    def test_distribution_entrypoints_cannot_be_symlinks(self) -> None:
+        for name in ("AGENTS.md", ".agents"):
+            with self.subTest(name=name):
+                path = self.root / name
+                outside = self.root.parent / name
+                path.rename(outside)
+                path.symlink_to(outside, target_is_directory=outside.is_dir())
+                self.assert_fails(f"{path}: symlinks")
+                path.unlink()
+                outside.rename(path)
 
     def test_cli_exit_status_and_diagnostics(self) -> None:
         for text, status, message in (

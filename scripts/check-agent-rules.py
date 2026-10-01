@@ -4,59 +4,50 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import urlsplit
 
 import yaml
 
 
 SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-MARKDOWN_LINK_PATTERN = re.compile(r"!?\[[^\]]*\]\((<[^>]*>|[^)\n]*)\)")
-FENCED_BLOCK_PATTERN = re.compile(
-    r"^\s*(```|~~~).*?^\s*\1\s*$", re.MULTILINE | re.DOTALL
+MARKDOWN_LINK_PATTERN = re.compile(
+    r"(?P<definition>^[ \t]*(?:>[ \t]*)*\[[^\]\n]+\]:[^\n]*)"
+    r"|!?\[[^\]\n]*\](?:\((?P<target>[^)\n]*)(?P<close>\)|$)"
+    r"|[ \t]*(?:\n[ \t]*)?(?P<reference>\[[^\]\n]*\]))",
+    re.MULTILINE,
 )
+FENCE_PATTERN = re.compile(r"^[ \t]*(?:>[ \t]*)*(`{3,}|~{3,})(.*)$")
+CODE_PATTERN = re.compile(
+    r"\\[\\`\[\]]|(?<!`)(?P<ticks>`+)(?!`)(?:(?!\n[ \t]*\n)[\s\S])*?(?<!`)(?P=ticks)(?!`)"
+)
+UNSUPPORTED_TARGET_PATTERN = re.compile(r"[\s()<>\"'\\`\[\]\x00-\x1f\x7f]")
 FRONTMATTER_PATTERN = re.compile(r"\A---\r?\n(.*?)\r?\n---(?:\r?\n|\Z)", re.DOTALL)
 RESOURCE_DIRS = {"assets", "references", "scripts"}
 
 
-def _contained_path(root: Path, path: Path, errors: list[str]) -> Path | None:
-    try:
-        resolved = path.resolve(strict=True)
-    except (OSError, RuntimeError, ValueError) as exc:
-        errors.append(f"{path}: cannot resolve payload path: {exc}")
-        return None
-    if resolved != root / "AGENTS.md" and not resolved.is_relative_to(root / ".agents"):
-        errors.append(f"{path}: path escapes the distributed payload")
-        return None
-    return resolved
-
-
 def _payload_paths(root: Path, errors: list[str]) -> set[Path]:
     paths: set[Path] = set()
-
-    def visit(path: Path, parents: frozenset[Path]) -> None:
-        resolved = _contained_path(root, path, errors)
-        if resolved is None:
-            return
-        paths.add(path)
-        if path.is_dir():
-            if resolved in parents:
-                errors.append(f"{path}: directory symlink cycle")
-                return
-            try:
-                children = sorted(path.iterdir())
-            except OSError as exc:
-                errors.append(f"{path}: cannot list directory: {exc}")
-                return
-            for child in children:
-                visit(child, parents | {resolved})
-        elif not path.is_file():
-            errors.append(f"{path}: expected a file or directory")
-
-    visit(root / "AGENTS.md", frozenset())
-    visit(root / ".agents", frozenset())
+    pending = [root / ".agents", root / "AGENTS.md"]
+    while pending:
+        path = pending.pop()
+        try:
+            if path.is_symlink():
+                errors.append(
+                    f"{path}: symlinks are not allowed; use a real file or directory"
+                )
+                continue
+            if path.is_dir():
+                pending.extend(reversed(sorted(path.iterdir())))
+            elif not path.is_file():
+                errors.append(f"{path}: expected an existing file or directory")
+                continue
+            paths.add(path)
+        except OSError as exc:
+            errors.append(f"{path}: cannot inspect payload: {exc}")
     return paths
 
 
@@ -68,35 +59,85 @@ def _read_text(path: Path, errors: list[str]) -> str | None:
         return None
 
 
-def _local_links(root: Path, source: Path, text: str, errors: list[str]) -> set[Path]:
-    linked: set[Path] = set()
-    for match in MARKDOWN_LINK_PATTERN.finditer(FENCED_BLOCK_PATTERN.sub("", text)):
-        target = match.group(1).strip()
-        if target.startswith("<") and ">" in target:
-            target = target[1 : target.index(">")]
+def _prose(text: str) -> str:
+    """Mask code examples without changing source line numbers."""
+    lines: list[str] = []
+    fence = ""
+    for line in text.splitlines(keepends=True):
+        match = FENCE_PATTERN.match(line)
+        if fence:
+            if (
+                match
+                and match[1][0] == fence[0]
+                and len(match[1]) >= len(fence)
+                and not match[2].strip()
+            ):
+                fence = ""
+            lines.append("\n" if line.endswith("\n") else "")
+        elif match and not (match[1][0] == "`" and "`" in match[2]):
+            fence = match[1]
+            lines.append("\n" if line.endswith("\n") else "")
         else:
-            target = target.split(maxsplit=1)[0] if target else ""
+            lines.append(line)
+    return CODE_PATTERN.sub(
+        lambda match: re.sub(r"[^\n]", " ", match[0]), "".join(lines)
+    )
+
+
+def _local_links(
+    root: Path, source: Path, text: str, paths: set[Path], errors: list[str]
+) -> set[Path]:
+    linked: set[Path] = set()
+    if source.name == "SKILL.md":
+        text = FRONTMATTER_PATTERN.sub(
+            lambda match: "\n" * match[0].count("\n"), text, count=1
+        )
+    text = _prose(text)
+    for match in MARKDOWN_LINK_PATTERN.finditer(text):
+        line_number = text.count("\n", 0, match.start()) + 1
+        location = f"{source}:{line_number}"
+        target = match["target"]
+        if target is None:
+            errors.append(
+                f"{location}: reference-style links are unsupported; use [text](path)"
+            )
+            continue
         try:
-            parts = urlsplit(target)
+            parts = urlsplit(target.lstrip().removeprefix("<"))
         except ValueError as exc:
-            errors.append(f"{source}: invalid Markdown link {target!r}: {exc}")
+            errors.append(f"{location}: invalid link {target!r}: {exc}")
             continue
         if parts.scheme == "file":
-            errors.append(f"{source}: file URI is not a distributable link: {target}")
+            errors.append(f"{location}: file URI is not a distributable link: {target}")
             continue
-        if parts.scheme or parts.netloc or not parts.path:
+        if parts.scheme or parts.netloc:
             continue
-        path_text = unquote(parts.path)
-        path = (
-            root / path_text.lstrip("/")
-            if path_text.startswith("/")
-            else source.parent / path_text
+        if (
+            not match["close"]
+            or not target
+            or UNSUPPORTED_TARGET_PATTERN.search(target)
+            or "%" in parts.path
+            or parts.query
+        ):
+            errors.append(
+                f"{location}: unsupported local link; use [text](path) with a plain path and optional #fragment"
+            )
+            continue
+        if not parts.path:
+            continue
+        path = Path(
+            os.path.normpath(
+                root / parts.path.lstrip("/")
+                if parts.path.startswith("/")
+                else source.parent / parts.path
+            )
         )
-        link_errors: list[str] = []
-        resolved = _contained_path(root, path, link_errors)
-        errors.extend(f"{source}: {error}" for error in link_errors)
-        if resolved is not None:
-            linked.add(resolved)
+        if path != root / "AGENTS.md" and not path.is_relative_to(root / ".agents"):
+            errors.append(f"{location}: path escapes the distributed payload: {target}")
+        elif path not in paths:
+            errors.append(f"{location}: missing local target: {target}")
+        else:
+            linked.add(path)
     return linked
 
 
@@ -162,7 +203,8 @@ def check_repository(root: Path) -> list[str]:
             errors.append(f"{path}: payload entries must belong to rules or skills")
 
     links = {
-        path: _local_links(root, path, text, errors) for path, text in documents.items()
+        path: _local_links(root, path, text, paths, errors)
+        for path, text in documents.items()
     }
     index = rules / "index.md"
     if not documents.get(index, "").strip():
@@ -172,7 +214,7 @@ def check_repository(root: Path) -> list[str]:
         if not path.is_file() or path.suffix != ".md":
             errors.append(f"{path}: rules must be flat Markdown files")
         elif path != index:
-            routed.add(path.resolve())
+            routed.add(path)
 
     for directory in sorted(path for path in paths if path.parent == skills):
         if not directory.is_dir():
@@ -183,16 +225,12 @@ def check_repository(root: Path) -> list[str]:
             errors.append(f"{skill}: readable SKILL.md is required")
             continue
         _validate_metadata(skill, documents[skill], errors)
-        routed.add(skill.resolve())
+        routed.add(skill)
         for path in sorted(path for path in paths if path.parent == directory):
             if path != skill and (path.name not in RESOURCE_DIRS or not path.is_dir()):
                 errors.append(f"{path}: unsupported skill-local entry")
         for path in sorted(path for path in paths if path.is_relative_to(directory)):
-            if (
-                path.is_file()
-                and path != skill
-                and path.resolve() not in links.get(skill, set())
-            ):
+            if path.is_file() and path != skill and path not in links.get(skill, set()):
                 errors.append(
                     f"{path}: orphan skill resource; link it directly from {skill}"
                 )

@@ -60,7 +60,9 @@ For rules-kit changes, run `just check-agent-rules` or its equivalent Nix check:
 nix build --no-link .#checks.x86_64-linux.agent-rules
 ```
 
-The checker validates the distributed entrypoint, directory layout, skill metadata, index coverage, local links, and resource ownership. Local references and symlinks must remain inside `AGENTS.md` and `.agents/**`. It does not evaluate instruction quality. Its tests use a minimal synthetic payload and do not depend on the other repository components.
+The checker validates the distributed entrypoint, directory layout, skill metadata, index coverage, local links, and resource ownership. It scans every distributed Markdown file and rejects symlinks. Local references must remain inside `AGENTS.md` and `.agents/**`. It does not evaluate instruction quality. Its tests use a minimal synthetic payload and do not depend on the other repository components.
+
+Use single-line `[text](path)` or `![description](path)` links with plain local paths and optional `#fragments`. Reference-style links and complex local targets (including spaces, parentheses, encoded paths, and link titles) are reported with their source line. Backtick inline code and backtick/tilde fenced examples are skipped. The checker does not fetch external URLs, match fragments to headings, or inspect native HTML links. It rejects `file:` URLs. The [maintenance rules](.project-agent/rules/maintenance.md) define the supported writing conventions.
 
 Workflow validation is independent: use `just check-workflows` or `nix build --no-link .#checks.x86_64-linux.github-workflows` when changing that boundary. Choose the local entrypoint or the equivalent Nix check instead of repeating the same tests through both.
 

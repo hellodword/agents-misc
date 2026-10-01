@@ -3,7 +3,7 @@
 ## Distribution boundary
 
 - Only `AGENTS.md` and `.agents/**` belong to the distributed payload.
-- Keep local payload links and symlink targets within that boundary. Do not link to this repository's maintenance overlay, checker, tests, or Just/Nix checks from the payload.
+- Use real files and directories; the checker rejects every symlink, including links within the payload. Keep local links within the distribution boundary. Do not link to this repository's maintenance overlay, checker, tests, or Just/Nix checks from the payload.
 - Consumers provide project facts and constraints through `.project-agent/project.md` and its direct links.
 
 ## Rules and skills
@@ -14,6 +14,14 @@
 - Describe the task a skill helps with and any exclusion needed to prevent misrouting. Keep the entrypoint concise and move substantial conditional guidance to owned references.
 - Put supporting files under the skill's `assets/`, `references/`, or `scripts/` directory, and link each file directly from `SKILL.md`.
 - Keep simple defaults in rules. Use human-readable templates for reports intended for people; add machine contracts only for actual program consumers.
+
+## Markdown links
+
+- The checker scans every Markdown file in `AGENTS.md` and `.agents/**`. Use single-line `[text](path)` links or `![description](path)` images. Local targets are plain paths, optionally followed by `#fragment`.
+- Write paths directly, without whitespace, parentheses, angle brackets, quotes, backslash escapes, percent encoding, query strings, or link titles. Paths are relative to the source document; a leading `/` refers to the repository root. References must point to an existing distributed file or directory.
+- Reference-style definitions, full references such as `[text][id]`, and collapsed references such as `[text][]` are errors; rewrite them as inline links.
+- Put Markdown examples in backtick-delimited inline code or backtick/tilde fenced code blocks so they are excluded from link checking. Skill frontmatter is validated as metadata rather than scanned for links.
+- External URLs are not fetched, fragment identifiers are not checked against headings, and native HTML links are outside the checker scope. `file:` URLs are rejected.
 
 ## Validation
 
