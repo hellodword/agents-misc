@@ -14,15 +14,15 @@ lib.genAttrs supportedSystems (
     agentsViewer = agentsViewerFor system;
   in
   rec {
-    codex = {
+    codex-patched = {
       type = "app";
-      program = "${codexPackage}/bin/codex";
+      program = "${codexPackage}/bin/codex-patched";
       meta = {
         description = "Patched Codex CLI";
       };
     };
 
-    default = codex;
+    default = codex-patched;
 
     codex-config-atlas = {
       type = "app";

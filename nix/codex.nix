@@ -118,7 +118,47 @@ let
       version = pinnedVersion;
       srcOverride = pinnedSource;
     };
-  codexFor = system: patchCodex (import nixpkgs { inherit system; }) (codexBaseFor system);
+  codexFor =
+    system:
+    let
+      pkgs = import nixpkgs { inherit system; };
+      codex = patchCodex pkgs (codexBaseFor system);
+    in
+    pkgs.runCommand "codex-patched-${codex.version}"
+      {
+        pname = "codex-patched";
+        inherit (codex) version;
+        meta = codex.meta // {
+          description = "Patched Codex CLI";
+          mainProgram = "codex-patched";
+        };
+      }
+      ''
+        # Keep helpers and resources beside the original executable without
+        # exposing their names in the user's profile.
+        mkdir -p "$out/bin"
+        ln -s ${codex}/bin/codex "$out/bin/codex-patched"
+
+        for completion in \
+          share/bash-completion/completions/codex.bash \
+          share/fish/vendor_completions.d/codex.fish \
+          share/zsh/site-functions/_codex
+        do
+          if [ -f "${codex}/$completion" ]; then
+            destination="$out/''${completion/codex/codex-patched}"
+            mkdir -p "$(dirname "$destination")"
+            # Rename completion functions and command registrations only;
+            # descriptions retain paths such as ~/.codex/config.toml.
+            sed \
+              -e 's/_codex/_codex-patched/g' \
+              -e '/^[[:space:]]*complete /s/ codex$/ codex-patched/' \
+              -e 's/^complete -c codex /complete -c codex-patched /' \
+              -e 's/^#compdef codex$/#compdef codex-patched/' \
+              -e 's/compdef _codex-patched codex$/compdef _codex-patched codex-patched/' \
+              "${codex}/$completion" > "$destination"
+          fi
+        done
+      '';
 in
 {
   inherit

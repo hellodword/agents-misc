@@ -4,7 +4,7 @@ Agent Rules Kit is a small, project-scoped instruction payload for coding agents
 
 ## Repository map
 
-This repository also maintains several independent Codex tools. Each component
+This repository also contains several independent Codex tools. Each component
 has one authoritative input boundary and one primary verification entrypoint:
 
 | Component                                                | Purpose                                                                   | Authoritative inputs                                            | Primary maintenance entry                                            |
@@ -14,6 +14,12 @@ has one authoritative input boundary and one primary verification entrypoint:
 | [Codex hook helpers](tools/codex-hooks/README.md)        | Bounded local forwarding and notification helpers for patched hook events | helper source and the patch-owned hook schemas                  | `nix build --no-link .#checks.x86_64-linux.codex-hooks`              |
 | [Codex Config Atlas](tools/codex-config-atlas/README.md) | Versioned upstream schema registry, CLI, and static comparison site       | tracked schema registry and Web source                          | `nix build --no-link .#checks.x86_64-linux.codex-config-atlas-tests` |
 | [Agents Viewer](tools/agents-viewer/README.md)           | Read-only local rollout index, API, and Web reader                        | rollout fixtures, Rust DTOs, Rust/Web source                    | `just agents-viewer-verify`                                          |
+
+Maintenance of the Codex patch set and Agents Viewer is paused at their current
+upstream baselines. Their source, Nix packages, and verification commands remain
+available; their CI workflows run only on manual dispatch. The patched CLI is
+available as `codex-patched` and can be installed alongside llm-agents.nix's
+`codex`. Agent Rules Kit and Codex Config Atlas maintenance continues.
 
 Generated ownership is explicit. Codex generated contracts live exclusively
 inside the final patch in `codex/series.toml`; Atlas data and site trees are

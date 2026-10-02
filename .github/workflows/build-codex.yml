@@ -1,8 +1,6 @@
-name: build codex
+name: build codex patched
 
 on:
-  push:
-    branches: [master]
   workflow_dispatch:
 
 permissions:
@@ -63,7 +61,7 @@ jobs:
     env:
       CACHIX_CACHE_NAME: hellodword-codex
       CACHIX_PUBLIC_KEY: hellodword-codex.cachix.org-1:0URmcnC9aynWh9+FJ2tf+HQloylGgZzPtrz3sttTTiQ=
-      FLAKE_PACKAGE: .#codex
+      FLAKE_PACKAGE: .#codex-patched
 
     steps:
       - uses: actions/checkout@v7

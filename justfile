@@ -42,7 +42,7 @@ codex-test:
 
 # Build the patched Codex Nix package only after development-shell validation passes.
 codex-final-nix:
-  nix build --no-link --accept-flake-config .#codex
+  nix build --no-link --accept-flake-config .#codex-patched
 
 # Run the Viewer API with the non-embedded development shell.
 agents-viewer-api-dev *args:

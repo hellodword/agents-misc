@@ -1,5 +1,9 @@
 # Agents Viewer
 
+Maintenance is paused at the current Codex rollout compatibility baseline. The
+source, Nix package, and verification commands remain available; the Viewer CI
+workflow runs only on manual dispatch.
+
 ## Why this exists
 
 Codex CLI is designed first as a live terminal interface, not as a durable conversation browser. Long sessions are routinely truncated on screen, and display bugs can make content disappear even though the rollout still contains it. Finding an earlier decision means scrolling through a large terminal transcript, search is limited, and copying is unreliable. Markdown in particular often gains whitespace or line breaks that were not part of the original message.

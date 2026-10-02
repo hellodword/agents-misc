@@ -1,5 +1,9 @@
 # Codex pure-patch workspace
 
+Maintenance is paused at the currently pinned upstream revision. The patch set,
+maintenance commands, and Nix package remain available; the Codex CI workflow
+runs only on manual dispatch.
+
 This directory maintains an ordered patch set over one pinned
 [`openai/codex`](https://github.com/openai/codex) revision. The upstream checkout
 and build cache are ignored runtime state; the durable inputs are
@@ -13,6 +17,28 @@ patch order, intent, exclusive path ownership, and patch-specific tests.
 
 Run every public recipe from the repository root. Development recipes enter
 `nix develop .#codex` themselves; do not nest Just inside that shell.
+
+## Installing and running
+
+The package and app are named `codex-patched`. Install it alongside the upstream
+package from llm-agents.nix, or run the flake app directly:
+
+```sh
+nix profile add .#codex-patched github:numtide/llm-agents.nix#codex
+nix run .#codex-patched -- --help
+```
+
+Use `codex-patched` for this patch set and `codex` for the llm-agents.nix package.
+The overlay exposes `pkgs.agents-misc.codex-patched`; the default package and app
+also select the patched CLI. The former `codex` package, app, and overlay entry
+have been renamed, while `devShells.codex` and the `just codex-*` recipes retain
+their names.
+
+The public package exports only `codex-patched` and its Bash, Fish, and Zsh
+completions. Helper executables and resources remain in its internal package.
+Both CLIs share `~/.codex` by default and honor `CODEX_HOME`; no configuration,
+login, or session migration is needed. Help and version text retain the
+upstream Codex naming.
 
 ## Behavior carried by the patches
 
@@ -171,7 +197,7 @@ The first Cargo command may access the network to obtain missing dependencies
 and normalize workspace versions. Later commands use the resulting locked
 resolution. `fetch` only obtains Git source; it does not populate Cargo's cache.
 A first run or upstream upgrade therefore needs registry and Git dependency
-access. Do not warm this cache by building `.#codex` or the flake's checks.
+access. Do not warm this cache by building `.#codex-patched` or the flake's checks.
 
 ## Commands and cache behavior
 
@@ -213,7 +239,7 @@ just codex-final-nix
 - `codex-test` first runs the maintenance unit tests, then replays the installed
   series, verifies two-pass generation has no drift, and runs all focused patch
   and integration commands.
-- `codex-final-nix` is the only workflow step that builds `.#codex`; use it only
+- `codex-final-nix` is the only workflow step that builds `.#codex-patched`; use it only
   after development-shell validation passes. The Nix package is a consumer of
   the installed patch set, not part of refresh.
 

@@ -14,7 +14,7 @@ lib.genAttrs supportedSystems (
     agentsViewer = agentsViewerFor system;
   in
   {
-    inherit codex;
+    codex-patched = codex;
     agents-viewer = agentsViewer.package;
     codex-config-atlas = codexConfigAtlas.codexConfigAtlas;
     codex-config-atlas-registry = codexConfigAtlas.codexConfigAtlasRegistry;

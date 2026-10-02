@@ -114,7 +114,7 @@
 
       overlays.default = final: _prev: {
         agents-misc = {
-          codex = codexFor final.stdenv.hostPlatform.system;
+          codex-patched = codexFor final.stdenv.hostPlatform.system;
           agents-viewer =
             (import ./nix/agents-viewer.nix {
               inherit (final) lib;
