@@ -1,25 +1,46 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Codex Config Atlas</title>
+    <meta
+      name="description"
+      content="比较 Codex 正式版本的配置变化，从上游 Schema 生成带说明、默认值和枚举注释的 TOML 配置示例。"
+    />
+    <meta name="color-scheme" content="light" />
+    <title>Codex Config Atlas · 配置版本与示例</title>
     <link rel="stylesheet" href="style.css" />
+    <link rel="icon" href="data:," />
   </head>
   <body>
+    <a class="skip-link" href="#app">跳到主要内容</a>
     <div class="page-shell">
-      <header class="hero">
-        <div class="hero-copy">
-          <p class="eyebrow">Codex Config Atlas</p>
-          <h1>Config.toml diff</h1>
-        </div>
+      <header class="site-header">
+        <h1 class="brand"><a href="./">Codex Config Atlas</a></h1>
+        <nav class="view-nav" aria-label="工作视图">
+          <button data-view="diff" aria-pressed="true">版本对比</button>
+          <button data-view="example" aria-pressed="false">配置示例</button>
+        </nav>
+        <a
+          id="registry-info"
+          class="registry-info"
+          href="https://github.com/openai/codex/releases"
+          target="_blank"
+          rel="noreferrer"
+          aria-label="Codex 上游版本（新窗口）"
+          >上游版本 ↗</a
+        >
       </header>
-      <main id="app" class="app-shell">
-        <div class="loading-card">
-          <p>Loading registry…</p>
-        </div>
+      <main id="app" tabindex="-1">
+        <div class="state-card" role="status">正在载入版本列表…</div>
       </main>
     </div>
+    <p id="status" class="status-message" role="status" aria-live="polite"></p>
+    <noscript
+      ><p class="state-card">
+        此工具需要启用 JavaScript 才能对比版本和预览配置。
+      </p></noscript
+    >
     <script type="module" src="app.js"></script>
   </body>
 </html>

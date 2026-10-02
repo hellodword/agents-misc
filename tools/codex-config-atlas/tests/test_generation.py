@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -23,6 +24,8 @@ from codex_config_atlas.registry import (
 from codex_config_atlas.schema_diff import build_schema_diff
 from codex_config_atlas.schema_normalize import normalize_schema
 from codex_config_atlas.toml_generate import generate_toml
+from codex_config_atlas.toml_example import generate_example_toml
+from codex_config_atlas.json_value import canonical_json_key
 
 
 TOOL_ROOT = Path(__file__).parents[1]
@@ -100,6 +103,24 @@ class HistoricalGenerationTests(unittest.TestCase):
                     pair_count += 1
         self.assertEqual(pair_count, len(self.entries) * (len(self.entries) + 1) // 2)
 
+    def test_every_historical_example_is_opt_in_and_preserves_top_level_fields(self):
+        for entry in self.entries:
+            with self.subTest(version=entry.version):
+                schema = json_load(SCHEMAS / entry.schema_path)
+                metadata = json_load(SCHEMAS / entry.metadata_path)
+                output = generate_example_toml(
+                    entry.version, entry.tag, metadata["schemaUrl"], schema
+                )
+                # Codex's root fields are all optional. Merely copying an example
+                # must never opt into a feature, provider, hook, or dummy server.
+                self.assertFalse(schema.get("required"))
+                self.assertEqual(tomllib.loads(output), {})
+                for name in schema["properties"]:
+                    self.assertIn(f"# --- {name} ---", output)
+                for field in self.fields[entry.version]:
+                    if field["hasDefault"]:
+                        self.assertIn(canonical_json_key(field["default"]), output)
+
     def test_data_and_site_are_reproducible_and_failure_atomic(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -107,6 +128,9 @@ class HistoricalGenerationTests(unittest.TestCase):
             site = root / "site"
 
             build_data(SCHEMAS, CURRENT_VERSION, MIN_VERSION, data)
+            for entry in self.entries:
+                example = data / "versions" / entry.version / "example.toml"
+                self.assertEqual(tomllib.loads(example.read_text()), {})
             first_data = tree_digest(data)
             build_data(SCHEMAS, CURRENT_VERSION, MIN_VERSION, data)
             self.assertEqual(tree_digest(data), first_data)
@@ -163,6 +187,7 @@ class HistoricalGenerationTests(unittest.TestCase):
             output.mkdir()
             (output / "value").write_text("before")
             original = tree_digest(output)
+
             def populate(candidate: Path) -> None:
                 (candidate / "value").write_text("after")
 
@@ -173,7 +198,9 @@ class HistoricalGenerationTests(unittest.TestCase):
                         args=["mv"], returncode=1, stdout="", stderr="unsupported"
                     ),
                 ),
-                self.assertRaisesRegex(RuntimeError, "atomic directory exchange failed"),
+                self.assertRaisesRegex(
+                    RuntimeError, "atomic directory exchange failed"
+                ),
             ):
                 build_directory_atomically(output, populate)
 
@@ -201,7 +228,9 @@ class HistoricalGenerationTests(unittest.TestCase):
                     "codex_config_atlas.atomic_output.shutil.rmtree",
                     side_effect=fail_old_output,
                 ),
-                self.assertWarnsRegex(RuntimeWarning, "old output remains at") as warning,
+                self.assertWarnsRegex(
+                    RuntimeWarning, "old output remains at"
+                ) as warning,
             ):
                 retained = build_directory_atomically(output, populate)
 

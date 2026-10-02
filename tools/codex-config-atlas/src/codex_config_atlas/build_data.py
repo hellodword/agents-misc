@@ -15,6 +15,7 @@ from .registry import (
     validate_manifest,
 )
 from .schema_normalize import normalize_schema
+from .toml_example import generate_example_toml
 
 
 def _version_dir(out_dir: Path, version: str) -> Path:
@@ -26,6 +27,7 @@ def _write_version_payload(
     entry: RegistryEntry,
     metadata: dict[str, Any],
     fields: list[dict[str, Any]],
+    schema: dict[str, Any],
 ) -> None:
     version_dir = _version_dir(out_dir, entry.version)
     version_dir.mkdir(parents=True, exist_ok=True)
@@ -38,6 +40,10 @@ def _write_version_payload(
             "schemaUrl": metadata["schemaUrl"],
             "fields": fields,
         },
+    )
+    (version_dir / "example.toml").write_text(
+        generate_example_toml(entry.version, entry.tag, metadata["schemaUrl"], schema),
+        encoding="utf-8",
     )
 
 
@@ -71,7 +77,7 @@ def build_data(
             schema = json_load(schema_file)
             metadata = json_load(metadata_file)
             fields = normalize_schema(schema)
-            _write_version_payload(candidate, entry, metadata, fields)
+            _write_version_payload(candidate, entry, metadata, fields, schema)
 
             version_item = {
                 "version": entry.version,

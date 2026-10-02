@@ -4,43 +4,47 @@ import {
   formatDeveloperDiff,
   highestChangeCategory,
   renderFieldValue,
-  summarizeChanges,
 } from "./diff_helpers.mjs";
 
-const state = {
-  meta: null,
-  versionCache: new Map(),
-  diffCache: new Map(),
-  selection: null,
-};
-
-const GROUP_SECTIONS = [
+const CATEGORIES = [
   {
     id: "breakingLike",
-    title: "Breaking-like",
-    chipClass: "chip-breaking-like",
+    title: "可能不兼容",
   },
   {
     id: "review",
-    title: "Needs review",
-    chipClass: "chip-review",
+    title: "需要确认",
   },
   {
     id: "behavior",
-    title: "Behavior",
-    chipClass: "chip-behavior",
+    title: "行为变化",
   },
   {
     id: "compatible",
-    title: "Compatible",
-    chipClass: "chip-compatible",
+    title: "兼容变更",
   },
   {
     id: "documentation",
-    title: "Documentation",
-    chipClass: "chip-documentation",
+    title: "文档更新",
   },
 ];
+const state = {
+  meta: null,
+  fields: new Map(),
+  examples: new Map(),
+  view: "diff",
+  from: "",
+  to: "",
+  version: "",
+  query: "",
+  category: "all",
+  section: "all",
+  groups: [],
+  example: "",
+  request: 0,
+};
+const app = document.getElementById("app");
+const status = document.getElementById("status");
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -49,319 +53,396 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
 }
-
-function versionParts(version) {
-  return version.split(".").map((part) => Number(part));
+function versions() {
+  // The registry owns stable semantic-version ordering.
+  return state.meta.versions.map((entry) => entry.version);
 }
-
-function compareVersions(a, b) {
-  const left = versionParts(a);
-  const right = versionParts(b);
-  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
-    const diff = (left[index] ?? 0) - (right[index] ?? 0);
-    if (diff !== 0) {
-      return diff;
-    }
+function readLocation() {
+  const params = new URLSearchParams(location.search);
+  const all = versions();
+  const valid = (value, fallback) => (all.includes(value) ? value : fallback);
+  state.view = params.get("view") === "example" ? "example" : "diff";
+  // Read only the active view; keep the other view's selections in memory.
+  if (state.view === "diff") {
+    state.from = valid(params.get("from"), all.at(-2) ?? all.at(-1));
+    state.to = valid(params.get("to"), all.at(-1));
+    state.query = params.get("q") ?? "";
+    state.category = CATEGORIES.some(
+      (category) => category.id === params.get("category"),
+    )
+      ? params.get("category")
+      : "all";
+  } else {
+    state.version = valid(params.get("version"), all.at(-1));
+    state.section = params.get("section") ?? "all";
   }
-  return 0;
+  state.from ||= all.at(-2) ?? all.at(-1);
+  state.to ||= all.at(-1);
+  state.version ||= state.to;
 }
-
-function sortedVersions() {
-  return state.meta.versions.map((item) => item.version).sort(compareVersions);
-}
-
-function defaultSelection() {
-  const versions = sortedVersions();
-  const toVersion = versions.at(-1);
-  const fromVersion = versions.at(-2) ?? toVersion;
-  return { fromVersion, toVersion };
-}
-
-function normalizeSelection(fromVersion, toVersion) {
-  const versions = sortedVersions();
-  let from = versions.includes(fromVersion) ? fromVersion : versions[0];
-  let to = versions.includes(toVersion) ? toVersion : versions.at(-1);
-
-  if (compareVersions(to, from) < 0) {
-    to = from;
+function writeLocation(push = false) {
+  const url = new URL(location.href);
+  url.search = "";
+  url.searchParams.set("view", state.view);
+  if (state.view === "diff") {
+    url.searchParams.set("from", state.from);
+    url.searchParams.set("to", state.to);
+    if (state.query) url.searchParams.set("q", state.query);
+    if (state.category !== "all")
+      url.searchParams.set("category", state.category);
+  } else {
+    url.searchParams.set("version", state.version);
+    if (state.section !== "all")
+      url.searchParams.set("section", state.section);
   }
-
-  return { fromVersion: from, toVersion: to };
+  history[push ? "pushState" : "replaceState"](null, "", url);
 }
-
-function emptyDiffPayload(fromVersion, toVersion) {
-  return {
-    from: fromVersion,
-    to: toVersion,
-    summary: summarizeChanges([]),
-    changes: [],
-  };
+async function fetchContent(path, json = true) {
+  const response = await fetch(path);
+  if (!response.ok) throw new Error(`${path}: HTTP ${response.status}`);
+  return json ? response.json() : response.text();
 }
-
-function getDiffPayload(fromVersion, toVersion, fromPayload, toPayload) {
-  const key = `${fromVersion}..${toVersion}`;
-  if (!state.diffCache.has(key)) {
-    state.diffCache.set(
-      key,
-      buildSchemaDiff(
-        fromVersion,
-        toVersion,
-        fromPayload.fields,
-        toPayload.fields,
-      ),
+function cached(cache, version, file, json = true) {
+  if (!cache.has(version)) {
+    cache.set(
+      version,
+      fetchContent(`data/versions/${version}/${file}`, json).catch((error) => {
+        cache.delete(version);
+        throw error;
+      }),
     );
   }
-  return state.diffCache.get(key);
+  return cache.get(version);
 }
-
-async function loadJson(path) {
-  const response = await fetch(path);
-  if (!response.ok) {
-    throw new Error(`Failed to load ${path}`);
-  }
-  return response.json();
-}
-
-async function loadVersions() {
-  return loadJson("data/versions.json");
-}
-
-async function loadVersion(version) {
-  if (state.versionCache.has(version)) {
-    return state.versionCache.get(version);
-  }
-
-  const fieldsPayload = await loadJson(`data/versions/${version}/fields.json`);
-
-  const payload = {
-    fields: fieldsPayload.fields,
-    fieldIndex: new Map(
-      fieldsPayload.fields.map((field) => [field.path, field]),
-    ),
-  };
-  state.versionCache.set(version, payload);
-  return payload;
-}
-
-function versionOptions(selected, predicate) {
-  return sortedVersions()
-    .filter(predicate)
-    .map((version) => {
-      const active = version === selected ? " selected" : "";
-      return `<option value="${escapeHtml(version)}"${active}>${escapeHtml(version)}</option>`;
-    })
+function versionOptions(selected) {
+  return [...versions()]
+    .reverse()
+    .map(
+      (version) =>
+        `<option value="${escapeHtml(version)}"${version === selected ? " selected" : ""}>${escapeHtml(version)}${version === versions().at(-1) ? " · 最新" : ""}</option>`,
+    )
     .join("");
 }
-
-function groupChanges(diffPayload, beforePayload, afterPayload) {
-  const grouped = new Map();
-  for (const change of diffPayload.changes) {
-    if (!grouped.has(change.path)) {
-      grouped.set(change.path, {
+function sourceLink(version) {
+  const entry = state.meta.versions.find((item) => item.version === version);
+  return `<a class="source-link" href="${escapeHtml(entry.schemaUrl)}" target="_blank" rel="noreferrer">Schema ↗<span class="sr-only">（${escapeHtml(version)}，新窗口）</span></a>`;
+}
+function renderShell() {
+  document.getElementById("registry-info").textContent =
+    `${state.meta.versions.length} 个版本 ↗`;
+  document
+    .querySelectorAll("[data-view]")
+    .forEach((button) =>
+      button.setAttribute(
+        "aria-pressed",
+        String(button.dataset.view === state.view),
+      ),
+    );
+  const diff = state.view === "diff";
+  app.innerHTML = `
+    <section class="version-panel" aria-label="${diff ? "对比版本" : "示例版本"}"><div class="version-controls">
+      ${
+        diff
+          ? `<div class="control"><label for="from-select">起始版本</label><select id="from-select">${versionOptions(state.from)}</select></div>
+        <button id="swap-versions" class="icon-button" title="交换起始与目标版本" aria-label="交换起始与目标版本">⇄</button>
+        <div class="control"><label for="to-select">目标版本</label><select id="to-select">${versionOptions(state.to)}</select></div>`
+          : `<div class="control"><label for="example-version">版本</label><select id="example-version">${versionOptions(state.version)}</select></div>`
+      }
+      </div>${sourceLink(diff ? state.to : state.version)}</section>
+    <div id="content" aria-busy="true"><div class="state-card"><span class="loader" aria-hidden="true"></span>正在载入${diff ? "版本差异" : "配置示例"}…</div></div>`;
+  if (diff) {
+    document.getElementById("from-select").onchange = (event) =>
+      changeVersion("from", event.target.value);
+    document.getElementById("to-select").onchange = (event) =>
+      changeVersion("to", event.target.value);
+    document.getElementById("swap-versions").onclick = () => {
+      [state.from, state.to] = [state.to, state.from];
+      state.version = state.to;
+      writeLocation();
+      refresh();
+    };
+  } else
+    document.getElementById("example-version").onchange = (event) =>
+      changeVersion("version", event.target.value);
+}
+function changeVersion(key, version) {
+  state[key] = version;
+  if (key === "to") state.version = version;
+  writeLocation();
+  refresh();
+}
+function groupChanges(diff, before, after) {
+  const beforeIndex = new Map(
+    before.fields.map((field) => [field.path, field]),
+  );
+  const afterIndex = new Map(after.fields.map((field) => [field.path, field]));
+  const groups = new Map();
+  for (const change of diff.changes) {
+    if (!groups.has(change.path))
+      groups.set(change.path, {
         path: change.path,
         changes: [],
-        beforeField: beforePayload.fieldIndex.get(change.path) || null,
-        afterField: afterPayload.fieldIndex.get(change.path) || null,
+        beforeField: beforeIndex.get(change.path) ?? null,
+        afterField: afterIndex.get(change.path) ?? null,
       });
-    }
-
-    const entry = grouped.get(change.path);
-    entry.changes.push(change);
+    groups.get(change.path).changes.push(change);
   }
-
-  return Array.from(grouped.values())
+  return [...groups.values()]
     .map((group) => ({
       ...group,
-      sectionId: resolveGroupSection(group),
+      category: highestChangeCategory(group.changes),
     }))
-    .sort((left, right) => left.path.localeCompare(right.path));
+    .sort((a, b) => a.path.localeCompare(b.path));
 }
-
-function resolveGroupSection(group) {
-  return highestChangeCategory(group.changes);
-}
-
-function partitionGroups(groups) {
-  const buckets = new Map(GROUP_SECTIONS.map((section) => [section.id, []]));
-  for (const group of groups) {
-    buckets.get(group.sectionId).push(group);
-  }
-
-  return GROUP_SECTIONS.map((section) => ({
-    ...section,
-    groups: buckets.get(section.id),
-  })).filter((section) => section.groups.length > 0);
-}
-
-function renderDiffSummary(diffPayload, groups, fromVersion, toVersion) {
-  return `
-    <div class="summary-grid">
-      <div class="stat">
-        <p class="stat-label">Comparing</p>
-        <p class="stat-value">${escapeHtml(fromVersion)} -> ${escapeHtml(toVersion)}</p>
-      </div>
-      <div class="stat">
-        <p class="stat-label">Changed Fields</p>
-        <p class="stat-value">${groups.length}</p>
-      </div>
-      <div class="stat">
-        <p class="stat-label">Change Events</p>
-        <p class="stat-value">${diffPayload.changes.length}</p>
-      </div>
-    </div>
-    <div class="chip-row">
-      ${GROUP_SECTIONS.filter((section) => diffPayload.summary[section.id] > 0)
+function renderGroup(group, open) {
+  const kind = !group.beforeField
+    ? "新增"
+    : !group.afterField
+      ? "移除"
+      : "变更";
+  const rows = changedFieldRows(group.changes).filter(
+    ({ rowKey }) =>
+      kind === "变更" ||
+      renderFieldValue(group.beforeField, rowKey) !== "-" ||
+      renderFieldValue(group.afterField, rowKey) !== "-",
+  );
+  return `<details class="field-card"${open ? " open" : ""}>
+    <summary><span class="change-kind kind-${kind}">${kind}</span><code>${escapeHtml(group.path)}</code><span class="disclosure" aria-hidden="true">⌄</span></summary>
+    <div class="matrix-wrap"><table class="field-matrix"><caption class="sr-only">${escapeHtml(group.path)} 的版本差异</caption>
+      <thead><tr><th scope="col">属性</th><th scope="col">${escapeHtml(state.from)} <span>之前</span></th><th scope="col">${escapeHtml(state.to)} <span>之后</span></th></tr></thead>
+      <tbody>${rows
         .map(
-          (section) =>
-            `<span class="chip ${section.chipClass}">${escapeHtml(
-              section.title,
-            )} ${diffPayload.summary[section.id]}</span>`,
+          ({ label, rowKey }) =>
+            `<tr><th scope="row">${escapeHtml(label)}</th><td data-label="${escapeHtml(state.from)} · 之前">${escapeHtml(renderFieldValue(group.beforeField, rowKey))}</td><td data-label="${escapeHtml(state.to)} · 之后">${escapeHtml(renderFieldValue(group.afterField, rowKey))}</td></tr>`,
         )
-        .join("")}
-    </div>
-  `;
+        .join("")}</tbody>
+    </table></div></details>`;
 }
-
-function renderDiffGroup(group) {
-  const rows = changedFieldRows(group.changes);
-
-  return `
-    <article class="change-item field-change-item">
-      <div>
-        <p class="field-path"><code>${escapeHtml(group.path)}</code></p>
-      </div>
-      <div class="field-matrix">
-        <div class="field-matrix-header"></div>
-        <div class="field-matrix-header">${escapeHtml(state.selection.fromVersion)}</div>
-        <div class="field-matrix-header">${escapeHtml(state.selection.toVersion)}</div>
-        ${rows
-          .map(
-            ({ label, rowKey }) => `
-              <div class="field-matrix-label">${escapeHtml(label)}</div>
-              <div class="field-matrix-value">${escapeHtml(
-                renderFieldValue(group.beforeField, rowKey),
-              )}</div>
-              <div class="field-matrix-value">${escapeHtml(
-                renderFieldValue(group.afterField, rowKey),
-              )}</div>
-            `,
-          )
-          .join("")}
-      </div>
-    </article>
-  `;
+function renderDiff(diff) {
+  const groups = state.groups;
+  const added = groups.filter((group) => !group.beforeField).length;
+  const removed = groups.filter((group) => !group.afterField).length;
+  document.getElementById("content").innerHTML = `
+    <div class="diff-overview"><div class="overview-total"><strong>${groups.length}</strong><span>个字段变化</span></div>
+      <div class="overview-breakdown"><span><i class="dot added"></i>${added} 新增</span><span><i class="dot removed"></i>${removed} 移除</span><span><i class="dot changed"></i>${groups.length - added - removed} 变更</span></div>
+      <button class="button secondary" id="copy-diff"${groups.length ? "" : " disabled"}>复制差异</button></div>
+    <section class="filter-panel" aria-label="筛选差异"${groups.length ? "" : " hidden"}><div class="search-control"><label class="sr-only" for="field-search">搜索配置字段或说明</label><input type="search" id="field-search" placeholder="搜索字段名称或说明…" value="${escapeHtml(state.query)}" autocomplete="off" /></div>
+      <div class="category-list" aria-label="变更分类">${[
+        { id: "all", title: "全部" },
+        ...CATEGORIES,
+      ]
+        .map((category) => {
+          const count =
+            category.id === "all"
+              ? groups.length
+              : groups.filter((group) => group.category === category.id).length;
+          return `<button class="category-button category-${category.id}" data-category="${category.id}" aria-pressed="${category.id === state.category}">${category.title}<span>${count}</span></button>`;
+        })
+        .join("")}</div></section>
+    <div class="results-toolbar"${groups.length ? "" : " hidden"}><p id="result-count" class="muted" role="status"></p><div><button id="expand-all" class="text-button">展开全部</button><button id="collapse-all" class="text-button">收起全部</button></div></div><div id="diff-results"></div>`;
+  document.getElementById("field-search").oninput = (event) => {
+    state.query = event.target.value;
+    writeLocation();
+    filterDiff();
+  };
+  document.querySelectorAll("[data-category]").forEach((button) => {
+    button.onclick = () => {
+      state.category = button.dataset.category;
+      writeLocation();
+      filterDiff();
+    };
+  });
+  document.getElementById("copy-diff").onclick = () =>
+    copyText(formatDeveloperDiff(groups), "已复制完整版本差异。");
+  for (const [id, open] of [
+    ["expand-all", true],
+    ["collapse-all", false],
+  ]) {
+    document.getElementById(id).onclick = () =>
+      document.querySelectorAll(".field-card").forEach((item) => {
+        item.open = open;
+      });
+  }
+  filterDiff();
+  status.textContent = `已载入 ${state.from} 到 ${state.to} 的对比，${groups.length} 个字段、${diff.changes.length} 处变化。`;
 }
-
-function renderDiffSection(section) {
-  return `
-    <section class="card">
-      <div class="section-head">
-        <h3>${escapeHtml(section.title)}</h3>
-        <p class="muted">${section.groups.length} item${section.groups.length === 1 ? "" : "s"}</p>
-      </div>
-      <div class="change-list">
-        ${section.groups.map((group) => renderDiffGroup(group)).join("")}
-      </div>
-    </section>
-  `;
+function filterDiff() {
+  const query = state.query.trim().toLowerCase();
+  const filtered = state.groups.filter(
+    (group) =>
+      (state.category === "all" || group.category === state.category) &&
+      [
+        group.path,
+        group.beforeField?.description,
+        group.afterField?.description,
+      ].some((value) => value?.toLowerCase().includes(query)),
+  );
+  document
+    .querySelectorAll("[data-category]")
+    .forEach((button) =>
+      button.setAttribute(
+        "aria-pressed",
+        String(button.dataset.category === state.category),
+      ),
+    );
+  document.getElementById("result-count").textContent =
+    `显示 ${filtered.length} / ${state.groups.length} 个字段`;
+  for (const id of ["expand-all", "collapse-all"])
+    document.getElementById(id).disabled = !filtered.length;
+  document.getElementById("diff-results").innerHTML = filtered.length
+    ? CATEGORIES.map((category) => {
+        const groups = filtered.filter(
+          (group) => group.category === category.id,
+        );
+        return groups.length
+          ? `<section class="diff-section category-${category.id}"><div class="section-heading"><h2>${category.title}<span>${groups.length}</span></h2></div><div class="change-list">${groups.map((group) => renderGroup(group, filtered.length <= 6)).join("")}</div></section>`
+          : "";
+      }).join("")
+    : `<div class="state-card empty-state"><p>${state.groups.length ? "没有匹配的配置项" : "无配置差异"}</p>${state.groups.length ? '<button id="clear-filters" class="button secondary">清除筛选</button>' : ""}</div>`;
+  const clear = document.getElementById("clear-filters");
+  if (clear)
+    clear.onclick = () => {
+      state.query = "";
+      state.category = "all";
+      document.getElementById("field-search").value = "";
+      writeLocation();
+      filterDiff();
+      document.getElementById("field-search").focus();
+    };
 }
-
-function renderDiffContent(fromVersion, toVersion, diffPayload, groups) {
-  const sections = partitionGroups(groups);
-  const diffCards = sections.length
-    ? sections.map((section) => renderDiffSection(section)).join("")
-    : '<div class="empty-card">No differences for the selected versions.</div>';
-
-  return `
-    ${renderDiffSummary(diffPayload, groups, fromVersion, toVersion)}
-    <section class="stack">
-      ${diffCards}
-    </section>
-  `;
+function exampleSections() {
+  const sections = [];
+  for (const match of state.example.matchAll(/^# --- (.+) ---$/gm))
+    sections.push({ name: match[1], index: match.index });
+  return sections.map((section, index) => ({
+    ...section,
+    end: sections[index + 1]?.index ?? state.example.length,
+  }));
 }
-
-async function renderApp() {
+function renderExample() {
+  const sections = exampleSections();
+  if (
+    state.section !== "all" &&
+    !sections.some((section) => section.name === state.section)
+  ) {
+    state.section = "all";
+    writeLocation();
+  }
+  document.getElementById("content").innerHTML = `
+    <section class="code-panel" aria-label="TOML 配置预览"><div class="code-toolbar"><div class="example-filter"><label for="example-section">配置组</label><select id="example-section"><option value="all">全部 · ${sections.length} 组</option>${sections.map((section) => `<option value="${escapeHtml(section.name)}"${section.name === state.section ? " selected" : ""}>${escapeHtml(section.name)}</option>`).join("")}</select></div><div class="code-actions"><button class="button secondary" id="copy-example">复制完整配置</button><a class="button primary" id="download-example" href="data/versions/${escapeHtml(state.version)}/example.toml" download="codex-${escapeHtml(state.version)}.example.toml">下载 TOML</a></div></div>
+      <pre id="example-preview" tabindex="0" aria-label="生成的 TOML 示例"><code></code></pre><div class="code-footer"><span>可选项已注释；启用前请替换占位值。</span><span id="line-count"></span></div></section>`;
+  document.getElementById("copy-example").onclick = () =>
+    copyText(state.example, "已复制完整 TOML 示例。");
+  document.getElementById("example-section").onchange = (event) => {
+    state.section = event.target.value;
+    writeLocation();
+    renderPreview();
+  };
+  renderPreview();
+  status.textContent = `已生成 ${state.version} 配置示例，包含 ${sections.length} 个配置组。`;
+}
+function renderPreview() {
+  const section = exampleSections().find((item) => item.name === state.section);
+  const source = section
+    ? state.example.slice(section.index, section.end)
+    : state.example;
+  const lines = source.trimEnd().split("\n");
+  document.querySelector("#example-preview code").innerHTML = lines
+    .map((line) => {
+      const style = /^# --- /.test(line)
+        ? "code-heading"
+        : /^# [^#]+ = /.test(line)
+          ? "code-assignment"
+          : "code-comment";
+      return `<span class="code-line ${style}">${escapeHtml(line) || " "}</span>`;
+    })
+    .join("\n");
+  document.getElementById("example-preview").scrollTop = 0;
+  document.getElementById("example-preview").scrollLeft = 0;
+  document.getElementById("line-count").textContent =
+    `${lines.length.toLocaleString()} 行`;
+}
+async function copyText(value, message) {
   try {
-    if (!state.meta) {
-      state.meta = await loadVersions();
-    }
-
-    if (!state.selection) {
-      state.selection = defaultSelection();
+    await navigator.clipboard.writeText(value);
+    status.textContent = message;
+  } catch {
+    status.textContent = "无法访问剪贴板。可手动选取文本，或下载 TOML 文件。";
+  }
+  status.classList.add("is-toast");
+  clearTimeout(state.toastTimer);
+  state.toastTimer = setTimeout(
+    () => status.classList.remove("is-toast"),
+    6000,
+  );
+}
+async function refresh() {
+  const request = ++state.request;
+  const focused = document.activeElement?.id;
+  renderShell();
+  if (focused) document.getElementById(focused)?.focus({ preventScroll: true });
+  status.textContent = "正在载入…";
+  status.classList.remove("is-toast");
+  const { from, to, version, view } = state;
+  try {
+    if (view === "diff") {
+      const [before, after] = await Promise.all([
+        cached(state.fields, from, "fields.json"),
+        cached(state.fields, to, "fields.json"),
+      ]);
+      if (request !== state.request) return;
+      const diff = buildSchemaDiff(from, to, before.fields, after.fields);
+      state.groups = groupChanges(diff, before, after);
+      console.log(formatDeveloperDiff(state.groups));
+      renderDiff(diff);
     } else {
-      state.selection = normalizeSelection(
-        state.selection.fromVersion,
-        state.selection.toVersion,
+      const example = await cached(
+        state.examples,
+        version,
+        "example.toml",
+        false,
       );
+      if (request !== state.request) return;
+      state.example = example;
+      renderExample();
     }
-
-    const { fromVersion, toVersion } = state.selection;
-    const [fromPayload, toPayload] = await Promise.all([
-      loadVersion(fromVersion),
-      loadVersion(toVersion),
-    ]);
-    const diffPayload =
-      fromVersion === toVersion
-        ? emptyDiffPayload(fromVersion, toVersion)
-        : getDiffPayload(fromVersion, toVersion, fromPayload, toPayload);
-    const groups = groupChanges(diffPayload, fromPayload, toPayload);
-    console.log(formatDeveloperDiff(groups));
-
-    document.getElementById("app").innerHTML = `
-      <section class="stack">
-        <div class="card controls">
-          <div class="control-row">
-            <div class="control">
-              <label for="from-select">From</label>
-              <select id="from-select">${versionOptions(
-                fromVersion,
-                (version) => compareVersions(version, toVersion) <= 0,
-              )}</select>
-            </div>
-            <div class="control">
-              <label for="to-select">To</label>
-              <select id="to-select">${versionOptions(
-                toVersion,
-                (version) => compareVersions(version, fromVersion) >= 0,
-              )}</select>
-            </div>
-          </div>
-          <div class="chip-row">
-            <span class="chip">current ${escapeHtml(state.meta.current)}</span>
-            <span class="chip">${state.meta.versions.length} tagged versions</span>
-          </div>
-        </div>
-        ${renderDiffContent(fromVersion, toVersion, diffPayload, groups)}
-      </section>
-    `;
-
-    bindControls();
   } catch (error) {
-    document.getElementById("app").innerHTML = `
-      <div class="empty-card">
-        <p><strong>Failed to load data.</strong></p>
-        <p class="muted">${escapeHtml(error.message || String(error))}</p>
-      </div>
-    `;
+    if (request !== state.request) return;
+    console.error(error);
+    document.getElementById("content").innerHTML =
+      '<div class="state-card error-state" role="alert"><h2>暂时无法载入版本数据</h2><p>请检查网络连接后重试，或选择另一个版本。</p><button id="retry" class="button primary">重试</button></div>';
+    document.getElementById("retry").onclick = refresh;
+    status.textContent = "载入失败。";
+  }
+  if (request === state.request)
+    document.getElementById("content").setAttribute("aria-busy", "false");
+}
+async function start() {
+  try {
+    state.meta = await fetchContent("data/versions.json");
+    if (!state.meta.versions?.length) throw new Error("Empty registry");
+    readLocation();
+    writeLocation();
+    document.querySelectorAll("[data-view]").forEach((button) => {
+      button.onclick = () => {
+        if (state.view === button.dataset.view) return;
+        state.view = button.dataset.view;
+        writeLocation(true);
+        refresh();
+      };
+    });
+    window.addEventListener("popstate", () => {
+      readLocation();
+      writeLocation();
+      refresh();
+    });
+    await refresh();
+  } catch (error) {
+    console.error(error);
+    app.innerHTML =
+      '<div class="state-card error-state" role="alert"><h2>无法载入版本列表</h2><p>请检查网络连接后重试。</p><button id="retry-start" class="button primary">重新载入</button></div>';
+    document.getElementById("retry-start").onclick = start;
+    status.textContent = "载入失败。";
   }
 }
-
-function bindControls() {
-  document.getElementById("from-select").addEventListener("change", (event) => {
-    state.selection = normalizeSelection(
-      event.target.value,
-      state.selection.toVersion,
-    );
-    renderApp();
-  });
-
-  document.getElementById("to-select").addEventListener("change", (event) => {
-    state.selection = normalizeSelection(
-      state.selection.fromVersion,
-      event.target.value,
-    );
-    renderApp();
-  });
-}
-
-renderApp();
+start();

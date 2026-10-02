@@ -111,6 +111,9 @@ let
   checkConfigAtlasData = pkgs.runCommand "check-codex-config-atlas-data-${codexVersion}" { } ''
     test -f ${codexConfigAtlasData}/versions.json
     test -d ${codexConfigAtlasData}/versions
+    for fields in ${codexConfigAtlasData}/versions/*/fields.json; do
+      test -s "$(dirname "$fields")/example.toml"
+    done
     test ! -e ${codexConfigAtlasData}/current.json
     test ! -e ${codexConfigAtlasData}/diffs
 
@@ -123,6 +126,9 @@ let
     test -f ${codexConfigAtlasSite}/diff_helpers.mjs
     test -f ${codexConfigAtlasSite}/data/versions.json
     test -d ${codexConfigAtlasSite}/data/versions
+    for fields in ${codexConfigAtlasSite}/data/versions/*/fields.json; do
+      test -s "$(dirname "$fields")/example.toml"
+    done
     test ! -e ${codexConfigAtlasSite}/data/current.json
     test ! -e ${codexConfigAtlasSite}/data/diffs
 

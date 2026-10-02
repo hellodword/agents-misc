@@ -35,6 +35,7 @@ from .registry import (
 from .schema_diff import build_schema_diff, render_schema_diff_markdown
 from .schema_normalize import defaults_from_fields, normalize_schema
 from .toml_generate import generate_toml
+from .toml_example import generate_example_toml
 
 
 GLOBAL_OPTION_NAMES = {
@@ -348,14 +349,18 @@ def _load_version_inputs(
 def _handle_gen_toml(args: argparse.Namespace) -> int:
     schemas_dir = Path(args.schemas).resolve()
     schema, metadata = _load_version_inputs(schemas_dir, args.version)
-    fields = normalize_schema(schema)
-    output = generate_toml(
-        args.version,
-        tag_for_version(args.version),
-        metadata["schemaUrl"],
-        fields,
-        args.mode,
-    )
+    if args.mode == "example":
+        output = generate_example_toml(
+            args.version, metadata["tag"], metadata["schemaUrl"], schema
+        )
+    else:
+        output = generate_toml(
+            args.version,
+            tag_for_version(args.version),
+            metadata["schemaUrl"],
+            normalize_schema(schema),
+            args.mode,
+        )
     _write_output(output, args.out)
     return 0
 
@@ -449,7 +454,9 @@ def build_parser() -> argparse.ArgumentParser:
     gen_toml = subparsers.add_parser("gen-toml")
     gen_toml.add_argument("--schemas", required=True)
     gen_toml.add_argument("--version", required=True)
-    gen_toml.add_argument("--mode", choices=["default", "reference"], required=True)
+    gen_toml.add_argument(
+        "--mode", choices=["default", "reference", "example"], required=True
+    )
     gen_toml.add_argument("--out")
     gen_toml.set_defaults(handler=_handle_gen_toml)
 

@@ -76,6 +76,7 @@ nix run .#codex-config-atlas -- check-registry --schemas tools/codex-config-atla
 nix run .#codex-config-atlas -- diff --schemas tools/codex-config-atlas/schemas --from 0.143.0 --to 0.144.1
 nix run .#codex-config-atlas -- diff-defaults --schemas tools/codex-config-atlas/schemas --from 0.143.0 --to 0.144.1
 nix run .#codex-config-atlas -- gen-toml --schemas tools/codex-config-atlas/schemas --version 0.144.1 --mode reference
+nix run .#codex-config-atlas -- gen-toml --schemas tools/codex-config-atlas/schemas --version 0.160.0 --mode example --out example.config.toml
 ```
 
 The CLI exposes these subcommands:
@@ -83,7 +84,7 @@ The CLI exposes these subcommands:
 - `current`: print the current patched Codex package version injected by Nix.
 - `sync-schema`: fetch and register one tagged upstream schema.
 - `check-registry`: validate manifest ordering, metadata, paths, and hashes.
-- `gen-toml`: render default or reference TOML for a registered version.
+- `gen-toml`: render default, reference, or opt-in example TOML for a registered version.
 - `diff`: render a schema diff as Markdown or JSON.
 - `diff-defaults`: render default-value changes as Markdown or JSON.
 - `build-data`: generate normalized version payloads for the site.
@@ -98,7 +99,50 @@ Schema diffs omit a `profiles.<name>.<path>` event only when the corresponding
 `<path>` event has the same semantic change. Profile-only changes and profile
 changes with different values or field metadata remain visible.
 
+### Annotated configuration examples
+
+`gen-toml --mode example` reads the original schema, including referenced
+definitions and union branches. Each configuration group contains its upstream
+description, type and requiredness, explicit default, allowed values and choice
+descriptions, constraints, and an example assignment. Defaults are labelled as
+JSON so that `null`, arrays, and object defaults retain their meaning. Array item
+schemas and named map entries are documented too. Descriptions remain in the
+upstream language.
+
+Optional assignments stay commented, **even when they have defaults**. A required
+child of an optional object also stays commented. Only fields required through
+the entire parent chain can be active. Dotted keys let a setting be uncommented
+without relying on a preceding table header; keys containing dots or other TOML
+syntax are quoted. Named entries use `example`, and synthesized values such as
+`"..."` are explicitly labelled as examples, not runtime defaults. A default
+mentioned only in prose is preserved as prose, not inferred as a schema default.
+
+Choose one union alternative, replace placeholders, and enable the fields you
+need. Object alternatives replace the corresponding scalar assignment. TOML
+cannot encode `null`: leave these keys omitted to preserve their default.
+Recursive references are documented at the recursion boundary instead of being
+expanded indefinitely. The existing `default` and `reference` modes retain their
+previous behavior.
+
+`build-data` writes `versions/<version>/example.toml` for every registered
+version. The site's **配置示例** view previews the complete file by default
+(`section=all`) and can be narrowed to a selected group; copy and download always
+include the complete example for the selected version. Previewing or downloading
+does not write to the user's Codex configuration.
+
 ## Following upstream Codex
+
+The registry includes every published, non-draft, non-prerelease GitHub release
+whose tag matches `rust-v<major>.<minor>.<patch>`, starting at `rust-v0.129.0`.
+Patch releases are included even when their schema bytes match a neighboring
+version. The supported inventory is owned by `schemas/manifest.json`; it is
+independent of the paused patched Codex package's current version.
+
+When refreshing, enumerate the upstream
+[release list](https://github.com/openai/codex/releases) with pagination, exclude
+drafts and prereleases, and compare the resulting stable tags to the manifest.
+Do not infer missing patch numbers: a tag must have an official release. Resolve
+annotated tags to their peeled commit when supplying `--expected-commit`.
 
 Register an explicit upstream version:
 
@@ -142,6 +186,44 @@ The Python package, dependencies, current Codex version, schema inputs, and Web
 assets are all resolved through the repository flake. Runtime build output,
 temporary generated data, and packaged sites stay outside the tracked source
 tree.
+
+### Source development and browser review
+
+The static UI has separate comparison and example views. Comparisons support
+field/description search, category filters, expandable details, reversing the
+selected versions, and copyable differences. URLs contain only the active view's
+parameters: `view=diff&from=…&to=…` with optional `q` and `category`, or
+`view=example&version=…` with optional `section` (default `all`, omitted from URLs).
+Switching views keeps the other view's selections in memory; browser history
+and reloading restore the active view from its URL. Older links containing both
+views' parameters still open and are normalized. Narrow screens stack
+before/after values while keeping the version labels visible.
+
+Use the Atlas development shell for source checks:
+
+```bash
+nix develop .#codex-config-atlas --command env PYTHONPATH=tools/codex-config-atlas/src python3 -m unittest discover -s tools/codex-config-atlas/tests -p 'test_*.py'
+nix develop .#codex-config-atlas --command node --test tools/codex-config-atlas/tests/test_web_diff.mjs
+```
+
+On Linux, the shell supplies Playwright and Chromium from the locked Nix inputs.
+The project-owned browser smoke flow launches that explicit browser, serves the
+selected site locally, and checks comparison, filtering, keyboard use, widths
+from 320 to 1440 px, preview, exact clipboard/download content, URL restoration,
+stale requests, and recoverable fetch failures. To capture screenshots of the
+packaged site in the ignored task workspace:
+
+```bash
+nix build --no-link --print-out-paths .#codex-config-atlas-site
+# Pass the printed store path as SITE below.
+nix develop .#codex-config-atlas --command python3 tools/codex-config-atlas/tests/browser_smoke.py --site SITE --screenshots tmp/agent/codex-config-atlas/review
+```
+
+`captures.json` records each screenshot's route, viewport, and browser version.
+Screenshots and AI review notes are temporary review evidence, not tracked
+golden images. Inspect the captures using the `ai-visual-review` rubric when
+visual review is requested; the smoke test itself does not perform AI review.
+Keep the schema registry unchanged while running reproducibility checks.
 
 ## Failure recovery
 

@@ -53,6 +53,24 @@ lib.genAttrs supportedSystems (
       RUSTY_V8_ARCHIVE = codexBasePackage.RUSTY_V8_ARCHIVE;
       RUSTY_V8_SRC_BINDING_PATH = codexBasePackage.RUSTY_V8_SRC_BINDING_PATH;
     };
+    atlasShell = pkgs.mkShell (
+      {
+        packages = [
+          pkgs.nodejs_24
+          pkgs.ruff
+          (pkgs.python3.withPackages (pythonPackages: [
+            pythonPackages.packaging
+            pythonPackages.tomlkit
+            pythonPackages.playwright
+          ]))
+        ]
+        ++ lib.optionals pkgs.stdenv.isLinux [ pkgs.chromium ];
+      }
+      // lib.optionalAttrs pkgs.stdenv.isLinux {
+        PLAYWRIGHT_NIX_BROWSER_PATH = lib.getExe pkgs.chromium;
+        PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
+      }
+    );
     agentsViewerShell = pkgs.mkShell (
       {
         packages =
@@ -84,6 +102,7 @@ lib.genAttrs supportedSystems (
     dev = devShell;
     default = devShell;
     codex = codexShell;
+    codex-config-atlas = atlasShell;
     agents-viewer = agentsViewerShell;
   }
 )
