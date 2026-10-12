@@ -17,16 +17,20 @@ Keep `flake.nix` focused on inputs and output wiring when implementation grows. 
 
 ## Just commands
 
-Recipes may compose and may run inside or outside the shell. Make it clear which layer enters the environment, and avoid cycles such as a recipe entering a shell that invokes the same recipe again.
+Invoke recipes directly, for example with `just test` or `just report`. Each recipe enters the project shell only when its command needs that environment.
 
-For a command designed to enter the shell itself:
+For a project with Go tests and an executable report script that needs no Nix environment:
 
 ```just
 # Run project tests through the development environment.
 test:
   nix develop --command go test ./...
+
+# Run the report script directly.
+report:
+  ./scripts/report.sh
 ```
 
-An environment-independent recipe may instead call the tool directly and be invoked as `nix develop --command just test` or from an entered shell. Follow one understandable convention for each command. Move complex orchestration into a reusable script when useful; do not impose command-count limits.
+Compose recipes when helpful and move complex orchestration into a reusable script when useful.
 
 Expose `nix build .#<output>` through Just only for an adopted product output. A general `check` recipe need not mean `nix flake check`; prefer focused development-shell commands when those are the project's checks.
