@@ -86,6 +86,8 @@ Old entrypoints have no forwarding aliases. The kit supplies no dedicated SQLite
 
 The long-task plan keeps completion evidence and authorization stable while allowing implementation choices to change. It records discoveries and continuation state, detects unproductive retries, and distinguishes incomplete or unverified work from completion. Starting a Goal or receiving an implementation task alone does not trigger planning.
 
+The remote NixOS VM test skill uses a prepared SSH executor for sandbox builds and direct driver debugging. It includes a project script template with non-interactive password and private-key authentication. The [executor preparation reference](docs/nixos-vm-test-runner.md) is for administrators, outside the distributed payload and the skill's loading path.
+
 ## Maintenance and validation
 
 Read [.project-agent/project.md](.project-agent/project.md) before modifying the kit. Invoke Just from the repository root; recipes enter their declared Nix environment as needed and may also be invoked from an entered shell.
@@ -97,6 +99,8 @@ nix build --no-link .#checks.x86_64-linux.agent-rules
 ```
 
 The checker validates the distributed entrypoint, license notice, directory layout, skill metadata, index coverage, local links, and resource ownership. It scans distributed `.md` and `.markdown` files case-insensitively and rejects symlinks and duplicate YAML fields. Prescribed entrypoint names remain exact: `AGENTS.md`, `index.md`, and `SKILL.md`. Local references must remain inside `AGENTS.md` and `.agents/**`. It does not validate consumer overlay links, project document chains, or instruction semantics. Its tests use a minimal synthetic payload and do not depend on the other repository components.
+
+Fresh remote KVM acceptance is a separate integration check.
 
 Both maintenance entrypoints enable `--check-license-copy` to compare the distributed notice with this repository's root `LICENSE` byte for byte. A standalone invocation of `scripts/check-agent-rules.py --root <consumer>` checks the payload without comparing the consuming project's license.
 

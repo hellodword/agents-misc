@@ -23,8 +23,11 @@ lib.genAttrs supportedSystems (
         coreutils
         git
         jq
+        (lib.getBin nix)
         nixfmt
+        openssh
         ruff
+        sshpass
         agentRulesPython
       ];
     };

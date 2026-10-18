@@ -29,6 +29,14 @@ The usual working environment is a Nix-based devcontainer. Prefer project develo
 - Run an actual project browser smoke flow on initial provisioning and relevant browser, Playwright, or launch-configuration changes. Separately pinned versions do not establish compatibility; resolve mismatches through the owning inputs or project configuration.
 - Follow the framework and project sandbox settings. For a trusted local E2E flow with an actual sandbox launch failure, inspect project requirements and container limitations; use native `chromiumSandbox: false` in project configuration when needed. If the project explicitly requires an enabled sandbox, fix the environment or report the blocker. Container detection alone does not justify overriding that policy.
 
+## Remote NixOS VM tests
+
+- Preserve a working project-local VM test flow. When the project selects remote execution or local KVM is unavailable, use a user-provided or project-authorized SSH executor; ask for a target when none is established.
+- Keep remote selection specific to the test command: evaluate locally and build through an explicit remote Nix store. Do not change the global store or builders, expose host devices to the development container, or fall back to local execution after a remote failure.
+- Use a prepared Linux executor with a multi-user Nix daemon, enabled sandbox without sandbox fallback, and working KVM. Check prerequisites and report deficiencies; remote provisioning and permission changes are outside this test workflow.
+- Require `qemu.forceAccel = true` for this KVM test flow. Initial acceptance combines confirmed daemon sandbox policy with a fresh test that starts QEMU and passes its assertions. Device presence and SSH-user configuration are preliminary evidence; a cached success is not evidence of execution during the current invocation.
+- Distinguish sandbox test builds from direct driver runs and interactive debugging. Retain useful remote logs and report their locations.
+
 ## Source handling
 
 - Do not use a `path:` flake reference to bypass Git source filtering. If a required durable file is untracked, use the root rule's exact-path intent-to-add procedure and report it.
