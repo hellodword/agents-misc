@@ -31,11 +31,10 @@ The usual working environment is a Nix-based devcontainer. Prefer project develo
 
 ## Remote NixOS VM tests
 
-- Preserve a working project-local VM test flow. When the project selects remote execution or local KVM is unavailable, use a user-provided or project-authorized SSH executor; ask for a target when none is established.
-- Keep remote selection specific to the test command: evaluate locally, transfer derivations through an explicit remote store, and run the build against the selected executor's daemon. Keep store and builder selection scoped to that invocation.
-- Use a prepared Linux executor with a multi-user Nix daemon, enabled sandbox without sandbox fallback, and working KVM. Check prerequisites and report deficiencies; remote provisioning and permission changes are outside this test workflow.
-- Require `qemu.forceAccel = true` for this KVM test flow. Initial acceptance combines confirmed daemon sandbox policy with a fresh test that starts QEMU and passes its assertions. Device presence and SSH-user configuration are preliminary evidence; a cached success is not evidence of execution during the current invocation.
-- Distinguish sandbox test builds from direct driver runs and interactive debugging. Retain useful remote logs and report their locations.
+- Preserve a working project-local VM test flow. When remote execution is selected or local KVM is unavailable, use a prepared HTTP MCP executor and the VM test rule.
+- Evaluate with the project's locked nixpkgs in the client environment. Transfer derivations through the service-issued binary cache and submit a sandbox test build to the physical host's Nix daemon.
+- Require `qemu.forceAccel = true`. Initial acceptance combines administrator-confirmed daemon sandbox policy with a fresh multi-node test that starts its guests and passes assertions on host KVM.
+- Compilation scheduling belongs to the host daemon; node CPUs and memory belong to the test definition. Collect logs and recorded outputs, and use a fresh top-level run identity for each new test execution.
 
 ## Source handling
 

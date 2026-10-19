@@ -10,6 +10,7 @@ has one authoritative input boundary and one primary verification entrypoint:
 | Component                                                | Purpose                                                                   | Authoritative inputs                                            | Primary maintenance entry                                            |
 | -------------------------------------------------------- | ------------------------------------------------------------------------- | --------------------------------------------------------------- | -------------------------------------------------------------------- |
 | [Agent Rules Kit](AGENTS.md)                             | Shared agent rules and reusable workflow skills                           | `AGENTS.md`, `.agents/**`                                       | `just check-agent-rules`                                             |
+| [VM Test MCP](tools/vm-test-mcp/README.md)               | HTTP automation for Windows guests and sandboxed NixOS VM tests           | `tools/vm-test-mcp/**`                                          | `just --justfile tools/vm-test-mcp/justfile test`                    |
 | [Codex patches](codex/README.md)                         | Reproducible patches over one pinned upstream Codex revision              | `codex/upstream.toml`, `codex/series.toml`, current patch files | `just codex-test`                                                    |
 | [Codex hook helpers](tools/codex-hooks/README.md)        | Bounded local forwarding and notification helpers for patched hook events | helper source and the patch-owned hook schemas                  | `nix build --no-link .#checks.x86_64-linux.codex-hooks`              |
 | [Codex Config Atlas](tools/codex-config-atlas/README.md) | Versioned upstream schema registry, CLI, and static comparison site       | tracked schema registry and Web source                          | `nix build --no-link .#checks.x86_64-linux.codex-config-atlas-tests` |
@@ -86,7 +87,7 @@ Old entrypoints have no forwarding aliases. The kit supplies no dedicated SQLite
 
 The long-task plan keeps completion evidence and authorization stable while allowing implementation choices to change. It records discoveries and continuation state, detects unproductive retries, and distinguishes incomplete or unverified work from completion. Starting a Goal or receiving an implementation task alone does not trigger planning.
 
-The remote NixOS VM test skill uses a prepared SSH executor for sandbox builds and direct driver debugging. Its Python template supports password/key authentication, per-run deadlines and retained logs. The distributed [manual preparation guide](.agents/skills/nixos-vm-test/references/preparation.md) covers Debian setup, sandbox KVM access and an optional Intel VirtualBox mitigation.
+The [NixOS VM test skill](.agents/skills/nixos-vm-test/SKILL.md) submits locally evaluated inputs to a prepared HTTP MCP executor for sandboxed tests on host KVM. The [Windows VM test skill](.agents/skills/windows-vm-test/SKILL.md) runs project scripts in baseline-restored VirtualBox guests. [VM Test MCP](tools/vm-test-mcp/README.md) provides task scheduling, transfers, logs and artifacts; each skill includes a manual preparation guide.
 
 ## Maintenance and validation
 

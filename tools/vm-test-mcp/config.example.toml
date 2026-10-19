@@ -1,0 +1,152 @@
+# VM Test MCP: one host-owned file for both processes.
+# Copy this file to /home/VM_OWNER/.config/vm-test-mcp/config.toml and pass
+# that same path to both nix_worker.py --config and server.py --config.
+# Both processes can run as the VirtualBox VM owner. Keep that account outside
+# Nix trusted-users; the daemon uses its own build identities and sandbox.
+# Keep this file private (0600), with runtime state in separate 0700 directories.
+# A separate worker account is also supported; see preparation.md.
+#
+# Replace VM_OWNER and the placeholders in the sections you enable.
+# Optional settings are commented out; each comment states the program default
+# and any different example value. Uncomment an option to apply its example.
+# Enable at least one backend below for test execution. With both backend
+# sections commented out, the controller starts with no test targets.
+# Host paths are absolute; the Python and workspace paths under vms are inside
+# Windows. TOML single-quoted strings preserve Windows backslashes literally.
+
+[service]
+# Required. Controller-owned directory on the physical host for task records,
+# uploads, downloads and logs. Created with mode 0700 on startup; existing state
+# must belong to the process user and be private. Use real directory paths,
+# with no symlink components. Keep it separate from nix.state_dir.
+state_dir = "/home/VM_OWNER/.local/state/vm-test-controller"
+
+# Optional. Concrete host IP to listen on; default: "127.0.0.1".
+# This example uses a Docker bridge address; replace it with the host address
+# reachable from your container when different.
+# host = "172.17.0.1"
+
+# Optional. HTTP listening port; default: 8765.
+# port = 8765
+
+# Optional. Origin embedded in upload/download URLs; default: http://host:port
+# using the two settings above. Override when the client uses another origin,
+# for example through a reverse proxy. Include the scheme, with no /mcp suffix.
+# public_url = "http://172.17.0.1:8765"
+
+# Optional. Literal ASCII Bearer token; default: "" (direct access).
+# When set, the client sends Authorization: Bearer <the same value>.
+# token = ""
+
+# Optional. VBoxManage executable on the physical host; default: "VBoxManage"
+# resolved through the controller's PATH. Used when Windows VMs are registered.
+# vboxmanage = "/run/current-system/sw/bin/VBoxManage"
+
+# Optional. Short VBoxManage command deadline, in seconds; default: 30.
+# command_timeout = 30
+
+# Optional. Wait for normal shutdown or initial desktop readiness, in seconds;
+# default: 120. The prepared Windows example allows 600 seconds for startup and
+# shutdown. A timed-out shutdown retains the task for cleanup verification.
+# shutdown_timeout = 600
+
+# Optional. Default and maximum requested task/guest-command deadline, in
+# seconds; default: 3600. The Nix worker inherits this value unless overridden.
+# task_timeout = 3600
+
+# Optional. Maximum bytes per input transfer or exported artifact;
+# default: 8589934592 (8 GiB).
+# upload_bytes = 8589934592
+
+# Optional. Maximum bytes per task/command log; default: 67108864 (64 MiB).
+# A guest command exceeding its output limit is stopped. The Nix worker
+# inherits this value unless overridden.
+# log_bytes = 67108864
+
+# Optional. Retention in days for completed, cleaned-up tasks and old
+# unreferenced transfers; default: 7. Unresolved cleanup remains retained.
+# retention_days = 7
+
+
+# NixOS backend (optional).
+# Uncomment [nix] and state_dir to enable it. Start nix_worker.py with this same
+# file. Remaining settings are optional overrides. Tests use the physical
+# host's existing Nix daemon; the worker runs as an ordinary, untrusted Nix user.
+# [nix]
+
+# Required when [nix] is enabled. Worker-owned 0700 directory on the physical
+# host, using real directory paths as for service.state_dir.
+# state_dir = "/home/VM_OWNER/.local/state/vm-test-nix"
+
+# Optional. One Unix socket path shared by controller and worker;
+# default: "/run/vm-test-nix/worker.sock". For both processes under the same
+# user, uncomment this example to put it inside that user's private state.
+# socket = "/home/VM_OWNER/.local/state/vm-test-nix/worker.sock"
+
+# Optional. Controller origin reachable from the worker; defaults to the
+# resolved service.public_url. Override only when the host needs a different
+# route. It must reach the same controller and include no /mcp suffix.
+# cache_base_url = "http://172.17.0.1:8765"
+
+# Optional. Nix executable on the physical host; default: "nix" from the
+# worker's PATH. The worker always submits builds to the existing Nix daemon.
+# nix = "/run/current-system/sw/bin/nix"
+
+# Optional. Maximum requested Nix task deadline, in seconds;
+# default: service.task_timeout. Tasks requesting more than this are rejected.
+# task_timeout = 3600
+
+# Optional. Nix task log limit in bytes; default: service.log_bytes.
+# log_bytes = 67108864
+
+# Optional. Cancellation grace period in seconds; default: 20. An interrupted
+# daemon build retains occupancy until the administrator verifies cleanup.
+# cleanup_timeout = 20
+
+
+# Windows backend (optional).
+# Uncomment [vms.windows] and its six required fields to register a prepared
+# test VM. "windows" is its MCP target ID; repeat this section with another ID
+# to register more VMs. The controller runs in the VM owner's desktop session.
+# [vms.windows]
+
+# Required. Existing VirtualBox VM name or UUID, resolved to UUID at startup.
+# vm = "WINDOWS_VM_NAME_OR_UUID"
+
+# Required. Existing powered-off baseline snapshot. Every new Windows task
+# restores it, including its VM settings and guest disk state. Prepare Guest
+# Additions, Python, tools, automatic login and the selected Defender settings
+# before saving. Use the prepared snapshot's UUID to identify it precisely.
+# baseline = "BASELINE_SNAPSHOT_UUID"
+
+# Required. Windows guest test account with an interactive desktop session.
+# username = "WINDOWS_TEST_USER"
+
+# Required. Literal password for that Windows guest account.
+# password = "REPLACE_WITH_GUEST_PASSWORD"
+
+# Required. Absolute Python 3.11+ executable path INSIDE the Windows guest.
+# Example: a per-user Python 3.14 installation. Run python -c "import sys;
+# print(sys.executable)" as the test user and copy the actual path.
+# python = 'C:\Users\WINDOWS_TEST_USER\AppData\Local\Programs\Python\Python314\python.exe'
+
+# Required. Absolute guest directory writable by the Windows test account.
+# workspace = 'C:\Users\WINDOWS_TEST_USER\vm-tests'
+
+# Optional. Windows login domain; default: omitted (local account).
+# domain = "WINDOWS_DOMAIN"
+
+# Optional. Allow normal shutdown of an idle running VM when another task
+# needs virtualization; default: false. Active service tasks finish first.
+# interruptible = false
+
+# Optional. VirtualBox start mode: "gui", "headless" or "separate";
+# default: "gui". Use the mode verified with the guest's desktop/graphics tests.
+# frontend = "gui"
+
+# Optional. Additional host environment for VBoxManage startvm --putenv;
+# default: no additional variables. Uncomment the table and its entries to
+# preserve a startup profile verified on this host's graphics stack. The Intel
+# Mesa example below still requires separate rendering/decode/encode tests.
+# [vms.windows.startup_env]
+# ANV_DEBUG = "video-decode,video-encode"

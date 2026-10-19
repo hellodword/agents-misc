@@ -1,14 +1,13 @@
 ---
 name: nixos-vm-test
-description: Run and debug NixOS QEMU VM tests on a prepared SSH executor when the project selects remote execution or local KVM is unavailable. Check prerequisites and use password or private-key authentication; exclude executor provisioning, ordinary Nix builds, and systemd-nspawn tests.
+description: Run and diagnose NixOS QEMU VM tests through a prepared HTTP MCP executor when remote execution is selected or local KVM is unavailable. Evaluate with the project's locked nixpkgs and collect sandbox test results; environment provisioning and ordinary Nix builds have separate workflows.
 ---
 
-# Remote NixOS VM Tests
+# NixOS VM Tests
 
-1. Identify the selected test, its locked nixpkgs input, execution system, and authorized SSH target. Preserve an existing suitable project entrypoint. Apply the Nix rule's remote execution policy; an unavailable executor is a reported prerequisite, not permission to provision one.
-2. Read [the execution reference](references/execution.md) for connection inputs, mode semantics, preflight limits, and result retrieval. Confirm the test uses QEMU nodes and forces hardware acceleration before running it.
-3. When a project needs an entrypoint, copy [the Python script template](assets/nix-vm-test.py) into its `scripts/` directory and adapt only the necessary project interfaces. Supply Python 3.11+, OpenSSH, Nix, and, for password authentication, `sshpass` through the project environment. The executor also needs Python 3.11+. Keep any Just recipe thin. Adding this entrypoint does not by itself adopt new flake product outputs.
-4. Run preflight, then the appropriate test mode. For initial executor acceptance, use [the smoke test module](assets/vm-smoke.nix) with the project's locked nixpkgs in an authorized check or isolated test fixture. Give the acceptance test a fresh name and retain evidence that it actually ran.
-5. Report the selected executor, mode, exit status, execution or cache evidence, and remote result/log locations. Distinguish SSH-user configuration, administrator-confirmed daemon policy, and demonstrated VM execution. Preserve useful failure artifacts and identify any cleanup that could not complete.
-
-For a separately authorized manual setup task, read [the preparation guide](references/preparation.md), including Debian tools, persistent sandbox KVM access, cache signatures and acceptance after reboot. For an Intel VirtualBox executor showing the described nested-KVM failures, inspect [the optional CPU 0 module](assets/qemu-cpu0.nix) and its observed conditions before importing it. It is a scoped mitigation pending an upstream fix.
+1. Identify the project test, locked nixpkgs input, execution system and prepared MCP executor. Preserve a suitable project-local flow. Apply the [VM test conventions](../../rules/vm-tests.md) and read [execution](references/execution.md) for submission and diagnosis.
+2. Use `targets` to check the executor and existing tasks. This workflow does not provision the host. For a separately authorized setup task, read [manual preparation](references/preparation.md).
+3. Evaluate locally and transfer inputs through a service-issued binary cache. When an entrypoint is useful, copy [the Python input helper](assets/nix-vm-test.py) into the project's scripts directory. It needs Python 3.11+ and Nix with flakes. It retains the project's pinned framework and gives the top-level test a fresh run identity.
+4. Submit the derivation as a NixOS task. Nodes run directly on host KVM inside the Nix test build. Follow logs and assertions, then retrieve useful output files. Diagnose by changing the test and submitting a fresh run.
+5. For initial acceptance, use [the multi-node test module](assets/vm-smoke.nix) with the project's locked nixpkgs. Confirm actual multi-vCPU guest startup and network assertions, alongside administrator-confirmed daemon sandbox policy.
+6. Report the task ID, execution system, assertion result, logs, artifacts and cleanup state. Keep unresolved failures attributable to the test, execution environment or framework.
