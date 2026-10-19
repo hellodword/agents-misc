@@ -86,7 +86,7 @@ Old entrypoints have no forwarding aliases. The kit supplies no dedicated SQLite
 
 The long-task plan keeps completion evidence and authorization stable while allowing implementation choices to change. It records discoveries and continuation state, detects unproductive retries, and distinguishes incomplete or unverified work from completion. Starting a Goal or receiving an implementation task alone does not trigger planning.
 
-The remote NixOS VM test skill uses a prepared SSH executor for sandbox builds and direct driver debugging. It includes a project script template with non-interactive password and private-key authentication. The [executor preparation reference](docs/nixos-vm-test-runner.md) is for administrators, outside the distributed payload and the skill's loading path.
+The remote NixOS VM test skill uses a prepared SSH executor for sandbox builds and direct driver debugging. Its Python template supports password/key authentication, per-run deadlines and retained logs. The distributed [manual preparation guide](.agents/skills/nixos-vm-test/references/preparation.md) covers Debian setup, sandbox KVM access and an optional Intel VirtualBox mitigation.
 
 ## Maintenance and validation
 

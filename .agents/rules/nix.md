@@ -32,7 +32,7 @@ The usual working environment is a Nix-based devcontainer. Prefer project develo
 ## Remote NixOS VM tests
 
 - Preserve a working project-local VM test flow. When the project selects remote execution or local KVM is unavailable, use a user-provided or project-authorized SSH executor; ask for a target when none is established.
-- Keep remote selection specific to the test command: evaluate locally and build through an explicit remote Nix store. Do not change the global store or builders, expose host devices to the development container, or fall back to local execution after a remote failure.
+- Keep remote selection specific to the test command: evaluate locally, transfer derivations through an explicit remote store, and run the build against the selected executor's daemon. Keep store and builder selection scoped to that invocation.
 - Use a prepared Linux executor with a multi-user Nix daemon, enabled sandbox without sandbox fallback, and working KVM. Check prerequisites and report deficiencies; remote provisioning and permission changes are outside this test workflow.
 - Require `qemu.forceAccel = true` for this KVM test flow. Initial acceptance combines confirmed daemon sandbox policy with a fresh test that starts QEMU and passes its assertions. Device presence and SSH-user configuration are preliminary evidence; a cached success is not evidence of execution during the current invocation.
 - Distinguish sandbox test builds from direct driver runs and interactive debugging. Retain useful remote logs and report their locations.
