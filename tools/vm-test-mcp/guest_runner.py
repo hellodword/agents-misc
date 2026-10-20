@@ -14,11 +14,41 @@ import time
 import zipfile
 from pathlib import Path
 
+FILE_RETRY_SECONDS = 2
+
+
+def retry_file(operation):
+    """Allow short Windows sharing/access conflicts without an unbounded wait."""
+    deadline = time.monotonic() + FILE_RETRY_SECONDS
+    while True:
+        try:
+            return operation()
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+
+
+def read_json(path):
+    return retry_file(lambda: json.loads(path.read_text(encoding="utf-8")))
+
 
 def write_json(path, value):
     temporary = path.with_suffix(".new")
-    temporary.write_text(json.dumps(value), encoding="utf-8")
-    temporary.replace(path)
+
+    def publish():
+        temporary.write_text(json.dumps(value), encoding="utf-8")
+        temporary.replace(path)
+
+    retry_file(publish)
+
+
+def read_status(directory):
+    # The terminal record is published once, independently of the hot snapshot.
+    try:
+        return read_json(directory / "result.json")
+    except FileNotFoundError:
+        return read_json(directory / "status.json")
 
 
 class InputPipe:
@@ -42,7 +72,7 @@ class InputPipe:
                 sequence = self.state["written_sequence"] + 1
                 path = self.directory / f"input-{sequence:08d}.json"
                 try:
-                    message = json.loads(path.read_text(encoding="utf-8"))
+                    message = read_json(path)
                 except FileNotFoundError:
                     self.stop.wait(0.05)
                     continue
@@ -106,7 +136,7 @@ def run(directory):
     import msvcrt
     from ctypes import wintypes as w
 
-    spec = json.loads((directory / "command.json").read_text(encoding="utf-8"))
+    spec = read_json(directory / "command.json")
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
 
     class Limits(ctypes.Structure):
@@ -246,12 +276,23 @@ def run(directory):
             raise ctypes.WinError(ctypes.get_last_error())
         return value
 
-    job = checked(kernel.CreateJobObjectW(None, None))
+    job = None
     child = Process()
+    assigned = False
     status = {"state": "running", "cleanup_confirmed": False, "exit_code": None}
-    input_pipe = InputPipe(directory) if spec.get("stdin") else None
-    write_json(directory / "status.json", status)
+    input_pipe = None
+
+    def failed(phase, error):
+        previous = status.get("error")
+        status.update(
+            state="failed",
+            error=f"{previous}; {phase}: {error}" if previous else f"{phase}: {error}",
+        )
+
     try:
+        job = checked(kernel.CreateJobObjectW(None, None))
+        input_pipe = InputPipe(directory) if spec.get("stdin") else None
+        write_json(directory / "status.json", status)
         limits = Extended()
         limits.BasicLimitInformation.LimitFlags = (
             0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
@@ -302,11 +343,8 @@ def run(directory):
                     ctypes.byref(child),
                 )
             )
-            try:
-                checked(kernel.AssignProcessToJobObject(job, child.hProcess))
-            except BaseException:
-                kernel.TerminateProcess(child.hProcess, 1)
-                raise
+            checked(kernel.AssignProcessToJobObject(job, child.hProcess))
+            assigned = True
             if kernel.ResumeThread(child.hThread) == 0xFFFFFFFF:
                 raise ctypes.WinError(ctypes.get_last_error())
             if input_pipe:
@@ -331,41 +369,67 @@ def run(directory):
                 if (directory / "run.log").stat().st_size > spec["log_bytes"]:
                     reason = "output_limit"
                     break
-            code = w.DWORD()
-            checked(kernel.GetExitCodeProcess(child.hProcess, ctypes.byref(code)))
-            if reason == "exited":
-                status["exit_code"] = code.value
-            checked(kernel.TerminateJobObject(job, 1))
-            deadline = time.monotonic() + 10
-            while True:
-                accounting = Accounting()
-                checked(
-                    kernel.QueryInformationJobObject(
-                        job,
-                        1,
-                        ctypes.byref(accounting),
-                        ctypes.sizeof(accounting),
-                        None,
-                    )
-                )
-                if accounting.ActiveProcesses == 0:
-                    status["cleanup_confirmed"] = True
-                    break
-                if time.monotonic() >= deadline:
-                    break
-                time.sleep(0.1)
-            output.truncate(min(output.seek(0, 2), spec["log_bytes"]))
             status.update(state="finished", reason=reason)
     except (OSError, ValueError, KeyError, TypeError) as error:
-        status.update(state="failed", error=str(error))
+        failed("execution", error)
     finally:
+        # File publication must never bypass process-tree cleanup or its readback.
+        try:
+            if child.hProcess:
+                if kernel.WaitForSingleObject(child.hProcess, 0) == 0:
+                    code = w.DWORD()
+                    checked(
+                        kernel.GetExitCodeProcess(child.hProcess, ctypes.byref(code))
+                    )
+                    status["exit_code"] = code.value
+                if assigned:
+                    checked(kernel.TerminateJobObject(job, 1))
+                    deadline = time.monotonic() + 10
+                    while True:
+                        accounting = Accounting()
+                        checked(
+                            kernel.QueryInformationJobObject(
+                                job,
+                                1,
+                                ctypes.byref(accounting),
+                                ctypes.sizeof(accounting),
+                                None,
+                            )
+                        )
+                        if accounting.ActiveProcesses == 0:
+                            status["cleanup_confirmed"] = True
+                            break
+                        if time.monotonic() >= deadline:
+                            break
+                        time.sleep(0.1)
+                else:
+                    checked(kernel.TerminateProcess(child.hProcess, 1))
+                    status["cleanup_confirmed"] = (
+                        kernel.WaitForSingleObject(child.hProcess, 10000) == 0
+                    )
+            else:
+                status["cleanup_confirmed"] = True
+        except OSError as error:
+            failed("cleanup", error)
         for handle in (child.hThread, child.hProcess, job):
             if handle:
                 kernel.CloseHandle(handle)
         if input_pipe:
             input_pipe.close()
             status["stdin"] = dict(input_pipe.state)
-        write_json(directory / "status.json", status)
+        try:
+            with (directory / "run.log").open("r+b") as output:
+                output.truncate(min(output.seek(0, 2), spec["log_bytes"]))
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            failed("log", error)
+        try:
+            write_json(directory / "result.json", status)
+        except OSError:
+            # Keep result.new for diagnosis if even the independent record fails.
+            print(json.dumps(status), file=sys.stderr, flush=True)
+            raise
 
 
 def pack(source, destination):
@@ -394,6 +458,8 @@ if __name__ == "__main__":
     elif sys.argv[1] == "pack":
         pack(sys.argv[2], sys.argv[3])
     elif sys.argv[1] == "publish":
-        Path(sys.argv[2]).replace(sys.argv[3])
+        retry_file(lambda: Path(sys.argv[2]).replace(sys.argv[3]))
+    elif sys.argv[1] == "status":
+        print(json.dumps(read_status(Path(sys.argv[2]))))
     else:
         run(Path(sys.argv[1]))

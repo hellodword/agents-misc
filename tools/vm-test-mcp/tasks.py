@@ -48,6 +48,8 @@ def command_failure(command):
         return reason
     if command.get("error") or command["state"] == "failed":
         return "executor"
+    if input_status(command)["error"]:
+        return "stdin"
     if command.get("exit_code") != 0:
         return "exit_code"
     return None
@@ -68,13 +70,20 @@ def page(items, offset, limit):
 def input_status(command):
     messages = command.get("input_requests", {})
     written = command.get("stdin", {}).get("written_sequence", 0)
+    error = command.get("stdin", {}).get("error")
+    if (
+        not error
+        and command["state"] not in {"starting", "running"}
+        and written < len(messages)
+    ):
+        error = f"Command ended before input sequence {written + 1} was acknowledged"
     return {
         "enabled": command["request"].get("stdin", False),
         "accepted_sequence": len(messages),
         "written_sequence": written,
         "eof_queued": any(m["eof"] for m in messages.values()),
         "closed": command.get("stdin", {}).get("closed", False),
-        "error": command.get("stdin", {}).get("error"),
+        "error": error,
         "pending_bytes": sum(
             len(m["text"].encode("utf-8"))
             for m in messages.values()
@@ -724,20 +733,18 @@ class Controller:
         try:
             while True:
                 try:
-                    await self.fetch_guest(
-                        vm,
-                        vm.guest_path(
-                            task["id"], "cmd-" + operation["id"], "status.json"
-                        ),
-                        directory / "status.json",
-                        65536,
+                    data, _ = await vm.python(
+                        vm.guest_path(task["id"], "guest_runner.py"),
+                        "status",
+                        vm.guest_path(task["id"], "cmd-" + operation["id"]),
                     )
                 except Failure:
                     if time.time() > task["deadline"]:
                         raise
                     await asyncio.sleep(1)
                     continue
-                status = load_json(directory / "status.json")
+                status = json.loads(data)
+                atomic_json(directory / "status.json", status)
                 with contextlib.suppress(Failure):
                     await self.fetch_guest(
                         vm,

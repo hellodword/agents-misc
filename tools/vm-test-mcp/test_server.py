@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 import httpx2
 import uvicorn
 from common import DEFAULTS, Failure, atomic_json, load_json, terminate
-from guest_runner import InputPipe
+from guest_runner import InputPipe, read_status, retry_file
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import MCPError
@@ -134,8 +134,14 @@ class RecordingVM(VirtualBox):
         if args[-1] == "probe":
             return b'{"interactive":true,"session_id":1}', 35
         if len(args) > 1 and args[1] == "publish":
-            self.local(args[2]).replace(self.local(args[3]))
+            retry_file(lambda: self.local(args[2]).replace(self.local(args[3])))
             return b"", 0
+        if len(args) > 1 and args[1] == "status":
+            try:
+                data = json.dumps(read_status(self.local(args[2]))).encode()
+                return data, len(data)
+            except OSError as error:
+                raise Failure(str(error)) from error
         self.jobs.append(asyncio.create_task(self.run_guest(self.local(args[-1]))))
         return b"started", 7
 
@@ -191,7 +197,7 @@ class RecordingVM(VirtualBox):
             reason=reason,
             cleanup_confirmed=True,
         )
-        atomic_json(directory / "status.json", state)
+        atomic_json(directory / "result.json", state)
 
     async def copy_to(self, source, destination):
         path = self.local(destination)
@@ -868,6 +874,106 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(status["command"]["cleanup_confirmed"])
         finally:
             await replacement.close()
+
+    async def test_input_delivery_results_include_unwritten_messages(self):
+        async with self.client() as client:
+            await self.call(
+                client,
+                "task_begin",
+                kind="windows",
+                target="windows",
+                request_id="delivery",
+            )
+            await self.wait_state(client, "delivery", "ready")
+            original = Path.read_text
+            for mode in ("temporary", "permanent", "early-exit", "eof-only"):
+                with self.subTest(mode=mode):
+                    attempts = 0
+
+                    def read(path, *args, **kwargs):
+                        nonlocal attempts
+                        if (
+                            path.name == "input-00000001.json"
+                            and self.vm.guest_root in path.parents
+                        ):
+                            attempts += 1
+                            if mode == "permanent" or (
+                                mode == "temporary" and attempts <= 2
+                            ):
+                                raise PermissionError(
+                                    "synthetic input sharing conflict"
+                                )
+                        return original(path, *args, **kwargs)
+
+                    early = mode in {"early-exit", "eof-only"}
+                    with patch.object(Path, "read_text", read):
+                        # Accept while starting, before launch has a chance to run.
+                        await self.controller.exec_guest(
+                            "delivery",
+                            mode,
+                            [
+                                sys.executable,
+                                "-u",
+                                "-c",
+                                "print('exited')"
+                                if early
+                                else "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())",
+                            ],
+                            stdin=True,
+                        )
+                        receipt = await self.controller.input(
+                            "delivery",
+                            mode,
+                            "first",
+                            "" if mode == "eof-only" else "消息1 é\n",
+                            eof=True,
+                        )
+                        self.assertEqual(receipt["state"], "accepted")
+                        final = await self.wait_state(client, "delivery", "ready")
+                    command = final["commands"][mode]
+                    self.assertEqual(command["exit_code"], 0)
+                    self.assertTrue(command["cleanup_confirmed"])
+                    self.assertEqual(command["stdin"]["accepted_sequence"], 1)
+                    self.assertTrue(command["stdin"]["closed"])
+                    delivered = mode == "temporary"
+                    self.assertEqual(
+                        command["stdin"]["written_sequence"], int(delivered)
+                    )
+                    self.assertEqual(
+                        command["failure_kind"], None if delivered else "stdin"
+                    )
+                    self.assertEqual(
+                        command["stdin"]["pending_bytes"],
+                        0
+                        if delivered or mode == "eof-only"
+                        else len("消息1 é\n".encode()),
+                    )
+                    retry = await self.call(
+                        client,
+                        "guest_input",
+                        task_id="delivery",
+                        command_id=mode,
+                        request_id="first",
+                        text="" if mode == "eof-only" else "消息1 é\n",
+                        eof=True,
+                    )
+                    self.assertEqual(
+                        retry["state"], "written" if delivered else "unconfirmed"
+                    )
+                    log = await self.call(
+                        client, "task_log", task_id="delivery", command_id=mode
+                    )
+                    self.assertEqual(
+                        log["text"],
+                        "消息1 é\n" if delivered else "exited\n" if early else "",
+                    )
+                    if not delivered:
+                        self.assertTrue(command["stdin"]["error"])
+            await self.call(client, "task_finish", task_id="delivery")
+            final = await self.wait_state(client, "delivery", "failed")
+            self.assertTrue(final["cleanup_confirmed"])
+            self.assertEqual(final["outcome"]["failed_command_count"], 3)
+            self.assertEqual(final["outcome"]["command_failure_kinds"], {"stdin": 3})
 
     async def test_task_deadline_keeps_its_reason_after_cleanup(self):
         async with self.client() as client:

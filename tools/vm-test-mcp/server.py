@@ -38,7 +38,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from tasks import Controller, INPUT_BYTES, INPUT_PENDING_BYTES
 from transfers import reply
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 
 def result(data):
