@@ -142,6 +142,7 @@ if sys.argv[1] == 'build':
         )
         failed = await self.wait_job("failure")
         self.assertEqual(failed["state"], "failed")
+        self.assertEqual(failed["failure_kind"], "build")
         self.assertTrue(failed["cleanup_confirmed"])
         self.assertIn(
             "test-node",
@@ -176,6 +177,7 @@ if sys.argv[1] == 'build':
         cancelled = await self.client.call("cancel", id="slow")
         self.assertEqual(cancelled["state"], "cleanup_unknown")
         self.assertFalse(cancelled["cleanup_confirmed"])
+        self.assertEqual(cancelled["failure_kind"], "cancelled")
         with self.assertRaises(Failure):
             await self.client.call("retire", id="slow")
         with self.assertRaises(Failure):

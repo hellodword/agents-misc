@@ -18,7 +18,15 @@ import tomllib
 
 
 class Failure(RuntimeError):
-    pass
+    def __init__(self, message, code="operation_failed", **details):
+        super().__init__(message)
+        self.code = code
+        self.details = details
+
+    def response(self):
+        return {
+            "error": {"code": self.code, "message": str(self), "details": self.details}
+        }
 
 
 ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}\Z")
@@ -81,7 +89,13 @@ def bounded(value, maximum, name, minimum=0.001):
         or not math.isfinite(value)
         or not minimum <= value <= maximum
     ):
-        raise Failure(f"{name} must be in {minimum}..{maximum}")
+        raise Failure(
+            f"{name} must be in {minimum}..{maximum}",
+            "out_of_range",
+            parameter=name,
+            minimum=minimum,
+            maximum=maximum,
+        )
     return value
 
 

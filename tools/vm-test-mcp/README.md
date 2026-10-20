@@ -68,24 +68,27 @@ Enable `[nix]` with its state directory for NixOS tests and `[vms.ID]` registrat
 
 ## Tools
 
-| Tool                         | Inputs / result                                                                               |
-| ---------------------------- | --------------------------------------------------------------------------------------------- |
-| `targets`                    | Registered IDs, VM UUIDs, Nix availability and current task summaries                         |
-| `host_info`, `vm_info`       | Fixed host summary; registered VM configuration/state                                         |
-| `vm_power`                   | `target`, `action`: start, shutdown, reboot, poweroff or reset                                |
-| `wait_for_state`             | `target`, `state`, bounded `timeout`                                                          |
-| `modify_vm`                  | `target`, typed `changes`; human confirmation followed by observed differences                |
-| `read_log`                   | `target`, optional `index`, `offset`, `limit`, `tail`, `generation`; paged VBox logs          |
-| `transfer_create`            | `kind`: file or cache; returns transfer ID and URL                                            |
-| `task_begin`                 | `kind`, unique `request_id`; Windows `target` or NixOS `cache_id` + `drv`; optional `timeout` |
-| `task_status`, `task_log`    | Persistent state and incremental output; logs optionally select `command_id`                  |
-| `guest_upload`               | `task_id`, `transfer_id`, absolute guest `destination`                                        |
-| `guest_exec`                 | `task_id`, command `request_id`, `argv`; optional guest `cwd`, `env`, `timeout`               |
-| `guest_collect`              | `task_id`, command `request_id`, `guest_path`; supervised ZIP creation in the guest           |
-| `screenshot`                 | `task_id`; PNG artifact URL                                                                   |
-| `artifacts`                  | `task_id`; optionally list a recorded Nix `root` and relative `path`                          |
-| `artifact_download`          | `task_id`, recorded Nix `root`, relative file `path`; download URL                            |
-| `task_finish`, `task_cancel` | Begin evidence collection/cleanup; observe completion through task status                     |
+| Tool                         | Inputs / result                                                                                         |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `targets`                    | Registered IDs, VM UUIDs, Nix availability, effective limits and current task summaries                 |
+| `host_info`, `vm_info`       | Fixed host summary; registered VM configuration/state                                                   |
+| `vm_power`                   | `target`, `action`: start, shutdown, reboot, poweroff or reset                                          |
+| `wait_for_state`             | `target`, `state`, bounded `timeout`                                                                    |
+| `modify_vm`                  | `target`, typed `changes`; human confirmation followed by observed differences                          |
+| `read_log`                   | `target`, optional `index`, `offset`, `limit`, `tail`, `generation`; paged VBox logs                    |
+| `transfer_create`            | `kind`: file or cache; returns transfer ID and URL                                                      |
+| `task_begin`                 | `kind`, unique `request_id`; Windows `target` or NixOS `cache_id` + `drv`; optional `timeout`           |
+| `task_status`                | `task_id`, optional `command_id`; compact outcome, counts, active/selected command and cleanup          |
+| `task_commands`              | `task_id`, `offset=0`, `limit=50`; full command requests/results in insertion order                     |
+| `task_log`                   | `task_id`, optional `command_id`, byte `offset` and `limit`; incremental output                         |
+| `guest_upload`               | `task_id`, `transfer_id`, absolute guest `destination`                                                  |
+| `guest_exec`                 | `task_id`, command `request_id`, `argv`; optional guest `cwd`, `env`, `timeout`, `stdin=false`          |
+| `guest_input`                | `task_id`, `command_id`, message `request_id`, `text=""`, `eof=false`; ordered stdin receipt            |
+| `guest_collect`              | `task_id`, command `request_id`, `guest_path`; supervised ZIP creation in the guest                     |
+| `screenshot`                 | `task_id`; PNG artifact URL                                                                             |
+| `artifacts`                  | `task_id`, `offset=0`, `limit=50`; artifact page and Nix roots, or directory listing with `root`/`path` |
+| `artifact_download`          | `task_id`, recorded Nix `root`, relative file `path`; download URL                                      |
+| `task_finish`, `task_cancel` | Begin evidence collection/cleanup; observe completion through task status                               |
 
 `modify_vm` supports CPU count, RAM/VRAM, graphics controller, 3D, paravirtualization provider, nested paging and VPID. It translates typed values to fixed VBoxManage options. Every modification and every hard power operation asks for confirmation through the MCP client, which is trusted to obtain the user's decision. A confirmation is bound to one exact operation, valid for 120 seconds, and consumed once. Decline/cancel returns `applied: false`; an uncertain modify result includes readback information.
 
@@ -103,11 +106,40 @@ One active virtualization task owns the service at a time. Registered interrupti
 
 Task IDs and command IDs make retries idempotent: identical inputs return the existing operation, changed inputs require a different ID. Task state is atomically persisted before execution. Windows commands use a guest-local supervisor and a Windows Job Object; children start suspended, join the job, then execute. The supervisor reports the child's actual exit code and bounded descendant cleanup independently of VBoxManage's own status.
 
+### Results and polling
+
+`task_begin`, `task_status`, `task_finish` and `task_cancel` return the same compact task view. It includes command/artifact counts, `current_command`, the remaining task deadline and `outcome`. Pass `command_id` to `task_status` for a specific command's exit status and stdin progress. Polling excludes request bodies, transfer records and historical commands.
+
+`outcome.failed_command_count`, `command_failure_kinds` and up to five `failed_command_ids` summarize command failures. Failure kinds distinguish `exit_code`, `timeout`, `output_limit`, `executor`, `cancelled`, `task_timeout` and `task_finished`. `outcome.failure` records execution failures with their phase; `stop_reason` identifies explicit cancellation or the task deadline; `cleanup_error` describes unresolved cleanup. `cleanup_confirmed` remains independent of the test result. A successful later command does not erase an earlier failure. Normal task completion is failed if any command failed or execution failed, while an explicit cancellation ends as cancelled after cleanup. Ending a still-running command records `task_finished` rather than inventing its exit code.
+
+Nix status includes the worker phase and exit code. A nonzero build exit is a build failure; importing inputs or starting a client can fail as executor work. Cancellation or deadline interruption may require cleanup reconciliation before another task starts.
+
+`task_commands` and task-level `artifacts` return `items`, `total` and `next_offset` (null at the end). Pages contain at most 100 items; command pages include requests and associated collection artifacts, excluding stdin message text. Follow the returned offset to read all history. `artifacts` also exposes `nix_outputs`; selecting a Nix root/path retains its bounded directory listing.
+
+### Interactive commands
+
+Start a long-lived driver with `guest_exec(stdin=true)`, then send UTF-8 text through `guest_input`. Include newlines explicitly for line-oriented protocols. `eof=true` writes any final text and closes stdin. Input is limited to 16 KiB per message and 64 KiB pending acknowledgement; `targets.limits` exposes these and the configured task/transfer/log limits. Drivers own their input protocol and application acknowledgements.
+
+Each message receives an increasing sequence number. Repeating the same request ID and content returns that message's receipt; changed content returns `request_conflict`. Receipt states are `accepted`, `written` and `unconfirmed` if the command ended before acknowledgement; unconfirmed input may have been partially consumed. The selected command's `stdin` reports accepted/written sequences, pending bytes, closure and errors. `written` means the supervisor wrote to the pipe, not that the application completed the action.
+
+Messages are persisted before acceptance and atomically published in the guest command directory. The supervisor consumes them in order; controller reconnect/restart resumes observation and publication for the same command. A pipe writer runs independently of supervision, so a driver that stops reading still respects command deadlines, cancellation and Job Object cleanup. This is a pipe interface, not a terminal/PTY.
+
+| Windows task state             | Available operations                                                                          |
+| ------------------------------ | --------------------------------------------------------------------------------------------- |
+| `ready`                        | Start a command or collection; upload; screenshot; query status/logs/artifacts; finish/cancel |
+| `executing`                    | Send input to the active stdin-enabled command; upload; screenshot; query; finish/cancel      |
+| `finishing`, `cleanup_unknown` | Query retained evidence; capture available screenshots; complete cleanup                      |
+| Completed                      | Query retained status, command pages, logs and artifacts                                      |
+
+Starting another command or collection while executing returns `task_busy` with the active command ID. Upload creates the guest destination's parent directories, waits for Guest Control copying and checks the resulting file size; `guest_upload_failed` identifies the destination. Coordinate file replacement with the running application.
+
 A service restart resumes observation of known guest commands and Nix jobs. An interrupted baseline/start/shutdown transition becomes `cleanup_unknown` for inspection and explicit task completion. A worker restart marks its unfinished jobs similarly. Useful evidence remains available; retention applies only to completed, cleaned-up tasks and old unreferenced transfers. Successful Nix outputs have task-owned GC roots until task retention expires. Retained failed-build directories and general store GC remain administrator-owned.
 
 ## HTTP and file transfer
 
 `/mcp` uses the SDK's Streamable HTTP JSON-RPC transport. POST carries requests, GET supports its event stream, and DELETE closes a legacy session. Tool results include structured JSON; protocol failures use MCP errors. Unknown tool/config fields are rejected. MCP requests are limited to 64 KiB, with 32 sessions and a 300-second idle timeout.
+
+Operational tool failures use `isError=true` and structured `error: {code, message, details}`. `task_busy`/`task_state` include the current state and allowed states; `out_of_range` includes the parameter and its minimum/maximum. Task timeouts are validated before allocation, using the smaller controller/worker limit for Nix tasks. Discover limits through `targets` before requesting a long run.
 
 `/files/CAPABILITY/blob` supports PUT for file upload and GET/HEAD for download. Cache capabilities instead expose `nix-cache-info`, store-hash `.narinfo` files and `nar/…` objects. PUT streams to a temporary file and publishes it atomically within quota. Submission or first guest use seals the transfer. Artifacts are read-only capabilities.
 

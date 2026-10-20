@@ -35,7 +35,7 @@ from mcp.types import (
     ToolAnnotations,
 )
 from pydantic import BaseModel, ConfigDict, Field
-from tasks import Controller
+from tasks import Controller, INPUT_BYTES, INPUT_PENDING_BYTES
 from transfers import reply
 
 
@@ -178,6 +178,21 @@ class Tools:
                 for key, vm in ctl.vms.items()
             ],
             "nix_enabled": ctl.worker is not None,
+            "limits": {
+                "windows_task_seconds": ctl.settings["task_timeout"],
+                "nixos_task_seconds": min(
+                    ctl.settings["task_timeout"],
+                    ctl.config.get("nix", {}).get(
+                        "task_timeout", ctl.settings["task_timeout"]
+                    ),
+                ),
+                "command_seconds": "At most the task timeout; execution is bounded by the remaining task deadline",
+                "upload_bytes": ctl.settings["upload_bytes"],
+                "log_bytes": ctl.settings["log_bytes"],
+                "stdin_message_bytes": INPUT_BYTES,
+                "stdin_pending_bytes": INPUT_PENDING_BYTES,
+                "page_items": 100,
+            },
             "tasks": [
                 {key: task[key] for key in ("id", "kind", "state", "cleanup_confirmed")}
                 for task in ctl.tasks.values()
@@ -270,13 +285,22 @@ class Tools:
         timeout: float | None = None,
     ) -> dict[str, object]:
         """Queue a test task; retry the same request_id with identical inputs."""
-        return await self.controller.begin(
+        task = await self.controller.begin(
             kind, request_id, target, cache_id, drv, timeout
         )
+        return self.controller.status(task["id"])
 
-    async def task_status(self, task_id: str) -> dict[str, object]:
-        """Read persistent task, command and cleanup state."""
-        return self.controller.task(task_id)
+    async def task_status(
+        self, task_id: str, command_id: str | None = None
+    ) -> dict[str, object]:
+        """Poll a compact task outcome and optional command status, without history."""
+        return self.controller.status(task_id, command_id)
+
+    async def task_commands(
+        self, task_id: str, offset: int = 0, limit: int = 50
+    ) -> dict[str, object]:
+        """Read a page of command requests and results; next_offset continues history."""
+        return self.controller.commands(task_id, offset, limit)
 
     async def task_log(
         self,
@@ -290,16 +314,18 @@ class Tools:
 
     async def task_finish(self, task_id: str) -> dict[str, object]:
         """Collect evidence and gracefully close a Windows task; cancel a running Nix task."""
-        return await self.controller.finish(task_id)
+        await self.controller.finish(task_id)
+        return self.controller.status(task_id)
 
     async def task_cancel(self, task_id: str) -> dict[str, object]:
         """Request bounded cleanup; poll task_status for confirmation."""
-        return await self.controller.finish(task_id, cancel=True)
+        await self.controller.finish(task_id, cancel=True)
+        return self.controller.status(task_id)
 
     async def guest_upload(
         self, task_id: str, transfer_id: str, destination: str
     ) -> dict[str, object]:
-        """Copy an uploaded file to an absolute path in the ready Windows guest."""
+        """Upload while ready or executing; create guest parent directories and verify size."""
         return await self.controller.upload(task_id, transfer_id, destination)
 
     async def guest_exec(
@@ -310,27 +336,46 @@ class Tools:
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         timeout: float | None = None,
+        stdin: bool = False,
     ) -> dict[str, object]:
-        """Start one supervised guest command; poll task_status for its actual exit code."""
-        return await self.controller.exec_guest(
-            task_id, request_id, argv, cwd, env, timeout
+        """Start one supervised command; stdin=true enables ordered guest_input messages."""
+        command = await self.controller.exec_guest(
+            task_id, request_id, argv, cwd, env, timeout, stdin=stdin
         )
+        return self.controller.status(task_id, command["id"])["command"]
+
+    async def guest_input(
+        self,
+        task_id: str,
+        command_id: str,
+        request_id: str,
+        text: str = "",
+        eof: bool = False,
+    ) -> dict[str, object]:
+        """Queue UTF-8 stdin for an existing command; retry the same ID/content; eof closes input."""
+        return await self.controller.input(task_id, command_id, request_id, text, eof)
 
     async def guest_collect(
         self, task_id: str, request_id: str, guest_path: str
     ) -> dict[str, object]:
         """Archive a guest file/directory in the guest and register it as an artifact."""
-        return await self.controller.collect(task_id, request_id, guest_path)
+        command = await self.controller.collect(task_id, request_id, guest_path)
+        return self.controller.status(task_id, command["id"])["command"]
 
     async def screenshot(self, task_id: str) -> dict[str, object]:
         """Capture the task's VM display and return an artifact download URL."""
         return await self.controller.screenshot(task_id)
 
     async def artifacts(
-        self, task_id: str, root: str | None = None, path: str = ""
+        self,
+        task_id: str,
+        root: str | None = None,
+        path: str = "",
+        offset: int = 0,
+        limit: int = 50,
     ) -> dict[str, object]:
         """List task artifacts or one directory within a recorded Nix output root."""
-        return await self.controller.outputs(task_id, root, path)
+        return await self.controller.outputs(task_id, root, path, offset, limit)
 
     async def artifact_download(
         self, task_id: str, root: str, path: str
@@ -368,7 +413,7 @@ def make_server(controller):
 
     server = MCPServer(
         "vm-test-mcp",
-        version="0.2.0",
+        version="0.3.0",
         log_level="WARNING",
         middleware=[strict],
         instructions="Use registered targets and persistent task IDs. NixOS nodes use host KVM; Windows guests use VirtualBox. Observe cleanup_confirmed before switching. Present modify_vm and hard power confirmations to the human.",
@@ -380,6 +425,7 @@ def make_server(controller):
         "read_log",
         "wait_for_state",
         "task_status",
+        "task_commands",
         "task_log",
         "artifacts",
     }
@@ -390,7 +436,10 @@ def make_server(controller):
             try:
                 return await _method(*args, **kwargs)
             except (Failure, OSError, ValueError, TimeoutError) as error:
-                raise ToolError(str(error)) from error
+                failure = error if isinstance(error, Failure) else Failure(str(error))
+                response = result(failure.response())
+                response.is_error = True
+                return response
 
         server.add_tool(
             guarded,

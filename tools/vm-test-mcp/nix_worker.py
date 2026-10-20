@@ -230,12 +230,14 @@ class Worker:
                 state="cancelled" if not began_build else "cleanup_unknown",
                 cleanup_confirmed=not began_build,
                 error="Cancellation requested; verify daemon workers before releasing an interrupted build",
+                failure_kind="cancelled",
             )
         except TimeoutError:
             job.update(
                 state="cleanup_unknown" if began_build else "failed",
                 cleanup_confirmed=not began_build,
                 error="Overall task deadline exceeded",
+                failure_kind="task_timeout",
             )
         except (Failure, OSError, ValueError, KeyError) as error:
             # A normal Nix response includes its builder teardown. Forced client
@@ -245,6 +247,11 @@ class Worker:
                 state="cleanup_unknown" if interrupted and began_build else "failed",
                 cleanup_confirmed=not (interrupted and began_build),
                 error=str(error),
+                failure_kind="cancelled"
+                if interrupted
+                else "build"
+                if began_build and job.get("exit_code")
+                else "executor",
             )
         finally:
             self.save(job)

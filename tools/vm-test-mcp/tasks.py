@@ -30,6 +30,69 @@ from transfers import Transfers
 from virtualbox import VirtualBox
 
 FINISHED = {"succeeded", "failed", "cancelled"}
+INPUT_BYTES = 16 * 1024
+INPUT_PENDING_BYTES = 64 * 1024
+
+
+def command_failure(command):
+    if command["state"] in {"starting", "running"}:
+        return None
+    reason = command.get("reason")
+    if reason in {
+        "timeout",
+        "output_limit",
+        "cancelled",
+        "task_finished",
+        "task_timeout",
+    }:
+        return reason
+    if command.get("error") or command["state"] == "failed":
+        return "executor"
+    if command.get("exit_code") != 0:
+        return "exit_code"
+    return None
+
+
+def page(items, offset, limit):
+    bounded(offset, 2**63 - 1, "offset", 0)
+    bounded(limit, 100, "limit", 1)
+    selected = items[offset : offset + limit]
+    following = offset + len(selected)
+    return {
+        "items": selected,
+        "total": len(items),
+        "next_offset": following if following < len(items) else None,
+    }
+
+
+def input_status(command):
+    messages = command.get("input_requests", {})
+    written = command.get("stdin", {}).get("written_sequence", 0)
+    return {
+        "enabled": command["request"].get("stdin", False),
+        "accepted_sequence": len(messages),
+        "written_sequence": written,
+        "eof_queued": any(m["eof"] for m in messages.values()),
+        "closed": command.get("stdin", {}).get("closed", False),
+        "error": command.get("stdin", {}).get("error"),
+        "pending_bytes": sum(
+            len(m["text"].encode("utf-8"))
+            for m in messages.values()
+            if m["sequence"] > written
+        ),
+    }
+
+
+def command_status(command, detail=False):
+    result = {
+        key: command.get(key)
+        for key in ("id", "state", "exit_code", "reason", "error", "cleanup_confirmed")
+    }
+    result["failure_kind"] = command_failure(command)
+    result["stdin"] = input_status(command)
+    if detail:
+        result.update(request=command["request"], artifact=command.get("artifact"))
+    return result
 
 
 class Controller:
@@ -80,6 +143,81 @@ class Controller:
             raise Failure("Unknown task")
         return self.tasks[key]
 
+    def status(self, key, command_id=None):
+        task = self.task(key)
+        commands = list(task["commands"].values())
+        failed = [c for c in commands if command_failure(c)]
+        kinds = {}
+        for command in failed:
+            kind = command_failure(command)
+            kinds[kind] = kinds.get(kind, 0) + 1
+        active = next(
+            (c for c in commands if c["state"] in {"starting", "running"}), None
+        )
+        result = {
+            field: task.get(field)
+            for field in (
+                "id",
+                "kind",
+                "target",
+                "state",
+                "cleanup_confirmed",
+                "created_at",
+                "updated_at",
+                "guest_directory",
+                "desktop",
+            )
+        }
+        result.update(
+            timeout=task["timeout"],
+            remaining_seconds=max(0, round(task["deadline"] - time.time(), 1))
+            if "deadline" in task and task["state"] not in FINISHED
+            else None,
+            command_count=len(commands),
+            artifact_count=len(task["artifacts"]),
+            current_command=command_status(active) if active else None,
+            outcome={
+                "failed_command_count": len(failed),
+                "failed_command_ids": [c["id"] for c in failed[:5]],
+                "command_failure_kinds": kinds,
+                "failure": task.get("failure"),
+                "stop_reason": task.get("stop_reason"),
+                "cleanup_error": task.get("cleanup_error"),
+            },
+        )
+        if task["kind"] == "nixos":
+            worker = task.get("worker", {})
+            result["worker"] = {
+                field: worker.get(field)
+                for field in ("state", "phase", "exit_code", "failure_kind", "error")
+            }
+        if command_id is not None:
+            if command_id not in task["commands"]:
+                raise Failure(
+                    "Unknown guest command", "unknown_command", command_id=command_id
+                )
+            result["command"] = command_status(task["commands"][command_id])
+        return result
+
+    def commands(self, key, offset=0, limit=50):
+        return page(
+            [
+                command_status(c, detail=True)
+                for c in self.task(key)["commands"].values()
+            ],
+            offset,
+            limit,
+        )
+
+    def fail(self, task, phase, error, cleanup=False):
+        task["cleanup_error" if cleanup else "failure"] = {
+            "kind": "cleanup" if cleanup else "executor",
+            "phase": phase,
+            "message": str(error),
+        }
+        task["state"] = "cleanup_unknown"
+        self.save(task)
+
     def vm(self, key):
         if key not in self.vms:
             raise Failure("Unknown registered VM")
@@ -115,10 +253,7 @@ class Controller:
             if task["kind"] == "nixos":
                 self.runners[task["id"]] = asyncio.create_task(self.resume_nix(task))
             elif task.get("vm_uuid") != self.vm(task["target"]).target:
-                task.update(
-                    state="cleanup_unknown", error="Registered VM identity changed"
-                )
-                self.save(task)
+                self.fail(task, "recovery", "Registered VM identity changed")
             elif task["state"] in {"ready", "executing"}:
                 for operation in task["commands"].values():
                     if operation["state"] in {"starting", "running"}:
@@ -126,11 +261,11 @@ class Controller:
                             asyncio.create_task(self.watch_command(task, operation))
                         )
             else:
-                task.update(
-                    state="cleanup_unknown",
-                    error="Controller restarted during a VM transition; inspect evidence and finish the task",
+                self.fail(
+                    task,
+                    "recovery",
+                    "Controller restarted during a VM transition; inspect evidence and finish the task",
                 )
-                self.save(task)
         self.loop = asyncio.create_task(self.schedule())
 
     async def close(self):
@@ -182,8 +317,13 @@ class Controller:
         self, kind, request_id, target=None, cache_id=None, drv=None, timeout=None
     ):
         identifier(request_id)
-        timeout = self.settings["task_timeout"] if timeout is None else timeout
-        bounded(timeout, self.settings["task_timeout"], "timeout")
+        maximum = self.settings["task_timeout"]
+        if kind == "nixos":
+            maximum = min(
+                maximum, self.config.get("nix", {}).get("task_timeout", maximum)
+            )
+        timeout = maximum if timeout is None else timeout
+        bounded(timeout, maximum, "timeout")
         if kind == "windows":
             self.vm(target)
             if cache_id is not None or drv is not None:
@@ -249,7 +389,7 @@ class Controller:
                         "finishing",
                         "cleanup_unknown",
                     } and time.time() > task.get("deadline", float("inf")):
-                        await self.finish(task["id"], cancel=True)
+                        await self.finish(task["id"], stop_reason="task_timeout")
                 if not self.active():
                     queued = next(
                         (
@@ -322,9 +462,8 @@ class Controller:
             self.event(task, "Guest and interactive desktop ready")
             self.save(task)
         except (Failure, OSError, ValueError, TimeoutError) as error:
-            task.update(state="cleanup_unknown", error=str(error))
+            self.fail(task, "prepare", error)
             self.event(task, str(error))
-            self.save(task)
 
     async def resume_nix(self, task):
         try:
@@ -335,24 +474,146 @@ class Controller:
                     "executing" if status["state"] == "running" else status["state"]
                 )
                 task["cleanup_confirmed"] = status["cleanup_confirmed"]
+                if task.get("failure", {}).get("phase") == "worker":
+                    task.pop("failure")
+                if status.get("error"):
+                    task["failure"] = {
+                        "kind": status.get("failure_kind", "executor"),
+                        "phase": status.get("phase"),
+                        "message": status["error"],
+                    }
+                    if status.get("failure_kind") in {"cancelled", "task_timeout"}:
+                        task.setdefault("stop_reason", status["failure_kind"])
+                if (
+                    task.get("stop_reason") == "task_timeout"
+                    and status["cleanup_confirmed"]
+                ):
+                    task["state"] = "failed"
                 self.save(task)
                 if status["state"] in FINISHED:
                     return
                 await asyncio.sleep(1)
         except (Failure, OSError, ValueError, TimeoutError) as error:
-            task.update(state="cleanup_unknown", error=str(error))
-            self.save(task)
+            self.fail(task, "worker", error)
 
-    def guest_task(self, key, ready=True):
+    def guest_task(self, key, states=("ready",)):
         task = self.task(key)
-        if task["kind"] != "windows" or (ready and task["state"] != "ready"):
-            raise Failure("Operation requires a ready Windows task")
+        if task["kind"] != "windows" or task["state"] not in states:
+            active = next(
+                (
+                    c["id"]
+                    for c in task["commands"].values()
+                    if c["state"] in {"starting", "running"}
+                ),
+                None,
+            )
+            raise Failure(
+                "Wait for a Windows task in " + ", ".join(sorted(states)),
+                "task_busy" if task["state"] == "executing" else "task_state",
+                state=task["state"],
+                current_command_id=active,
+                allowed_states=sorted(states),
+            )
         return task, self.vm(task["target"])
 
+    def input_receipt(self, command, request_id):
+        message = command["input_requests"][request_id]
+        written = input_status(command)["written_sequence"]
+        state = (
+            "written"
+            if message["sequence"] <= written
+            else "unconfirmed"
+            if command["state"] not in {"starting", "running"}
+            else "accepted"
+        )
+        return {
+            "command_id": command["id"],
+            "request_id": request_id,
+            "sequence": message["sequence"],
+            "state": state,
+            "eof": message["eof"],
+        }
+
+    async def input(self, key, command_id, request_id, text, eof=False):
+        task = self.task(key)
+        identifier(request_id)
+        if command_id not in task["commands"]:
+            raise Failure(
+                "Unknown guest command", "unknown_command", command_id=command_id
+            )
+        command = task["commands"][command_id]
+        messages = command.setdefault("input_requests", {})
+        if request_id in messages:
+            previous = messages[request_id]
+            if (previous["text"], previous["eof"]) != (text, eof):
+                raise Failure(
+                    "Input request identifier refers to different content",
+                    "request_conflict",
+                )
+            return self.input_receipt(command, request_id)
+        status = input_status(command)
+        if (
+            command["state"] not in {"starting", "running"}
+            or not status["enabled"]
+            or status["eof_queued"]
+            or status["closed"]
+        ):
+            raise Failure(
+                "This command has no open input stream",
+                "stdin_closed",
+                command_id=command_id,
+            )
+        self.guest_task(key, states={"executing"})
+        size = len(text.encode("utf-8"))
+        bounded(size, INPUT_BYTES, "input UTF-8 bytes", 0 if eof else 1)
+        bounded(
+            status["pending_bytes"] + size,
+            INPUT_PENDING_BYTES,
+            "pending input bytes",
+            0,
+        )
+        messages[request_id] = {
+            "sequence": len(messages) + 1,
+            "text": text,
+            "eof": eof,
+            "published": False,
+        }
+        self.save(task)
+        return self.input_receipt(command, request_id)
+
+    async def publish_input(self, task, command):
+        vm = self.vm(task["target"])
+        for message in list(command.get("input_requests", {}).values()):
+            if message["published"]:
+                continue
+            name = f"input-{message['sequence']:08d}.json"
+            directory = self.directory(task["id"]) / ("cmd-" + command["id"])
+            atomic_json(
+                directory / name, {"text": message["text"], "eof": message["eof"]}
+            )
+            destination = vm.guest_path(task["id"], "cmd-" + command["id"], name)
+            await self.send_guest(vm, directory / name, destination + ".upload")
+            await vm.python(
+                vm.guest_path(task["id"], "guest_runner.py"),
+                "publish",
+                destination + ".upload",
+                destination,
+            )
+            message["published"] = True
+            self.save(task)
+
     async def exec_guest(
-        self, key, request_id, argv, cwd=None, env=None, timeout=None, collect=None
+        self,
+        key,
+        request_id,
+        argv,
+        cwd=None,
+        env=None,
+        timeout=None,
+        collect=None,
+        stdin=False,
     ):
-        task, _ = self.guest_task(key, ready=False)
+        task = self.task(key)
         identifier(request_id)
         if not argv or not all(
             isinstance(arg, str) and "\0" not in arg for arg in argv
@@ -373,6 +634,7 @@ class Controller:
             "env": env,
             "timeout": task["timeout"] if timeout is None else timeout,
             "collect": collect,
+            "stdin": stdin,
         }
         if request_id in task["commands"]:
             operation = task["commands"][request_id]
@@ -427,8 +689,8 @@ class Controller:
             self.save(task)
             await self.watch_command(task, command)
         except (Failure, OSError, TimeoutError) as error:
-            task.update(state="cleanup_unknown", error=str(error))
-            self.save(task)
+            command.update(state="failed", error=str(error))
+            self.fail(task, "launch", error)
 
     async def send_guest(self, vm, source, destination):
         with staging_directory(self.root) as directory:
@@ -492,6 +754,7 @@ class Controller:
                             "cleanup_confirmed",
                             "reason",
                             "error",
+                            "stdin",
                         )
                         if key in status
                     }
@@ -516,30 +779,54 @@ class Controller:
                         if task["state"] == "executing":
                             task["state"] = "ready"
                     else:
-                        task.update(
-                            state="cleanup_unknown",
-                            error="Guest process cleanup was not confirmed",
+                        self.fail(
+                            task,
+                            "command",
+                            "Guest process cleanup was not confirmed",
+                            cleanup=True,
                         )
                     self.save(task)
                     return
+                await self.publish_input(task, operation)
                 await asyncio.sleep(1)
         except (Failure, OSError, ValueError, TimeoutError) as error:
-            task.update(state="cleanup_unknown", error=str(error))
-            self.save(task)
+            self.fail(task, "command", error)
 
     async def upload(self, key, transfer_id, destination):
-        task, vm = self.guest_task(key)
+        task, vm = self.guest_task(key, states={"ready", "executing"})
         if not PureWindowsPath(destination).is_absolute() or "\0" in destination:
             raise Failure("Destination must be an absolute guest path")
         await self.transfers.seal(transfer_id, "file")
         if transfer_id not in task.setdefault("inputs", []):
             task["inputs"].append(transfer_id)
             self.save(task)
-        await self.send_guest(vm, self.transfers.file(transfer_id), destination)
-        return {"task_id": key, "guest_path": destination}
+        source = self.transfers.file(transfer_id)
+        with open_file(source) as stream:
+            size = os.fstat(stream.fileno()).st_size
+        try:
+            await vm.python(
+                "-c",
+                "import pathlib,sys; pathlib.Path(sys.argv[1]).parent.mkdir(parents=True,exist_ok=True)",
+                destination,
+            )
+            await self.send_guest(vm, source, destination)
+            result, _ = await vm.python(
+                "-c",
+                "import pathlib,sys; print(pathlib.Path(sys.argv[1]).stat().st_size)",
+                destination,
+            )
+            if int(result) != size:
+                raise Failure("Guest file size differs from uploaded input")
+        except (Failure, OSError, ValueError, TimeoutError) as error:
+            raise Failure(
+                f"Upload to guest path {destination} failed: {error}",
+                "guest_upload_failed",
+                destination=destination,
+            ) from error
+        return {"task_id": key, "guest_path": destination, "bytes": size}
 
     async def collect(self, key, request_id, guest_path):
-        _, vm = self.guest_task(key, ready=False)
+        _, vm = self.guest_task(key)
         output = vm.guest_path(key, identifier(request_id) + ".zip")
         return await self.exec_guest(
             key,
@@ -555,7 +842,9 @@ class Controller:
         )
 
     async def screenshot(self, key):
-        task, vm = self.guest_task(key, ready=False)
+        task, vm = self.guest_task(
+            key, states={"ready", "executing", "finishing", "cleanup_unknown"}
+        )
         path = self.directory(key) / "screenshot.png"
         with staging_directory(path.parent) as directory:
             temporary = directory / "screenshot.png"
@@ -578,15 +867,19 @@ class Controller:
             task["artifacts"].append(await self.transfers.artifact(path, task["id"]))
             self.save(task)
 
-    async def finish(self, key, cancel=False):
+    async def finish(self, key, cancel=False, stop_reason=None):
         task = self.task(key)
         if task["state"] in FINISHED or task["state"] == "finishing":
             return task
         if task["state"] == "queued":
-            task.update(state="cancelled", cleanup_confirmed=True)
+            task.update(
+                state="cancelled", cleanup_confirmed=True, stop_reason="cancelled"
+            )
             self.save(task)
             return task
         task["state"] = "finishing"
+        if cancel or stop_reason:
+            task["stop_reason"] = stop_reason or "cancelled"
         self.save(task)
         prior = self.runners.get(key)
 
@@ -598,12 +891,12 @@ class Controller:
                 if owner == key:
                     operation.cancel()
                     await asyncio.gather(operation, return_exceptions=True)
-            await self.finish_run(task, cancel)
+            await self.finish_run(task)
 
         self.runners[key] = asyncio.create_task(finish_after_observer())
         return task
 
-    async def finish_run(self, task, cancel):
+    async def finish_run(self, task):
         try:
             if task["kind"] == "nixos":
                 status = await self.worker.call("cancel", id=task["id"])
@@ -612,6 +905,17 @@ class Controller:
                     worker=status,
                     cleanup_confirmed=status["cleanup_confirmed"],
                 )
+                if status.get("error"):
+                    task["failure"] = {
+                        "kind": status.get("failure_kind", "executor"),
+                        "phase": status.get("phase"),
+                        "message": status["error"],
+                    }
+                if (
+                    task.get("stop_reason") == "task_timeout"
+                    and task["cleanup_confirmed"]
+                ):
+                    task["state"] = "failed"
             else:
                 vm = self.vm(task["target"])
                 await self.evidence(task)
@@ -632,21 +936,31 @@ class Controller:
                     if key == task["id"]:
                         running.cancel()
                         await asyncio.gather(running, return_exceptions=True)
-                failed = any(
-                    op.get("exit_code") != 0 for op in task["commands"].values()
+                for op in task["commands"].values():
+                    if not op.get("cleanup_confirmed"):
+                        if op["state"] in {"starting", "running"}:
+                            op.update(
+                                state="finished",
+                                reason=task.get("stop_reason") or "task_finished",
+                            )
+                        op["cleanup_confirmed"] = True
+                        if op["request"].get("stdin"):
+                            op.setdefault("stdin", {})["closed"] = True
+                failed = task.get("failure") or any(
+                    command_failure(op) for op in task["commands"].values()
                 )
                 task.update(
                     state="cancelled"
-                    if cancel
+                    if task.get("stop_reason") == "cancelled"
                     else "failed"
-                    if failed
+                    if failed or task.get("stop_reason") == "task_timeout"
                     else "succeeded",
                     cleanup_confirmed=True,
                 )
+            task.pop("cleanup_error", None)
             self.save(task)
         except (Failure, OSError, ValueError, TimeoutError) as error:
-            task.update(state="cleanup_unknown", error=str(error))
-            self.save(task)
+            self.fail(task, "shutdown", error, cleanup=True)
 
     async def task_log(self, key, command_id=None, offset=0, limit=65536):
         task = self.task(key)
@@ -661,11 +975,11 @@ class Controller:
         )
         return window(directory / "run.log", offset, limit)
 
-    async def outputs(self, key, root=None, path=""):
+    async def outputs(self, key, root=None, path="", offset=0, limit=50):
         task = self.task(key)
         if root is None:
             return {
-                "artifacts": task["artifacts"],
+                **page(task["artifacts"], offset, limit),
                 "nix_outputs": task.get("worker", {}).get("outputs", {}),
             }
         if task["kind"] != "nixos":
@@ -726,7 +1040,19 @@ class Controller:
                 result["observation"] = observed
                 if observed["reached"]:
                     for task in occupying:
-                        task.update(state="cancelled", cleanup_confirmed=True)
+                        task.update(
+                            state="cancelled",
+                            cleanup_confirmed=True,
+                            stop_reason="cancelled",
+                        )
+                        task.pop("cleanup_error", None)
+                        for command in task["commands"].values():
+                            if not command.get("cleanup_confirmed"):
+                                command.update(
+                                    state="finished",
+                                    reason="cancelled",
+                                    cleanup_confirmed=True,
+                                )
                         self.save(task)
             return result
 

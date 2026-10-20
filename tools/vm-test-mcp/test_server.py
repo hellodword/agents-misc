@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 import httpx2
 import uvicorn
 from common import DEFAULTS, Failure, atomic_json, load_json, terminate
+from guest_runner import InputPipe
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import MCPError
@@ -104,10 +105,19 @@ class RecordingVM(VirtualBox):
 
     async def python(self, *args, background=False, timeout=None):
         if args[0] == "-c":
-            self.local(args[-1]).mkdir(parents=True, exist_ok=True)
+            path = self.local(args[-1])
+            if "stat().st_size" in args[1]:
+                data = str(path.stat().st_size).encode()
+                return data, len(data)
+            if ".parent.mkdir" in args[1]:
+                path = path.parent
+            path.mkdir(parents=True, exist_ok=True)
             return b"", 0
         if args[-1] == "probe":
             return b'{"interactive":true,"session_id":1}', 35
+        if len(args) > 1 and args[1] == "publish":
+            self.local(args[2]).replace(self.local(args[3]))
+            return b"", 0
         self.jobs.append(asyncio.create_task(self.run_guest(self.local(args[-1]))))
         return b"started", 7
 
@@ -125,16 +135,23 @@ class RecordingVM(VirtualBox):
                 str(self.local(argv[4])),
             ]
         with (directory / "run.log").open("wb") as output:
+            input_pipe = InputPipe(directory) if spec.get("stdin") else None
             process = await asyncio.create_subprocess_exec(
                 *argv,
+                stdin=input_pipe.reader if input_pipe else asyncio.subprocess.DEVNULL,
                 stdout=output,
                 stderr=output,
                 cwd=directory.parent,
                 start_new_session=True,
             )
+            if input_pipe:
+                input_pipe.start()
             self.children.append(process)
             started, reason = time.monotonic(), "exited"
             while process.returncode is None:
+                if input_pipe:
+                    state["stdin"] = dict(input_pipe.state)
+                    atomic_json(directory / "status.json", state)
                 if (
                     directory.parent / "cancel"
                 ).exists() or time.monotonic() - started > spec["timeout"]:
@@ -147,6 +164,9 @@ class RecordingVM(VirtualBox):
                     break
                 await asyncio.sleep(0.01)
             await process.wait()
+            if input_pipe:
+                input_pipe.close()
+                state["stdin"] = dict(input_pipe.state)
         state.update(
             state="finished",
             exit_code=process.returncode if reason == "exited" else None,
@@ -157,7 +177,6 @@ class RecordingVM(VirtualBox):
 
     async def copy_to(self, source, destination):
         path = self.local(destination)
-        path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, path)
 
     async def copy_from(self, source, destination):
@@ -217,9 +236,22 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
 
     @contextlib.asynccontextmanager
     async def client(self, callback=None, mode="auto"):
+        async def record_response(response):
+            if hasattr(
+                self, "status_wire_sizes"
+            ) and "application/json" in response.headers.get("content-type", ""):
+                request = json.loads(response.request.content or b"{}")
+                if (
+                    request.get("method") == "tools/call"
+                    and request.get("params", {}).get("name") == "task_status"
+                ):
+                    self.status_wire_sizes.append(len(await response.aread()))
+
         async with (
             httpx2.AsyncClient(
-                headers={"Authorization": f"Bearer {TOKEN}"}, trust_env=False
+                headers={"Authorization": f"Bearer {TOKEN}"},
+                trust_env=False,
+                event_hooks={"response": [record_response]},
             ) as http,
             Client(
                 streamable_http_client(self.origin + "/mcp", http_client=http),
@@ -240,6 +272,10 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
             while True:
                 task = await self.call(client, "task_status", task_id=key)
                 if task["state"] == state:
+                    commands = await self.call(
+                        client, "task_commands", task_id=key, limit=100
+                    )
+                    task["commands"] = {c["id"]: c for c in commands["items"]}
                     return task
                 if task["state"] == "cleanup_unknown" and state != "cleanup_unknown":
                     self.fail(task)
@@ -353,6 +389,8 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(task["commands"]["assert"]["id"], "assert")
             self.assertEqual(task["commands"]["assert"]["request"]["argv"], run["argv"])
             self.assertEqual(task["commands"]["assert"]["exit_code"], 7)
+            self.assertEqual(task["outcome"]["failed_command_ids"], ["assert"])
+            self.assertEqual(task["outcome"]["command_failure_kinds"], {"exit_code": 1})
             count = len(self.vm.children)
             await self.call(client, "guest_exec", **run)
             self.assertEqual(len(self.vm.children), count)
@@ -442,6 +480,10 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
             command = replacement.task("recover")["commands"]["long"]
             self.assertEqual(command["reason"], "timeout")
             self.assertTrue(command["cleanup_confirmed"])
+            self.assertEqual(
+                replacement.status("recover")["outcome"]["command_failure_kinds"],
+                {"timeout": 1},
+            )
             self.assertIsNotNone(self.vm.children[0].returncode)
         finally:
             await replacement.close()
@@ -468,12 +510,18 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
                 target="windows",
             )
             await self.call(client, "task_finish", task_id="stuck")
-            await self.wait_state(client, "stuck", "cleanup_unknown")
+            unresolved = await self.wait_state(client, "stuck", "cleanup_unknown")
+            self.assertEqual(
+                unresolved["outcome"]["cleanup_error"]["phase"], "shutdown"
+            )
+            self.assertIsNone(unresolved["outcome"]["failure"])
             self.assertEqual(
                 (await self.call(client, "task_status", task_id="next"))["state"],
                 "queued",
             )
             await self.call(client, "vm_power", target="windows", action="poweroff")
+            recovered = await self.call(client, "task_status", task_id="stuck")
+            self.assertIsNone(recovered["outcome"]["cleanup_error"])
             self.vm.shutdown_hangs = False
             await self.wait_state(client, "next", "ready")
             await self.call(client, "task_cancel", task_id="next")
@@ -482,6 +530,335 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
                     "cleanup_confirmed"
                 ]
             )
+
+    async def test_compact_status_paged_history_and_discoverable_limits(self):
+        async with self.client() as client:
+            limits = (await self.call(client, "targets"))["limits"]
+            invalid = await client.call_tool(
+                "task_begin",
+                {
+                    "kind": "windows",
+                    "target": "windows",
+                    "request_id": "oversized",
+                    "timeout": 10800,
+                },
+            )
+            self.assertTrue(invalid.is_error)
+            self.assertEqual(
+                invalid.structured_content["error"]["details"]["maximum"],
+                limits["windows_task_seconds"],
+            )
+            self.assertNotIn("oversized", self.controller.tasks)
+            await self.call(
+                client,
+                "task_begin",
+                kind="windows",
+                target="windows",
+                request_id="history",
+            )
+            await self.wait_state(client, "history", "ready")
+            task = self.controller.task("history")
+            measurements = []
+            self.status_wire_sizes = []
+            for count in (1, 21, 100):
+                task["commands"] = {
+                    f"cmd-{i:03}": {
+                        "id": f"cmd-{i:03}",
+                        "request": {"argv": ["test", "x" * 2000]},
+                        "state": "finished",
+                        "exit_code": 1 if i % 2 else 0,
+                        "reason": "exited",
+                        "cleanup_confirmed": True,
+                    }
+                    for i in range(count)
+                }
+                task["artifacts"] = [
+                    {"id": f"artifact-{i:03}", "kind": "artifact"} for i in range(count)
+                ]
+                reply = await client.call_tool("task_status", {"task_id": "history"})
+                status = reply.structured_content
+                self.assertEqual(status["command_count"], count)
+                self.assertEqual(status["outcome"]["failed_command_count"], count // 2)
+                self.assertLessEqual(len(status["outcome"]["failed_command_ids"]), 5)
+                self.assertNotIn("commands", status)
+                self.assertNotIn("artifacts", status)
+                measurements.append(
+                    (
+                        count,
+                        len(json.dumps(status, separators=(",", ":")).encode()),
+                        len(reply.model_dump_json(by_alias=True).encode()),
+                    )
+                )
+            self.assertLess(max(n for _, n, _ in measurements), 1600)
+            self.assertLess(max(n for _, _, n in measurements), 3600)
+            self.assertEqual(len(self.status_wire_sizes), 3)
+            self.assertLess(max(self.status_wire_sizes), 3600)
+            print(
+                "status bytes (commands, structured UTF-8, MCP result UTF-8):",
+                measurements,
+            )
+            print("status HTTP JSON-RPC response body bytes:", self.status_wire_sizes)
+            commands, artifacts = [], []
+            for name, output in (("task_commands", commands), ("artifacts", artifacts)):
+                offset = 0
+                while offset is not None:
+                    result = await self.call(
+                        client, name, task_id="history", offset=offset, limit=17
+                    )
+                    self.assertEqual(result["total"], 100)
+                    output.extend(result["items"])
+                    offset = result["next_offset"]
+            self.assertEqual([c["id"] for c in commands], list(task["commands"]))
+            self.assertEqual(len({a["id"] for a in artifacts}), 100)
+            selected = await self.call(
+                client, "task_status", task_id="history", command_id="cmd-099"
+            )
+            self.assertEqual(
+                selected["command"]["exit_code"], commands[-1]["exit_code"]
+            )
+            await self.call(client, "task_finish", task_id="history")
+            final = await self.wait_state(client, "history", "failed")
+            self.assertTrue(final["cleanup_confirmed"])
+            self.assertIsNone(final["outcome"]["failure"])
+
+    async def test_interactive_input_upload_and_reconnect(self):
+        async with self.client() as client, httpx2.AsyncClient(trust_env=False) as http:
+            await self.call(
+                client,
+                "task_begin",
+                kind="windows",
+                target="windows",
+                request_id="interactive",
+            )
+            await self.wait_state(client, "interactive", "ready")
+            await self.call(
+                client,
+                "guest_exec",
+                task_id="interactive",
+                request_id="driver",
+                stdin=True,
+                argv=[
+                    sys.executable,
+                    "-u",
+                    "-c",
+                    "import sys; total=0\nfor line in sys.stdin:\n total+=int(line); print(total,flush=True)\nprint('eof',flush=True)",
+                ],
+            )
+            for tool, parameters in (
+                (
+                    "guest_exec",
+                    {
+                        "request_id": "second",
+                        "argv": [sys.executable, "-c", "print(1)"],
+                    },
+                ),
+                (
+                    "guest_collect",
+                    {
+                        "request_id": "collect",
+                        "guest_path": self.vm.guest_path("interactive"),
+                    },
+                ),
+            ):
+                reply = await client.call_tool(
+                    tool, {"task_id": "interactive", **parameters}
+                )
+                self.assertEqual(reply.structured_content["error"]["code"], "task_busy")
+                self.assertEqual(
+                    reply.structured_content["error"]["details"]["current_command_id"],
+                    "driver",
+                )
+            transfer = await self.call(client, "transfer_create")
+            await http.put(transfer["url"], content=b"input while running")
+            destination = self.vm.guest_path("interactive", "new", "nested", "data.txt")
+            await self.call(
+                client,
+                "guest_upload",
+                task_id="interactive",
+                transfer_id=transfer["id"],
+                destination=destination,
+            )
+            self.assertEqual(
+                self.vm.local(destination).read_bytes(), b"input while running"
+            )
+            await self.call(
+                client,
+                "guest_upload",
+                task_id="interactive",
+                transfer_id=transfer["id"],
+                destination=destination,
+            )
+            with patch.object(self.vm, "copy_to", side_effect=Failure("copy failed")):
+                failed = await client.call_tool(
+                    "guest_upload",
+                    {
+                        "task_id": "interactive",
+                        "transfer_id": transfer["id"],
+                        "destination": destination,
+                    },
+                )
+                self.assertEqual(
+                    failed.structured_content["error"]["code"], "guest_upload_failed"
+                )
+            await self.call(client, "screenshot", task_id="interactive")
+            args = {
+                "task_id": "interactive",
+                "command_id": "driver",
+                "request_id": "first",
+                "text": "2\n",
+            }
+            publishing, release = asyncio.Event(), asyncio.Event()
+            original_copy = self.vm.copy_to
+
+            async def delayed_input(source, destination):
+                await original_copy(source, destination)
+                if destination.endswith("input-00000001.json.upload"):
+                    publishing.set()
+                    await release.wait()
+
+            patcher = patch.object(self.vm, "copy_to", side_effect=delayed_input)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+            first = await self.call(client, "guest_input", **args)
+            self.assertEqual(first["sequence"], 1)
+            self.assertEqual(
+                (await self.call(client, "guest_input", **args))["sequence"], 1
+            )
+            conflict = await client.call_tool("guest_input", args | {"text": "9\n"})
+            self.assertEqual(
+                conflict.structured_content["error"]["code"], "request_conflict"
+            )
+        async with self.client() as client:
+            await asyncio.wait_for(publishing.wait(), 5)
+            await self.call(
+                client,
+                "guest_input",
+                task_id="interactive",
+                command_id="driver",
+                request_id="second",
+                text="3\n",
+            )
+            await self.call(
+                client,
+                "guest_input",
+                task_id="interactive",
+                command_id="driver",
+                request_id="close",
+                eof=True,
+            )
+            release.set()
+            final = await self.wait_state(client, "interactive", "ready")
+            status = final["commands"]["driver"]
+            self.assertEqual(status["exit_code"], 0)
+            self.assertEqual(status["stdin"]["written_sequence"], 3)
+            self.assertTrue(status["stdin"]["closed"])
+            self.assertEqual(
+                (await self.call(client, "guest_input", **args))["state"], "written"
+            )
+            log = await self.call(
+                client, "task_log", task_id="interactive", command_id="driver"
+            )
+            self.assertEqual(log["text"], "2\n5\neof\n")
+            closed = await client.call_tool(
+                "guest_input", args | {"request_id": "after-exit"}
+            )
+            self.assertEqual(closed.structured_content["error"]["code"], "stdin_closed")
+            await self.call(client, "task_finish", task_id="interactive")
+            await self.wait_state(client, "interactive", "succeeded")
+
+    async def test_input_recovery_and_blocked_reader_cleanup(self):
+        async with self.client() as client:
+            await self.call(
+                client,
+                "task_begin",
+                kind="windows",
+                target="windows",
+                request_id="stdin-recovery",
+            )
+            await self.wait_state(client, "stdin-recovery", "ready")
+            await self.call(
+                client,
+                "guest_exec",
+                task_id="stdin-recovery",
+                request_id="reader",
+                stdin=True,
+                argv=[
+                    sys.executable,
+                    "-u",
+                    "-c",
+                    "import sys; print(sys.stdin.read(),end='')",
+                ],
+            )
+        async with asyncio.timeout(5):
+            while not self.vm.children:
+                await asyncio.sleep(0.02)
+        await self.controller.close()
+        replacement = Controller(self.config, {"windows": self.vm})
+        await replacement.start()
+        try:
+            await replacement.input("stdin-recovery", "reader", "text", "retained\n")
+            await replacement.input("stdin-recovery", "reader", "end", "", eof=True)
+            async with asyncio.timeout(6):
+                while replacement.task("stdin-recovery")["state"] != "ready":
+                    await asyncio.sleep(0.03)
+            self.assertEqual(
+                (await replacement.task_log("stdin-recovery", "reader"))["text"],
+                "retained\n",
+            )
+            await replacement.exec_guest(
+                "stdin-recovery",
+                "blocked",
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                timeout=1.5,
+                stdin=True,
+            )
+            for i in range(4):
+                await replacement.input(
+                    "stdin-recovery", "blocked", f"chunk-{i}", "x" * 16384
+                )
+            with self.assertRaises(Failure) as full:
+                await replacement.input("stdin-recovery", "blocked", "full", "x")
+            self.assertEqual(full.exception.code, "out_of_range")
+            async with asyncio.timeout(7):
+                while replacement.task("stdin-recovery")["state"] != "ready":
+                    await asyncio.sleep(0.03)
+            status = replacement.status("stdin-recovery", "blocked")["command"]
+            self.assertEqual(status["reason"], "timeout")
+            self.assertTrue(status["cleanup_confirmed"])
+            self.assertTrue(status["stdin"]["closed"])
+            await replacement.exec_guest(
+                "stdin-recovery",
+                "cancelled",
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                stdin=True,
+            )
+            await replacement.finish("stdin-recovery", cancel=True)
+            async with asyncio.timeout(5):
+                while not replacement.task("stdin-recovery")["cleanup_confirmed"]:
+                    await asyncio.sleep(0.03)
+            status = replacement.status("stdin-recovery", "cancelled")
+            self.assertEqual(status["outcome"]["stop_reason"], "cancelled")
+            self.assertEqual(status["command"]["reason"], "cancelled")
+            self.assertTrue(status["command"]["cleanup_confirmed"])
+        finally:
+            await replacement.close()
+
+    async def test_task_deadline_keeps_its_reason_after_cleanup(self):
+        async with self.client() as client:
+            await self.call(
+                client,
+                "task_begin",
+                kind="windows",
+                target="windows",
+                request_id="deadline",
+                timeout=1.5,
+            )
+            await self.wait_state(client, "deadline", "ready")
+            final = await self.wait_state(client, "deadline", "failed")
+            self.assertTrue(final["cleanup_confirmed"])
+            self.assertEqual(final["outcome"]["stop_reason"], "task_timeout")
+            self.assertIsNone(final["outcome"]["failure"])
+            self.assertIsNone(final["outcome"]["cleanup_error"])
 
     async def test_typed_configuration_confirmation_and_readback(self):
         answer = ElicitResult(action="decline")
@@ -736,10 +1113,12 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
                 target="windows",
             )
             task = await self.wait_state(client, "shared", "cleanup_unknown")
-            self.assertIn("shared folders", task["error"])
+            self.assertIn("shared folders", task["outcome"]["failure"]["message"])
             self.assertFalse(any(call[0] == "startvm" for call in self.vm.calls))
-            await self.call(client, "task_cancel", task_id="shared")
-            await self.wait_state(client, "shared", "cancelled")
+            await self.call(client, "task_finish", task_id="shared")
+            completed = await self.wait_state(client, "shared", "failed")
+            self.assertEqual(completed["outcome"]["failure"]["phase"], "prepare")
+            self.assertTrue(completed["cleanup_confirmed"])
             del self.vm.config["SharedFolderPathMachineMapping1"]
             await self.call(client, "vm_power", target="windows", action="start")
             self.assertEqual(self.vm.config["VMState"], "running")
@@ -771,6 +1150,7 @@ elif sys.argv[1] == 'build':
                 f"port = {port}\ntask_timeout = 4000\n"
                 f"[nix]\nstate_dir = {json.dumps(str(root / 'worker'))}\n"
                 f"socket = {json.dumps(str(root / 'worker.sock'))}\n"
+                "task_timeout = 3000\n"
                 f"nix = {json.dumps(str(fake))}\n"
             )
             processes = []
@@ -806,6 +1186,10 @@ elif sys.argv[1] == 'build':
                         self.assertFalse(reply.is_error)
                         self.assertEqual(reply.structured_content["vms"], [])
                         self.assertTrue(reply.structured_content["nix_enabled"])
+                        self.assertEqual(
+                            reply.structured_content["limits"]["nixos_task_seconds"],
+                            3000,
+                        )
                         reply = await client.call_tool(
                             "transfer_create", {"kind": "cache"}
                         )
@@ -814,6 +1198,21 @@ elif sys.argv[1] == 'build':
                         self.assertEqual(
                             cache["url"], f"http://127.0.0.1:{port}/files/{cache['id']}"
                         )
+                        rejected = await client.call_tool(
+                            "task_begin",
+                            {
+                                "kind": "nixos",
+                                "request_id": "too-long",
+                                "cache_id": cache["id"],
+                                "drv": "/nix/store/" + "0" * 32 + "-test.drv",
+                                "timeout": 3500,
+                            },
+                        )
+                        self.assertEqual(
+                            rejected.structured_content["error"]["details"]["maximum"],
+                            3000,
+                        )
+                        self.assertFalse((root / "controller/tasks/too-long").exists())
                         reply = await client.call_tool(
                             "task_begin",
                             {
@@ -840,7 +1239,7 @@ elif sys.argv[1] == 'build':
                                 await asyncio.sleep(0.05)
                         self.assertEqual(task["state"], "succeeded", task)
                         self.assertTrue(task["cleanup_confirmed"])
-                        self.assertEqual(task["worker"]["request"]["timeout"], 4000)
+                        self.assertEqual(task["timeout"], 3000)
                         log = await client.call_tool(
                             "task_log", {"task_id": "shared-config"}
                         )

@@ -4,7 +4,7 @@ The Agent evaluates the project in its container. A prepared HTTP MCP service su
 
 ## Prepare and submit
 
-Use `targets` to identify Nix availability and existing tasks. Allocate a binary cache with `transfer_create(kind="cache")`; its `id` and `url` identify one input transfer. Supply local Python 3.11+ and Nix through the project environment.
+Use `targets` to identify Nix availability, effective task limits and existing tasks. Allocate a binary cache with `transfer_create(kind="cache")`; its `id` and `url` identify one input transfer. Supply local Python 3.11+ and Nix through the project environment.
 
 ```sh
 nix develop --command python3 scripts/nix-vm-test.py \
@@ -21,9 +21,9 @@ The helper relies on the standard `runNixOSTest` inspection and override interfa
 
 ## Execution and evidence
 
-Poll `task_status(task_id)` and read `task_log` using `next_offset`. A queued task waits for current virtualization work to finish. The worker imports inputs through ordinary Nix verification and invokes the daemon with fixed build parameters, including local builder selection, `--keep-failed` and a builder timeout.
+Poll the compact `task_status(task_id)` and read `task_log` using `next_offset`. Status includes `outcome`, worker phase/exit code and cleanup confirmation. A queued task waits for current virtualization work to finish. The worker imports inputs through ordinary Nix verification and invokes the daemon with fixed build parameters, including local builder selection, `--keep-failed` and a builder timeout.
 
-Successful results expose named output roots through `artifacts`. List a root or subdirectory, then use `artifact_download` for selected regular files. Test scripts should place useful reports, screenshots and diagnostics in their normal test output. Directory listings are limited to 2000 entries; descend into narrower directories when needed.
+Successful results expose named output roots in `artifacts.nix_outputs`. List a root or subdirectory, then use `artifact_download` for selected regular files. Previously exported files are listed in `artifacts.items`; follow `next_offset` until null for all pages. Test scripts should place useful reports, screenshots and diagnostics in their normal test output. Directory listings are limited to 2000 entries; descend into narrower directories when needed.
 
 Text logs remain available for failed builds. Nix retains failed build directories for the administrator; automatic downloads use recorded output roots, not paths printed by arbitrary build output. Successful outputs have task-owned GC roots during retention. Retrieve needed evidence before that retention period expires; failed build directories remain administrator-owned.
 

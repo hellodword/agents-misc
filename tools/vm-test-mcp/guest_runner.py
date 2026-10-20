@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -18,6 +19,53 @@ def write_json(path, value):
     temporary = path.with_suffix(".new")
     temporary.write_text(json.dumps(value), encoding="utf-8")
     temporary.replace(path)
+
+
+class InputPipe:
+    """Guest-local ordered files feed a pipe without blocking process supervision."""
+
+    def __init__(self, directory):
+        self.directory = directory
+        reader, self.writer = os.pipe()
+        self.reader = os.fdopen(reader, "rb", buffering=0)
+        self.state = {"written_sequence": 0, "closed": False, "error": None}
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self.feed, daemon=True)
+
+    def start(self):
+        self.reader.close()  # The child owns its inherited reader now.
+        self.thread.start()
+
+    def feed(self):
+        try:
+            while not self.stop.is_set():
+                sequence = self.state["written_sequence"] + 1
+                path = self.directory / f"input-{sequence:08d}.json"
+                try:
+                    message = json.loads(path.read_text(encoding="utf-8"))
+                except FileNotFoundError:
+                    self.stop.wait(0.05)
+                    continue
+                data = message["text"].encode("utf-8")
+                while data:
+                    data = data[os.write(self.writer, data) :]
+                self.state["written_sequence"] = sequence
+                if message["eof"]:
+                    break
+        except (OSError, ValueError, KeyError) as error:
+            self.state["error"] = str(error)
+        finally:
+            os.close(self.writer)
+            self.state["closed"] = True
+
+    def close(self):
+        self.stop.set()
+        self.reader.close()
+        if self.thread.ident is not None:
+            self.thread.join(timeout=2)
+        else:
+            os.close(self.writer)
+            self.state["closed"] = True
 
 
 def probe():
@@ -201,6 +249,7 @@ def run(directory):
     job = checked(kernel.CreateJobObjectW(None, None))
     child = Process()
     status = {"state": "running", "cleanup_confirmed": False, "exit_code": None}
+    input_pipe = InputPipe(directory) if spec.get("stdin") else None
     write_json(directory / "status.json", status)
     try:
         limits = Extended()
@@ -213,7 +262,7 @@ def run(directory):
             )
         )
         with (
-            open(os.devnull, "rb") as stdin,
+            input_pipe.reader if input_pipe else open(os.devnull, "rb") as stdin,
             (directory / "run.log").open("wb") as output,
         ):
             handles = [
@@ -260,9 +309,14 @@ def run(directory):
                 raise
             if kernel.ResumeThread(child.hThread) == 0xFFFFFFFF:
                 raise ctypes.WinError(ctypes.get_last_error())
+            if input_pipe:
+                input_pipe.start()
             started = time.monotonic()
             reason = "exited"
             while True:
+                if input_pipe:
+                    status["stdin"] = dict(input_pipe.state)
+                    write_json(directory / "status.json", status)
                 waited = kernel.WaitForSingleObject(child.hProcess, 250)
                 if waited == 0:
                     break
@@ -308,6 +362,9 @@ def run(directory):
         for handle in (child.hThread, child.hProcess, job):
             if handle:
                 kernel.CloseHandle(handle)
+        if input_pipe:
+            input_pipe.close()
+            status["stdin"] = dict(input_pipe.state)
         write_json(directory / "status.json", status)
 
 
@@ -336,5 +393,7 @@ if __name__ == "__main__":
         print(json.dumps(probe()))
     elif sys.argv[1] == "pack":
         pack(sys.argv[2], sys.argv[3])
+    elif sys.argv[1] == "publish":
+        Path(sys.argv[2]).replace(sys.argv[3])
     else:
         run(Path(sys.argv[1]))
