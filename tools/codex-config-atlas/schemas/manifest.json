@@ -342,6 +342,36 @@
       "schemaPath": "rust-v0.160.0/config.schema.json",
       "tag": "rust-v0.160.0",
       "version": "0.160.0"
+    },
+    {
+      "metadataPath": "rust-v0.160.1/metadata.json",
+      "schemaPath": "rust-v0.160.1/config.schema.json",
+      "tag": "rust-v0.160.1",
+      "version": "0.160.1"
+    },
+    {
+      "metadataPath": "rust-v0.161.0/metadata.json",
+      "schemaPath": "rust-v0.161.0/config.schema.json",
+      "tag": "rust-v0.161.0",
+      "version": "0.161.0"
+    },
+    {
+      "metadataPath": "rust-v0.162.0/metadata.json",
+      "schemaPath": "rust-v0.162.0/config.schema.json",
+      "tag": "rust-v0.162.0",
+      "version": "0.162.0"
+    },
+    {
+      "metadataPath": "rust-v0.162.1/metadata.json",
+      "schemaPath": "rust-v0.162.1/config.schema.json",
+      "tag": "rust-v0.162.1",
+      "version": "0.162.1"
+    },
+    {
+      "metadataPath": "rust-v0.163.0/metadata.json",
+      "schemaPath": "rust-v0.163.0/config.schema.json",
+      "tag": "rust-v0.163.0",
+      "version": "0.163.0"
     }
   ]
 }
