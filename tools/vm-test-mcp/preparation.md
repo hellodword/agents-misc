@@ -125,6 +125,21 @@ Follow the [Nix executor guide](../../.agents/skills/nixos-vm-test/references/pr
 
 Follow the [Windows baseline guide](../../.agents/skills/windows-vm-test/references/preparation.md) for installation media, Guest Additions, Python, interactive login, hardware acceleration and the powered-off snapshot. Register only disposable test VMs whose reset boundary is acceptable.
 
+## Webcam input
+
+VirtualBox webcam passthrough requires a matching [Oracle VirtualBox Extension Pack](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/AdvancedTopics.html#webcam-passthrough). The administrator chooses and installs it under its applicable license. The MCP controller does not install host components.
+
+From the VM owner's host session, check the installed extension pack and visible cameras:
+
+```sh
+VBoxManage list extpacks
+VBoxManage list webcams
+```
+
+The VM process must have permission to use the chosen camera device. Prepare a USB controller in the Windows baseline and allow camera access for the test application inside Windows. Keep microphone and speaker settings in the baseline; runtime camera attachment uses `controlvm` and does not change the snapshot.
+
+After starting a test task, use `webcams` to choose a device and approve `vm_webcam(attach)` for that VM. Confirm it appears in the guest and that the application can receive frames. Approve `vm_webcam(detach)` after use, then finish the task and verify shutdown. The attachment result proves the VirtualBox device state; application input needs its own assertion.
+
 ## Interrupted Nix work
 
 Read the task state and worker journal, then verify from the host that the affected build's workers have stopped. The worker records task ID, derivation and timestamps under its private state directory. Retained failed-build directories remain available to the administrator.

@@ -1018,6 +1018,19 @@ class Controller:
             self.save(task)
             return artifact
 
+    async def webcam(self, target, action, camera):
+        async with self.gate:
+            if any(
+                task["kind"] != "windows"
+                or task["target"] != target
+                or task["state"] not in {"ready", "executing", "cleanup_unknown"}
+                for task in self.active()
+            ):
+                raise Failure(
+                    "Wait for the registered Windows task before changing webcams"
+                )
+            return await self.vm(target).webcam(action, camera)
+
     async def power(self, target, action):
         async with self.gate:
             vm = self.vm(target)

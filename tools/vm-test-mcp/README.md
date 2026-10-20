@@ -68,31 +68,43 @@ Enable `[nix]` with its state directory for NixOS tests and `[vms.ID]` registrat
 
 ## Tools
 
-| Tool                         | Inputs / result                                                                                         |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `targets`                    | Registered IDs, VM UUIDs, Nix availability, effective limits and current task summaries                 |
-| `host_info`, `vm_info`       | Fixed host summary; registered VM configuration/state                                                   |
-| `vm_power`                   | `target`, `action`: start, shutdown, reboot, poweroff or reset                                          |
-| `wait_for_state`             | `target`, `state`, bounded `timeout`                                                                    |
-| `modify_vm`                  | `target`, typed `changes`; human confirmation followed by observed differences                          |
-| `read_log`                   | `target`, optional `index`, `offset`, `limit`, `tail`, `generation`; paged VBox logs                    |
-| `transfer_create`            | `kind`: file or cache; returns transfer ID and URL                                                      |
-| `task_begin`                 | `kind`, unique `request_id`; Windows `target` or NixOS `cache_id` + `drv`; optional `timeout`           |
-| `task_status`                | `task_id`, optional `command_id`; compact outcome, counts, active/selected command and cleanup          |
-| `task_commands`              | `task_id`, `offset=0`, `limit=50`; full command requests/results in insertion order                     |
-| `task_log`                   | `task_id`, optional `command_id`, byte `offset` and `limit`; incremental output                         |
-| `guest_upload`               | `task_id`, `transfer_id`, absolute guest `destination`                                                  |
-| `guest_exec`                 | `task_id`, command `request_id`, `argv`; optional guest `cwd`, `env`, `timeout`, `stdin=false`          |
-| `guest_input`                | `task_id`, `command_id`, message `request_id`, `text=""`, `eof=false`; ordered stdin receipt            |
-| `guest_collect`              | `task_id`, command `request_id`, `guest_path`; supervised ZIP creation in the guest                     |
-| `screenshot`                 | `task_id`; PNG artifact URL                                                                             |
-| `artifacts`                  | `task_id`, `offset=0`, `limit=50`; artifact page and Nix roots, or directory listing with `root`/`path` |
-| `artifact_download`          | `task_id`, recorded Nix `root`, relative file `path`; download URL                                      |
-| `task_finish`, `task_cancel` | Begin evidence collection/cleanup; observe completion through task status                               |
+| Tool                         | Inputs / result                                                                                          |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `targets`                    | Service version, registered IDs, VM UUIDs, Nix availability, effective limits and current task summaries |
+| `host_info`, `vm_info`       | Fixed host summary; registered VM configuration/state                                                    |
+| `vm_power`                   | `target`, `action`: start, shutdown, reboot, poweroff or reset                                           |
+| `wait_for_state`             | `target`, `state`, bounded `timeout`                                                                     |
+| `modify_vm`                  | `target`, typed `changes`; human confirmation followed by observed differences                           |
+| `webcams`                    | `target`; host video devices and current VM attachments, with selectable device IDs                      |
+| `vm_webcam`                  | `target`, `action=attach/detach`, `camera_id`; human confirmation and attachment readback                |
+| `read_log`                   | `target`, optional `index`, `offset`, `limit`, `tail`, `generation`; paged VBox logs                     |
+| `transfer_create`            | `kind`: file or cache; returns transfer ID and URL                                                       |
+| `task_begin`                 | `kind`, unique `request_id`; Windows `target` or NixOS `cache_id` + `drv`; optional `timeout`            |
+| `task_status`                | `task_id`, optional `command_id`; compact outcome, counts, active/selected command and cleanup           |
+| `task_commands`              | `task_id`, `offset=0`, `limit=50`; full command requests/results in insertion order                      |
+| `task_log`                   | `task_id`, optional `command_id`, byte `offset` and `limit`; incremental output                          |
+| `guest_upload`               | `task_id`, `transfer_id`, absolute guest `destination`                                                   |
+| `guest_exec`                 | `task_id`, command `request_id`, `argv`; optional guest `cwd`, `env`, `timeout`, `stdin=false`           |
+| `guest_input`                | `task_id`, `command_id`, message `request_id`, `text=""`, `eof=false`; ordered stdin receipt             |
+| `guest_collect`              | `task_id`, command `request_id`, `guest_path`; supervised ZIP creation in the guest                      |
+| `screenshot`                 | `task_id`; PNG artifact URL                                                                              |
+| `artifacts`                  | `task_id`, `offset=0`, `limit=50`; artifact page and Nix roots, or directory listing with `root`/`path`  |
+| `artifact_download`          | `task_id`, recorded Nix `root`, relative file `path`; download URL                                       |
+| `task_finish`, `task_cancel` | Begin evidence collection/cleanup; observe completion through task status                                |
 
 `modify_vm` supports CPU count, RAM/VRAM, graphics controller, 3D, paravirtualization provider, nested paging and VPID. It translates typed values to fixed VBoxManage options. Every modification and every hard power operation asks for confirmation through the MCP client, which is trusted to obtain the user's decision. A confirmation is bound to one exact operation, valid for 120 seconds, and consumed once. Decline/cancel returns `applied: false`; an uncertain modify result includes readback information.
 
 Windows commands execute inside registered guests; Nix builders execute in the host daemon's build sandbox. Host-side orchestration uses fixed programs, registered resources, service-owned paths and recorded Nix output roots. Each VM start checks the actual configuration for host shared folders, including after snapshot restoration.
+
+### Webcam input
+
+Call `webcams(target)` to list `available` host cameras and `attached` cameras on the VM. Each item has an `id`, a display name when available, and the device reference reported by VirtualBox. Select an available ID for `vm_webcam(action="attach")`, or an attached ID for `action="detach"`. The VM must be running or paused; cameras can be changed while a guest command is running.
+
+Each operation asks the human to approve the exact VM, camera and action. Attaching makes that camera available to guest applications until it is detached or the VM stops. Device IDs come from enumeration; the service passes the resolved device to fixed `VBoxManage controlvm … webcam attach/detach` argument arrays. Camera settings and arbitrary host paths are outside this interface.
+
+The result separates `command_succeeded` from `observed_attached`. `applied` reports whether readback matches the requested state, or null when observation failed. If the CLI times out after changing the device, successful readback can still confirm the effect. Inspect the returned state before retrying. An unplugged camera can remain in the attached list and can still be detached by its listed ID. Runtime attachments are established for each test run; microphone and speaker configuration belongs to the baseline.
+
+Prepare webcam passthrough using the [host guide](preparation.md#webcam-input). The service exposes the device; a guest application must separately verify that it can open the camera and receive frames.
 
 ## Task lifecycle
 
@@ -140,6 +152,8 @@ A service restart resumes observation of known guest commands and Nix jobs. An i
 `/mcp` uses the SDK's Streamable HTTP JSON-RPC transport. POST carries requests, GET supports its event stream, and DELETE closes a legacy session. Tool results include structured JSON; protocol failures use MCP errors. Unknown tool/config fields are rejected. MCP requests are limited to 64 KiB, with 32 sessions and a 300-second idle timeout.
 
 Operational tool failures use `isError=true` and structured `error: {code, message, details}`. `task_busy`/`task_state` include the current state and allowed states; `out_of_range` includes the parameter and its minimum/maximum. Task timeouts are validated before allocation, using the smaller controller/worker limit for Nix tasks. Discover limits through `targets` before requesting a long run.
+
+`targets.service` and MCP `serverInfo` identify the same service version. After upgrading the controller, reconnect the MCP client and fetch `tools/list` to refresh names, schemas and descriptions. For a stale declaration, compare that fresh response with the client or gateway's published tool list. See the [MCP tools protocol](https://modelcontextprotocol.io/specification/2026-07-28/server/tools).
 
 `/files/CAPABILITY/blob` supports PUT for file upload and GET/HEAD for download. Cache capabilities instead expose `nix-cache-info`, store-hash `.narinfo` files and `nar/…` objects. PUT streams to a temporary file and publishes it atomically within quota. Submission or first guest use seals the transfer. Artifacts are read-only capabilities.
 

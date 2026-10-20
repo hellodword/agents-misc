@@ -38,6 +38,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from tasks import Controller, INPUT_BYTES, INPUT_PENDING_BYTES
 from transfers import reply
 
+VERSION = "0.4.0"
+
 
 def result(data):
     return CallToolResult(
@@ -89,7 +91,7 @@ class Confirmation:
     def __init__(self):
         self.pending = {}
 
-    async def run(self, command, ctx, apply):
+    async def run(self, command, ctx, apply, prompt="Approve this one operation?"):
         caps = ctx.client_capabilities
         if (
             not caps
@@ -99,7 +101,8 @@ class Confirmation:
             raise ToolError("This operation requires human form elicitation")
         binding = json.dumps(command, sort_keys=True)
         message = (
-            "Approve this one operation?\n"
+            prompt
+            + "\n"
             + binding
             + "\nApproval expires in two minutes and authorizes one execution."
         )
@@ -168,6 +171,7 @@ class Tools:
         """List registered VM targets, the Nix executor and current tasks."""
         ctl = self.controller
         return {
+            "service": {"name": "vm-test-mcp", "version": VERSION},
             "vms": [
                 {
                     "id": key,
@@ -211,6 +215,33 @@ class Tools:
     async def vm_info(self, target: str) -> dict[str, object]:
         """Read configuration and power state of a registered VirtualBox VM."""
         return await self.controller.vm(target).info()
+
+    async def webcams(self, target: str) -> dict[str, object]:
+        """List host webcams and attachments on a registered VM; IDs select devices."""
+        return await self.controller.vm(target).webcams()
+
+    async def vm_webcam(
+        self,
+        target: str,
+        action: Literal["attach", "detach"],
+        camera_id: str,
+        ctx: Context,
+    ) -> CallToolResult | InputRequiredResult:
+        """Confirm one webcam attach/detach, then report its observed state."""
+        vm = self.controller.vm(target)
+        camera = vm.select_webcam(await vm.webcams(), action, camera_id)
+
+        async def apply():
+            return await self.controller.webcam(target, action, camera)
+
+        return await self.confirmation.run(
+            {"vm_uuid": vm.target, "webcam": action, "camera": camera},
+            ctx,
+            apply,
+            prompt="Allow guest applications on this VM to use this host webcam?"
+            if action == "attach"
+            else "Detach this host webcam from the VM?",
+        )
 
     async def vm_power(
         self,
@@ -413,15 +444,16 @@ def make_server(controller):
 
     server = MCPServer(
         "vm-test-mcp",
-        version="0.3.0",
+        version=VERSION,
         log_level="WARNING",
         middleware=[strict],
-        instructions="Use registered targets and persistent task IDs. NixOS nodes use host KVM; Windows guests use VirtualBox. Observe cleanup_confirmed before switching. Present modify_vm and hard power confirmations to the human.",
+        instructions="Use registered targets and persistent task IDs. NixOS nodes use host KVM; Windows guests use VirtualBox. Observe cleanup_confirmed before switching. Present VM setting, hard power and webcam confirmations to the human.",
     )
     reads = {
         "targets",
         "host_info",
         "vm_info",
+        "webcams",
         "read_log",
         "wait_for_state",
         "task_status",
@@ -449,7 +481,7 @@ def make_server(controller):
                 destructive_hint=name not in reads,
                 open_world_hint=False,
             ),
-            structured_output=name not in {"modify_vm", "vm_power"},
+            structured_output=name not in {"modify_vm", "vm_power", "vm_webcam"},
         )
     return server
 

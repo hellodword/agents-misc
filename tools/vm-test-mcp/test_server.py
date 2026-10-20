@@ -56,6 +56,8 @@ class RecordingVM(VirtualBox):
             "teleporterpassword": "omit-this",
         }
         self.calls, self.children, self.jobs = [], [], []
+        self.host_webcams = [(".1", 'Camera "A"', "/dev/video0")]
+        self.attached_webcams = []
         self.shutdown_hangs = False
         (self.directory / "VBox.log").write_bytes(b"first line\nsecond line\n")
 
@@ -73,6 +75,14 @@ class RecordingVM(VirtualBox):
             data = b"7.2.synthetic"
         elif arguments == ["list", "hostinfo"]:
             data = b"Processor count: 8"
+        elif arguments == ["list", "webcams"]:
+            data = (
+                f"Video Input Devices: {len(self.host_webcams)}\n"
+                + "".join(
+                    f'{alias} "{name}"\n{reference}\n'
+                    for alias, name, reference in self.host_webcams
+                )
+            ).encode()
         elif arguments == ["list", "runningvms"]:
             data = (
                 f'"fixture" {{{UUID}}}\n' if self.config["VMState"] == "running" else ""
@@ -81,12 +91,20 @@ class RecordingVM(VirtualBox):
             self.config["VMState"] = "running"
             data = b"started"
         elif arguments[0] == "controlvm":
-            if arguments[2] in {"shutdown", "poweroff"} and (
+            if arguments[2:4] == ["webcam", "list"]:
+                data = "".join(x + "\n" for x in self.attached_webcams).encode()
+                return data[offset : offset + limit], len(data)
+            if arguments[2:4] == ["webcam", "attach"]:
+                self.attached_webcams.append(arguments[4] or "default")
+            elif arguments[2:4] == ["webcam", "detach"]:
+                self.attached_webcams.remove(arguments[4] or "default")
+            elif arguments[2] in {"shutdown", "poweroff"} and (
                 not self.shutdown_hangs or arguments[2] == "poweroff"
             ):
                 for child in self.children:
                     await terminate(child, grace=0.1)
                 self.config["VMState"] = "poweroff"
+                self.attached_webcams.clear()
             data = b"accepted"
         elif arguments[0] == "snapshot":
             shutil.rmtree(self.guest_root)
@@ -335,6 +353,14 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
                     for tool in tools.tools
                 )
             )
+            schemas = {tool.name: tool.input_schema for tool in tools.tools}
+            self.assertIn("command_id", schemas["task_status"]["properties"])
+            self.assertIn("stdin", schemas["guest_exec"]["properties"])
+            self.assertIn("guest_input", schemas)
+            self.assertIn("task_commands", schemas)
+            self.assertIn("offset", schemas["artifacts"]["properties"])
+            service = (await self.call(client, "targets"))["service"]
+            self.assertEqual(service["version"], client.server_info.version)
             args = {"kind": "windows", "request_id": "desktop", "target": "windows"}
             first = await self.call(client, "task_begin", **args)
             self.assertEqual(
@@ -859,6 +885,80 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(final["outcome"]["stop_reason"], "task_timeout")
             self.assertIsNone(final["outcome"]["failure"])
             self.assertIsNone(final["outcome"]["cleanup_error"])
+
+    async def test_webcam_consent_device_selection_and_readback(self):
+        answer = ElicitResult(action="decline")
+
+        async def consent(_ctx, _params):
+            return answer
+
+        async with self.client(callback=consent) as client:
+            catalog = await self.call(client, "webcams", target="windows")
+            camera = catalog["available"][0]
+            self.assertEqual(camera["name"], 'Camera "A"')
+            self.assertEqual(catalog["attached"], [])
+            await self.call(
+                client,
+                "task_begin",
+                kind="windows",
+                target="windows",
+                request_id="camera",
+            )
+            await self.wait_state(client, "camera", "ready")
+            await self.call(
+                client,
+                "guest_exec",
+                task_id="camera",
+                request_id="driver",
+                argv=[sys.executable, "-c", "import time; time.sleep(30)"],
+            )
+            args = {"target": "windows", "action": "attach", "camera_id": camera["id"]}
+            denied = await self.call(client, "vm_webcam", **args)
+            self.assertFalse(denied["applied"])
+            self.assertEqual(self.vm.attached_webcams, [])
+            invalid = await client.call_tool(
+                "vm_webcam", args | {"camera_id": "/etc/passwd"}
+            )
+            self.assertEqual(
+                invalid.structured_content["error"]["code"], "unknown_webcam"
+            )
+            answer = ElicitResult(action="accept", content={"confirm": True})
+            attached = await self.call(client, "vm_webcam", **args)
+            self.assertTrue(attached["applied"])
+            self.assertTrue(attached["observed_attached"])
+            self.assertIn(
+                ["controlvm", UUID, "webcam", "attach", "/dev/video0"], self.vm.calls
+            )
+            # A physically unplugged device can remain attached in VirtualBox.
+            self.vm.host_webcams.clear()
+            catalog = await self.call(client, "webcams", target="windows")
+            self.assertEqual(catalog["available"], [])
+            self.assertEqual(catalog["attached"][0]["id"], camera["id"])
+            detached = await self.call(
+                client, "vm_webcam", **(args | {"action": "detach"})
+            )
+            self.assertTrue(detached["applied"])
+            self.assertFalse(detached["observed_attached"])
+
+            self.vm.host_webcams = [(".2", 'Camera "A"', "/dev/video0")]
+            original = self.vm.command
+
+            async def interrupted(arguments, **kwargs):
+                output = await original(arguments, **kwargs)
+                if arguments[2:4] == ["webcam", "attach"]:
+                    raise Failure("CLI interrupted after attaching")
+                return output
+
+            with patch.object(self.vm, "command", side_effect=interrupted):
+                attached = await self.call(client, "vm_webcam", **args)
+            self.assertTrue(attached["applied"])
+            self.assertFalse(attached["command_succeeded"])
+            self.assertEqual(len(self.vm.attached_webcams), 1)
+            self.assertIn("after attaching", attached["error"])
+            await self.call(client, "vm_webcam", **(args | {"action": "detach"}))
+            await self.call(client, "task_cancel", task_id="camera")
+            final = await self.wait_state(client, "camera", "cancelled")
+            self.assertTrue(final["cleanup_confirmed"])
 
     async def test_typed_configuration_confirmation_and_readback(self):
         answer = ElicitResult(action="decline")

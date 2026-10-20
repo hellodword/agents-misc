@@ -21,6 +21,8 @@ One supervised command runs at a time within a task. The supervisor attaches its
 
 Use the guest's configured Python and project framework for browser and desktop automation. The service provides commands and screenshots; project scripts own application interactions and assertions.
 
+For camera input, call `webcams(target)` and select an available device ID. `vm_webcam(target, action="attach", camera_id=…)` presents the exact VM and device for human approval, then reports `observed_attached`. Confirm that the guest application can receive frames. After use, select the ID from the attached list and approve `action="detach"`; verify the observed result before finishing the task. Camera attachment is runtime state. Microphone and speaker settings come from the baseline.
+
 For a long-lived desktop driver, use `guest_exec(stdin=true)` and send actions with `guest_input(task_id, command_id, request_id, text, eof=false)`. Text is UTF-8; include newlines when the driver reads lines. Reuse the same message ID and content for retries. Observe `command.stdin.written_sequence`, then use the driver's output or screenshot to confirm the application action. Sending `eof=true` closes the stream. The 16 KiB message and 64 KiB pending limits are reported by `targets`; pipe writes are distinct from application acknowledgement.
 
 While executing, input, uploads, screenshots and log queries remain available. A second command or `guest_collect` waits until the current command ends; `task_busy` identifies it. Use the existing driver for additional application actions, then close its input or let it exit before collection. Controller reconnection or restart retains the task and input message identities.

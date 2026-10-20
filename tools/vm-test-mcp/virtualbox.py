@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import time
 import uuid
 from pathlib import Path, PureWindowsPath
@@ -113,6 +114,108 @@ class VirtualBox:
             "virtualbox_version": version[0].decode().strip(),
             "host": details[0].decode("utf-8", errors="replace").strip(),
         }
+
+    async def webcams(self):
+        """Enumerate host video devices and this VM's current attachments."""
+        data, total = await self.command(["list", "webcams"])
+        if total > MAX_OUTPUT:
+            raise ToolError("Webcam enumeration exceeded the output limit")
+        lines = data.decode("utf-8").splitlines()
+        if not lines:
+            raise ToolError("VBoxManage returned no webcam enumeration")
+        available = []
+        for index in range(1, len(lines), 2):
+            label = re.fullmatch(r'(\.\d+) "(.*)"', lines[index])
+            if not label or index + 1 >= len(lines) or not lines[index + 1]:
+                raise ToolError("VBoxManage returned incomplete webcam information")
+            reference = lines[index + 1]
+            available.append(
+                {
+                    "id": hashlib.sha256(reference.encode()).hexdigest(),
+                    "name": label[2],
+                    "reference": reference,
+                    "alias": label[1],
+                }
+            )
+        info = await self.info()
+        attached = []
+        if info["VMState"] in {"running", "paused"}:
+            data, total = await self.command(
+                ["controlvm", self.target, "webcam", "list"]
+            )
+            if total > MAX_OUTPUT:
+                raise ToolError("Attached webcam list exceeded the output limit")
+            for reference in data.decode("utf-8").splitlines():
+                device = next(
+                    (
+                        item
+                        for item in available
+                        if reference in {item["reference"], item["alias"]}
+                    ),
+                    {},
+                )
+                attached.append(
+                    {
+                        "id": hashlib.sha256(reference.encode()).hexdigest(),
+                        "name": device.get("name"),
+                        "reference": reference,
+                    }
+                )
+        return {
+            "vm_uuid": self.target,
+            "vm_state": info["VMState"],
+            "available": available,
+            "attached": attached,
+        }
+
+    @staticmethod
+    def select_webcam(catalog, action, camera_id):
+        items = catalog["available" if action == "attach" else "attached"]
+        for item in items:
+            if item["id"] == camera_id:
+                return {key: item[key] for key in ("id", "name", "reference")}
+        raise ToolError(
+            "Select a webcam ID from the current device list",
+            "unknown_webcam",
+            action=action,
+        )
+
+    async def webcam(self, action, camera):
+        """Apply an approved device choice and read back its attachment state."""
+        async with self.mutation_lock:
+            before = await self.webcams()
+            if before["vm_state"] not in {"running", "paused"}:
+                raise ToolError("Start the registered VM before changing webcams")
+            selected = self.select_webcam(before, action, camera["id"])
+            if action == "attach" and selected != camera:
+                raise ToolError("The selected webcam changed; enumerate it again")
+            response = {
+                "vm_uuid": self.target,
+                "action": action,
+                "camera": camera,
+                "applied": None,
+            }
+            # VBoxManage prints an attachment made without an argument as "default".
+            reference = "" if camera["reference"] == "default" else camera["reference"]
+            try:
+                await self.command(
+                    ["controlvm", self.target, "webcam", action, reference]
+                )
+                response["command_succeeded"] = True
+            except ToolError as error:
+                response.update(command_succeeded=False, error=str(error))
+            try:
+                after = await self.webcams()
+                attached = any(item["id"] == camera["id"] for item in after["attached"])
+                response.update(
+                    applied=attached == (action == "attach"),
+                    observed_attached=attached,
+                    vm_state=after["vm_state"],
+                    attached=after["attached"],
+                )
+            except ToolError as error:
+                response["readback_error"] = str(error)
+            return response
 
     async def wait_for_state(
         self, state: str, timeout: float = 30
