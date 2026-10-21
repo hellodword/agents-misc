@@ -42,12 +42,13 @@ state_dir = "/home/VM_OWNER/.local/state/vm-test-controller"
 # resolved through the controller's PATH. Used when Windows VMs are registered.
 # vboxmanage = "/run/current-system/sw/bin/VBoxManage"
 
-# Optional. Short VBoxManage command deadline, in seconds; default: 30.
+# Optional. Short VBoxManage command and cleanup evidence deadline, in seconds;
+# default: 30. Each cleanup screenshot/log collection has this deadline.
 # command_timeout = 30
 
-# Optional. Wait for normal shutdown or initial desktop readiness, in seconds;
-# default: 120. The prepared Windows example allows 600 seconds for startup and
-# shutdown. A timed-out shutdown retains the task for cleanup verification.
+# Optional. Wait for each stop attempt or initial desktop readiness, in seconds;
+# default: 120. The prepared Windows example allows 600 seconds. Normal shutdown
+# failure or timeout leads to poweroff; actual poweroff confirms cleanup.
 # shutdown_timeout = 600
 
 # Optional. Default and maximum requested task/guest-command deadline, in
@@ -136,8 +137,9 @@ state_dir = "/home/VM_OWNER/.local/state/vm-test-controller"
 # Optional. Windows login domain; default: omitted (local account).
 # domain = "WINDOWS_DOMAIN"
 
-# Optional. Allow normal shutdown of an idle running VM when another task
-# needs virtualization; default: false. Active service tasks finish first.
+# Optional. Allow shutdown of an idle VM for a different VM or NixOS task;
+# default: false. Normal shutdown can fall back to poweroff. Active service
+# tasks finish first. A new task for this VM powers it off before baseline restore.
 # interruptible = false
 
 # Optional. VirtualBox start mode: "gui", "headless" or "separate";
@@ -150,3 +152,27 @@ state_dir = "/home/VM_OWNER/.local/state/vm-test-controller"
 # Mesa example below still requires separate rendering/decode/encode tests.
 # [vms.windows.startup_env]
 # ANV_DEBUG = "video-decode,video-encode"
+
+# Optional. Per-VM capabilities, loaded at service startup. Values below are
+# program defaults. Each field overrides only its explicitly supplied attributes;
+# for example, cpus = { max = 2 } retains enabled = true and min = 1.
+# Limits apply to fields requested through modify_vm. Existing VM settings and
+# baseline startup are independent of these limits. targets reports effective policy.
+# [vms.windows.modify_vm]
+# enabled = true
+# cpus = { enabled = true, min = 1, max = 4 }
+# memory_mb = { enabled = true, min = 128, max = 16384 }
+# vram_mb = { enabled = true, min = 1, max = 256 }
+# graphics_controller = { enabled = true, allowed = ["vmsvga", "vboxsvga", "vboxvga", "none"] }
+# accelerate_3d = { enabled = true, allowed = [false, true] }
+# paravirt_provider = { enabled = true, allowed = ["default", "legacy", "minimal", "hyperv", "kvm", "none"] }
+# nested_paging = { enabled = true, allowed = [false, true] }
+# vpid = { enabled = true, allowed = [false, true] }
+#
+# memory_mb and vram_mb use MiB; 16384 MiB = 16 GiB. enabled = false disables
+# the operation or individual field. allowed = [false] permits disabling a feature;
+# allowed = [] permits no values. Numeric bounds must fit the tool's supported ranges.
+
+# Optional. Permit attachment and detachment of enumerated cameras; default: true.
+# [vms.windows.webcam]
+# enabled = true

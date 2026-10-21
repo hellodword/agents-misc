@@ -217,6 +217,8 @@ if sys.argv[1] == 'build':
 
     async def test_virtualization_switch_waits_for_cleanup(self):
         vm = RecordingVM(self.root)
+        vm.config["VMState"] = "running"
+        vm.shutdown_hangs = True
         config = self.shared_config | {
             "service": self.shared_config["service"] | {"shutdown_timeout": 0.2},
             "vms": {"windows": vm.profile},
@@ -244,6 +246,10 @@ if sys.argv[1] == 'build':
                 ):
                     await asyncio.sleep(0.03)
             self.assertEqual(ctl.task("desktop")["state"], "queued")
+            self.assertEqual(
+                [call[2] for call in vm.calls if call[0] == "controlvm"],
+                ["shutdown", "poweroff"],
+            )
             await ctl.finish("linux", cancel=True)
             async with asyncio.timeout(5):
                 while ctl.task("linux")["state"] != "cleanup_unknown":

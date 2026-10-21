@@ -138,7 +138,7 @@ VBoxManage list webcams
 
 The VM process must have permission to use the chosen camera device. Prepare a USB controller in the Windows baseline and allow camera access for the test application inside Windows. Keep microphone and speaker settings in the baseline; runtime camera attachment uses `controlvm` and does not change the snapshot.
 
-After starting a test task, use `webcams` to choose a device and approve `vm_webcam(attach)` for that VM. Confirm it appears in the guest and that the application can receive frames. Approve `vm_webcam(detach)` after use, then finish the task and verify shutdown. The attachment result proves the VirtualBox device state; application input needs its own assertion.
+Check the target's effective webcam capability with `targets`. After starting a test task, use `webcams` to choose a device and call `vm_webcam(attach)` for that VM. Confirm it appears in the guest and that the application can receive frames. Call `vm_webcam(detach)` after use, then finish the task and verify poweroff. The attachment result proves the VirtualBox device state; application input needs its own assertion.
 
 ## Interrupted Nix work
 

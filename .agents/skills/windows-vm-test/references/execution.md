@@ -4,7 +4,9 @@ The service controls a registered VirtualBox guest directly on the physical host
 
 ## Task and desktop
 
-Call `targets` to inspect targets and effective limits, then `task_begin(kind="windows", request_id="PROJECT-RUN-ID", target="REGISTERED-ID")`. The service queues the task, restores its powered-off baseline, starts the VM, waits for Guest Additions desktop readiness and probes the command session. Poll the compact `task_status` until `ready`.
+Call `targets` to inspect targets, effective capabilities and limits, then `task_begin(kind="windows", request_id="PROJECT-RUN-ID", target="REGISTERED-ID")`. The service queues the task, powers off its target if necessary, restores its powered-off baseline, starts the VM, waits for Guest Additions desktop readiness and probes the command session. Poll the compact `task_status` until `ready`.
+
+An active task owns the service until cleanup is confirmed. `interruptible` controls stopping an idle VM to make way for a different VM or NixOS task. A new Windows task can power off its own target before baseline restoration regardless of that setting.
 
 Use the same request ID and identical inputs when retrying a submission. A new task ID creates a new baseline-restored environment. Multiple commands in one task share files, installations and desktop state.
 
@@ -21,7 +23,7 @@ One supervised command runs at a time within a task. The supervisor attaches its
 
 Use the guest's configured Python and project framework for browser and desktop automation. The service provides commands and screenshots; project scripts own application interactions and assertions.
 
-For camera input, call `webcams(target)` and select an available device ID. `vm_webcam(target, action="attach", camera_id=…)` presents the exact VM and device for human approval, then reports `observed_attached`. Confirm that the guest application can receive frames. After use, select the ID from the attached list and approve `action="detach"`; verify the observed result before finishing the task. Camera attachment is runtime state. Microphone and speaker settings come from the baseline.
+For camera input, check the target's `webcam.enabled`, call `webcams(target)` and select an available device ID. `vm_webcam(target, action="attach", camera_id=…)` applies the device selection and reports `observed_attached`. Confirm that the guest application can receive frames. After use, select the ID from the attached list and call `action="detach"`; verify the observed result before finishing the task. Camera attachment is runtime state. Microphone and speaker settings come from the baseline.
 
 For a long-lived desktop driver, use `guest_exec(stdin=true)` and send actions with `guest_input(task_id, command_id, request_id, text, eof=false)`. Text is UTF-8; include newlines when the driver reads lines. Reuse the same message ID and content for retries. Observe `command.stdin.written_sequence`, then use the driver's output or screenshot to confirm the application action. Sending `eof=true` closes the stream. The 16 KiB message and 64 KiB pending limits are reported by `targets`; pipe writes are distinct from application acknowledgement.
 
@@ -31,10 +33,10 @@ While executing, input, uploads, screenshots and log queries remain available. A
 
 `screenshot(task_id)` returns a PNG artifact URL. `guest_collect(task_id, request_id, guest_path)` starts a supervised archive operation in the guest; its command history entry and `artifacts(task_id)` expose the resulting download URL. Command/artifact pages return `items`, `total`, and `next_offset`; follow that offset until null. Fetch selected URLs into the project's ignored evidence directory.
 
-Capture failures while the relevant application state is still visible. `task_finish` collects available screenshot/VirtualBox log evidence and normally shuts down the guest. `task_cancel` also requests command cancellation. Poll the final cleanup state; an HTTP disconnect leaves the task managed by the service.
+Capture failures while the relevant application state is still visible. Windows task completion, cancellation and deadline cleanup stop control-side observers, collect bounded screenshot/VirtualBox log evidence and power off the guest. Collect application reports before ending the task. Poll the final cleanup state; an HTTP disconnect leaves the task managed by the service.
 
 The task's `outcome` separates command failures, execution errors, explicit cancellation/task deadline and cleanup errors. Any historical command failure keeps normal completion failed even after a later success. Report that cause alongside `cleanup_confirmed`; a failed test with confirmed cleanup is different from an executor or shutdown failure.
 
-If normal shutdown or guest control fails, the service retains occupancy. Inspect the task and VM log. A separately confirmed `vm_power(poweroff)` can stop the affected VM, after which observed `poweroff` establishes cleanup. Save available evidence before that operation.
+Use `vm_power(poweroff)` when the next startup will restore the baseline. A standalone `vm_power(shutdown)` requests normal shutdown and falls back to poweroff after a failed request or bounded wait. Inspect the returned attempts and observed state. If poweroff cannot be established, the service retains occupancy as `cleanup_unknown`; inspect the task and VM log before retrying cleanup when conditions change.
 
-Each `modify_vm` request presents typed changes for human confirmation and returns observed differences. Coordinate settings with the administrator's baseline: restoring a snapshot also restores the snapshot's VM configuration.
+Use `modify_vm` within the target's effective field limits and allowed values. The service checks the complete request before applying it and returns observed differences. A `policy_denied` result identifies the restriction; keep subsequent operations within that policy. Limits apply to requested changes, while snapshot restoration uses the administrator's recorded VM configuration. Coordinate durable settings with that baseline.

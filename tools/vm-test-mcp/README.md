@@ -45,8 +45,8 @@ Set `service.token` directly in the shared TOML. An empty token permits direct M
 | `host`, `port`, `public_url`        | `127.0.0.1`, `8765`, derived `http://host:port`; public URL is the origin returned in transfer URLs       |
 | `token`                             | Empty; optional literal Bearer token for MCP requests                                                     |
 | `vboxmanage`                        | `VBoxManage` from the service's PATH                                                                      |
-| `command_timeout`                   | 30 seconds per short VBoxManage operation                                                                 |
-| `shutdown_timeout`                  | 120 seconds for graceful shutdown and initial desktop readiness                                           |
+| `command_timeout`                   | 30 seconds per short VBoxManage operation and each cleanup evidence collection                            |
+| `shutdown_timeout`                  | 120 seconds per stop observation and for initial desktop readiness                                        |
 | `task_timeout`                      | 3600 seconds, also the maximum requested task/command deadline                                            |
 | `upload_bytes`                      | 8 GiB per transfer or exported artifact                                                                   |
 | `log_bytes`                         | 64 MiB per task/command log; a guest command exceeding its output limit is stopped                        |
@@ -58,13 +58,47 @@ Set `service.token` directly in the shared TOML. An empty token permits direct M
 | `nix.task_timeout`, `nix.log_bytes` | Inherit the corresponding service limits; optional worker-specific overrides                              |
 | `nix.cleanup_timeout`               | 20 seconds of cancellation grace                                                                          |
 | `vms.ID`                            | Registered name/UUID, powered-off baseline, guest credentials, Python path, workspace and startup profile |
-| `vms.ID.interruptible`              | `false`; whether an idle running VM may be shut down automatically when another task needs virtualization |
+| `vms.ID.interruptible`              | `false`; whether an idle VM may be stopped for a different VM or NixOS task                               |
 | `vms.ID.frontend`                   | `gui`; also `headless` and `separate`                                                                     |
 | `vms.ID.startup_env`                | Administrator-owned variables passed through `startvm --putenv`                                           |
+| `vms.ID.modify_vm`                  | Enabled; per-field capabilities and writable ranges                                                       |
+| `vms.ID.webcam.enabled`             | `true`; permit attaching and detaching enumerated cameras                                                 |
 
 VM IDs are stable service names. VM identities resolve to UUIDs on startup. Each new Windows task authorizes restoring that registration's baseline; use disposable test VMs. Snapshot restore also restores VM settings, so the administrator owns baseline updates after durable configuration changes.
 
 Enable `[nix]` with its state directory for NixOS tests and `[vms.ID]` registrations for Windows tests. The shared parser resolves defaults for both processes. The worker uses the resolved `[nix]` settings; its Unix socket is mode `0660`. For the same-user setup, set `nix.socket` inside the worker's private state directory as shown in the example. Existing state directories must belong to their process user with mode `0700`; file access uses real directory paths without symlink components.
+
+### VM capabilities
+
+Each registration has an independent `modify_vm` table. Its `enabled` flag controls configuration changes as a whole; each field also has an `enabled` flag, defaulting to `true`. Numeric fields accept `min` and `max`; enum and boolean fields accept `allowed`.
+
+| Field                 | Default writable values                                 | Supported bounds |
+| --------------------- | ------------------------------------------------------- | ---------------- |
+| `cpus`                | 1–4                                                     | 1–256            |
+| `memory_mb`           | 128–16384 MiB (maximum 16 GiB)                          | 128–1048576 MiB  |
+| `vram_mb`             | 1–256 MiB                                               | 1–256 MiB        |
+| `graphics_controller` | `vmsvga`, `vboxsvga`, `vboxvga`, `none`                 | Listed values    |
+| `accelerate_3d`       | `false`, `true`                                         | Listed values    |
+| `paravirt_provider`   | `default`, `legacy`, `minimal`, `hyperv`, `kvm`, `none` | Listed values    |
+| `nested_paging`       | `false`, `true`                                         | Listed values    |
+| `vpid`                | `false`, `true`                                         | Listed values    |
+
+Configuration loads at service startup. Omitted attributes use the defaults above. For example:
+
+```toml
+[vms.windows.modify_vm]
+cpus = { max = 2 }
+memory_mb = { min = 1024, max = 8192 }
+accelerate_3d = { allowed = [false] }
+vpid = { enabled = false }
+
+[vms.windows.webcam]
+enabled = true
+```
+
+Here CPU changes remain enabled with a minimum of 1, and 3D acceleration can be disabled. An empty `allowed` list permits no values. `webcam.enabled = false` prohibits both attachment and detachment. Read `targets.vms` for each target's effective `modify_vm` and `webcam` policy.
+
+The service checks all requested fields before executing a modification. A policy rejection returns `policy_denied` with the operation, target and applicable restriction. The limits apply only to fields present in the request; existing settings, baseline restoration and VM startup are independent of these limits. For example, an administrator's eight-CPU baseline can start under a four-CPU modification limit, and a VRAM-only change leaves those CPUs untouched.
 
 ## Tools
 
@@ -72,11 +106,11 @@ Enable `[nix]` with its state directory for NixOS tests and `[vms.ID]` registrat
 | ---------------------------- | -------------------------------------------------------------------------------------------------------- |
 | `targets`                    | Service version, registered IDs, VM UUIDs, Nix availability, effective limits and current task summaries |
 | `host_info`, `vm_info`       | Fixed host summary; registered VM configuration/state                                                    |
-| `vm_power`                   | `target`, `action`: start, shutdown, reboot, poweroff or reset                                           |
+| `vm_power`                   | `target`, `action`: start, shutdown, reboot or poweroff                                                  |
 | `wait_for_state`             | `target`, `state`, bounded `timeout`                                                                     |
-| `modify_vm`                  | `target`, typed `changes`; human confirmation followed by observed differences                           |
+| `modify_vm`                  | `target`, typed `changes`; policy validation followed by observed differences                            |
 | `webcams`                    | `target`; host video devices and current VM attachments, with selectable device IDs                      |
-| `vm_webcam`                  | `target`, `action=attach/detach`, `camera_id`; human confirmation and attachment readback                |
+| `vm_webcam`                  | `target`, `action=attach/detach`, `camera_id`; policy validation and attachment readback                 |
 | `read_log`                   | `target`, optional `index`, `offset`, `limit`, `tail`, `generation`; paged VBox logs                     |
 | `transfer_create`            | `kind`: file or cache; returns transfer ID and URL                                                       |
 | `task_begin`                 | `kind`, unique `request_id`; Windows `target` or NixOS `cache_id` + `drv`; optional `timeout`            |
@@ -92,7 +126,7 @@ Enable `[nix]` with its state directory for NixOS tests and `[vms.ID]` registrat
 | `artifact_download`          | `task_id`, recorded Nix `root`, relative file `path`; download URL                                       |
 | `task_finish`, `task_cancel` | Begin evidence collection/cleanup; observe completion through task status                                |
 
-`modify_vm` supports CPU count, RAM/VRAM, graphics controller, 3D, paravirtualization provider, nested paging and VPID. It translates typed values to fixed VBoxManage options. Every modification and every hard power operation asks for confirmation through the MCP client, which is trusted to obtain the user's decision. A confirmation is bound to one exact operation, valid for 120 seconds, and consumed once. Decline/cancel returns `applied: false`; an uncertain modify result includes readback information.
+`modify_vm` translates typed values to fixed VBoxManage options after policy validation. It returns observed configuration differences, including readback information when the command's result is uncertain. Configuration, power and webcam operations execute directly within the registered target's capabilities and task-ownership rules.
 
 Windows commands execute inside registered guests; Nix builders execute in the host daemon's build sandbox. Host-side orchestration uses fixed programs, registered resources, service-owned paths and recorded Nix output roots. Each VM start checks the actual configuration for host shared folders, including after snapshot restoration.
 
@@ -100,7 +134,7 @@ Windows commands execute inside registered guests; Nix builders execute in the h
 
 Call `webcams(target)` to list `available` host cameras and `attached` cameras on the VM. Each item has an `id`, a display name when available, and the device reference reported by VirtualBox. Select an available ID for `vm_webcam(action="attach")`, or an attached ID for `action="detach"`. The VM must be running or paused; cameras can be changed while a guest command is running.
 
-Each operation asks the human to approve the exact VM, camera and action. Attaching makes that camera available to guest applications until it is detached or the VM stops. Device IDs come from enumeration; the service passes the resolved device to fixed `VBoxManage controlvm … webcam attach/detach` argument arrays. Camera settings and arbitrary host paths are outside this interface.
+Attaching makes the selected camera available to guest applications until it is detached or the VM stops. Device IDs come from enumeration and are rechecked before execution; the service passes the resolved device to fixed `VBoxManage controlvm … webcam attach/detach` argument arrays. Camera settings and arbitrary host paths are outside this interface.
 
 The result separates `command_succeeded` from `observed_attached`. `applied` reports whether readback matches the requested state, or null when observation failed. If the CLI times out after changing the device, successful readback can still confirm the effect. Inspect the returned state before retrying. An unplugged camera can remain in the attached list and can still be detached by its listed ID. Runtime attachments are established for each test run; microphone and speaker configuration belongs to the baseline.
 
@@ -108,13 +142,13 @@ Prepare webcam passthrough using the [host guide](preparation.md#webcam-input). 
 
 ## Task lifecycle
 
-A task starts `queued`, becomes `preparing`, then `ready` for Windows or `executing` for Nix. Windows commands temporarily use `executing` and return to `ready` after their process tree stops. `task_finish` enters `finishing`, collects available evidence and shuts down normally. Final states are `succeeded`, `failed` or `cancelled`, with `cleanup_confirmed: true`.
+A task starts `queued`, becomes `preparing`, then `ready` for Windows or `executing` for Nix. Windows commands temporarily use `executing` and return to `ready` after their process tree stops. Windows task completion, cancellation and deadline cleanup enter `finishing`, stop control-side observers, collect bounded screenshot/log evidence and directly power off the VM. Collect application reports before ending the task. Final states are `succeeded`, `failed` or `cancelled`, with `cleanup_confirmed: true`. Cancelling a queued task affects only that task's state.
 
-`cleanup_unknown` retains occupancy. A failed graceful shutdown stays unresolved until a later successful shutdown or a separately approved hard power operation. A Nix worker interruption during a build requires administrator reconciliation after checking daemon workers. Normal task completion allows the next queued task to start.
+`cleanup_unknown` retains occupancy when actual VM poweroff cannot be established. Inspect evidence and retry cleanup after a relevant condition changes. A later observed poweroff releases occupancy while preserving the original test outcome. A Nix worker interruption during a build requires administrator reconciliation after checking daemon workers. Confirmed task cleanup allows the next queued task to start.
 
-Normal shutdown and reboot request the guest operating system through Guest Additions. Shutdown uses `VBoxManage controlvm VM shutdown` and then observes the actual power state; it is independent of the guest's power-button policy.
+Normal shutdown and reboot request the guest operating system through Guest Additions. A standalone `shutdown` uses `VBoxManage controlvm VM shutdown` and observes the actual power state. A failed request or bounded wait triggers a fresh observation followed by `poweroff` if still needed. Each shutdown operation attempts this sequence once. Power results include the requested `action`, actual `attempts`, any `graceful_error` and the final `observation`; task logs record the same details during preparation and cleanup. An already powered-off VM needs no power command.
 
-One active virtualization task owns the service at a time. Registered interruptible idle VMs can shut down automatically. The service reports unregistered running VirtualBox VMs for the administrator to handle. KVM workloads started outside this service remain part of administrator scheduling.
+One active virtualization task owns the service at a time. A new Windows task powers off its own target before restoring the baseline, independently of `interruptible`. Stopping another idle VM for a different VM or NixOS task requires `interruptible = true` and follows the shutdown/poweroff sequence. Standalone power operations act on the current VM without restoring a baseline. The service reports unregistered running VirtualBox VMs for the administrator to handle. KVM workloads started outside this service remain part of administrator scheduling.
 
 Task IDs and command IDs make retries idempotent: identical inputs return the existing operation, changed inputs require a different ID. Task state is atomically persisted before execution. Windows commands use a guest-local supervisor and a Windows Job Object; children start suspended, join the job, then execute. The supervisor reports the child's actual exit code and bounded descendant cleanup independently of VBoxManage's own status.
 

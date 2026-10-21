@@ -232,6 +232,33 @@ class Controller:
             raise Failure("Unknown registered VM")
         return self.vms[key]
 
+    def check_policy(self, target, operation, changes=None):
+        policy = self.vm(target).profile[operation]
+        if not policy["enabled"]:
+            raise Failure(
+                f"{operation} is disabled for {target}",
+                "policy_denied",
+                target=target,
+                operation=operation,
+                policy={"enabled": False},
+            )
+        for field, value in (changes or {}).items():
+            rule = policy[field]
+            if (
+                not rule["enabled"]
+                or ("allowed" in rule and value not in rule["allowed"])
+                or ("min" in rule and not rule["min"] <= value <= rule["max"])
+            ):
+                raise Failure(
+                    f"{operation}.{field} is restricted for {target}",
+                    "policy_denied",
+                    target=target,
+                    operation=operation,
+                    field=field,
+                    requested=value,
+                    policy=rule,
+                )
+
     def save(self, task):
         task["updated_at"] = utc()
         atomic_json(self.directory(task["id"]) / "state.json", task)
@@ -288,7 +315,7 @@ class Controller:
         await asyncio.gather(*jobs, return_exceptions=True)
         self.lock_handle.close()
 
-    async def quiesce(self, except_target=None):
+    async def quiesce(self, except_target=None, task=None):
         if self.worker:
             status = await self.worker.call("ping")
             if any(not job.get("cleanup_confirmed") for job in status["tasks"]):
@@ -308,19 +335,71 @@ class Controller:
                 continue
             if not vm.profile.get("interruptible", False):
                 raise Failure(f"Registered VM {key} is not idle-interruptible")
-            await self.shutdown(vm)
+            await self.stop_vm(vm, "shutdown", task)
 
-    async def shutdown(self, vm):
-        if (await vm.info())["VMState"] == "poweroff":
-            return
-        await vm.power("shutdown")
-        observed = await vm.wait_for_state(
-            "poweroff", self.settings["shutdown_timeout"]
-        )
-        if not observed["reached"]:
-            raise Failure(
-                "Graceful shutdown did not complete; VM occupancy is retained"
+    async def observe_poweroff(self, vm, wait=False):
+        observed = {
+            "vm_uuid": vm.target,
+            "target_state": "poweroff",
+            "reached": False,
+            "observed_state": None,
+        }
+        try:
+            if wait:
+                return await vm.wait_for_state(
+                    "poweroff", self.settings["shutdown_timeout"]
+                )
+            observed["observed_state"] = (await vm.info())["VMState"]
+            observed["reached"] = observed["observed_state"] == "poweroff"
+        except (Failure, OSError, TimeoutError) as error:
+            observed["error"] = str(error)
+        return observed
+
+    async def stop_vm(self, vm, action, task=None):
+        """Observe bounded stop attempts; only observed poweroff releases occupancy."""
+        result = {
+            "vm_uuid": vm.target,
+            "action": action,
+            "attempts": [],
+            "observation": await self.observe_poweroff(vm),
+        }
+        actions = ("shutdown", "poweroff") if action == "shutdown" else ("poweroff",)
+        for attempted in actions:
+            if result["observation"]["reached"]:
+                break
+            if task:
+                with contextlib.suppress(Failure, OSError):
+                    self.event(task, f"VM {vm.target}: requesting {attempted}")
+            attempt = {"action": attempted, "command_succeeded": False}
+            try:
+                await vm.power(attempted)
+                attempt["command_succeeded"] = True
+            except (Failure, OSError, TimeoutError) as error:
+                attempt["error"] = str(error)
+            result["attempts"].append(attempt)
+            result["observation"] = await self.observe_poweroff(
+                vm, wait=attempt["command_succeeded"] or attempted == "poweroff"
             )
+            if attempted == "shutdown":
+                if "error" in attempt:
+                    result["graceful_error"] = attempt["error"]
+                elif not result["observation"]["reached"]:
+                    result["graceful_error"] = result["observation"].get(
+                        "error",
+                        "Graceful shutdown did not reach poweroff before the timeout",
+                    )
+            if not result["observation"]["reached"]:
+                result["observation"] = await self.observe_poweroff(vm)
+        if task:
+            with contextlib.suppress(Failure, OSError):
+                self.event(task, "VM stop result: " + json.dumps(result))
+        if not result["observation"]["reached"]:
+            raise Failure(
+                "Could not confirm VM poweroff; occupancy is retained",
+                "cleanup_unconfirmed",
+                **result,
+            )
+        return result
 
     async def begin(
         self, kind, request_id, target=None, cache_id=None, drv=None, timeout=None
@@ -423,7 +502,7 @@ class Controller:
 
     async def prepare(self, task):
         try:
-            await self.quiesce()
+            await self.quiesce(except_target=task["target"], task=task)
             if task["kind"] == "nixos":
                 status = await self.worker.call(
                     "submit",
@@ -439,6 +518,7 @@ class Controller:
             vm = self.vm(task["target"])
             task["vm_uuid"] = vm.target
             self.save(task)
+            await self.stop_vm(vm, "poweroff", task)
             self.event(task, "Restoring registered powered-off baseline")
             await vm.restore()
             self.event(task, "Starting registered Windows VM")
@@ -865,14 +945,47 @@ class Controller:
     async def evidence(self, task):
         vm = self.vm(task["target"])
         with contextlib.suppress(Failure, OSError, TimeoutError):
-            await self.screenshot(task["id"])
+            async with asyncio.timeout(self.settings["command_timeout"]):
+                await self.screenshot(task["id"])
         with contextlib.suppress(Failure, OSError, TimeoutError):
-            log = await vm.read_log(tail=True, limit=262144)
-            path = self.directory(task["id"]) / "VBox.log"
-            with atomic_file(path) as stream:
-                stream.write(log["text"].encode("utf-8"))
-            task["artifacts"].append(await self.transfers.artifact(path, task["id"]))
-            self.save(task)
+            async with asyncio.timeout(self.settings["command_timeout"]):
+                log = await vm.read_log(tail=True, limit=262144)
+                path = self.directory(task["id"]) / "VBox.log"
+                with atomic_file(path) as stream:
+                    stream.write(log["text"].encode("utf-8"))
+                task["artifacts"].append(
+                    await self.transfers.artifact(path, task["id"])
+                )
+                self.save(task)
+
+    async def stop_observers(self, task):
+        for (owner, _), operation in list(self.operations.items()):
+            if owner == task["id"]:
+                operation.cancel()
+                await asyncio.gather(operation, return_exceptions=True)
+
+    def complete_windows_cleanup(self, task):
+        for op in task["commands"].values():
+            if not op.get("cleanup_confirmed"):
+                if op["state"] in {"starting", "running"}:
+                    op.update(
+                        state="finished",
+                        reason=task.get("stop_reason") or "task_finished",
+                    )
+                op["cleanup_confirmed"] = True
+                if op["request"].get("stdin"):
+                    op.setdefault("stdin", {})["closed"] = True
+        failed = task.get("failure") or any(
+            command_failure(op) for op in task["commands"].values()
+        )
+        task.update(
+            state="cancelled"
+            if task.get("stop_reason") == "cancelled"
+            else "failed"
+            if failed or task.get("stop_reason") == "task_timeout"
+            else "succeeded",
+            cleanup_confirmed=True,
+        )
 
     async def finish(self, key, cancel=False, stop_reason=None):
         task = self.task(key)
@@ -894,10 +1007,7 @@ class Controller:
             if prior:
                 prior.cancel()
                 await asyncio.gather(prior, return_exceptions=True)
-            for (owner, _), operation in list(self.operations.items()):
-                if owner == key:
-                    operation.cancel()
-                    await asyncio.gather(operation, return_exceptions=True)
+            await self.stop_observers(task)
             await self.finish_run(task)
 
         self.runners[key] = asyncio.create_task(finish_after_observer())
@@ -926,44 +1036,8 @@ class Controller:
             else:
                 vm = self.vm(task["target"])
                 await self.evidence(task)
-                if (await vm.info())["VMState"] != "poweroff":
-                    if any(
-                        not op.get("cleanup_confirmed")
-                        for op in task["commands"].values()
-                    ):
-                        marker = self.directory(task["id"]) / "cancel"
-                        with atomic_file(marker):
-                            pass
-                        with contextlib.suppress(Failure, TimeoutError):
-                            await self.send_guest(
-                                vm, marker, vm.guest_path(task["id"], "cancel")
-                            )
-                    await self.shutdown(vm)
-                for (key, _), running in list(self.operations.items()):
-                    if key == task["id"]:
-                        running.cancel()
-                        await asyncio.gather(running, return_exceptions=True)
-                for op in task["commands"].values():
-                    if not op.get("cleanup_confirmed"):
-                        if op["state"] in {"starting", "running"}:
-                            op.update(
-                                state="finished",
-                                reason=task.get("stop_reason") or "task_finished",
-                            )
-                        op["cleanup_confirmed"] = True
-                        if op["request"].get("stdin"):
-                            op.setdefault("stdin", {})["closed"] = True
-                failed = task.get("failure") or any(
-                    command_failure(op) for op in task["commands"].values()
-                )
-                task.update(
-                    state="cancelled"
-                    if task.get("stop_reason") == "cancelled"
-                    else "failed"
-                    if failed or task.get("stop_reason") == "task_timeout"
-                    else "succeeded",
-                    cleanup_confirmed=True,
-                )
+                await self.stop_vm(vm, "poweroff", task)
+                self.complete_windows_cleanup(task)
             task.pop("cleanup_error", None)
             self.save(task)
         except (Failure, OSError, ValueError, TimeoutError) as error:
@@ -1025,8 +1099,9 @@ class Controller:
             self.save(task)
             return artifact
 
-    async def webcam(self, target, action, camera):
+    async def webcam(self, target, action, camera_id):
         async with self.gate:
+            self.check_policy(target, "webcam")
             if any(
                 task["kind"] != "windows"
                 or task["target"] != target
@@ -1036,14 +1111,16 @@ class Controller:
                 raise Failure(
                     "Wait for the registered Windows task before changing webcams"
                 )
-            return await self.vm(target).webcam(action, camera)
+            vm = self.vm(target)
+            camera = vm.select_webcam(await vm.webcams(), action, camera_id)
+            return await vm.webcam(action, camera)
 
     async def power(self, target, action):
         async with self.gate:
             vm = self.vm(target)
             occupying = self.active()
             if occupying and not (
-                action in {"shutdown", "poweroff", "reset"}
+                action in {"shutdown", "poweroff"}
                 and all(
                     task["target"] == target and task["state"] == "cleanup_unknown"
                     for task in occupying
@@ -1052,29 +1129,18 @@ class Controller:
                 raise Failure("Finish the active task before changing VM power")
             if action == "start":
                 await self.quiesce(except_target=target)
-            result = await vm.power(action)
             if action in {"shutdown", "poweroff"}:
-                observed = await vm.wait_for_state(
-                    "poweroff", self.settings["shutdown_timeout"]
+                for task in occupying:
+                    await self.stop_observers(task)
+                result = await self.stop_vm(
+                    vm, action, occupying[0] if occupying else None
                 )
-                result["observation"] = observed
-                if observed["reached"]:
-                    for task in occupying:
-                        task.update(
-                            state="cancelled",
-                            cleanup_confirmed=True,
-                            stop_reason="cancelled",
-                        )
-                        task.pop("cleanup_error", None)
-                        for command in task["commands"].values():
-                            if not command.get("cleanup_confirmed"):
-                                command.update(
-                                    state="finished",
-                                    reason="cancelled",
-                                    cleanup_confirmed=True,
-                                )
-                        self.save(task)
-            return result
+                for task in occupying:
+                    self.complete_windows_cleanup(task)
+                    task.pop("cleanup_error", None)
+                    self.save(task)
+                return result
+            return await vm.power(action)
 
     async def prune(self):
         cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(

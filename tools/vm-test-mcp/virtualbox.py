@@ -181,7 +181,7 @@ class VirtualBox:
         )
 
     async def webcam(self, action, camera):
-        """Apply an approved device choice and read back its attachment state."""
+        """Apply an enumerated device choice and read back its attachment state."""
         async with self.mutation_lock:
             before = await self.webcams()
             if before["vm_state"] not in {"running", "paused"}:
@@ -283,18 +283,17 @@ class VirtualBox:
         return data.decode("utf-8", errors="replace")
 
     async def power(
-        self, action: Literal["start", "shutdown", "poweroff", "reboot", "reset"]
+        self, action: Literal["start", "shutdown", "poweroff", "reboot"]
     ) -> dict[str, object]:
         """start: configured frontend; shutdown/reboot: Guest Additions.
 
-        poweroff cuts power immediately; reset is a hard reboot. Both can lose
-        unsaved guest data. Never escalate a graceful operation automatically.
+        poweroff cuts power immediately and can lose unsaved guest data.
+        The controller observes shutdown and handles its poweroff fallback.
         """
         actions = {
             "shutdown": "shutdown",
             "poweroff": "poweroff",
             "reboot": "reboot",
-            "reset": "reset",
         }
         if action == "start":
             info = await self.info()

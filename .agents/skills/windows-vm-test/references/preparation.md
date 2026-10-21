@@ -85,13 +85,13 @@ Choose the VirtualBox graphics controller, memory and 3D configuration for the i
 
 Run separate application checks for rendering, decoding and encoding. For browsers, retain renderer/decoder diagnostics and a visible test result. For FFmpeg, record the selected hardware device/codec and a successful representative operation. A codec advertised by a program or a successful playback alone does not prove hardware execution. Record unsupported combinations as capability results.
 
-For physical camera input, the host owner prepares the matching Extension Pack and device access described in [VirtualBox webcam passthrough](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/AdvancedTopics.html#webcam-passthrough). Configure a USB controller and the guest application's camera permission. Keep microphone and speaker input/output settings in the baseline. Runtime tests select an enumerated camera through MCP and obtain explicit human approval before attaching or detaching it.
+For physical camera input, the host owner prepares the matching Extension Pack and device access described in [VirtualBox webcam passthrough](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/AdvancedTopics.html#webcam-passthrough). Configure a USB controller and the guest application's camera permission. Keep microphone and speaker input/output settings in the baseline. Runtime tests select an enumerated camera through MCP within the target's configured webcam capability.
 
 Consult [VirtualBox Guest Additions](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/guestadditions.html) for the installed version's graphics support and [Guest Control](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/vboxmanage.html) for execution/session requirements.
 
 ## Baseline acceptance
 
-1. Restart after preparing login, desktop and Defender settings. Confirm automatic login, effective settings, Python and guest file transfer. Normal MCP shutdown requests the guest OS through Guest Additions and verifies that the VM powers off.
+1. Restart after preparing login, desktop and Defender settings. Confirm automatic login, effective settings, Python and guest file transfer. Exercise normal MCP shutdown and check its attempt history: the Guest Additions request should reach poweroff during baseline acceptance. A poweroff fallback identifies a guest shutdown issue to investigate.
 2. Run a script that prints output, creates a report and exits with a known nonzero code. Confirm the code and report reach the Agent.
 3. Exercise a command with descendants and a timeout; confirm cleanup before another task starts.
 4. Run one representative browser/desktop test and the requested hardware-accelerated media operation. Save diagnostics and screenshots.

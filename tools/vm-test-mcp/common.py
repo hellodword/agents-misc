@@ -262,7 +262,69 @@ VM_KEYS = {
     "workspace",
     "frontend",
     "startup_env",
+    "modify_vm",
+    "webcam",
 }
+VM_NUMERIC_LIMITS = {
+    "cpus": (1, 256),
+    "memory_mb": (128, 1048576),
+    "vram_mb": (1, 256),
+}
+VM_ALLOWED_VALUES = {
+    "graphics_controller": ["vmsvga", "vboxsvga", "vboxvga", "none"],
+    "accelerate_3d": [False, True],
+    "paravirt_provider": ["default", "legacy", "minimal", "hyperv", "kvm", "none"],
+    "nested_paging": [False, True],
+    "vpid": [False, True],
+}
+
+
+def policy_table(value, keys, path):
+    if not isinstance(value, dict) or value.keys() - keys:
+        raise Failure(f"{path} must be a table with keys: {', '.join(sorted(keys))}")
+    if "enabled" in value and type(value["enabled"]) is not bool:
+        raise Failure(f"{path}.enabled must be a boolean")
+    return value
+
+
+def vm_policy(profile, path):
+    """Resolve independent per-VM capability defaults and validate overrides."""
+    settings = policy_table(
+        profile.get("modify_vm", {}),
+        {"enabled"} | VM_NUMERIC_LIMITS.keys() | VM_ALLOWED_VALUES.keys(),
+        f"{path}.modify_vm",
+    )
+    modify = {"enabled": settings.get("enabled", True)}
+    default_max = {"cpus": 4, "memory_mb": 16384}
+    for name, (minimum, maximum) in VM_NUMERIC_LIMITS.items():
+        location = f"{path}.modify_vm.{name}"
+        rule = {
+            "enabled": True,
+            "min": minimum,
+            "max": default_max.get(name, maximum),
+        } | policy_table(settings.get(name, {}), {"enabled", "min", "max"}, location)
+        for bound in ("min", "max"):
+            if type(rule[bound]) is not int:
+                raise Failure(f"{location}.{bound} must be an integer")
+            bounded(rule[bound], maximum, f"{location}.{bound}", minimum)
+        if rule["min"] > rule["max"]:
+            raise Failure(f"{location}.min must not exceed {location}.max")
+        modify[name] = rule
+    for name, choices in VM_ALLOWED_VALUES.items():
+        location = f"{path}.modify_vm.{name}"
+        rule = {"enabled": True, "allowed": list(choices)} | policy_table(
+            settings.get(name, {}), {"enabled", "allowed"}, location
+        )
+        if not isinstance(rule["allowed"], list) or any(
+            type(value) is not type(choices[0]) or value not in choices
+            for value in rule["allowed"]
+        ):
+            raise Failure(f"{location}.allowed must be a list of values from {choices}")
+        modify[name] = rule
+    webcam = {"enabled": True} | policy_table(
+        profile.get("webcam", {}), {"enabled"}, f"{path}.webcam"
+    )
+    return {"modify_vm": modify, "webcam": webcam}
 
 
 def read_config(path):
@@ -308,6 +370,7 @@ def read_config(path):
             raise Failure("VM and baseline must identify registered resources")
         if vm.get("frontend", "gui") not in {"gui", "headless", "separate"}:
             raise Failure("frontend must be gui, headless or separate")
+        vm.update(vm_policy(vm, f"vms.{name}"))
     nix = {}
     if "nix" in config:
         settings = config["nix"]

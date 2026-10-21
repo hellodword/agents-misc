@@ -6,7 +6,6 @@
 """HTTP MCP for single-layer Windows and NixOS VM testing."""
 
 import argparse
-import asyncio
 import contextlib
 import functools
 import hmac
@@ -14,23 +13,15 @@ import inspect
 import ipaddress
 import json
 import logging
-import secrets
 import sys
-import time
 from typing import Literal
 from urllib.parse import urlsplit
 
 from common import Failure, read_config
 from mcp.server import MCPServer
-from mcp.server.mcpserver import Context
-from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import (
     CallToolResult,
-    ElicitRequest,
-    ElicitRequestFormParams,
-    ElicitResult,
-    InputRequiredResult,
     TextContent,
     ToolAnnotations,
 )
@@ -38,7 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from tasks import Controller, INPUT_BYTES, INPUT_PENDING_BYTES
 from transfers import reply
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 
 
 def result(data):
@@ -87,85 +78,9 @@ class VMChanges(BaseModel):
         return arguments
 
 
-class Confirmation:
-    def __init__(self):
-        self.pending = {}
-
-    async def run(self, command, ctx, apply, prompt="Approve this one operation?"):
-        caps = ctx.client_capabilities
-        if (
-            not caps
-            or caps.elicitation is None
-            or (caps.elicitation.form is None and caps.elicitation.url is not None)
-        ):
-            raise ToolError("This operation requires human form elicitation")
-        binding = json.dumps(command, sort_keys=True)
-        message = (
-            prompt
-            + "\n"
-            + binding
-            + "\nApproval expires in two minutes and authorizes one execution."
-        )
-        schema = {
-            "type": "object",
-            "properties": {
-                "confirm": {
-                    "type": "boolean",
-                    "title": "Approve this operation",
-                    "default": False,
-                }
-            },
-            "required": ["confirm"],
-        }
-        if ctx.protocol_version and ctx.protocol_version < "2026-07-28":
-            async with asyncio.timeout(120):
-                answer = await ctx.session.elicit_form(
-                    message, schema, related_request_id=ctx.request_context.request_id
-                )
-        else:
-            now = time.monotonic()
-            self.pending = {
-                key: value for key, value in self.pending.items() if value[1] > now
-            }
-            if not ctx.request_state:
-                if ctx.input_responses or len(self.pending) >= 64:
-                    raise ToolError(
-                        "Unexpected response or too many pending confirmations"
-                    )
-                key = secrets.token_urlsafe(32)
-                self.pending[key] = (binding, now + 120)
-                return InputRequiredResult(
-                    request_state=key,
-                    input_requests={
-                        "approval": ElicitRequest(
-                            params=ElicitRequestFormParams(
-                                message=message, requested_schema=schema
-                            )
-                        )
-                    },
-                )
-            pending = self.pending.pop(ctx.request_state, None)
-            if pending is None or pending[0] != binding:
-                raise ToolError(
-                    "Confirmation expired, was reused, or operation changed"
-                )
-            answers = ctx.input_responses or {}
-            if set(answers) != {"approval"}:
-                raise ToolError("Missing confirmation response")
-            answer = answers["approval"]
-        if (
-            not isinstance(answer, ElicitResult)
-            or answer.action != "accept"
-            or (answer.content or {}).get("confirm") is not True
-        ):
-            return result({"applied": False, "reason": "User did not approve"})
-        return result(await apply())
-
-
 class Tools:
     def __init__(self, controller):
         self.controller = controller
-        self.confirmation = Confirmation()
 
     async def targets(self) -> dict[str, object]:
         """List registered VM targets, the Nix executor and current tasks."""
@@ -178,6 +93,8 @@ class Tools:
                     "uuid": vm.target,
                     "baseline": vm.profile["baseline"],
                     "interruptible": vm.profile.get("interruptible", False),
+                    "modify_vm": vm.profile["modify_vm"],
+                    "webcam": vm.profile["webcam"],
                 }
                 for key, vm in ctl.vms.items()
             ],
@@ -225,58 +142,29 @@ class Tools:
         target: str,
         action: Literal["attach", "detach"],
         camera_id: str,
-        ctx: Context,
-    ) -> CallToolResult | InputRequiredResult:
-        """Confirm one webcam attach/detach, then report its observed state."""
-        vm = self.controller.vm(target)
-        camera = vm.select_webcam(await vm.webcams(), action, camera_id)
-
-        async def apply():
-            return await self.controller.webcam(target, action, camera)
-
-        return await self.confirmation.run(
-            {"vm_uuid": vm.target, "webcam": action, "camera": camera},
-            ctx,
-            apply,
-            prompt="Allow guest applications on this VM to use this host webcam?"
-            if action == "attach"
-            else "Detach this host webcam from the VM?",
-        )
+    ) -> dict[str, object]:
+        """Attach or detach an enumerated webcam within the target's policy."""
+        return await self.controller.webcam(target, action, camera_id)
 
     async def vm_power(
         self,
         target: str,
-        action: Literal["start", "shutdown", "reboot", "poweroff", "reset"],
-        ctx: Context,
-    ) -> CallToolResult | InputRequiredResult:
-        """Operate a registered VM; poweroff and reset require human confirmation."""
-        vm = self.controller.vm(target)
+        action: Literal["start", "shutdown", "reboot", "poweroff"],
+    ) -> dict[str, object]:
+        """Operate a registered VM; shutdown falls back to poweroff if needed."""
+        return await self.controller.power(target, action)
 
-        async def apply():
-            return await self.controller.power(target, action)
-
-        if action in {"poweroff", "reset"}:
-            return await self.confirmation.run(
-                {"vm_uuid": vm.target, "power": action}, ctx, apply
-            )
-        return result(await apply())
-
-    async def modify_vm(
-        self, target: str, changes: VMChanges, ctx: Context
-    ) -> CallToolResult | InputRequiredResult:
-        """Confirm typed VirtualBox configuration changes and return readback differences."""
+    async def modify_vm(self, target: str, changes: VMChanges) -> dict[str, object]:
+        """Apply typed settings within the target's policy and return readback differences."""
         vm = self.controller.vm(target)
         arguments = changes.arguments()
-
-        async def apply():
-            async with self.controller.gate:
-                if self.controller.active():
-                    raise Failure("Finish the active task before changing VM settings")
-                return await vm.modify(arguments)
-
-        return await self.confirmation.run(
-            ["VBoxManage", "modifyvm", vm.target, *arguments], ctx, apply
-        )
+        async with self.controller.gate:
+            self.controller.check_policy(
+                target, "modify_vm", changes.model_dump(exclude_none=True)
+            )
+            if self.controller.active():
+                raise Failure("Finish the active task before changing VM settings")
+            return await vm.modify(arguments)
 
     async def read_log(
         self,
@@ -344,14 +232,16 @@ class Tools:
         return await self.controller.task_log(task_id, command_id, offset, limit)
 
     async def task_finish(self, task_id: str) -> dict[str, object]:
-        """Collect evidence and gracefully close a Windows task; cancel a running Nix task."""
-        await self.controller.finish(task_id)
-        return self.controller.status(task_id)
+        """Collect evidence and power off a Windows task's VM; cancel a running Nix task."""
+        async with self.controller.gate:
+            await self.controller.finish(task_id)
+            return self.controller.status(task_id)
 
     async def task_cancel(self, task_id: str) -> dict[str, object]:
-        """Request bounded cleanup; poll task_status for confirmation."""
-        await self.controller.finish(task_id, cancel=True)
-        return self.controller.status(task_id)
+        """Request bounded cleanup; poll task_status for the observed cleanup state."""
+        async with self.controller.gate:
+            await self.controller.finish(task_id, cancel=True)
+            return self.controller.status(task_id)
 
     async def guest_upload(
         self, task_id: str, transfer_id: str, destination: str
@@ -423,7 +313,7 @@ def make_server(controller):
         if not name.startswith("_")
     }
     allowed = {
-        name: set(inspect.signature(method).parameters) - {"ctx"}
+        name: set(inspect.signature(method).parameters)
         for name, method in methods.items()
     }
 
@@ -447,7 +337,7 @@ def make_server(controller):
         version=VERSION,
         log_level="WARNING",
         middleware=[strict],
-        instructions="Use registered targets and persistent task IDs. NixOS nodes use host KVM; Windows guests use VirtualBox. Observe cleanup_confirmed before switching. Present VM setting, hard power and webcam confirmations to the human.",
+        instructions="Use registered targets, their configured capabilities and persistent task IDs. NixOS nodes use host KVM; Windows guests use VirtualBox. Windows task cleanup powers off the guest; each new task restores its baseline. Observe cleanup_confirmed before switching.",
     )
     reads = {
         "targets",
@@ -481,7 +371,7 @@ def make_server(controller):
                 destructive_hint=name not in reads,
                 open_world_hint=False,
             ),
-            structured_output=name not in {"modify_vm", "vm_power", "vm_webcam"},
+            structured_output=True,
         )
     return server
 

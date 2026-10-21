@@ -14,12 +14,10 @@ from urllib.parse import urlsplit
 
 import httpx2
 import uvicorn
-from common import DEFAULTS, Failure, atomic_json, load_json, terminate
+from common import DEFAULTS, Failure, atomic_json, load_json, terminate, vm_policy
 from guest_runner import InputPipe, read_status, retry_file
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
-from mcp.shared.exceptions import MCPError
-from mcp.types import ElicitResult, InputRequiredResult
 from server import make_app
 from tasks import Controller
 from virtualbox import VirtualBox, read_window
@@ -31,14 +29,14 @@ TOKEN = "synthetic-token"
 class RecordingVM(VirtualBox):
     """Synthetic VBox boundary; guest commands run real isolated POSIX processes."""
 
-    def __init__(self, directory):
+    def __init__(self, directory, target=UUID):
         self.directory = Path(directory)
         self.guest_root = self.directory / "guest"
         self.guest_root.mkdir(exist_ok=True)
         super().__init__(
-            UUID,
+            target,
             profile={
-                "vm": UUID,
+                "vm": target,
                 "baseline": "ready",
                 "interruptible": True,
                 "frontend": "gui",
@@ -46,10 +44,11 @@ class RecordingVM(VirtualBox):
                 "password": "synthetic",
                 "python": sys.executable,
                 "workspace": r"C:\vm-tests",
+                **vm_policy({}, "vms.windows"),
             },
         )
         self.config = {
-            "UUID": UUID,
+            "UUID": target,
             "VMState": "poweroff",
             "cpus": "4",
             "LogFldr": str(directory),
@@ -59,6 +58,7 @@ class RecordingVM(VirtualBox):
         self.host_webcams = [(".1", 'Camera "A"', "/dev/video0")]
         self.attached_webcams = []
         self.shutdown_hangs = False
+        self.poweroff_hangs = False
         (self.directory / "VBox.log").write_bytes(b"first line\nsecond line\n")
 
     async def command(self, arguments, *, offset=0, limit=1024 * 1024, timeout=None):
@@ -85,7 +85,9 @@ class RecordingVM(VirtualBox):
             ).encode()
         elif arguments == ["list", "runningvms"]:
             data = (
-                f'"fixture" {{{UUID}}}\n' if self.config["VMState"] == "running" else ""
+                f'"fixture" {{{self.target}}}\n'
+                if self.config["VMState"] == "running"
+                else ""
             ).encode()
         elif arguments[0] == "startvm":
             self.config["VMState"] = "running"
@@ -99,7 +101,7 @@ class RecordingVM(VirtualBox):
             elif arguments[2:4] == ["webcam", "detach"]:
                 self.attached_webcams.remove(arguments[4] or "default")
             elif arguments[2] in {"shutdown", "poweroff"} and (
-                not self.shutdown_hangs or arguments[2] == "poweroff"
+                not getattr(self, arguments[2] + "_hangs")
             ):
                 for child in self.children:
                     await terminate(child, grace=0.1)
@@ -259,7 +261,7 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         self.socket.close()
 
     @contextlib.asynccontextmanager
-    async def client(self, callback=None, mode="auto"):
+    async def client(self):
         async def record_response(response):
             if hasattr(
                 self, "status_wire_sizes"
@@ -279,8 +281,6 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
             ) as http,
             Client(
                 streamable_http_client(self.origin + "/mcp", http_client=http),
-                elicitation_callback=callback,
-                mode=mode,
                 read_timeout_seconds=5,
             ) as client,
         ):
@@ -520,11 +520,8 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await replacement.close()
 
-    async def test_shutdown_failure_keeps_queue_until_confirmed_poweroff(self):
-        async def approve(_ctx, _params):
-            return ElicitResult(action="accept", content={"confirm": True})
-
-        async with self.client(callback=approve) as client:
+    async def test_unconfirmed_poweroff_retains_queue_and_test_outcome(self):
+        async with self.client() as client:
             await self.call(
                 client,
                 "task_begin",
@@ -533,7 +530,16 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
                 target="windows",
             )
             await self.wait_state(client, "stuck", "ready")
+            await self.call(
+                client,
+                "guest_exec",
+                task_id="stuck",
+                request_id="failure",
+                argv=[sys.executable, "-c", "raise SystemExit(7)"],
+            )
+            await self.wait_state(client, "stuck", "ready")
             self.vm.shutdown_hangs = True
+            self.vm.poweroff_hangs = True
             await self.call(
                 client,
                 "task_begin",
@@ -551,10 +557,43 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
                 (await self.call(client, "task_status", task_id="next"))["state"],
                 "queued",
             )
-            await self.call(client, "vm_power", target="windows", action="poweroff")
+            self.vm.poweroff_hangs = False
+            stopping, release = asyncio.Event(), asyncio.Event()
+            original = self.vm.power
+
+            async def hold_poweroff(action):
+                if action == "poweroff":
+                    stopping.set()
+                    await release.wait()
+                return await original(action)
+
+            with patch.object(self.vm, "power", side_effect=hold_poweroff):
+                recovery = asyncio.create_task(
+                    self.call(client, "vm_power", target="windows", action="shutdown")
+                )
+                await asyncio.wait_for(stopping.wait(), 3)
+                repeated_finish = asyncio.create_task(
+                    self.call(client, "task_finish", task_id="stuck")
+                )
+                try:
+                    await asyncio.wait({repeated_finish}, timeout=0.05)
+                    self.assertEqual(
+                        self.controller.task("stuck")["state"], "cleanup_unknown"
+                    )
+                finally:
+                    release.set()
+                    recovered_power, _ = await asyncio.gather(recovery, repeated_finish)
+            self.assertEqual(
+                [attempt["action"] for attempt in recovered_power["attempts"]],
+                ["shutdown", "poweroff"],
+            )
             recovered = await self.call(client, "task_status", task_id="stuck")
+            self.assertEqual(recovered["state"], "failed")
+            self.assertEqual(
+                recovered["outcome"]["command_failure_kinds"], {"exit_code": 1}
+            )
+            self.assertTrue(recovered["cleanup_confirmed"])
             self.assertIsNone(recovered["outcome"]["cleanup_error"])
-            self.vm.shutdown_hangs = False
             await self.wait_state(client, "next", "ready")
             await self.call(client, "task_cancel", task_id="next")
             self.assertTrue(
@@ -562,6 +601,181 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
                     "cleanup_confirmed"
                 ]
             )
+
+    async def test_shutdown_observes_failures_and_uses_bounded_poweroff_fallback(self):
+        async with self.client() as client:
+            original = self.vm.command
+
+            async def unavailable(arguments, **kwargs):
+                if arguments[:3] == ["controlvm", UUID, "shutdown"]:
+                    self.vm.calls.append(arguments)
+                    raise Failure("Guest session limit reached")
+                return await original(arguments, **kwargs)
+
+            self.vm.config["VMState"] = "running"
+            with patch.object(self.vm, "command", side_effect=unavailable):
+                reply = await self.call(
+                    client, "vm_power", target="windows", action="shutdown"
+                )
+            self.assertEqual(
+                [a["action"] for a in reply["attempts"]], ["shutdown", "poweroff"]
+            )
+            self.assertIn("Guest session limit", reply["graceful_error"])
+            self.assertTrue(reply["observation"]["reached"])
+
+            self.vm.config["VMState"] = "running"
+            self.vm.shutdown_hangs = True
+            reply = await self.call(
+                client, "vm_power", target="windows", action="shutdown"
+            )
+            self.assertEqual(
+                [a["action"] for a in reply["attempts"]], ["shutdown", "poweroff"]
+            )
+            self.assertIn("timeout", reply["graceful_error"])
+
+            self.vm.config["VMState"] = "running"
+            self.vm.shutdown_hangs = False
+
+            async def interrupted(arguments, **kwargs):
+                output = await original(arguments, **kwargs)
+                if arguments[:3] == ["controlvm", UUID, "shutdown"]:
+                    raise Failure("CLI interrupted after shutdown")
+                return output
+
+            with patch.object(self.vm, "command", side_effect=interrupted):
+                reply = await self.call(
+                    client, "vm_power", target="windows", action="shutdown"
+                )
+            self.assertEqual([a["action"] for a in reply["attempts"]], ["shutdown"])
+            self.assertFalse(reply["attempts"][0]["command_succeeded"])
+            self.assertTrue(reply["observation"]["reached"])
+            for action in ("shutdown", "poweroff"):
+                reply = await self.call(
+                    client, "vm_power", target="windows", action=action
+                )
+                self.assertEqual(reply["attempts"], [])
+                self.assertTrue(reply["observation"]["reached"])
+
+    async def test_task_cleanup_bounds_evidence_and_does_not_need_guest_control(self):
+        async with self.client() as client:
+            await self.call(
+                client,
+                "task_begin",
+                kind="windows",
+                target="windows",
+                request_id="stop",
+            )
+            await self.wait_state(client, "stop", "ready")
+            await self.call(
+                client,
+                "guest_exec",
+                task_id="stop",
+                request_id="driver",
+                argv=[sys.executable, "-c", "import time; time.sleep(30)"],
+            )
+            async with asyncio.timeout(3):
+                while not self.vm.children:
+                    await asyncio.sleep(0.01)
+            self.vm.shutdown_hangs = True
+            self.config["service"]["command_timeout"] = 0.05
+
+            async def stuck_screenshot(_destination):
+                await asyncio.Event().wait()
+
+            with (
+                patch.object(self.vm, "screenshot", side_effect=stuck_screenshot),
+                patch.object(
+                    self.controller,
+                    "event",
+                    side_effect=OSError("Log storage unavailable"),
+                ),
+                patch.object(
+                    self.vm,
+                    "copy_to",
+                    side_effect=Failure("Guest session limit reached"),
+                ) as copy,
+            ):
+                await self.call(client, "task_cancel", task_id="stop")
+                final = await self.wait_state(client, "stop", "cancelled")
+            copy.assert_not_awaited()
+            self.assertTrue(final["cleanup_confirmed"])
+            self.assertEqual(final["commands"]["driver"]["reason"], "cancelled")
+            self.assertIsNotNone(self.vm.children[0].returncode)
+            self.assertEqual(
+                [call for call in self.vm.calls if call[0] == "controlvm"],
+                [["controlvm", UUID, "poweroff"]],
+            )
+
+    async def test_baseline_start_and_queued_cancellation_respect_task_ownership(self):
+        self.vm.profile["interruptible"] = False
+        self.vm.config["cpus"] = "8"
+        async with self.client() as client:
+            await self.call(
+                client, "modify_vm", target="windows", changes={"vram_mb": 128}
+            )
+            self.assertEqual(self.vm.config["cpus"], "8")
+            await self.call(client, "vm_power", target="windows", action="start")
+            await self.call(
+                client,
+                "task_begin",
+                kind="windows",
+                target="windows",
+                request_id="baseline",
+            )
+            await self.wait_state(client, "baseline", "ready")
+            self.assertEqual(self.vm.config["cpus"], "8")
+            transitions = [
+                c[0] if c[0] != "controlvm" else c[2]
+                for c in self.vm.calls
+                if c[0] in {"startvm", "snapshot", "controlvm"}
+            ]
+            self.assertEqual(
+                transitions, ["startvm", "poweroff", "snapshot", "startvm"]
+            )
+            await self.call(
+                client,
+                "task_begin",
+                kind="windows",
+                target="windows",
+                request_id="queued",
+            )
+            before = len(self.vm.calls)
+            await self.call(client, "task_cancel", task_id="queued")
+            queued = await self.wait_state(client, "queued", "cancelled")
+            self.assertTrue(queued["cleanup_confirmed"])
+            for tool, args in (
+                ("vm_power", {"action": "poweroff"}),
+                ("modify_vm", {"changes": {"cpus": 2}}),
+            ):
+                denied = await client.call_tool(tool, {"target": "windows", **args})
+                self.assertTrue(denied.is_error)
+            self.assertEqual(len(self.vm.calls), before)
+            self.assertEqual(self.vm.config["VMState"], "running")
+            await self.call(client, "task_finish", task_id="baseline")
+            self.assertTrue(
+                (await self.wait_state(client, "baseline", "succeeded"))[
+                    "cleanup_confirmed"
+                ]
+            )
+
+    async def test_quiesce_respects_idle_policy_and_unregistered_vms(self):
+        self.vm.config["VMState"] = "running"
+        self.vm.profile["interruptible"] = False
+        with self.assertRaisesRegex(Failure, "not idle-interruptible"):
+            await self.controller.quiesce()
+        self.assertEqual(self.vm.config["VMState"], "running")
+        self.vm.profile["interruptible"] = True
+        with patch.object(self.vm, "running_vms", return_value=[UUID, "unregistered"]):
+            with self.assertRaisesRegex(Failure, "unregistered"):
+                await self.controller.quiesce()
+        self.assertEqual(self.vm.config["VMState"], "running")
+        self.vm.shutdown_hangs = True
+        await self.controller.quiesce()
+        self.assertEqual(
+            [call for call in self.vm.calls if call[0] == "controlvm"],
+            [["controlvm", UUID, "shutdown"], ["controlvm", UUID, "poweroff"]],
+        )
+        self.assertEqual(self.vm.config["VMState"], "poweroff")
 
     async def test_compact_status_paged_history_and_discoverable_limits(self):
         async with self.client() as client:
@@ -992,13 +1206,8 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(final["outcome"]["failure"])
             self.assertIsNone(final["outcome"]["cleanup_error"])
 
-    async def test_webcam_consent_device_selection_and_readback(self):
-        answer = ElicitResult(action="decline")
-
-        async def consent(_ctx, _params):
-            return answer
-
-        async with self.client(callback=consent) as client:
+    async def test_webcam_policy_device_selection_and_readback(self):
+        async with self.client() as client:
             catalog = await self.call(client, "webcams", target="windows")
             camera = catalog["available"][0]
             self.assertEqual(camera["name"], 'Camera "A"')
@@ -1019,22 +1228,32 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
                 argv=[sys.executable, "-c", "import time; time.sleep(30)"],
             )
             args = {"target": "windows", "action": "attach", "camera_id": camera["id"]}
-            denied = await self.call(client, "vm_webcam", **args)
-            self.assertFalse(denied["applied"])
+            self.vm.profile["webcam"]["enabled"] = False
+            denied = await client.call_tool("vm_webcam", args)
+            self.assertEqual(
+                denied.structured_content["error"]["code"], "policy_denied"
+            )
             self.assertEqual(self.vm.attached_webcams, [])
+            self.vm.profile["webcam"]["enabled"] = True
             invalid = await client.call_tool(
                 "vm_webcam", args | {"camera_id": "/etc/passwd"}
             )
             self.assertEqual(
                 invalid.structured_content["error"]["code"], "unknown_webcam"
             )
-            answer = ElicitResult(action="accept", content={"confirm": True})
             attached = await self.call(client, "vm_webcam", **args)
             self.assertTrue(attached["applied"])
             self.assertTrue(attached["observed_attached"])
             self.assertIn(
                 ["controlvm", UUID, "webcam", "attach", "/dev/video0"], self.vm.calls
             )
+            self.vm.profile["webcam"]["enabled"] = False
+            denied = await client.call_tool("vm_webcam", args | {"action": "detach"})
+            self.assertEqual(
+                denied.structured_content["error"]["code"], "policy_denied"
+            )
+            self.assertEqual(self.vm.attached_webcams, ["/dev/video0"])
+            self.vm.profile["webcam"]["enabled"] = True
             # A physically unplugged device can remain attached in VirtualBox.
             self.vm.host_webcams.clear()
             catalog = await self.call(client, "webcams", target="windows")
@@ -1066,49 +1285,53 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
             final = await self.wait_state(client, "camera", "cancelled")
             self.assertTrue(final["cleanup_confirmed"])
 
-    async def test_typed_configuration_confirmation_and_readback(self):
-        answer = ElicitResult(action="decline")
+    async def test_typed_configuration_policy_and_readback(self):
+        async with self.client() as client:
+            target = (await self.call(client, "targets"))["vms"][0]
+            self.assertTrue(target["webcam"]["enabled"])
+            self.assertEqual(
+                target["modify_vm"]["cpus"], {"enabled": True, "min": 1, "max": 4}
+            )
+            self.assertEqual(target["modify_vm"]["memory_mb"]["max"], 16384)
+            reply = await self.call(
+                client, "modify_vm", target="windows", changes={"cpus": 2}
+            )
+            self.assertEqual(reply["changes"]["cpus"], {"before": "4", "after": "2"})
+            before = len(self.vm.calls)
+            invalid = await client.call_tool(
+                "modify_vm",
+                {
+                    "target": "windows",
+                    "changes": {"cpus": 3, "uart_mode": "/host/file"},
+                },
+            )
+            self.assertTrue(invalid.is_error)
+            self.assertEqual(len(self.vm.calls), before)
 
-        async def confirm(_ctx, _params):
-            return answer
-
-        for mode in ("auto", "legacy"):
-            answer = ElicitResult(action="decline")
-
-            async with self.client(callback=confirm, mode=mode) as client:
-                self.assertFalse(
-                    (
-                        await self.call(
-                            client, "modify_vm", target="windows", changes={"cpus": 2}
-                        )
-                    )["applied"]
-                )
-                answer = ElicitResult(action="accept", content={"confirm": True})
-                self.vm.config["cpus"] = "4"
-                reply = await self.call(
-                    client, "modify_vm", target="windows", changes={"cpus": 2}
+            for changes, field in (
+                ({"cpus": 3, "memory_mb": 16385}, "memory_mb"),
+                ({"cpus": 5}, "cpus"),
+            ):
+                denied = await client.call_tool(
+                    "modify_vm", {"target": "windows", "changes": changes}
                 )
                 self.assertEqual(
-                    reply["changes"]["cpus"], {"before": "4", "after": "2"}
+                    denied.structured_content["error"]["code"], "policy_denied"
                 )
-                invalid = await client.call_tool(
-                    "modify_vm",
-                    {
-                        "target": "windows",
-                        "changes": {"cpus": 2, "uart_mode": "/host/file"},
-                    },
+                self.assertEqual(
+                    denied.structured_content["error"]["details"]["field"], field
                 )
-                self.assertTrue(invalid.is_error)
+                self.assertEqual(len(self.vm.calls), before)
+                self.assertEqual(self.vm.config["cpus"], "2")
 
-        original = self.vm.command
+            original = self.vm.command
 
-        async def partial_change(arguments, **kwargs):
-            response = await original(arguments, **kwargs)
-            if arguments[0] == "modifyvm":
-                raise Failure("synthetic failure after applying the setting")
-            return response
+            async def partial_change(arguments, **kwargs):
+                response = await original(arguments, **kwargs)
+                if arguments[0] == "modifyvm":
+                    raise Failure("synthetic failure after applying the setting")
+                return response
 
-        async with self.client(callback=confirm) as client:
             with patch.object(self.vm, "command", side_effect=partial_change):
                 reply = await self.call(
                     client, "modify_vm", target="windows", changes={"cpus": 3}
@@ -1117,48 +1340,111 @@ class HTTPTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(reply["changes"]["cpus"], {"before": "2", "after": "3"})
             self.assertIn("after applying", reply["error"])
 
-        async def unused(_ctx, _params):
-            self.fail("Manual continuation called callback")
+            await self.call(
+                client,
+                "modify_vm",
+                target="windows",
+                changes={
+                    "cpus": 4,
+                    "memory_mb": 16384,
+                    "vram_mb": 256,
+                    "graphics_controller": "vboxsvga",
+                    "accelerate_3d": True,
+                    "paravirt_provider": "hyperv",
+                    "nested_paging": True,
+                    "vpid": False,
+                },
+            )
+            self.assertIn(
+                [
+                    "modifyvm",
+                    UUID,
+                    "--cpus",
+                    "4",
+                    "--memory",
+                    "16384",
+                    "--vram",
+                    "256",
+                    "--graphicscontroller",
+                    "vboxsvga",
+                    "--accelerate-3d",
+                    "on",
+                    "--paravirt-provider",
+                    "hyperv",
+                    "--nested-paging",
+                    "on",
+                    "--x86-vtx-vpid",
+                    "off",
+                ],
+                self.vm.calls,
+            )
 
-        async with self.client(callback=unused) as client:
-            args = {"target": "windows", "changes": {"cpus": 2}}
-            ask = await client.session.call_tool(
-                "modify_vm", args, allow_input_required=True
+    async def test_independent_vm_policies_and_field_restrictions(self):
+        directory = self.root / "other"
+        directory.mkdir()
+        other = RecordingVM(directory, "22222222-2222-4333-8444-555555555555")
+        other.profile.update(
+            vm_policy(
+                {
+                    "modify_vm": {
+                        "cpus": {"min": 2, "max": 3},
+                        "memory_mb": {"enabled": False},
+                        "accelerate_3d": {"allowed": [False]},
+                        "graphics_controller": {"allowed": ["vboxsvga"]},
+                        "vpid": {"allowed": []},
+                    },
+                    "webcam": {"enabled": False},
+                },
+                "vms.other",
             )
-            self.assertIsInstance(ask, InputRequiredResult)
-            answers = {
-                "approval": ElicitResult(action="accept", content={"confirm": True})
+        )
+        self.controller.vms["other"] = other
+        async with self.client() as client:
+            targets = {
+                vm["id"]: vm for vm in (await self.call(client, "targets"))["vms"]
             }
-            with self.assertRaises(MCPError):
-                await client.session.call_tool(
-                    "modify_vm",
-                    {"target": "windows", "changes": {"cpus": 3}},
-                    input_responses=answers,
-                    request_state=ask.request_state,
+            self.assertEqual(targets["windows"]["modify_vm"]["cpus"]["max"], 4)
+            self.assertEqual(targets["other"]["modify_vm"]["cpus"]["max"], 3)
+            self.assertFalse(targets["other"]["webcam"]["enabled"])
+            for changes in (
+                {"cpus": 1},
+                {"cpus": 4},
+                {"cpus": 2, "memory_mb": 1024},
+                {"accelerate_3d": True},
+                {"graphics_controller": "none"},
+                {"vpid": False},
+            ):
+                denied = await client.call_tool(
+                    "modify_vm", {"target": "other", "changes": changes}
                 )
-            ask = await client.session.call_tool(
-                "modify_vm", args, allow_input_required=True
+                self.assertEqual(
+                    denied.structured_content["error"]["code"], "policy_denied"
+                )
+            self.assertEqual(other.calls, [])
+            await self.call(
+                client,
+                "modify_vm",
+                target="other",
+                changes={
+                    "cpus": 2,
+                    "accelerate_3d": False,
+                    "graphics_controller": "vboxsvga",
+                },
             )
-            self.assertFalse(
-                (
-                    await client.session.call_tool(
-                        "modify_vm",
-                        args,
-                        input_responses=answers,
-                        request_state=ask.request_state,
-                    )
-                ).is_error
+            self.assertEqual(other.config["cpus"], "2")
+            await self.call(client, "modify_vm", target="other", changes={"cpus": 3})
+            self.assertEqual(other.config["cpus"], "3")
+            other.profile["modify_vm"]["enabled"] = False
+            before = len(other.calls)
+            denied = await client.call_tool(
+                "modify_vm", {"target": "other", "changes": {"cpus": 2}}
             )
-            self.assertTrue(
-                (
-                    await client.session.call_tool(
-                        "modify_vm",
-                        args,
-                        input_responses=answers,
-                        request_state=ask.request_state,
-                    )
-                ).is_error
+            self.assertEqual(
+                denied.structured_content["error"]["code"], "policy_denied"
             )
+            self.assertEqual(len(other.calls), before)
+            await self.call(client, "modify_vm", target="windows", changes={"cpus": 4})
+            self.assertEqual(self.vm.config["cpus"], "4")
 
     async def test_http_auth_cache_boundary_and_log_rotation(self):
         async with httpx2.AsyncClient(trust_env=False) as http, self.client() as client:
@@ -1341,7 +1627,10 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
             fake = root / "nix"
             fake.write_text(f"""#!{sys.executable}
 import json, sys, urllib.request
-if sys.argv[1] == 'copy':
+if sys.argv[1] == 'showvminfo':
+    print('UUID="{UUID}"')
+    print('VMState="poweroff"')
+elif sys.argv[1] == 'copy':
     origin = sys.argv[sys.argv.index('--from') + 1]
     with urllib.request.urlopen(origin + '/nix-cache-info', timeout=3) as response:
         assert b'StoreDir: /nix/store' in response.read()
@@ -1354,10 +1643,16 @@ elif sys.argv[1] == 'build':
             config.write_text(
                 f"[service]\nstate_dir = {json.dumps(str(root / 'controller'))}\n"
                 f"port = {port}\ntask_timeout = 4000\n"
+                f"vboxmanage = {json.dumps(str(fake))}\n"
                 f"[nix]\nstate_dir = {json.dumps(str(root / 'worker'))}\n"
                 f"socket = {json.dumps(str(root / 'worker.sock'))}\n"
                 "task_timeout = 3000\n"
                 f"nix = {json.dumps(str(fake))}\n"
+                f'[vms.windows]\nvm = "{UUID}"\nbaseline = "ready"\n'
+                'username = "tester"\npassword = "synthetic"\n'
+                'python = "python"\nworkspace = "workspace"\n'
+                "[vms.windows.modify_vm]\ncpus = { max = 2 }\n"
+                "[vms.windows.webcam]\nenabled = false\n"
             )
             processes = []
             try:
@@ -1390,7 +1685,9 @@ elif sys.argv[1] == 'build':
                     ) as client:
                         reply = await client.call_tool("targets")
                         self.assertFalse(reply.is_error)
-                        self.assertEqual(reply.structured_content["vms"], [])
+                        target = reply.structured_content["vms"][0]
+                        self.assertEqual(target["modify_vm"]["cpus"]["max"], 2)
+                        self.assertFalse(target["webcam"]["enabled"])
                         self.assertTrue(reply.structured_content["nix_enabled"])
                         self.assertEqual(
                             reply.structured_content["limits"]["nixos_task_seconds"],
