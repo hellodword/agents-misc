@@ -1,0 +1,7 @@
+airtest==1.4.3
+numpy==1.26.4
+opencv-contrib-python==4.6.0.66
+# Airtest pins pywinauto 0.6.3. Its sdist computes these dependencies from
+# the build OS, so declare them for Windows when resolving on another OS.
+comtypes; sys_platform == "win32"
+pypiwin32; sys_platform == "win32"

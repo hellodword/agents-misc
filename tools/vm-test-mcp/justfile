@@ -1,7 +1,18 @@
 ruff := "ruff==0.15.20"
 
-shell:
-    nix-shell -p python3 uv
+worker:
+    nix-shell -p python3 --run 'exec python3 nix_worker.py --config config.toml'
+
+server:
+    nix-shell -p python3 uv --run 'exec uv run --no-project --python python3 server.py --config config.toml'
+
+[positional-arguments]
+build-helper sdk_dir="":
+    VM_TEST_SDK_DIR="$1" nix-shell -p python3 stdenv.cc --run 'exec python3 build_helper.py "$VM_TEST_SDK_DIR"'
+
+[positional-arguments]
+test-helper sdk_dir="":
+    VM_TEST_SDK_DIR="$1" nix-shell -p python3 stdenv.cc --run 'exec python3 build_helper.py "$VM_TEST_SDK_DIR" --test'
 
 test:
     nix-shell -p python3 uv --run 'uv tool run {{ruff}} check *.py && uv run --no-project --isolated --python python3 --with-requirements server.py python -B -m unittest -v'

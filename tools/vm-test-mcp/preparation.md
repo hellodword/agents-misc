@@ -6,7 +6,7 @@ The host administrator performs these steps. The Agent container calls the HTTP 
 
 Both processes can run as the current VirtualBox VM owner. Use Python 3.11+, uv, VBoxManage for Windows targets, and the host Nix CLI/daemon for Nix tasks. The worker user must be an ordinary Nix client outside `trusted-users`, including group entries such as `@wheel`. The daemon runs builders under its own build identities; separating the controller and worker processes provides scheduling and recovery, not a separate filesystem identity when both use the same user.
 
-Deploy the component to a stable host-owned directory. Copy [config.example.toml](config.example.toml) to `/home/VM_OWNER/.config/vm-test-mcp/config.toml`, mode `0600`, and enable the required backends. Both processes read that same file. Keep literal guest credentials in this host-local file, outside the Nix store.
+Deploy the component to a stable host-owned directory. Copy [config.example.toml](config.example.toml) to its ignored `config.toml`, mode `0600`, and enable the required backends. Both processes read that same file. Keep literal guest credentials in this host-local file, outside the Nix store.
 
 For the same-user setup, use separate state directories and put the worker socket inside its directory:
 
@@ -27,7 +27,9 @@ For a container client, set `service.host` to the host bridge IP. The public ori
 
 ## Start and supervise
 
-First start the worker and controller using the commands in [README.md](README.md#prepare-and-start). Run the controller in the VM owner's graphical session with the display/session variables required by the verified VirtualBox profile. Prewarm the uv environment with the controller's `--help` before unattended startup.
+First start the worker and controller using the commands in [README.md](README.md#prepare-and-start). Requests default to headless. To support explicitly requested `gui=true` starts, run the controller in the VM owner's graphical session with the required display/session variables. Configuration supplies the startup environment and capability policy. Prewarm the uv environment with the controller's `--help` before unattended startup.
+
+Prepare and register optional controls/vision interpreters using the [Windows baseline guide](../../.agents/skills/windows-vm-test/references/preparation.md). Its resources keep automation dependencies separate from the guest supervisor and document GUI autoresize/resolution settings, normal shutdown and snapshot acceptance. Baseline installation is separate from running project-owned tests inside a disposable task.
 
 Once verified, user systemd units can supervise both processes. For example, create `~/.config/systemd/user/vm-test-nix.service`:
 
@@ -37,7 +39,7 @@ Description=Nix worker for VM tests
 
 [Service]
 WorkingDirectory=/path/to/vm-test-mcp
-ExecStart=/path/to/python3 /path/to/vm-test-mcp/nix_worker.py --config /home/VM_OWNER/.config/vm-test-mcp/config.toml
+ExecStart=/path/to/python3 /path/to/vm-test-mcp/nix_worker.py --config config.toml
 Restart=on-failure
 UMask=0077
 
@@ -55,7 +57,7 @@ PartOf=graphical-session.target
 
 [Service]
 WorkingDirectory=/path/to/vm-test-mcp
-ExecStart=/path/to/uv run --no-project /path/to/vm-test-mcp/server.py --config /home/VM_OWNER/.config/vm-test-mcp/config.toml
+ExecStart=/path/to/uv run --no-project /path/to/vm-test-mcp/server.py --config config.toml
 Restart=on-failure
 UMask=0077
 
@@ -125,14 +127,30 @@ Follow the [Nix executor guide](../../.agents/skills/nixos-vm-test/references/pr
 
 Follow the [Windows baseline guide](../../.agents/skills/windows-vm-test/references/preparation.md) for installation media, Guest Additions, Python, interactive login, hardware acceleration and the powered-off snapshot. Register only disposable test VMs whose reset boundary is acceptable.
 
-## Webcam input
+## Native mouse input
 
-VirtualBox webcam passthrough requires a matching [Oracle VirtualBox Extension Pack](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/AdvancedTopics.html#webcam-passthrough). The administrator chooses and installs it under its applicable license. The MCP controller does not install host components.
-
-From the VM owner's host session, check the installed extension pack and visible cameras:
+Build the Linux amd64 helper against the C bindings from an [official VirtualBox SDK](https://www.virtualbox.org/wiki/Downloads) for native mouse input. Run these commands in the component directory containing `config.toml`. The build locates the SDK within the configured VBoxManage installation. The SDK's generated header and glue retain their own license notices; the glue is compiled from the provided SDK without modification.
 
 ```sh
-VBoxManage list extpacks
+just build-helper
+just test-helper
+```
+
+If the installation does not include the C SDK, supply its root, containing `bindings/c`, as the optional argument to either command: `just build-helper /path/to/sdk` or `just test-helper /path/to/sdk`.
+
+`service.input_helper` defaults to `build/vbox-input-helper` relative to the configuration file. The controller resolves VBoxManage's executable symlink and looks for `VBoxXPCOMC.so` in that installation's executable and library directories. For a custom layout, set the absolute `service.vbox_library_dir`. These paths are controlled by the host administrator. Run the helper through the controller as the VM owner. The host's VirtualBox hardening configuration remains enabled. Runtime use negotiates the C function table and required object interfaces; a matching product version string alone is not the compatibility criterion. Reported helper failures affect native mouse availability independently of CLI controls.
+
+Prepare a suitable virtual pointing device and verify both a relative move and an absolute click against a screenshot. Test a guest UAC prompt using isolated guest credentials and confirm the resulting application state. The helper addresses the VM's input devices, independently of the host desktop pointer.
+
+For development memory checks, run `python3 build_helper.py SDK_DIR --sanitize --test` in a C compiler environment. These tests use a synthetic C API library; actual host/guest acceptance is separate.
+
+## Webcam input
+
+VirtualBox 7.2.2 and later include webcam passthrough in the base package; consult the installed release's [release notes](https://docs.oracle.com/en/virtualization/virtualbox/7.2/relnotes/ChangeLog.html) for its requirements. The administrator prepares device access and the VM's USB controller.
+
+From the VM owner's host session, enumerate visible cameras:
+
+```sh
 VBoxManage list webcams
 ```
 
@@ -148,7 +166,7 @@ After verifying cleanup, run reconciliation as the worker identity:
 
 ```sh
 python3 /path/to/vm-test-mcp/nix_worker.py \
-  --config /home/VM_OWNER/.config/vm-test-mcp/config.toml --reconcile TASK_ID
+  --config config.toml --reconcile TASK_ID
 ```
 
 The Unix peer UID must match the worker owner for this operation. The HTTP controller does not expose reconciliation. Read the original task again to confirm its updated state before continuing.

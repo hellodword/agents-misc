@@ -17,7 +17,7 @@ import sys
 from typing import Literal
 from urllib.parse import urlsplit
 
-from common import Failure, read_config
+from common import Failure, bounded, read_config
 from mcp.server import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import (
@@ -26,10 +26,10 @@ from mcp.types import (
     ToolAnnotations,
 )
 from pydantic import BaseModel, ConfigDict, Field
-from tasks import Controller, INPUT_BYTES, INPUT_PENDING_BYTES
+from tasks import Controller, INPUT_BYTES, INPUT_PENDING_BYTES, page
 from transfers import reply
 
-VERSION = "0.6.0"
+VERSION = "0.8.0"
 
 
 def result(data):
@@ -93,8 +93,14 @@ class Tools:
                     "uuid": vm.target,
                     "baseline": vm.profile["baseline"],
                     "interruptible": vm.profile.get("interruptible", False),
+                    "python": vm.profile["python"],
+                    "automation": vm.profile.get("automation", {}),
+                    "input_interval_seconds": vm.profile.get(
+                        "input_interval_seconds", 1.0
+                    ),
                     "modify_vm": vm.profile["modify_vm"],
                     "webcam": vm.profile["webcam"],
+                    "capabilities": await ctl.desktop.capabilities(vm),
                 }
                 for key, vm in ctl.vms.items()
             ],
@@ -150,9 +156,10 @@ class Tools:
         self,
         target: str,
         action: Literal["start", "shutdown", "reboot", "poweroff"],
+        gui: bool = False,
     ) -> dict[str, object]:
-        """Operate a registered VM; shutdown falls back to poweroff if needed."""
-        return await self.controller.power(target, action)
+        """Start headless unless gui=true; shutdown falls back to poweroff if needed."""
+        return await self.controller.power(target, action, gui=gui)
 
     async def modify_vm(self, target: str, changes: VMChanges) -> dict[str, object]:
         """Apply typed settings within the target's policy and return readback differences."""
@@ -202,10 +209,11 @@ class Tools:
         cache_id: str | None = None,
         drv: str | None = None,
         timeout: float | None = None,
+        gui: bool = False,
     ) -> dict[str, object]:
-        """Queue a test task; retry the same request_id with identical inputs."""
+        """Queue a task; Windows starts headless unless gui=true. Retry identical inputs with the same ID."""
         task = await self.controller.begin(
-            kind, request_id, target, cache_id, drv, timeout
+            kind, request_id, target, cache_id, drv, timeout, gui=gui
         )
         return self.controller.status(task["id"])
 
@@ -283,9 +291,264 @@ class Tools:
         command = await self.controller.collect(task_id, request_id, guest_path)
         return self.controller.status(task_id, command["id"])["command"]
 
-    async def screenshot(self, task_id: str) -> dict[str, object]:
+    async def screenshot(self, task_id: str, screen: int = 0) -> dict[str, object]:
         """Capture the task's VM display and return an artifact download URL."""
-        return await self.controller.screenshot(task_id)
+        return await self.controller.screenshot(task_id, screen)
+
+    async def vm_keyboard(
+        self,
+        task_id: str,
+        request_id: str,
+        chords: list[list[str]],
+        input_interval_seconds: float | None = None,
+    ) -> dict[str, object]:
+        """Send physical key chords, e.g. [[\"CTRL\",\"ALT\",\"DELETE\"]]; inspect the UI after delivery."""
+        from desktop import scancodes
+
+        scancodes(chords)
+
+        async def apply(task, backend):
+            return await backend.keyboard(chords)
+
+        return await self.controller.desktop.execute(
+            task_id,
+            request_id,
+            "keyboard",
+            {"chords": chords},
+            apply,
+            input_interval_seconds=input_interval_seconds,
+        )
+
+    async def vm_mouse(
+        self,
+        task_id: str,
+        request_id: str,
+        action: Literal["move", "click", "drag", "scroll"],
+        x: int = 0,
+        y: int = 0,
+        screen: int = 0,
+        end_x: int = 0,
+        end_y: int = 0,
+        button: Literal["left", "right", "middle"] = "left",
+        dz: int = 0,
+        dw: int = 0,
+        relative: bool = False,
+        input_interval_seconds: float | None = None,
+    ) -> dict[str, object]:
+        """Use screenshot pixels or relative movement; end_x/end_y are drag destination or relative drag delta."""
+        bounded(screen, 63, "screen", 0)
+        for name, value in (("x", x), ("y", y), ("end_x", end_x), ("end_y", end_y)):
+            bounded(value, 32767, name, -32768)
+        bounded(dz, 100, "dz", -100)
+        bounded(dw, 100, "dw", -100)
+        values = dict(
+            action=action,
+            screen=screen,
+            x=x,
+            y=y,
+            end_x=end_x,
+            end_y=end_y,
+            button={"left": 1, "right": 2, "middle": 4}[button],
+            dz=dz,
+            dw=dw,
+            relative=relative,
+        )
+
+        async def apply(task, backend):
+            return await backend.helper(**values)
+
+        return await self.controller.desktop.execute(
+            task_id,
+            request_id,
+            "mouse",
+            values,
+            apply,
+            input_interval_seconds=input_interval_seconds,
+        )
+
+    async def vm_display(
+        self,
+        task_id: str,
+        screen: int = 0,
+        width: int | None = None,
+        height: int | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, object]:
+        """Observe a display or request its resolution and check the actual size."""
+        bounded(screen, 63, "screen", 0)
+        ctl = self.controller
+        if width is None and height is None:
+            async with ctl.desktop.lock(task_id):
+                task = await ctl.desktop.live(task_id, "display")
+                return await ctl.desktop.backend(task).screen(
+                    screen, ctl.directory(task_id)
+                )
+        bounded(width, 16384, "width", 1)
+        bounded(height, 16384, "height", 1)
+
+        async def apply(task, backend):
+            return await ctl.desktop.display(task, backend, screen, width, height)
+
+        return await ctl.desktop.execute(
+            task_id,
+            request_id,
+            "display",
+            dict(screen=screen, width=width, height=height),
+            apply,
+        )
+
+    async def vm_network_link(
+        self,
+        task_id: str,
+        adapter: int = 1,
+        connected: bool | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, object]:
+        """Observe or change the cable connection of an existing virtual NIC."""
+        bounded(adapter, 36, "adapter", 1)
+        ctl = self.controller
+
+        async def apply(task, backend):
+            return await backend.link(adapter, connected)
+
+        if connected is None:
+            async with ctl.desktop.lock(task_id):
+                task = await ctl.desktop.live(task_id, "network_link")
+                return await apply(task, ctl.desktop.backend(task))
+        return await ctl.desktop.execute(
+            task_id,
+            request_id,
+            "network_link",
+            dict(adapter=adapter, connected=connected),
+            apply,
+        )
+
+    async def vm_audio(
+        self,
+        task_id: str,
+        input: bool | None = None,
+        output: bool | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, object]:
+        """Observe or independently toggle the VM audio input and playback switches."""
+        ctl = self.controller
+
+        async def apply(task, backend):
+            return await backend.audio(input, output)
+
+        if input is None and output is None:
+            async with ctl.desktop.lock(task_id):
+                task = await ctl.desktop.live(task_id, "audio")
+                return await apply(task, ctl.desktop.backend(task))
+        return await ctl.desktop.execute(
+            task_id, request_id, "audio", dict(input=input, output=output), apply
+        )
+
+    async def guest_sessions(
+        self, task_id: str, offset: int = 0, limit: int = 50
+    ) -> dict[str, object]:
+        """Read Guest Control session/process IDs and status without allocating a guest session."""
+        ctl = self.controller
+        task, vm = ctl.guest_task(
+            task_id, {"preparing", "ready", "executing", "cleanup_unknown"}
+        )
+        ctl.check_policy(task["target"], "guest_sessions")
+        if task.get("vm_uuid") != vm.target or not task.get("vm_started"):
+            raise Failure("Wait until this task has started its VM")
+        items = await ctl.desktop.backend(task).sessions()
+        return {
+            **page(items, offset, limit),
+            "session_count": sum(x["kind"] == "session" for x in items),
+            "process_count": sum(x["kind"] == "process" for x in items),
+        }
+
+    async def _capture(
+        self, task_id, kind, action, request_id, capture_id, options, offset=0, limit=50
+    ):
+        ctl = self.controller
+        task = ctl.task(task_id)
+        if task["kind"] != "windows":
+            raise Failure("Captures belong to Windows tasks")
+        if action in {"status", "read"}:
+            if capture_id is None and action == "status":
+                return page(
+                    [
+                        ctl.captures.describe(c)
+                        for c in task.get("captures", {}).values()
+                        if c["kind"] == kind
+                    ],
+                    offset,
+                    limit,
+                )
+            capture = ctl.captures.get(task, capture_id, kind)
+            return (
+                ctl.captures.read_metrics(task, capture, offset, limit)
+                if action == "read"
+                else ctl.captures.describe(capture)
+            )
+
+        async def apply(task, backend):
+            if action == "start":
+                defaults = backend.vm.profile[kind]
+                resolved = {
+                    name: defaults[name] if value is None else value
+                    for name, value in options.items()
+                }
+                return await ctl.captures.start(task, kind, resolved)
+            return await ctl.captures.stop(
+                task, ctl.captures.get(task, capture_id, kind)
+            )
+
+        return await ctl.desktop.execute(
+            task_id,
+            request_id,
+            kind,
+            dict(action=action, capture_id=capture_id, **options),
+            apply,
+        )
+
+    async def vm_packet_capture(
+        self,
+        task_id: str,
+        action: Literal["start", "stop", "status"],
+        request_id: str | None = None,
+        capture_id: str | None = None,
+        adapter: int = 1,
+    ) -> dict[str, object]:
+        """Trace one enabled virtual NIC into a service-owned PCAP artifact."""
+        bounded(adapter, 36, "adapter", 1)
+        return await self._capture(
+            task_id,
+            "packet_capture",
+            action,
+            request_id,
+            capture_id,
+            dict(adapter=adapter),
+        )
+
+    async def vm_metrics(
+        self,
+        task_id: str,
+        action: Literal["start", "read", "stop", "status"],
+        request_id: str | None = None,
+        capture_id: str | None = None,
+        interval_seconds: int | None = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> dict[str, object]:
+        """Sample VM metrics on demand; read pages or stop to export timestamped JSONL evidence."""
+        if interval_seconds is not None:
+            bounded(interval_seconds, 3600, "interval_seconds", 1)
+        return await self._capture(
+            task_id,
+            "metrics",
+            action,
+            request_id,
+            capture_id,
+            dict(interval_seconds=interval_seconds),
+            offset,
+            limit,
+        )
 
     async def artifacts(
         self,
@@ -350,6 +613,7 @@ def make_server(controller):
         "task_commands",
         "task_log",
         "artifacts",
+        "guest_sessions",
     }
     for name, method in methods.items():
 

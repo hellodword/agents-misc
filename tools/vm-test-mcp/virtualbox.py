@@ -16,6 +16,7 @@ from common import Failure as ToolError
 from common import open_file
 
 MAX_OUTPUT = 1024 * 1024
+POWERED_OFF_STATES = {"poweroff", "aborted"}
 
 
 async def read_window(stream, offset, limit):
@@ -46,6 +47,7 @@ class VirtualBox:
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env={**os.environ, "LC_ALL": "C", "LANGUAGE": "C"},
             )
         except OSError as error:
             raise ToolError(f"Could not start VBoxManage: {error}") from error
@@ -225,6 +227,11 @@ class VirtualBox:
         running describes the VM process; check guest readiness separately.
         A reboot may remain running throughout this observation.
         """
+        result = await self.wait_for_states({state}, timeout)
+        result.pop("target_states")
+        return {"target_state": state, **result}
+
+    async def wait_for_states(self, states, timeout):
         if not math.isfinite(timeout) or timeout < 0:
             raise ToolError("State wait timeout must be a finite, nonnegative number")
         started = time.monotonic()
@@ -234,7 +241,7 @@ class VirtualBox:
             async with asyncio.timeout(timeout):
                 while True:
                     last = await self.info()
-                    if last["VMState"] == state:
+                    if last["VMState"] in states:
                         reached = True
                         break
                     await asyncio.sleep(0.5)
@@ -242,7 +249,7 @@ class VirtualBox:
             pass
         return {
             "vm_uuid": self.target,
-            "target_state": state,
+            "target_states": sorted(states),
             "reached": reached,
             "observed_state": last["VMState"] if last else None,
             "elapsed_seconds": round(time.monotonic() - started, 3),
@@ -283,9 +290,9 @@ class VirtualBox:
         return data.decode("utf-8", errors="replace")
 
     async def power(
-        self, action: Literal["start", "shutdown", "poweroff", "reboot"]
+        self, action: Literal["start", "shutdown", "poweroff", "reboot"], *, gui=False
     ) -> dict[str, object]:
-        """start: configured frontend; shutdown/reboot: Guest Additions.
+        """start: headless unless gui is requested; shutdown/reboot: Guest Additions.
 
         poweroff cuts power immediately and can lose unsaved guest data.
         The controller observes shutdown and handles its poweroff fallback.
@@ -305,7 +312,7 @@ class VirtualBox:
                 "startvm",
                 self.target,
                 "--type",
-                self.profile.get("frontend", "gui"),
+                "gui" if gui else "headless",
             ]
             for key, value in self.profile.get("startup_env", {}).items():
                 command.extend(["--putenv", f"{key}={value}"])
@@ -317,6 +324,7 @@ class VirtualBox:
         return {
             "vm_uuid": self.target,
             "action": action,
+            **({"gui": gui} if action == "start" else {}),
             "command_succeeded": True,
             "output": output,
             "note": "Use vm_info to observe state. A successful ACPI/guest request does not prove shutdown or reboot completed.",
@@ -401,17 +409,93 @@ class VirtualBox:
             ["guestcontrol", self.target, operation, *auth, *args], timeout=timeout
         )
 
-    async def python(self, *args, background=False, timeout=None):
-        options = [] if background else ["--wait-stdout", "--wait-stderr"]
+    async def python(self, *args, timeout=None):
         return await self.guest(
-            "start" if background else "run",
+            "run",
             "--exe",
             self.profile["python"],
-            *options,
+            "--wait-stdout",
+            "--wait-stderr",
             "--",
             *args,
             timeout=timeout,
         )
+
+    async def guest_session_inventory(self):
+        data, total = await self.command(["guestcontrol", self.target, "list", "all"])
+        if total > MAX_OUTPUT:
+            raise ToolError("Guest session inventory exceeded the output limit")
+        output = data.decode(errors="replace")
+        if output.strip() == "No active guest sessions found":
+            return {}
+        sessions, current = {}, None
+        for line in output.splitlines():
+            session = re.search(
+                r"Session #\d+\s+ID=(\d+)\s+.*?Status=\[[^]]+\] Name=(.*)$",
+                line,
+            )
+            if session:
+                current = {"name": session[2], "pids": []}
+                sessions[int(session[1])] = current
+            elif current is not None:
+                process = re.search(r"Process #\d+\s+PID=(\d+)\s+", line)
+                if process:
+                    current["pids"].append(int(process[1]))
+        count = re.search(r"^Total guest sessions: (\d+)\s*$", output, re.MULTILINE)
+        if count is None or int(count[1]) != len(sessions):
+            raise ToolError("Guest session inventory is incomplete")
+        return sessions
+
+    async def start_python(self, *args):
+        """Start a persistent supervisor and return its private session identity."""
+        data, total = await self.guest(
+            "start", "--verbose", "--exe", self.profile["python"], "--", *args
+        )
+        match = re.search(rb"^\[(\d+) - Session (\d+)\]\s*$", data, re.MULTILINE)
+        if total > MAX_OUTPUT or match is None:
+            raise ToolError("Guest supervisor session identity was not returned")
+        pid, identity = int(match[1]), int(match[2])
+        session = (await self.guest_session_inventory()).get(identity)
+        if session is None or pid not in session["pids"]:
+            raise ToolError("Guest supervisor session identity could not be verified")
+        return {"id": identity, "pid": pid, "name": session["name"]}
+
+    async def close_guest_session(self, owned):
+        """Close a completed supervisor's session, checking identity on recovery."""
+
+        async def present():
+            session = (await self.guest_session_inventory()).get(owned["id"])
+            if session is None:
+                return False
+            if session["name"] != owned["name"] or owned["pid"] not in session["pids"]:
+                raise ToolError(
+                    "Guest session identity changed; cleanup is unconfirmed"
+                )
+            return True
+
+        if not await present():
+            return
+        error = None
+        try:
+            await self.command(
+                [
+                    "guestcontrol",
+                    self.target,
+                    "closesession",
+                    "--session-id",
+                    str(owned["id"]),
+                ]
+            )
+        except ToolError as failure:
+            error = failure
+        try:
+            async with asyncio.timeout(self.timeout):
+                while await present():
+                    if error:
+                        raise error
+                    await asyncio.sleep(0.1)
+        except TimeoutError as failure:
+            raise ToolError("Guest session closure could not be confirmed") from failure
 
     async def copy_to(self, source, destination):
         await self.guest("copyto", "--target-directory", destination, str(source))
@@ -450,9 +534,9 @@ class VirtualBox:
         if info["VMState"] != "poweroff":
             raise ToolError("The registered baseline must be a powered-off snapshot")
 
-    async def screenshot(self, destination):
+    async def screenshot(self, destination, screen=0):
         await self.command(
-            ["controlvm", self.target, "screenshotpng", str(destination)]
+            ["controlvm", self.target, "screenshotpng", str(destination), str(screen)]
         )
 
     async def running_vms(self):

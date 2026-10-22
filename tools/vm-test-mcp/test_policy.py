@@ -81,6 +81,52 @@ workspace = 'C:\vm-tests'
                     "vms.windows.modify_vm." + location, str(failure.exception)
                 )
 
+    def test_capture_defaults_and_independent_desktop_capabilities(self):
+        config = self.read("""[vms.windows.mouse]
+enabled = false
+[vms.windows.metrics]
+interval_seconds = 2
+""")
+        profile = config["vms"]["windows"]
+        self.assertFalse(profile["mouse"]["enabled"])
+        self.assertTrue(profile["keyboard"]["enabled"])
+        self.assertEqual(profile["metrics"]["interval_seconds"], 2)
+        defaults = self.read("")["vms"]["windows"]
+        self.assertTrue(defaults["packet_capture"]["enabled"])
+        self.assertEqual(defaults["metrics"]["interval_seconds"], 1)
+
+    def test_helper_path_follows_configuration_directory(self):
+        config = self.read("")
+        self.assertEqual(
+            config["service"]["input_helper"],
+            str(self.path.parent / "build" / "vbox-input-helper"),
+        )
+        self.path.write_text(
+            self.base.replace("[service]", '[service]\ninput_helper = "native/helper"')
+        )
+        self.assertEqual(
+            read_config(self.path)["service"]["input_helper"],
+            str(self.path.parent / "native" / "helper"),
+        )
+
+    def test_automation_paths_and_native_input_defaults(self):
+        self.assertEqual(self.read("")["vms"]["windows"]["input_interval_seconds"], 1.0)
+        config = self.read(
+            "input_interval_seconds = 0\n[vms.windows.automation]\ncontrols_python = 'C:\\controls\\python.exe'\n"
+        )
+        self.assertEqual(config["vms"]["windows"]["input_interval_seconds"], 0)
+        for setting in (
+            'frontend = "gui"',
+            "input_interval_seconds = -1",
+            "input_interval_seconds = nan",
+            "input_interval_seconds = inf",
+            "input_interval_seconds = true",
+            '[vms.windows.automation]\nvision_python = "relative.exe"',
+            '[vms.windows.automation]\npython = "unknown"',
+        ):
+            with self.subTest(setting=setting), self.assertRaises(Failure):
+                self.read(setting)
+
 
 if __name__ == "__main__":
     unittest.main()

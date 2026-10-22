@@ -26,8 +26,10 @@ from common import (
     window,
 )
 from nix_worker import WorkerClient
+from desktop import Desktop, png_size
+from captures import Captures
 from transfers import Transfers
-from virtualbox import VirtualBox
+from virtualbox import POWERED_OFF_STATES, VirtualBox
 
 FINISHED = {"succeeded", "failed", "cancelled"}
 INPUT_BYTES = 16 * 1024
@@ -142,6 +144,8 @@ class Controller:
         self.operations = {}
         self.gate = asyncio.Lock()
         self.loop = None
+        self.desktop = Desktop(self)
+        self.captures = Captures(self)
 
     def directory(self, key):
         return self.root / "tasks" / identifier(key)
@@ -163,6 +167,13 @@ class Controller:
         active = next(
             (c for c in commands if c["state"] in {"starting", "running"}), None
         )
+        captures = list(task.get("captures", {}).values())
+        desktop_requests = task.get("desktop_requests", {})
+        unconfirmed = [
+            key
+            for key, receipt in desktop_requests.items()
+            if receipt["state"] == "unconfirmed"
+        ]
         result = {
             field: task.get(field)
             for field in (
@@ -175,6 +186,8 @@ class Controller:
                 "updated_at",
                 "guest_directory",
                 "desktop",
+                "gui",
+                "automation",
             )
         }
         result.update(
@@ -184,6 +197,14 @@ class Controller:
             else None,
             command_count=len(commands),
             artifact_count=len(task["artifacts"]),
+            capture_count=len(captures),
+            captures=[
+                {key: c.get(key) for key in ("id", "kind", "state", "stop_reason")}
+                | {"error_count": len(c["errors"])}
+                for c in captures[-5:]
+            ],
+            desktop_request_count=len(desktop_requests),
+            input_cleanup_errors=task.get("input_cleanup_errors", []),
             current_command=command_status(active) if active else None,
             outcome={
                 "failed_command_count": len(failed),
@@ -192,6 +213,9 @@ class Controller:
                 "failure": task.get("failure"),
                 "stop_reason": task.get("stop_reason"),
                 "cleanup_error": task.get("cleanup_error"),
+                "unconfirmed_input_or_operation_count": len(unconfirmed),
+                "unconfirmed_request_ids": unconfirmed[:5],
+                "capture_error_count": sum(len(c["errors"]) for c in captures),
             },
         )
         if task["kind"] == "nixos":
@@ -285,6 +309,18 @@ class Controller:
     async def start(self):
         for vm in self.vms.values():
             await vm.resolve()
+        for task in self.tasks.values():
+            if (
+                task["kind"] == "windows"
+                and task["target"] in self.vms
+                and task.get("vm_uuid") == self.vm(task["target"]).target
+            ):
+                await self.captures.recover(task)
+                try:
+                    await self.desktop.cleanup(task)
+                except (Failure, OSError, TimeoutError) as error:
+                    task["input_cleanup_errors"] = [str(error)]
+                    self.save(task)
         for task in self.active():
             if task["kind"] == "nixos":
                 self.runners[task["id"]] = asyncio.create_task(self.resume_nix(task))
@@ -292,7 +328,7 @@ class Controller:
                 self.fail(task, "recovery", "Registered VM identity changed")
             elif task["state"] in {"ready", "executing"}:
                 for operation in task["commands"].values():
-                    if operation["state"] in {"starting", "running"}:
+                    if not operation.get("cleanup_confirmed"):
                         self.operations[(task["id"], operation["id"])] = (
                             asyncio.create_task(self.watch_command(task, operation))
                         )
@@ -305,6 +341,7 @@ class Controller:
         self.loop = asyncio.create_task(self.schedule())
 
     async def close(self):
+        await self.captures.close()
         jobs = [
             task
             for task in [self.loop, *self.runners.values(), *self.operations.values()]
@@ -331,7 +368,7 @@ class Controller:
             if key == except_target:
                 continue
             info = await vm.info()
-            if info["VMState"] == "poweroff":
+            if info["VMState"] in POWERED_OFF_STATES:
                 continue
             if not vm.profile.get("interruptible", False):
                 raise Failure(f"Registered VM {key} is not idle-interruptible")
@@ -340,23 +377,23 @@ class Controller:
     async def observe_poweroff(self, vm, wait=False):
         observed = {
             "vm_uuid": vm.target,
-            "target_state": "poweroff",
+            "target_states": sorted(POWERED_OFF_STATES),
             "reached": False,
             "observed_state": None,
         }
         try:
             if wait:
-                return await vm.wait_for_state(
-                    "poweroff", self.settings["shutdown_timeout"]
+                return await vm.wait_for_states(
+                    POWERED_OFF_STATES, self.settings["shutdown_timeout"]
                 )
             observed["observed_state"] = (await vm.info())["VMState"]
-            observed["reached"] = observed["observed_state"] == "poweroff"
+            observed["reached"] = observed["observed_state"] in POWERED_OFF_STATES
         except (Failure, OSError, TimeoutError) as error:
             observed["error"] = str(error)
         return observed
 
     async def stop_vm(self, vm, action, task=None):
-        """Observe bounded stop attempts; only observed poweroff releases occupancy."""
+        """Observe bounded stop attempts and retain abnormal termination evidence."""
         result = {
             "vm_uuid": vm.target,
             "action": action,
@@ -391,6 +428,18 @@ class Controller:
             if not result["observation"]["reached"]:
                 result["observation"] = await self.observe_poweroff(vm)
         if task:
+            if (
+                result["observation"]["observed_state"] == "aborted"
+                and task.get("vm_started")
+                and task.get("vm_uuid") == vm.target
+                and not task.get("failure")
+            ):
+                task["failure"] = {
+                    "kind": "executor",
+                    "phase": "vm_runtime",
+                    "message": "VirtualBox reported VMState=aborted",
+                }
+                self.save(task)
             with contextlib.suppress(Failure, OSError):
                 self.event(task, "VM stop result: " + json.dumps(result))
         if not result["observation"]["reached"]:
@@ -402,9 +451,21 @@ class Controller:
         return result
 
     async def begin(
-        self, kind, request_id, target=None, cache_id=None, drv=None, timeout=None
+        self,
+        kind,
+        request_id,
+        target=None,
+        cache_id=None,
+        drv=None,
+        timeout=None,
+        *,
+        gui=False,
     ):
         identifier(request_id)
+        if type(gui) is not bool or (kind != "windows" and gui):
+            raise Failure(
+                "gui must be a boolean and is only available for Windows tasks"
+            )
         maximum = self.settings["task_timeout"]
         if kind == "nixos":
             maximum = min(
@@ -429,11 +490,12 @@ class Controller:
             "cache_id": cache_id,
             "drv": drv,
             "timeout": timeout,
+            "gui": gui,
         }
         async with self.gate:
             if request_id in self.tasks:
                 task = self.task(request_id)
-                if task["request"] != request:
+                if {"gui": False, **task["request"]} != request:
                     raise Failure(
                         "Request identifier already refers to different inputs"
                     )
@@ -522,7 +584,9 @@ class Controller:
             self.event(task, "Restoring registered powered-off baseline")
             await vm.restore()
             self.event(task, "Starting registered Windows VM")
-            await vm.power("start")
+            await vm.power("start", gui=task.get("gui", False))
+            task["vm_started"] = True
+            self.save(task)
             self.event(task, "Waiting for Guest Additions desktop readiness")
             await vm.ready(min(task["timeout"], self.settings["shutdown_timeout"]))
             self.event(
@@ -547,7 +611,11 @@ class Controller:
                 raise Failure(
                     "Guest command does not run in an interactive desktop; configure the test user's login session"
                 )
-            task.update(state="ready", guest_directory=guest_dir, desktop=desktop)
+            task.update(guest_directory=guest_dir, desktop=desktop)
+            from automation import discover
+
+            await discover(self, task, vm)
+            task["state"] = "ready"
             self.event(task, "Guest and interactive desktop ready")
             self.save(task)
         except (Failure, OSError, ValueError, TimeoutError) as error:
@@ -771,8 +839,8 @@ class Controller:
                 directory / "command.json",
                 vm.guest_path(key, "cmd-" + request_id, "command.json"),
             )
-            await vm.python(
-                vm.guest_path(key, "guest_runner.py"), guest_dir, background=True
+            command["guest_session"] = await vm.start_python(
+                vm.guest_path(key, "guest_runner.py"), guest_dir
             )
             command["state"] = "running"
             self.save(task)
@@ -811,6 +879,10 @@ class Controller:
         vm = self.vm(task["target"])
         directory = self.directory(task["id"]) / ("cmd-" + operation["id"])
         try:
+            if not operation.get("guest_session"):
+                raise Failure(
+                    "Guest supervisor launch is unconfirmed; finish the task to release its VM"
+                )
             while True:
                 try:
                     data, _ = await vm.python(
@@ -838,7 +910,6 @@ class Controller:
                         for key in (
                             "state",
                             "exit_code",
-                            "cleanup_confirmed",
                             "reason",
                             "error",
                             "stdin",
@@ -849,6 +920,7 @@ class Controller:
                 self.save(task)
                 if status["state"] != "running":
                     if status.get("cleanup_confirmed"):
+                        await vm.close_guest_session(operation["guest_session"])
                         if (
                             operation["request"].get("collect")
                             and status.get("exit_code") == 0
@@ -863,6 +935,7 @@ class Controller:
                             artifact = await self.transfers.artifact(local, task["id"])
                             task["artifacts"].append(artifact)
                             operation["artifact"] = artifact
+                        operation["cleanup_confirmed"] = True
                         if task["state"] == "executing":
                             task["state"] = "ready"
                     else:
@@ -928,16 +1001,26 @@ class Controller:
             collect=output,
         )
 
-    async def screenshot(self, key):
+    async def screenshot(self, key, screen=0):
+        async with self.desktop.lock(key):
+            return await self.capture_screenshot(key, screen)
+
+    async def capture_screenshot(self, key, screen):
+        bounded(screen, 63, "screen", 0)
         task, vm = self.guest_task(
-            key, states={"ready", "executing", "finishing", "cleanup_unknown"}
+            key,
+            states={"preparing", "ready", "executing", "finishing", "cleanup_unknown"},
         )
+        if task["state"] == "preparing" and not task.get("vm_started"):
+            raise Failure("Wait until this task has started its VM")
         path = self.directory(key) / "screenshot.png"
         with staging_directory(path.parent) as directory:
             temporary = directory / "screenshot.png"
-            await vm.screenshot(temporary)
+            await vm.screenshot(temporary, screen)
+            geometry = png_size(temporary)
             await copy_file(temporary, path, self.settings["upload_bytes"])
         artifact = await self.transfers.artifact(path, key)
+        artifact.update(screen=screen, **geometry)
         task["artifacts"].append(artifact)
         self.save(task)
         return artifact
@@ -975,8 +1058,14 @@ class Controller:
                 op["cleanup_confirmed"] = True
                 if op["request"].get("stdin"):
                     op.setdefault("stdin", {})["closed"] = True
-        failed = task.get("failure") or any(
-            command_failure(op) for op in task["commands"].values()
+        failed = (
+            task.get("failure")
+            or any(command_failure(op) for op in task["commands"].values())
+            or any(
+                r["state"] == "unconfirmed"
+                for r in task.get("desktop_requests", {}).values()
+            )
+            or any(c["errors"] for c in task.get("captures", {}).values())
         )
         task.update(
             state="cancelled"
@@ -985,6 +1074,8 @@ class Controller:
             if failed or task.get("stop_reason") == "task_timeout"
             else "succeeded",
             cleanup_confirmed=True,
+            held_keys=[],
+            mouse_used=False,
         )
 
     async def finish(self, key, cancel=False, stop_reason=None):
@@ -1035,8 +1126,14 @@ class Controller:
                     task["state"] = "failed"
             else:
                 vm = self.vm(task["target"])
+                await self.captures.cleanup(task)
+                try:
+                    await self.desktop.cleanup(task)
+                except (Failure, OSError, TimeoutError) as error:
+                    task["input_cleanup_errors"] = [str(error)]
                 await self.evidence(task)
                 await self.stop_vm(vm, "poweroff", task)
+                await self.captures.cleanup(task, powered_off=True)
                 self.complete_windows_cleanup(task)
             task.pop("cleanup_error", None)
             self.save(task)
@@ -1115,7 +1212,9 @@ class Controller:
             camera = vm.select_webcam(await vm.webcams(), action, camera_id)
             return await vm.webcam(action, camera)
 
-    async def power(self, target, action):
+    async def power(self, target, action, *, gui=False):
+        if type(gui) is not bool or (gui and action != "start"):
+            raise Failure("gui is a boolean available only for start")
         async with self.gate:
             vm = self.vm(target)
             occupying = self.active()
@@ -1132,15 +1231,17 @@ class Controller:
             if action in {"shutdown", "poweroff"}:
                 for task in occupying:
                     await self.stop_observers(task)
+                    await self.captures.cleanup(task)
                 result = await self.stop_vm(
                     vm, action, occupying[0] if occupying else None
                 )
                 for task in occupying:
+                    await self.captures.cleanup(task, powered_off=True)
                     self.complete_windows_cleanup(task)
                     task.pop("cleanup_error", None)
                     self.save(task)
                 return result
-            return await vm.power(action)
+            return await vm.power(action, gui=gui)
 
     async def prune(self):
         cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(

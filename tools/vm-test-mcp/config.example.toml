@@ -1,6 +1,6 @@
 # VM Test MCP: one host-owned file for both processes.
-# Copy this file to /home/VM_OWNER/.config/vm-test-mcp/config.toml and pass
-# that same path to both nix_worker.py --config and server.py --config.
+# Copy this file to config.toml in the component directory. The worker and
+# server recipes read that file; direct CLI startup uses --config config.toml.
 # Both processes can run as the VirtualBox VM owner. Keep that account outside
 # Nix trusted-users; the daemon uses its own build identities and sandbox.
 # Keep this file private (0600), with runtime state in separate 0700 directories.
@@ -41,6 +41,15 @@ state_dir = "/home/VM_OWNER/.local/state/vm-test-controller"
 # Optional. VBoxManage executable on the physical host; default: "VBoxManage"
 # resolved through the controller's PATH. Used when Windows VMs are registered.
 # vboxmanage = "/run/current-system/sw/bin/VBoxManage"
+
+# Optional. Native mouse helper; default: "build/vbox-input-helper", resolved
+# relative to this configuration file. An absolute path is also accepted.
+# Build with just build-helper. Executables and SDKs are administrator-owned.
+# input_helper = "build/vbox-input-helper"
+
+# Optional. Absolute directory containing VBoxXPCOMC.so; default: empty, located
+# from the configured VBoxManage installation. Set this for a custom layout.
+# vbox_library_dir = ""
 
 # Optional. Short VBoxManage command and cleanup evidence deadline, in seconds;
 # default: 30. Each cleanup screenshot/log collection has this deadline.
@@ -126,7 +135,7 @@ state_dir = "/home/VM_OWNER/.local/state/vm-test-controller"
 # Required. Literal password for that Windows guest account.
 # password = "REPLACE_WITH_GUEST_PASSWORD"
 
-# Required. Absolute Python 3.11+ executable path INSIDE the Windows guest.
+# Required. Absolute Python 3.11+ supervisor executable INSIDE the Windows guest.
 # Example: a per-user Python 3.14 installation. Run python -c "import sys;
 # print(sys.executable)" as the test user and copy the actual path.
 # python = 'C:\Users\WINDOWS_TEST_USER\AppData\Local\Programs\Python\Python314\python.exe'
@@ -142,9 +151,16 @@ state_dir = "/home/VM_OWNER/.local/state/vm-test-controller"
 # tasks finish first. A new task for this VM powers it off before baseline restore.
 # interruptible = false
 
-# Optional. VirtualBox start mode: "gui", "headless" or "separate";
-# default: "gui". Use the mode verified with the guest's desktop/graphics tests.
-# frontend = "gui"
+# Optional. Minimum time from the end of one native input action to the next;
+# default: 1.0 seconds. A request may override it, including with 0.
+# input_interval_seconds = 1.0
+
+# Optional. Independent guest automation interpreters; paths must be absolute.
+# targets returns registrations; task_status reports bounded import/version probes.
+# Missing environments do not prevent a task from preparing project dependencies.
+# [vms.windows.automation]
+# controls_python = 'C:\vm-tools\controls\Scripts\python.exe'
+# vision_python = 'C:\vm-tools\vision\Scripts\python.exe'
 
 # Optional. Additional host environment for VBoxManage startvm --putenv;
 # default: no additional variables. Uncomment the table and its entries to
@@ -176,3 +192,25 @@ state_dir = "/home/VM_OWNER/.local/state/vm-test-controller"
 # Optional. Permit attachment and detachment of enumerated cameras; default: true.
 # [vms.windows.webcam]
 # enabled = true
+
+# Optional. Independent runtime capabilities; enabled defaults to true for each.
+# [vms.windows.keyboard]
+# enabled = true
+# [vms.windows.mouse]
+# enabled = true
+# [vms.windows.display]
+# enabled = true
+# [vms.windows.network_link]
+# enabled = true
+# [vms.windows.audio]
+# enabled = true
+# [vms.windows.guest_sessions]
+# enabled = true
+# [vms.windows.packet_capture]
+# enabled = true
+
+# Optional. Metrics start on request. Interval is an integer from 1..3600 seconds.
+# Evidence is bounded by log_bytes and upload_bytes; values below are defaults.
+# [vms.windows.metrics]
+# enabled = true
+# interval_seconds = 1

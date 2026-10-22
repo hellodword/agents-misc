@@ -4,13 +4,42 @@ This is a manual guide for the VM owner. Installation media, OS setup and baseli
 
 ## Host and guest
 
-Use the host's ordinary VirtualBox installation and a dedicated registered test VM. Run the MCP controller as the VM owner with access to the graphical session used by the selected startup profile. The controller needs Python 3.11+, uv and its declared MCP SDK; it uses the installed `VBoxManage`.
+Use the host's ordinary VirtualBox installation and a dedicated registered test VM. Run the MCP controller as the VM owner. Windows tasks default to headless; an explicitly requested `gui=true` start requires the owner's graphical session and display/session environment. The controller needs Python 3.11+, uv and its declared MCP SDK; it uses the installed `VBoxManage`.
 
 Install Windows from administrator-provided, appropriately licensed media. Install matching Guest Additions, Python 3.11+ at a known absolute path, and the common project tools worth retaining in the baseline. Create a test user with a password and a writable task workspace. Register these in the host-owned service configuration.
 
 Use the same test account for the console desktop and Guest Control commands. In that account, run `python -c "import sys; print(sys.executable); print(sys.version)"` and register the reported executable. A per-user installation can live under `C:\Users\WINDOWS_TEST_USER\AppData\Local\Programs\Python\Python314\python.exe`; use the actual installed path. A workspace under that user's profile gives uploads, test programs and reports a common writable location.
 
 Use a disposable test disk and keep host data outside the guest's shared-folder namespace. Service-mediated uploads provide task inputs. Review attached media and network access for the intended test environment.
+
+## Automation environments
+
+Prepare independent Windows amd64 Python **3.11.17** environments for controls and vision. The supervisor can retain its existing Python 3.11+ interpreter. Python 3.11.17 is a security release without python.org Windows installers; use an owner-approved distribution such as uv's managed CPython, and verify the actual interpreter version and bitness. See the [Python release](https://www.python.org/downloads/release/python-31117/) and [uv Python distributions](https://docs.astral.sh/uv/concepts/python-versions/).
+
+| Environment | Declared dependencies                                                    |
+| ----------- | ------------------------------------------------------------------------ |
+| Controls    | pywinauto 0.6.9, Pillow for screenshots, psutil, pywin32 for Job Objects |
+| Vision      | Airtest 1.4.3, NumPy 1.26.4, OpenCV contrib 4.6.0.66                     |
+
+Install uv through the owner's existing software preparation process. Resolve and lock each environment independently using the example's `.in` inputs and generated `.txt` locks; [standalone automation](automation.md) gives the update commands. In the guest, select an absolute destination dedicated to these environments:
+
+```powershell
+uv python install 3.11.17
+$python = uv python find 3.11.17
+& .\scripts\prepare-environments.ps1 -Python $python -Destination C:\vm-tools
+```
+
+The script creates venvs, synchronizes their hash-locked dependencies, runs `uv pip check`, and verifies actual imports. Run the example's controls, vision and mixed flows on the unlocked test desktop to validate input, screenshots, image matching and process-tree cleanup. Also force a worker timeout and confirm a subsequent run succeeds. An import-only check does not establish desktop readiness.
+
+After successful acceptance, shut Windows down normally, observe `poweroff`, and save the powered-off baseline. Register the exact paths in host configuration:
+
+```toml
+[vms.windows.automation]
+controls_python = 'C:\vm-tools\controls\Scripts\python.exe'
+vision_python = 'C:\vm-tools\vision\Scripts\python.exe'
+```
+
+`targets` reports these registrations; preparation probes in each task return the actual versions, availability and errors through `task_status.automation`. A missing environment does not block task-local project dependency preparation. Projects may reuse these environments only when they satisfy their declared dependencies; otherwise create project environments inside the task. Saving or replacing a baseline remains a separately authorized environment-preparation operation.
 
 ## Automatic login and an available desktop
 
@@ -81,11 +110,26 @@ For this baseline profile, real-time protection and behavior monitoring should r
 
 ## Graphics and media
 
+For GUI runs, disable automatic guest resizing and permit resolutions larger than the host window. Execute these as the VM owner during preparation:
+
+```sh
+VBoxManage setextradata REGISTERED_VM GUI/AutoresizeGuest false
+VBoxManage setextradata global GUI/MaxGuestResolution any
+VBoxManage getextradata REGISTERED_VM GUI/AutoresizeGuest
+VBoxManage getextradata global GUI/MaxGuestResolution
+```
+
+These settings do not guarantee resolution preservation in a normal GUI window. During a UAC desktop switch, Guest Additions capabilities can change and the GUI can send a new size hint based on the host window's available area. This adjustment can reduce an explicitly requested guest resolution even with automatic resizing disabled; see VirtualBox's [normal-window adjustment logic](https://github.com/VirtualBox/virtualbox/blob/main/src/VBox/Frontends/VirtualBox/src/runtime/normal/UIMachineViewNormal.cpp). The default headless mode avoids this GUI adjustment path.
+
+Verify actual screenshot sizes after `vm_display` changes and UAC round trips. Record Windows scale/DPI separately, and reacquire the window, screenshot and image locations before resuming input after a desktop or layout change. Exercise 1280×1024, 1920×1080 and 3840×2160 at 100% and 150% where supported. UIA visibility and image matching can change with toolkit, scaling and elevation. Ordinary drivers should run at the tested application's integrity level; run administrator setup separately and use native VM input for the UAC secure desktop. Preserve real UAC confirmation and cancellation cases.
+
 Choose the VirtualBox graphics controller, memory and 3D configuration for the installed guest driver. Preserve the startup environment already verified with the host's graphics stack. If that environment includes `ANV_DEBUG=video-decode,video-encode`, record it in the VM startup profile and verify it after launching through the service.
 
 Run separate application checks for rendering, decoding and encoding. For browsers, retain renderer/decoder diagnostics and a visible test result. For FFmpeg, record the selected hardware device/codec and a successful representative operation. A codec advertised by a program or a successful playback alone does not prove hardware execution. Record unsupported combinations as capability results.
 
-For physical camera input, the host owner prepares the matching Extension Pack and device access described in [VirtualBox webcam passthrough](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/AdvancedTopics.html#webcam-passthrough). Configure a USB controller and the guest application's camera permission. Keep microphone and speaker input/output settings in the baseline. Runtime tests select an enumerated camera through MCP within the target's configured webcam capability.
+For physical camera input, prepare host device access, a VM USB controller and the guest application's camera permission. VirtualBox 7.2.2 and later include webcam passthrough in the base package; use the installed release's [release notes](https://docs.oracle.com/en/virtualization/virtualbox/7.2/relnotes/ChangeLog.html) to establish its requirements. Configure the audio devices in the baseline; runtime tests can toggle their input and playback paths. Tests select an enumerated camera through MCP within the target's configured webcam capability.
+
+For native mouse input, the host owner builds and configures the service's C helper using the official SDK and installed VirtualBox C API library. Prepare a pointing device with absolute support, such as a USB tablet, and verify input against a full-resolution screenshot. Keep VirtualBox hardening enabled. Validate a guest UAC interaction using isolated guest credentials and an application assertion. Native input readiness is separate from Guest Control session readiness.
 
 Consult [VirtualBox Guest Additions](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/guestadditions.html) for the installed version's graphics support and [Guest Control](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/vboxmanage.html) for execution/session requirements.
 

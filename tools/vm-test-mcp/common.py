@@ -12,7 +12,8 @@ import secrets
 import shutil
 import signal
 import stat
-from pathlib import Path
+import sys
+from pathlib import Path, PureWindowsPath
 
 import tomllib
 
@@ -245,11 +246,23 @@ DEFAULTS = {
     "log_bytes": 64 * 1024**2,
     "retention_days": 7,
     "vboxmanage": "VBoxManage",
+    "input_helper": "build/vbox-input-helper",
+    "vbox_library_dir": "",
 }
 NIX_DEFAULTS = {
     "socket": "/run/vm-test-nix/worker.sock",
     "nix": "nix",
     "cleanup_timeout": 20,
+}
+DESKTOP_CAPABILITIES = {
+    "keyboard": {},
+    "mouse": {},
+    "display": {},
+    "network_link": {},
+    "audio": {},
+    "metrics": {"interval_seconds": 1},
+    "guest_sessions": {},
+    "packet_capture": {},
 }
 VM_KEYS = {
     "vm",
@@ -260,11 +273,12 @@ VM_KEYS = {
     "domain",
     "python",
     "workspace",
-    "frontend",
+    "automation",
+    "input_interval_seconds",
     "startup_env",
     "modify_vm",
     "webcam",
-}
+} | DESKTOP_CAPABILITIES.keys()
 VM_NUMERIC_LIMITS = {
     "cpus": (1, 256),
     "memory_mb": (128, 1048576),
@@ -324,7 +338,18 @@ def vm_policy(profile, path):
     webcam = {"enabled": True} | policy_table(
         profile.get("webcam", {}), {"enabled"}, f"{path}.webcam"
     )
-    return {"modify_vm": modify, "webcam": webcam}
+    result = {"modify_vm": modify, "webcam": webcam}
+    for name, defaults in DESKTOP_CAPABILITIES.items():
+        location = f"{path}.{name}"
+        result[name] = {"enabled": True, **defaults} | policy_table(
+            profile.get(name, {}), {"enabled"} | defaults.keys(), location
+        )
+    interval = result["metrics"]["interval_seconds"]
+    location = f"{path}.metrics.interval_seconds"
+    if type(interval) is not int:
+        raise Failure(f"{location} must be an integer")
+    bounded(interval, 3600, location, 1)
+    return result
 
 
 def read_config(path):
@@ -337,6 +362,15 @@ def read_config(path):
         raise Failure("Unknown service configuration key")
     explicit_public_url = "public_url" in service
     service = DEFAULTS | service
+    if not isinstance(service["input_helper"], str):
+        raise Failure("service.input_helper must be a path string")
+    if service["input_helper"]:
+        service["input_helper"] = str(
+            (Path(path).resolve().parent / service["input_helper"]).resolve()
+        )
+    library = service["vbox_library_dir"]
+    if not isinstance(library, str) or (library and not Path(library).is_absolute()):
+        raise Failure("service.vbox_library_dir must be an absolute path or empty")
     if not explicit_public_url:
         host = service["host"]
         authority = f"[{host}]" if ":" in host else host
@@ -368,8 +402,24 @@ def read_config(path):
             or vm["baseline"].startswith("-")
         ):
             raise Failure("VM and baseline must identify registered resources")
-        if vm.get("frontend", "gui") not in {"gui", "headless", "separate"}:
-            raise Failure("frontend must be gui, headless or separate")
+        vm["input_interval_seconds"] = bounded(
+            vm.get("input_interval_seconds", 1.0),
+            sys.float_info.max,
+            "input_interval_seconds",
+            0,
+        )
+        automation = policy_table(
+            vm.get("automation", {}),
+            {"controls_python", "vision_python"},
+            f"vms.{name}.automation",
+        )
+        for interpreter in automation.values():
+            if (
+                not isinstance(interpreter, str)
+                or not PureWindowsPath(interpreter).is_absolute()
+            ):
+                raise Failure("Automation interpreters must be absolute Windows paths")
+        vm["automation"] = automation
         vm.update(vm_policy(vm, f"vms.{name}"))
     nix = {}
     if "nix" in config:
