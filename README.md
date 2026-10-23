@@ -87,7 +87,7 @@ Old entrypoints have no forwarding aliases. The kit supplies no dedicated SQLite
 
 The long-task plan keeps completion evidence and authorization stable while allowing implementation choices to change. It records discoveries and continuation state, detects unproductive retries, and distinguishes incomplete or unverified work from completion. Starting a Goal or receiving an implementation task alone does not trigger planning.
 
-The [NixOS VM test skill](.agents/skills/nixos-vm-test/SKILL.md) submits locally evaluated inputs to a prepared HTTP MCP executor for sandboxed tests on host KVM. The [VirtualBox VM test skill](.agents/skills/virtualbox-vm-test/SKILL.md) runs project scripts in independent Windows/Linux baseline clones. [VM Test MCP](tools/vm-test-mcp/README.md) provides task scheduling, transfers, logs and artifacts; each skill includes a manual preparation guide.
+The [NixOS VM test skill](.agents/skills/nixos-vm-test/SKILL.md) submits locally evaluated inputs to a prepared HTTP MCP executor for sandboxed tests on host KVM. The [VirtualBox VM test skill](.agents/skills/virtualbox-vm-test/SKILL.md) runs project scripts in independent Windows/Linux baseline clones. [VM Test MCP](tools/vm-test-mcp/README.md) provides task scheduling, transfers, logs and artifacts; its [administrator guide](tools/vm-test-mcp/preparation.md) covers host and baseline preparation for both workflows.
 
 ## Maintenance and validation
 

@@ -4,6 +4,16 @@ This guide prepares the host and baselines. Test execution uses the separate
 [runtime guide](README.md). Perform setup as the responsible administrator;
 controller requests cannot select host programs, directories or devices.
 
+## Execution environment
+
+| Role                  | Requirements                                                                                                                      |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Development container | `vm-test-submit`, Nix with `nix-command` and `flakes`, the tested project's inputs, and HTTP access to the controller             |
+| Physical Linux host   | Hardware virtualization, sufficient RAM and disk, VirtualBox for labs, and multi-user Nix with working `/dev/kvm` for NixOS tests |
+| MCP controller        | The service package and the VirtualBox owner account when labs are enabled                                                        |
+| Nix worker            | An ordinary account, the worker package, Nix CLI, daemon socket access and a separate private state directory                     |
+| NixOS test nodes      | Driver and guest packages supplied by the tested project's locked nixpkgs                                                         |
+
 ## Accounts and shared configuration
 
 Install `.#vm-test-mcp` and an administrator-selected VirtualBox 7.2 runtime.
@@ -22,7 +32,7 @@ Nix store. There is no configuration-file permission requirement. Local
 `config.yaml` is Git-ignored. The mandatory token authenticates MCP requests.
 Omitted or empty `service.hosts` / `service.origins` allow any value; nonempty
 lists apply exact matching. Configure HTTP and published-service listeners
-separately; `network.source_cidrs` limits only TCP/UDP entry clients. Register
+separately; `virtualbox.network.source_cidrs` limits only TCP/UDP entry clients. Register
 host public/NAT addresses and extra management ranges for egress protection.
 
 Run the controller as the VirtualBox owner. Run the worker as an ordinary account
@@ -42,7 +52,7 @@ controller access the `0660` socket.
 
 The administrator installs and activates Windows, disables Windows Update through
 group policy, and installs matching Guest Additions. Use a password-bearing local
-administrator account for Guest Control, and VDI disks. The runtime verifies the
+administrator account for Guest Control. The runtime verifies the
 prepared command service; administrator membership alone is not evidence of an
 elevated Guest Control token.
 
@@ -115,11 +125,26 @@ Snapshot a working Guest Additions setup. Recommend Python and, for Compose test
 Docker Engine/Compose with the daemon enabled at boot; test workflows handle absent
 tools without changing the source VM.
 
-Remove raw disks, host shares, PCI passthrough, generic USB filters and host
+Select durable baseline dependencies explicitly. For the optional controls/vision
+example, use its [environment preparation script](../../.agents/skills/virtualbox-vm-test/scripts/prepare-environments.ps1)
+and the [automation guide](../../.agents/skills/virtualbox-vm-test/references/automation.md)
+for the declared Python version, separate environments and hash-locked dependencies.
+Verify actual imports and desktop behavior. These project environments also run
+without MCP and are separate from baseline identity and command supervision.
+
+Use VDI disks for both Windows and Linux source VMs. Remove raw disks, host shares,
+PCI passthrough, generic USB filters and host
 serial/parallel devices from source VMs. The controller also sanitizes and checks
 clones before boot. Allowed camera/audio/3D policy is independent of baseline
 installation; media stays off unless explicitly requested. Graphics controller,
-VRAM and virtualization tuning remain baseline choices.
+VRAM, paravirtualization and paging remain baseline choices. Declare any required
+host startup environment in the template's `startup_env`.
+
+Clones default to `GUI/AutoresizeGuest=false`. Use `node_display(auto_resize=…)`
+for that per-node setting and `lab_gui_set(max_guest_resolution="any"|"auto")`
+for the global resolution policy, whose default is `any`. MCP applies these
+settings, restores the recorded global value at cleanup and reports conflicts
+with external edits; administrator `setextradata` commands are unnecessary.
 
 ## Snapshots and host disk use
 
@@ -181,15 +206,24 @@ bounded to 8 MiB.
 
 Use multi-user Nix with dedicated build users. Configure the **running daemon**
 with strict sandboxing, no fallback, local KVM access for builders, and trusted
-cache keys. For NixOS, merge through the host's managed configuration:
+cache keys. The worker uses the existing host store and daemon; store contents
+remain readable task inputs. Nix treats trusted users as effectively root-equivalent,
+so the worker's ordinary account remains outside `trusted-users`.
+
+For NixOS, merge through the host's managed configuration, preserving existing
+cache and virtualization settings:
 
 ```nix
-nix.settings = {
-  sandbox = true;
-  sandbox-fallback = false;
-  require-sigs = true;
-  extra-system-features = [ "kvm" "nixos-test" ];
-};
+{
+  boot.kernelModules = [ "kvm-intel" ]; # Use kvm-amd on AMD systems.
+  nix.settings = {
+    experimental-features = [ "nix-command" "flakes" ];
+    sandbox = true;
+    sandbox-fallback = false;
+    require-sigs = true;
+    extra-system-features = [ "kvm" "nixos-test" ];
+  };
+}
 ```
 
 Worker startup checks that its account is non-root and its client configuration
@@ -206,7 +240,11 @@ effective sandbox isolation and KVM access during administrator acceptance.
 Review `trusted-users`, `build-users-group`, `sandbox-paths` and
 `extra-sandbox-paths`. Expose `/dev/kvm` only as needed; do not expose home directories,
 credentials, daemon sockets or container-engine sockets. Verify KVM permissions for
-the actual build identity, including after reboot. A worker client configuration
+the actual build identity, including after reboot. Sandbox builders may retain
+their primary group while dropping supplementary groups. If explicit device
+mapping or a persistent ACL is needed, configure it for the actual build group
+through managed Nix/udev settings and verify it with a fresh sandbox VM test.
+The submission account itself does not launch the test nodes. A worker client configuration
 dump is supporting evidence, not proof of the daemon's active policy.
 
 The helper uploads a standard binary cache. The daemon verifies imported content
@@ -218,9 +256,28 @@ to resolve an import failure. Review the
 [Nix sandbox settings](https://nix.dev/manual/nix/2.34/command-ref/conf-file.html#conf-sandbox)
 and [binary cache settings](https://nix.dev/manual/nix/2.34/store/types/local-binary-cache-store.html).
 
-Daemon `max-jobs`/`cores` and host scheduling policy govern other build activity;
-controller/worker process limits do not constrain daemon-owned builders. Finish
-competing manually started virtualization before using this scheduler.
+Content-addressed inputs carry their own integrity identity. Locally built
+input-addressed paths require an accepted signature or reproduction on the executor.
+For a refused path, compare local metadata with an administrator-trusted cache:
+
+```sh
+nix path-info --json /nix/store/STORE_PATH
+nix path-info --json --store https://cache.nixos.org /nix/store/STORE_PATH
+```
+
+When the store path and NarHash match, fetch the signed content on the executor:
+
+```sh
+nix copy --from https://cache.nixos.org --to daemon /nix/store/STORE_PATH
+```
+
+Choose daemon `max-jobs` and `cores` from available CPU/RAM. They control build
+scheduling and parallelism hints, not strict per-task resource isolation.
+Controller/worker process limits do not constrain daemon-owned builders; limits
+on the shared daemon also affect unrelated host builds. Ordinary KVM builds must
+participate in the administrator's scheduling policy. Finish competing manually
+started virtualization before using this scheduler; MCP leaves unrelated VMs
+under their administrator's control.
 
 ## Service supervision
 
@@ -299,12 +356,26 @@ Record these real-host results separately from the default adapter suite:
 3. Public IPv4 works while host, metadata and protected ranges are blocked. Egress
    disable terminates public flows while retaining LAN/entries. Router and controller
    heartbeat failures close networking; explicit recovery restores declared state.
-4. Requested GUI, native input, screenshots, multiple commands, ordered UTF-8 stdin,
-   EOF, descendant cleanup and each explicitly enabled media device work.
+4. CLI commands work without desktop login. Requested GUI login/unlock, native
+   input, screenshots, concurrent commands, ordered UTF-8 stdin, EOF, descendant
+   cleanup and each explicitly enabled media device work. Verify actual guest
+   identity and elevation when the application assertions depend on them.
 5. Cancellation, timeout, partial creation and controller restart remove all clones,
    NAT rules, relays and temporary resources while preserving evidence.
 6. The router boots and sustains DHCP, DNS, NAT and interactive traffic at 256 MiB.
-7. A fresh multi-node Nix test starts guests on host KVM. A synthetic readable host
-   marker is inaccessible inside the sandbox; a request with `__noChroot = true`
-   is rejected specifically for isolation policy; build identities differ from the
-   worker and root. Interrupt a build and verify the cleanup hold/recovery procedure.
+7. Use the [multi-node acceptance module](../../.agents/skills/nixos-vm-test/assets/vm-smoke.nix)
+   with the tested project's locked nixpkgs and a fresh run ID. Confirm guest startup,
+   CPU counts and network assertions on host KVM. A synthetic readable host marker
+   is inaccessible inside the sandbox; a request with `__noChroot = true` is rejected
+   specifically for isolation policy; build identities differ from the worker and
+   root. Exercise a failing test and cancellation, retaining logs, evidence and
+   cleanup state. Interrupt a build and verify the cleanup hold/recovery procedure.
+
+Record rendering, decoding and encoding results from actual application behavior
+when graphics or media devices are exposed; device availability and the basic KVM
+smoke test do not establish those capabilities. Keep application assertions
+separate from evidence collection and resource cleanup.
+
+Repeat fresh acceptance after relevant host kernel, Nix, VirtualBox, Guest Additions,
+baseline or test-framework changes. Failed Nix build directories and store garbage
+collection remain administrator-owned maintenance.
