@@ -174,8 +174,8 @@ func TestNetworkChangesValidateAtomicallyAndRequireLeaseRecovery(t *testing.T) {
 func TestRouterBootChangeRequiresExplicitRecovery(t *testing.T) {
 	b := &VBoxBackend{Config: testConfig(t)}
 	task := newTask("lab", 60)
-	task.LAN = b.Config.Network.LAN
-	task.DNS = b.Config.Network.DNS
+	task.LAN = b.Config.VirtualBox.Network.LAN
+	task.DNS = b.Config.VirtualBox.Network.DNS
 	task.Router = &Node{ID: wire.ID(), UUID: wire.UUID()}
 	task.RouterBootID = wire.UUID()
 	if err := os.MkdirAll(b.runtime(task), 0700); err != nil {
@@ -240,7 +240,7 @@ func (f *slowStatusBackend) Network(ctx context.Context, task *Task, protected [
 func TestSlowGuestPollDoesNotStarveNetworkLease(t *testing.T) {
 	f := &slowStatusBackend{entered: make(chan struct{}, 1), updates: make(chan struct{}, 10)}
 	c := testConfig(t)
-	c.Network.LeaseSeconds = 5
+	c.VirtualBox.Network.LeaseSeconds = 5
 	s, err := New(c, f)
 	if err != nil {
 		t.Fatal(err)
@@ -249,7 +249,7 @@ func TestSlowGuestPollDoesNotStarveNetworkLease(t *testing.T) {
 	task := newTask("lab", 60)
 	task.State, task.Network = "running", "ready"
 	task.NetworkUpdated = time.Now().UTC()
-	task.Nodes = []*Node{{ID: wire.ID(), State: "running"}}
+	task.Nodes = []*Node{{ID: wire.ID(), State: "running", Preparation: Preparation{Stage: "ready"}}}
 	ctx, cancel := context.WithCancel(context.Background())
 	runtime := &Runtime{ctx: ctx, cancel: cancel}
 	done := make(chan struct{})

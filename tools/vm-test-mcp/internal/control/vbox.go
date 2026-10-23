@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -30,6 +31,7 @@ type VBoxBackend struct {
 	Worker     WorkerClient
 	CacheURL   func(string) string
 	cloneLocks sync.Map
+	guestSlots sync.Map
 }
 
 func (b *VBoxBackend) run(ctx context.Context, args ...string) ([]byte, error) {
@@ -37,7 +39,48 @@ func (b *VBoxBackend) run(ctx context.Context, args ...string) ([]byte, error) {
 	if err != nil {
 		return nil, wire.Fail("virtualbox_unavailable", "VBoxManage was not found in PATH")
 	}
-	return b.Runner.Run(ctx, exe, args, nil)
+	out, err := b.Runner.Run(ctx, exe, args, nil)
+	return out, b.executionError(args[0], err)
+}
+func (b *VBoxBackend) redact(value string) string {
+	values := []string{b.Config.Service.Token, b.Config.Service.StateDir}
+	for _, t := range b.Config.VirtualBox.Templates {
+		values = append(values, t.Password, t.VM, t.Snapshot)
+	}
+	sort.Slice(values, func(i, j int) bool { return len(values[i]) > len(values[j]) })
+	for _, secret := range values {
+		if secret != "" {
+			value = strings.ReplaceAll(value, secret, "[redacted]")
+		}
+	}
+	return value
+}
+func (b *VBoxBackend) executionError(stage string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var known *wire.Error
+	if errors.As(err, &known) {
+		return err
+	}
+	code := "backend_error"
+	details := map[string]any{"stage": stage}
+	var failure *hostexec.Failure
+	if errors.As(err, &failure) {
+		details["exit_code"] = failure.ExitCode
+		details["stderr"] = b.redact(string(failure.Stderr))
+		details["timed_out"] = failure.TimedOut
+		if failure.TimedOut {
+			code = "backend_timeout"
+		}
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		code = "backend_timeout"
+	}
+	if errors.Is(err, context.Canceled) {
+		code = "backend_cancelled"
+	}
+	return &wire.Error{Code: code, Message: "VirtualBox operation could not be confirmed", Details: details}
 }
 func machineInfo(data []byte) (map[string]string, error) {
 	v := map[string]string{}
@@ -155,6 +198,9 @@ func on(v bool) string {
 	return "off"
 }
 func (b *VBoxBackend) Prepare(ctx context.Context, t *Task, n *Node) error {
+	ctx, cancel := context.WithTimeout(ctx, b.Config.VirtualBox.StartupTimeout.Value())
+	defer cancel()
+	reportProgress(ctx, "creating", nil, nil)
 	template := b.Config.VirtualBox.Templates[n.Template]
 	router := n.ID == t.Router.ID
 	if e := os.MkdirAll(b.runtime(t), 0700); e != nil {
@@ -183,7 +229,9 @@ func (b *VBoxBackend) Prepare(ctx context.Context, t *Task, n *Node) error {
 		}
 		value, _ := b.cloneLocks.LoadOrStore(baseID, &sync.Mutex{})
 		lock := value.(*sync.Mutex)
-		lock.Lock()
+		if err := lockContext(ctx, lock); err != nil {
+			return err
+		}
 		e = func() error {
 			base, err := b.info(ctx, baseID)
 			if err != nil {
@@ -221,7 +269,7 @@ func (b *VBoxBackend) Prepare(ctx context.Context, t *Task, n *Node) error {
 		args = append(args, fmt.Sprintf("--lpt%d", i), "off")
 	}
 	if router {
-		args = append(args, "--nictype1", "82540EM", "--nictype2", "82540EM", "--firmware", "efi64", "--x86-long-mode", "on", "--ioapic", "on", "--boot1", "dvd", "--boot2", "none", "--boot3", "none", "--boot4", "none", "--graphicscontroller", "vmsvga", "--vram", "16", "--nic2", "nat", "--nat-net2", b.Config.Network.WAN, "--cable-connected2", "on", "--mac-address2", "080027"+t.ID[6:12])
+		args = append(args, "--nictype1", "82540EM", "--nictype2", "82540EM", "--firmware", "efi64", "--x86-long-mode", "on", "--ioapic", "on", "--boot1", "dvd", "--boot2", "none", "--boot3", "none", "--boot4", "none", "--graphicscontroller", "vmsvga", "--vram", "16", "--nic2", "nat", "--nat-net2", b.Config.VirtualBox.Network.WAN, "--cable-connected2", "on", "--mac-address2", "080027"+t.ID[6:12])
 		// libslirp translates UDP forwarding replies back to the host's
 		// loopback relay. Without this, it drops those replies. The router's
 		// nftables policy still rejects guest-initiated host access and only
@@ -254,26 +302,58 @@ func (b *VBoxBackend) Prepare(ctx context.Context, t *Task, n *Node) error {
 			return e
 		}
 	}
+	reportProgress(ctx, "starting", nil, nil)
 	if _, e = b.start(ctx, n); e != nil {
 		return e
 	}
-	ready, cancel := context.WithTimeout(ctx, time.Duration(b.Config.VirtualBox.ReadySeconds)*time.Second)
-	defer cancel()
+	ready := ctx
+	var startup Health
 	for {
+		probe, stop := context.WithTimeout(ready, probeTimeout)
 		if router {
-			_, e = b.guestExec(ready, t, n, false, "probe")
+			_, e = b.guestExec(probe, t, n, false, "probe")
+			reportProgress(ctx, "guest_control", nil, e)
 		} else {
-			e = b.ensureSupervisor(ready, t, n)
+			status, err := b.nodeStatus(probe, t, n)
+			e = err
+			stage := "guest_control"
+			if err == nil {
+				if status.GuestError != nil {
+					e = status.GuestError
+				} else {
+					stage = "initializing"
+					if status.ServiceError != nil {
+						e = status.ServiceError
+					}
+				}
+				if status.State != "running" {
+					e = wire.Fail("node_stopped", "Node stopped during preparation")
+				}
+				if e == nil && (status.Guest["prepared"] != true || status.Guest["privileged"] != true) {
+					e = wire.Fail("guest_not_ready", "Guest initialization is in progress")
+				}
+			}
+			reportProgress(ctx, stage, status, e)
+			if status != nil && (status.PreparationFailed || oneOf(status.State, "aborted", "poweroff", "stuck")) {
+				stop()
+				return e
+			}
+			if failure := startup.startupFailure(time.Now().UTC(), status, err, b.Config.VirtualBox.UnavailableAfter.Value()); failure != nil {
+				stop()
+				return failure
+			}
 		}
+		stop()
 		if e == nil {
 			break
 		}
 		select {
 		case <-ready.Done():
-			return wire.Fail("guest_not_ready", "Guest preparation or privileged supervisor verification failed; inspect the baseline")
+			return &wire.Error{Code: "guest_not_ready", Message: "Node did not become ready before its startup deadline", Details: map[string]any{"node_id": n.ID, "last_error": wire.Safe(e)}}
 		case <-time.After(2 * time.Second):
 		}
 	}
+	reportProgress(ctx, "ready", nil, nil)
 	// Keep both DVDs attached: a diskless router needs its seed on every boot.
 	if !router && n.Media.Camera {
 		if _, e = b.run(ctx, "controlvm", n.UUID, "webcam", "attach", template.Cameras[n.Camera]); e != nil {
@@ -360,7 +440,7 @@ func (b *VBoxBackend) verify(t *Task, n *Node, i map[string]string) error {
 	for slot := 2; slot <= 8; slot++ {
 		expected[fmt.Sprintf("nic%d", slot)] = "none"
 	}
-	if n.ID == t.Router.ID {
+	if t.Router != nil && n.ID == t.Router.ID {
 		expected["nic2"] = "nat"
 		expected["VMTestMedia-0-0"] = t.RouterISO
 		expected["VMTestMedia-1-0"] = filepath.Join(b.runtime(t), "seed.iso")
@@ -387,7 +467,7 @@ func (b *VBoxBackend) verify(t *Task, n *Node, i map[string]string) error {
 	return nil
 }
 func (b *VBoxBackend) seedData(t *Task) map[string]any {
-	return map[string]any{"password": t.RouterPassword, "lan_mac": t.Router.MAC, "wan_mac": "08:00:27:" + t.ID[6:8] + ":" + t.ID[8:10] + ":" + t.ID[10:12], "lan": t.LAN, "wan": b.Config.Network.WAN}
+	return map[string]any{"password": t.RouterPassword, "lan_mac": t.Router.MAC, "wan_mac": "08:00:27:" + t.ID[6:8] + ":" + t.ID[8:10] + ":" + t.ID[10:12], "lan": t.LAN, "wan": b.Config.VirtualBox.Network.WAN}
 }
 func (b *VBoxBackend) seed(ctx context.Context, t *Task, n *Node) error {
 	dir := filepath.Join(b.runtime(t), "seed")
@@ -403,7 +483,7 @@ func (b *VBoxBackend) seed(ctx context.Context, t *Task, n *Node) error {
 		return wire.Fail("backend_unavailable", "Packaged ISO builder was not found")
 	}
 	if _, e := b.Runner.Run(ctx, builder, []string{"-as", "mkisofs", "-quiet", "-V", "VMTESTSEED", "-o", iso, dir}, nil); e != nil {
-		return e
+		return b.executionError("iso_builder", e)
 	}
 	if e := os.Chmod(iso, 0600); e != nil {
 		return e
@@ -425,22 +505,10 @@ func guestJoin(root string, parts ...string) string {
 	return strings.TrimRight(root, "/\\") + sep + strings.Join(parts, sep)
 }
 func (b *VBoxBackend) guest(ctx context.Context, t *Task, n *Node, operation string, args ...string) ([]byte, error) {
-	c := b.guestConfig(t, n)
-	stage, e := os.MkdirTemp(b.runtime(t), "auth-")
-	if e != nil {
-		return nil, e
-	}
-	defer os.RemoveAll(stage)
-	password := filepath.Join(stage, "password")
-	if e = os.WriteFile(password, []byte(c.Password), 0600); e != nil {
-		return nil, e
-	}
-	argv := []string{"guestcontrol", n.UUID, operation, "--username", c.Username, "--passwordfile", password}
-	if c.Domain != "" {
-		argv = append(argv, "--domain", c.Domain)
-	}
-	return b.run(ctx, append(argv, args...)...)
+	result, err := b.guestCaptured(ctx, t, n, operation, args...)
+	return result.Stdout, err
 }
+
 func (b *VBoxBackend) guestExec(ctx context.Context, t *Task, n *Node, start bool, args ...string) ([]byte, error) {
 	c := b.guestConfig(t, n)
 	op := "run"
@@ -451,7 +519,7 @@ func (b *VBoxBackend) guestExec(ctx context.Context, t *Task, n *Node, start boo
 		// long-running supervisors after a fixed transport timeout.
 		options = append(options, "--timeout", "0")
 	} else {
-		options = append(options, "--timeout", "60000", "--wait-stdout", "--wait-stderr")
+		options = append(options, "--timeout", guestTimeout(ctx), "--wait-stdout", "--wait-stderr")
 	}
 	// VBoxManage supplies argv[0] from --exe. Arguments after -- start at argv[1].
 	options = append(options, "--")
@@ -498,7 +566,7 @@ func (b *VBoxBackend) publish(local string, r io.Reader) error {
 		return e
 	}
 	safe := &safefs.Root{Root: root}
-	_, _, e = safe.Write(filepath.ToSlash(rel), r, b.Config.Retention.MaxUploadBytes)
+	_, _, e = safe.Write(filepath.ToSlash(rel), r, b.Config.Storage.MaxUploadBytes)
 	return e
 }
 func (b *VBoxBackend) requestFile(ctx context.Context, t *Task, n *Node, name string, value any) (string, error) {
@@ -519,72 +587,93 @@ func (b *VBoxBackend) requestFile(ctx context.Context, t *Task, n *Node, name st
 	return remote, nil
 }
 func (b *VBoxBackend) Delete(ctx context.Context, t *Task, n *Node) error {
-	raw, e := b.run(ctx, "list", "vms")
-	if e != nil {
-		return e
+	var info map[string]string
+	exists := false
+	err := cleanupStep(ctx, "ownership", func() error {
+		raw, err := b.run(ctx, "list", "vms")
+		if err != nil {
+			return err
+		}
+		exists = strings.Contains(string(raw), "{"+n.UUID+"}")
+		if !exists {
+			return nil
+		}
+		info, err = b.info(ctx, n.UUID)
+		if err != nil {
+			return err
+		}
+		return b.owned(t, n, info)
+	})
+	if err != nil {
+		return err
 	}
-	if !strings.Contains(string(raw), "{"+n.UUID+"}") {
-		if n.ID == t.Router.ID {
-			return b.closeSeed(ctx, t)
+	if exists {
+		if err = cleanupStep(ctx, "poweroff", func() error {
+			if !oneOf(info["VMState"], "poweroff", "aborted") {
+				var err error
+				if info["VMState"] == "saved" {
+					_, err = b.run(ctx, "discardstate", n.UUID)
+				} else {
+					_, err = b.run(ctx, "controlvm", n.UUID, "poweroff")
+				}
+				if err != nil {
+					return err
+				}
+			}
+			for {
+				var err error
+				info, err = b.info(ctx, n.UUID)
+				if err != nil {
+					return err
+				}
+				if oneOf(info["VMState"], "poweroff", "aborted") {
+					return nil
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(500 * time.Millisecond):
+				}
+			}
+		}); err != nil {
+			return err
+		}
+		// Optical media may be administrator-owned. Detach them before deleting
+		// the VM, and never close borrowed images in the global medium registry.
+		if err = cleanupStep(ctx, "detach_media", func() error {
+			for key, value := range info {
+				m := attachment.FindStringSubmatch(key)
+				if m == nil || value == "none" || value == "emptydrive" {
+					continue
+				}
+				if _, ok := info[fmt.Sprintf("%s-tempeject-%s-%s", m[1], m[2], m[3])]; ok || value == t.RouterISO || strings.HasSuffix(strings.ToLower(value), ".iso") {
+					if _, err := b.run(ctx, "storageattach", n.UUID, "--storagectl", m[1], "--port", m[2], "--device", m[3], "--medium", "none"); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		if err = cleanupStep(ctx, "unregister", func() error { _, err := b.run(ctx, "unregistervm", n.UUID, "--delete"); return err }); err != nil {
+			return err
+		}
+	}
+	if err = cleanupStep(ctx, "verify", func() error {
+		raw, err := b.run(ctx, "list", "vms")
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(raw), "{"+n.UUID+"}") {
+			return wire.Fail("cleanup_required", "Clone remains registered")
 		}
 		return nil
+	}); err != nil {
+		return err
 	}
-	info, e := b.info(ctx, n.UUID)
-	if e != nil {
-		return e
-	}
-	if e = b.owned(t, n, info); e != nil {
-		return e
-	}
-	if info["VMState"] != "poweroff" && info["VMState"] != "aborted" {
-		if info["VMState"] == "saved" {
-			_, e = b.run(ctx, "discardstate", n.UUID)
-		} else {
-			_, e = b.run(ctx, "controlvm", n.UUID, "poweroff")
-		}
-		if e != nil {
-			return e
-		}
-	}
-	for {
-		info, e = b.info(ctx, n.UUID)
-		if e != nil {
-			return e
-		}
-		if oneOf(info["VMState"], "poweroff", "aborted") {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(500 * time.Millisecond):
-		}
-	}
-	// Detach every optical medium before --delete, especially the borrowed boot
-	// ISO. Never close or delete administrator media in the global DVD registry.
-	for key, value := range info {
-		m := attachment.FindStringSubmatch(key)
-		if m == nil || value == "none" || value == "emptydrive" {
-			continue
-		}
-		if _, ok := info[fmt.Sprintf("%s-tempeject-%s-%s", m[1], m[2], m[3])]; ok || value == t.RouterISO || strings.HasSuffix(strings.ToLower(value), ".iso") {
-			if _, e = b.run(ctx, "storageattach", n.UUID, "--storagectl", m[1], "--port", m[2], "--device", m[3], "--medium", "none"); e != nil {
-				return e
-			}
-		}
-	}
-	if _, e = b.run(ctx, "unregistervm", n.UUID, "--delete"); e != nil {
-		return e
-	}
-	raw, e = b.run(ctx, "list", "vms")
-	if e != nil {
-		return e
-	}
-	if strings.Contains(string(raw), "{"+n.UUID+"}") {
-		return wire.Fail("cleanup_required", "Clone remains registered")
-	}
-	if n.ID == t.Router.ID {
-		return b.closeSeed(ctx, t)
+	if t.Router != nil && n.ID == t.Router.ID {
+		return cleanupStep(ctx, "seed", func() error { return b.closeSeed(ctx, t) })
 	}
 	return nil
 }
@@ -616,7 +705,7 @@ func (b *VBoxBackend) closeSeed(ctx context.Context, t *Task) error {
 	return nil
 }
 func (b *VBoxBackend) Action(ctx context.Context, t *Task, n *Node, a NodeAction) (json.RawMessage, error) {
-	if n == nil || (n.ID == t.Router.ID && a.Action != "diagnostics") {
+	if n == nil || (t.Router != nil && n.ID == t.Router.ID && !oneOf(a.Action, "diagnostics", "vm_info", "screenshot")) {
 		return nil, wire.Fail("policy_denied", "Router is not a test target")
 	}
 	c := b.guestConfig(t, n)
@@ -627,20 +716,21 @@ func (b *VBoxBackend) Action(ctx context.Context, t *Task, n *Node, a NodeAction
 	}
 	switch a.Action {
 	case "node_status":
+		status, err := b.nodeStatus(ctx, t, n)
+		return wire.JSON(status), err
+	case "node_exec":
+		result, err := b.guestCommand(ctx, t, n, a.Argv, a.Cwd, a.Env)
+		return wire.JSON(execView(result, b.executionError("guest_command", err))), nil
+	case "vm_info":
 		info, err := b.info(ctx, n.UUID)
 		if err != nil {
 			return nil, err
 		}
-		status := map[string]any{"state": info["VMState"], "guest": map[string]any{"ready": false}}
-		if info["VMState"] == "running" {
-			if raw, err := b.guestExec(ctx, t, n, false, "probe", "--root", c.WorkDir); err == nil {
-				var guest map[string]any
-				if json.Unmarshal(raw, &guest) == nil {
-					status["guest"] = guest
-				}
-			}
+		fields := map[string]string{}
+		for _, key := range []string{"VMState", "VMStateChangeTime", "memory", "cpus", "GuestAdditionsVersion", "GuestAdditionsRunLevel"} {
+			fields[key] = info[key]
 		}
-		return wire.JSON(status), nil
+		return wire.JSON(fields), nil
 	case "start":
 		raw, e = b.start(ctx, n)
 	case "poweroff", "pause", "resume", "reset":
@@ -735,6 +825,7 @@ func (b *VBoxBackend) Action(ctx context.Context, t *Task, n *Node, a NodeAction
 			args = append(args, strconv.Itoa(v))
 		}
 		raw, e = b.Runner.Run(ctx, helper, args, nil)
+		e = b.executionError("input_helper", e)
 		if e == nil {
 			return raw, nil
 		}
@@ -821,7 +912,7 @@ func (b *VBoxBackend) Network(ctx context.Context, t *Task, protected []string, 
 	if !recover && t.RouterBootID != "" && t.RouterBootID != status.BootID {
 		return "", wire.Fail("network_degraded", "Router restarted; explicit network_recover is required")
 	}
-	p := taskPolicy(t, b.Config.Network.WAN, b.Config.Network.LeaseSeconds, protected)
+	p := taskPolicy(t, b.Config.VirtualBox.Network.WAN, b.Config.VirtualBox.Network.LeaseSeconds, protected)
 	if e := p.Validate(); e != nil {
 		return "", e
 	}
@@ -849,7 +940,7 @@ func (b *VBoxBackend) Endpoint(ctx context.Context, t *Task, e *Endpoint, open b
 	if !open {
 		return nil
 	}
-	ip, _ := network.WANAddresses(b.Config.Network.WAN)
+	ip, _ := network.WANAddresses(b.Config.VirtualBox.Network.WAN)
 	_, err = b.run(ctx, append(args, fmt.Sprintf("%s,%s,127.0.0.1,%d,%s,%d", name, e.Protocol, e.LoopbackPort, ip, e.RouterPort))...)
 	return err
 }

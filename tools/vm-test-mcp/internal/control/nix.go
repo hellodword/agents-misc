@@ -16,7 +16,7 @@ import (
 func (s *Server) WorkerCacheURL(id string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.capability("transfer", id, "read", time.Now().Add(time.Duration(s.cfg.Scheduler.MaxSeconds+3600)*time.Second))
+	return s.capability("transfer", id, "read", time.Now().Add(time.Duration(s.cfg.Tasks.MaxDuration.Seconds()+3600)*time.Second))
 }
 
 type workerReader struct {
@@ -121,7 +121,7 @@ func (b *VBoxBackend) workerEvidence(ctx context.Context, t *Task, raw json.RawM
 		if e != nil {
 			return nil, e
 		}
-		n, h, e := hashFile(file, b.Config.Retention.MaxUploadBytes)
+		n, h, e := hashFile(file, b.Config.Storage.MaxUploadBytes)
 		file.Close()
 		if e != nil {
 			return nil, e

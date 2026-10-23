@@ -9,6 +9,7 @@ let
     fileset = lib.fileset.unions [
       ../tools/vm-test-mcp/go.mod
       ../tools/vm-test-mcp/go.sum
+      ../tools/vm-test-mcp/config.example.yaml
       ../tools/vm-test-mcp/cmd
       ../tools/vm-test-mcp/internal
     ];
@@ -64,7 +65,7 @@ let
   };
   goBase = {
     pname = "vm-test-mcp";
-    version = "0.9.0";
+    version = "0.10.0";
     src = source;
     vendorHash = "sha256-utwEeEeOIhFTZl66lwO+ErGwa1gl+rkJL0qMAlUOx8k=";
     tags = [ "sqlite_omit_load_extension" ];

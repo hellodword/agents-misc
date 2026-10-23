@@ -45,7 +45,7 @@ func TestRouterISOEnablesBackendAndParticipatesInNixExclusion(t *testing.T) {
 	if reason, err := b.Available(context.Background(), "nixos"); err != nil || reason != "virtualbox_running" {
 		t.Fatal("Nix would overlap a running VirtualBox VM", reason, err)
 	}
-	b.Config.Router.ISO = ""
+	b.Config.VirtualBox.Router.ISO = ""
 	if reason, err := b.Available(context.Background(), "lab"); err != nil || reason != "virtualbox_disabled" {
 		t.Fatal("empty backend configuration was enabled", reason, err)
 	}
@@ -189,7 +189,7 @@ func (r *liveRouterRunner) Run(_ context.Context, exe string, args []string, _ i
 func TestDisklessRouterOwnsVMAndSeedButNeverBootISO(t *testing.T) {
 	b := &VBoxBackend{Config: testConfig(t)}
 	task := newTask("lab", 60)
-	task.LAN = b.Config.Network.LAN
+	task.LAN = b.Config.VirtualBox.Network.LAN
 	task.RouterPassword = wire.ID() + wire.ID()
 	realISO := filepath.Join(t.TempDir(), "router.iso")
 	if err := os.WriteFile(realISO, []byte("borrowed ISO"), 0644); err != nil {

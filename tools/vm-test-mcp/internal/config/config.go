@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/goccy/go-yaml"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
@@ -26,9 +27,28 @@ type Service struct {
 	Hosts     []string `yaml:"hosts"`
 	Origins   []string `yaml:"origins"`
 }
-type Scheduler struct {
-	DefaultSeconds int `yaml:"default_seconds"`
-	MaxSeconds     int `yaml:"max_seconds"`
+type Duration time.Duration
+
+func (d Duration) Value() time.Duration { return time.Duration(d) }
+func (d Duration) Seconds() int         { return int(time.Duration(d) / time.Second) }
+func (d *Duration) UnmarshalYAML(data []byte) error {
+	var value string
+	if err := yaml.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return fmt.Errorf("duration must include a unit, for example 30s or 10m: %w", err)
+	}
+	*d = Duration(parsed)
+	return nil
+}
+func (d Duration) MarshalYAML() (any, error) { return d.Value().String(), nil }
+
+type Tasks struct {
+	DefaultTimeout Duration `yaml:"default_timeout"`
+	MaxDuration    Duration `yaml:"max_duration"`
+	CleanupTimeout Duration `yaml:"cleanup_timeout"`
 }
 type Media struct {
 	Camera       bool `yaml:"camera" json:"camera,omitempty"`
@@ -60,13 +80,16 @@ type Template struct {
 	Cameras       map[string]string `yaml:"cameras" json:"-"`
 }
 type VirtualBox struct {
-	Executable      string              `yaml:"executable"`
-	LibraryDir      string              `yaml:"library_dir"`
-	InputHelper     string              `yaml:"input_helper"`
-	ISOBuilder      string              `yaml:"iso_builder"`
-	ReadySeconds    int                 `yaml:"ready_seconds"`
-	ShutdownSeconds int                 `yaml:"shutdown_seconds"`
-	Templates       map[string]Template `yaml:"templates"`
+	Executable       string              `yaml:"executable"`
+	LibraryDir       string              `yaml:"library_dir"`
+	InputHelper      string              `yaml:"input_helper"`
+	ISOBuilder       string              `yaml:"iso_builder"`
+	StartupTimeout   Duration            `yaml:"startup_timeout"`
+	ShutdownTimeout  Duration            `yaml:"shutdown_timeout"`
+	UnavailableAfter Duration            `yaml:"unavailable_after"`
+	Router           Router              `yaml:"router"`
+	Network          Network             `yaml:"network"`
+	Templates        map[string]Template `yaml:"templates"`
 }
 type Router struct {
 	ISO string `yaml:"iso"`
@@ -83,32 +106,30 @@ type Network struct {
 	PortMax             int      `yaml:"port_max"`
 	LeaseSeconds        int      `yaml:"lease_seconds"`
 }
-type Retention struct {
-	Days           int   `yaml:"days"`
+type Storage struct {
+	Days           int   `yaml:"retention_days"`
 	MaxUploadBytes int64 `yaml:"max_upload_bytes"`
 }
 type Nix = Worker
 type Config struct {
 	Service    Service    `yaml:"service"`
-	Scheduler  Scheduler  `yaml:"scheduler"`
+	Tasks      Tasks      `yaml:"tasks"`
 	VirtualBox VirtualBox `yaml:"virtualbox"`
-	Router     Router     `yaml:"router"`
-	Network    Network    `yaml:"network"`
-	Retention  Retention  `yaml:"retention"`
+	Storage    Storage    `yaml:"storage"`
 	Nix        Nix        `yaml:"nix"`
 }
 
 func (c Config) VirtualBoxEnabled() bool {
-	return c.Router.ISO != "" || len(c.VirtualBox.Templates) != 0
+	return c.VirtualBox.Router.ISO != "" || len(c.VirtualBox.Templates) != 0
 }
 
 func Defaults() Config {
 	return Config{
-		Service: Service{Listen: "127.0.0.1:8765"}, Scheduler: Scheduler{DefaultSeconds: 3600, MaxSeconds: 86400},
-		VirtualBox: VirtualBox{ReadySeconds: 600, ShutdownSeconds: 600},
-		Nix:        Worker{ControllerUID: -1, Nix: "nix"},
-		Network:    Network{LAN: "10.77.0.0/24", WAN: "10.0.2.0/24", DNS: []string{"1.1.1.1", "9.9.9.9"}, Listen: "127.0.0.1", Sources: []string{"127.0.0.1/32"}, PortMin: 20000, PortMax: 29999, LeaseSeconds: 15},
-		Retention:  Retention{MaxUploadBytes: 8 << 30},
+		Service: Service{Listen: "127.0.0.1:8765"},
+		Tasks:   Tasks{DefaultTimeout: Duration(time.Hour), MaxDuration: Duration(24 * time.Hour), CleanupTimeout: Duration(5 * time.Minute)},
+		VirtualBox: VirtualBox{StartupTimeout: Duration(10 * time.Minute), ShutdownTimeout: Duration(time.Minute), UnavailableAfter: Duration(30 * time.Second),
+			Network: Network{LAN: "10.77.0.0/24", WAN: "10.0.2.0/24", DNS: []string{"1.1.1.1", "9.9.9.9"}, Listen: "127.0.0.1", Sources: []string{"127.0.0.1/32"}, PortMin: 20000, PortMax: 29999, LeaseSeconds: 15}},
+		Nix: Worker{ControllerUID: -1, Nix: "nix"}, Storage: Storage{MaxUploadBytes: 8 << 30},
 	}
 }
 func decode(file string, v any) error {
@@ -171,10 +192,10 @@ func (c *Config) Validate() error {
 			return bad("invalid Origin allowlist")
 		}
 	}
-	if c.Scheduler.DefaultSeconds < 1 || c.Scheduler.MaxSeconds < c.Scheduler.DefaultSeconds || c.Scheduler.MaxSeconds > 86400*30 {
+	if c.Tasks.DefaultTimeout < Duration(time.Second) || c.Tasks.MaxDuration < c.Tasks.DefaultTimeout || c.Tasks.MaxDuration > Duration(30*24*time.Hour) || c.Tasks.CleanupTimeout < Duration(time.Second) || c.Tasks.CleanupTimeout > Duration(time.Hour) {
 		return bad("deadline limits")
 	}
-	if c.Retention.Days < 0 || c.Retention.MaxUploadBytes < 1 {
+	if c.Storage.Days < 0 || c.Storage.MaxUploadBytes < 1 {
 		return bad("retention limits")
 	}
 	for name, t := range c.VirtualBox.Templates {
@@ -239,14 +260,20 @@ func (c *Config) Validate() error {
 		}
 		c.VirtualBox.Templates[name] = t
 	}
-	if c.VirtualBox.ReadySeconds == 0 {
-		c.VirtualBox.ReadySeconds = 600
+	defaults := Defaults().VirtualBox
+	if c.VirtualBox.StartupTimeout == 0 {
+		c.VirtualBox.StartupTimeout = defaults.StartupTimeout
 	}
-	if c.VirtualBox.ShutdownSeconds == 0 {
-		c.VirtualBox.ShutdownSeconds = 600
+	if c.VirtualBox.ShutdownTimeout == 0 {
+		c.VirtualBox.ShutdownTimeout = defaults.ShutdownTimeout
 	}
-	if c.VirtualBox.ReadySeconds < 1 || c.VirtualBox.ReadySeconds > 3600 || c.VirtualBox.ShutdownSeconds < 1 || c.VirtualBox.ShutdownSeconds > 3600 {
-		return bad("VirtualBox timeouts must be 1..3600 seconds")
+	if c.VirtualBox.UnavailableAfter == 0 {
+		c.VirtualBox.UnavailableAfter = defaults.UnavailableAfter
+	}
+	for _, value := range []Duration{c.VirtualBox.StartupTimeout, c.VirtualBox.ShutdownTimeout, c.VirtualBox.UnavailableAfter} {
+		if value < Duration(time.Second) || value > Duration(time.Hour) {
+			return bad("node timeouts must be between 1s and 1h")
+		}
 	}
 	if c.VirtualBoxEnabled() {
 		for _, p := range []string{c.VirtualBox.Executable, c.VirtualBox.LibraryDir, c.VirtualBox.InputHelper, c.VirtualBox.ISOBuilder} {
@@ -254,40 +281,40 @@ func (c *Config) Validate() error {
 				return bad("VirtualBox path overrides must be absolute")
 			}
 		}
-		if !absolute(c.Router.ISO) {
-			return bad("router.iso must be an absolute Live ISO path")
+		if !absolute(c.VirtualBox.Router.ISO) {
+			return bad("virtualbox.router.iso must be an absolute Live ISO path")
 		}
 	}
 	if c.Nix.Socket != "" && !absolute(c.Nix.Socket) {
 		return bad("worker socket")
 	}
-	lan, e := netip.ParsePrefix(c.Network.LAN)
+	lan, e := netip.ParsePrefix(c.VirtualBox.Network.LAN)
 	if e != nil || !PrivateLAN(lan) {
 		return bad("LAN must be a canonical RFC1918 IPv4 subnet /8 through /29")
 	}
-	wan, e := netip.ParsePrefix(c.Network.WAN)
+	wan, e := netip.ParsePrefix(c.VirtualBox.Network.WAN)
 	if e != nil || !wan.Addr().Is4() || wan != wan.Masked() || wan.Bits() > 28 || lan.Overlaps(wan) {
 		return bad("WAN subnet")
 	}
-	if a, e := netip.ParseAddr(c.Network.Listen); e != nil || !a.Is4() {
+	if a, e := netip.ParseAddr(c.VirtualBox.Network.Listen); e != nil || !a.Is4() {
 		return bad("endpoint IPv4 listener")
 	}
-	if len(c.Network.Sources) == 0 {
+	if len(c.VirtualBox.Network.Sources) == 0 {
 		return bad("endpoint source CIDRs are required")
 	}
-	for _, s := range append(append([]string{}, c.Network.Sources...), c.Network.Protected...) {
+	for _, s := range append(append([]string{}, c.VirtualBox.Network.Sources...), c.VirtualBox.Network.Protected...) {
 		p, e := netip.ParsePrefix(s)
 		if e != nil || !p.Addr().Is4() || p != p.Masked() {
 			return bad("invalid IPv4 CIDR")
 		}
 	}
-	for _, s := range append(append([]string{}, c.Network.DNS...), c.Network.PublicHostAddresses...) {
+	for _, s := range append(append([]string{}, c.VirtualBox.Network.DNS...), c.VirtualBox.Network.PublicHostAddresses...) {
 		a, e := netip.ParseAddr(s)
 		if e != nil || !a.Is4() {
 			return bad("invalid IPv4 address")
 		}
 	}
-	if len(c.Network.DNS) == 0 || len(c.Network.DNS) > 8 || c.Network.PortMin < 1024 || c.Network.PortMax > 65535 || c.Network.PortMin > c.Network.PortMax || c.Network.LeaseSeconds < 5 || c.Network.LeaseSeconds > 60 {
+	if len(c.VirtualBox.Network.DNS) == 0 || len(c.VirtualBox.Network.DNS) > 8 || c.VirtualBox.Network.PortMin < 1024 || c.VirtualBox.Network.PortMax > 65535 || c.VirtualBox.Network.PortMin > c.VirtualBox.Network.PortMax || c.VirtualBox.Network.LeaseSeconds < 5 || c.VirtualBox.Network.LeaseSeconds > 60 {
 		return bad("network limits")
 	}
 	return nil

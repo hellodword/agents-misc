@@ -73,6 +73,8 @@ func (f *fakeBackend) Action(_ context.Context, t *Task, n *Node, a NodeAction) 
 		f.commandState = map[string]wire.CommandStatus{}
 	}
 	switch a.Action {
+	case "node_status":
+		return wire.JSON(NodeStatus{State: "running", Guest: map[string]any{"prepared": true, "privileged": true}}), nil
 	case "command_start":
 		f.commandState[a.Spec.ID] = wire.CommandStatus{State: "running"}
 	case "command_poll":
@@ -99,10 +101,10 @@ func testConfig(t *testing.T) config.Config {
 	c.Service.Origins = []string{"http://localhost"}
 	c.Service.StateDir = t.TempDir()
 	os.Chmod(c.Service.StateDir, 0700)
-	c.Scheduler.DefaultSeconds = 60
-	c.Scheduler.MaxSeconds = 600
-	c.VirtualBox = config.VirtualBox{Executable: "/fake/VBoxManage", LibraryDir: "/fake/lib", InputHelper: "/fake/input", ISOBuilder: "/fake/xorriso", Templates: map[string]config.Template{"windows": {Kind: "windows", VM: "11111111-1111-4111-8111-111111111111", Snapshot: "22222222-2222-4222-8222-222222222222", Username: "synthetic", Password: "synthetic", Supervisor: "C:\\guest.exe", WorkDir: "C:\\work", CPUs: 1, MemoryMiB: 512, MaxCPUs: 4, MaxMemoryMiB: 4096}}}
-	c.Router = config.Router{ISO: "/fake/router.iso"}
+	c.Tasks.DefaultTimeout = config.Duration(60 * time.Second)
+	c.Tasks.MaxDuration = config.Duration(600 * time.Second)
+	c.VirtualBox = config.VirtualBox{StartupTimeout: c.VirtualBox.StartupTimeout, ShutdownTimeout: c.VirtualBox.ShutdownTimeout, UnavailableAfter: c.VirtualBox.UnavailableAfter, Network: c.VirtualBox.Network, Executable: "/fake/VBoxManage", LibraryDir: "/fake/lib", InputHelper: "/fake/input", ISOBuilder: "/fake/xorriso", Templates: map[string]config.Template{"windows": {Kind: "windows", VM: "11111111-1111-4111-8111-111111111111", Snapshot: "22222222-2222-4222-8222-222222222222", Username: "synthetic", Password: "synthetic", Supervisor: "C:\\guest.exe", WorkDir: "C:\\work", CPUs: 1, MemoryMiB: 512, MaxCPUs: 4, MaxMemoryMiB: 4096}}}
+	c.VirtualBox.Router = config.Router{ISO: "/fake/router.iso"}
 	return c
 }
 func testServer(t *testing.T) (*Server, *fakeBackend) {
@@ -261,7 +263,7 @@ func TestQueueCancelFailureAndRecovery(t *testing.T) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v, _ := s.task(lab.ID)
-	if v.State != "interrupted" {
+	if v.State != "failed" || v.Failure == nil {
 		t.Fatal(v.State)
 	}
 	q, _ := s.task(queued)

@@ -1,4 +1,4 @@
-# VM Test MCP 0.9.0
+# VM Test MCP 0.10.0
 
 Go services for disposable Windows/Linux VirtualBox labs and strict NixOS sandbox
 tests on physical-host KVM. A lab contains independent linked clones and a private
@@ -47,7 +47,7 @@ Follow [administrator preparation](preparation.md). Both services read the same
 [annotated YAML](config.example.yaml) outside the Nix store. There is no config-file
 permission requirement; their private state directories remain separate.
 Local `config.yaml` is Git-ignored. Optional backend blocks are commented
-out until their administrator-owned inputs are ready. Configuring `router.iso`
+out until their administrator-owned inputs are ready. Configuring `virtualbox.router.iso`
 enables VirtualBox even before templates are registered; `lab_create(nodes=[])`
 starts just the router for boot and dynamic policy checks. Templates reference powered-off
 snapshots directly; the service never modifies a source VM or creates a preparation
@@ -83,7 +83,7 @@ Diagnostics go to stderr. Streamable HTTP is at `/mcp`, authenticated with
 `Authorization: Bearer TOKEN`, with optional exact Host/Origin allowlists (empty or omitted allows any). All token
 holders share authority over all tasks.
 
-1. Call `service_describe` for templates, backend status and limits.
+1. Call `service_get` for templates, backend status and limits.
 2. Call `lab_create` with a fresh `request_id` and a fixed list of named nodes.
    Reusing a template creates independent clones with separate UUIDs, MACs and disks.
 3. Poll the operation with `operation_get`, then `task_get`. Every mutation returns
@@ -93,7 +93,7 @@ holders share authority over all tasks.
 5. Upload through `transfer_create`/`guest_file_put`, collect files or guest tar
    archives with `guest_file_get`, and retrieve evidence through `artifact_get`.
 6. Submit `passed`, `failed` or `inconclusive` and a summary through `task_finish`.
-   Wait for `cleanup: complete`; evidence remains until `task_purge` by default.
+   Wait for `cleanup.state: complete`; evidence remains until `task_purge` by default.
 
 The [API contract](contract.md) describes parameters, errors and transfer routes.
 The distributed [VirtualBox workflow](../../.agents/skills/virtualbox-vm-test/SKILL.md)
@@ -137,7 +137,40 @@ temporary setup desktop. It does not require a logged-in user.
 Native input is serialized per node. An `uncertain` receipt means delivery could
 not be confirmed; inspect a screenshot before choosing another action. Delivery
 is separate from application assertions. Video, NIC and metrics captures produce
-artifacts. Available VBox logs are collected at task termination. Logs use byte offsets and base64 payloads, including for UTF-8 text.
+artifacts. Automatic evidence bundles include available VM logs, screenshots, initialization and system-service observations. Logs use byte offsets and base64 payloads, including for UTF-8 text.
+
+## Faults, diagnostics and cleanup
+
+`task_get` separates `phase` (`queued`, `preparing`, `running`, `ended`), `result`
+and `cleanup`. Use `node_get` for preparation progress, expected power state,
+capabilities and the last observation of VirtualBox, Guest Control and command
+service health. Each observation records its time, last success and bounded error.
+
+A preparation failure ends the lab after collecting evidence within a shared
+30-second budget. Running faults retain the lab and healthy nodes until the caller
+finishes/cancels or the task deadline expires. A node's unavailable capability
+recovers after two successful observations. Power actions record their expected
+transition, so an intentional pause or shutdown does not become a lost-node alarm.
+
+Use `task_diagnose(task_id, node_ids?)` during preparation or execution. Omitting
+node IDs collects the whole lab, including its router. Available evidence is kept
+even if other collectors time out. `node_exec` executes a short absolute guest
+argv directly through Guest Control, independently of command-service readiness;
+its default budget is 10 seconds and maximum is 30 seconds. The receipt retains
+bounded stdout/stderr and an artifact. An unconfirmed result stays `uncertain`.
+Use `command_start` for ordinary workloads and process-group supervision.
+
+Cleanup closes published entries immediately, limits evidence collection and
+records resource steps and retry counts. `task_cleanup` retries remaining
+resources of an ended VirtualBox task. A `blocked` cleanup keeps the FIFO occupied;
+inspect its resource errors before a new retry. Nix daemon teardown still uses the
+administrator's local verification procedure. Task results and evidence remain
+available after resource cleanup.
+
+The annotated config groups deadlines under `tasks`, backend/router/network policy
+under `virtualbox`, worker settings under `nix`, and retention/upload limits under
+`storage`. Timeouts use units such as `30s`, `10m` and `1h`. `service_get` exposes the
+effective probe, diagnosis and cleanup limits.
 
 ## NixOS submissions
 
@@ -160,7 +193,7 @@ Progress, task ID and live logs go to stderr; stdout is the final task JSON. Evi
 and inputs stay on the server. The printed local workspace, by default
 `tmp/agent/vm-test-runs/ID`, retains `run.json`, `submission.json`, the uploaded cache,
 `task.log` and `result.json` (including artifact metadata). An unsuccessful test or
-unresolved cleanup exits 1; only `passed` with `cleanup: complete` exits 0.
+unresolved cleanup exits 1; only `passed` with `cleanup.state: complete` exits 0.
 
 ```sh
 # Resume the original task, including after an interrupted/lost submission reply.
@@ -197,7 +230,7 @@ policy; signature checking stays enabled. Build outputs have worker-owned GC roo
 and are exported only as ordinary files under registered output roots.
 
 An interrupted daemon build keeps scheduler occupancy until local administrator
-[recovery](preparation.md#recovery). Reconciliation is never an MCP tool.
+[recovery](preparation.md#recovery). Nix daemon cleanup attestation is a local administrator operation.
 
 ## Development and verification
 

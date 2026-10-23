@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hellodword/agents-misc/vm-test-mcp/internal/config"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/hostexec"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/state"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
@@ -55,7 +56,7 @@ func (f *blockedPrepare) Prepare(ctx context.Context, _ *Task, _ *Node) error {
 }
 func TestDeadlineIncludesBackendPreparation(t *testing.T) {
 	c := testConfig(t)
-	c.Scheduler.DefaultSeconds = 1
+	c.Tasks.DefaultTimeout = config.Duration(1 * time.Second)
 	s, e := New(c, &blockedPrepare{})
 	if e != nil {
 		t.Fatal(e)
@@ -164,8 +165,8 @@ func TestRouterRestartRequiresExplicitRecoveryAndOwnership(t *testing.T) {
 		t.Run(power, func(t *testing.T) {
 			b := &VBoxBackend{Config: testConfig(t)}
 			task := newTask("lab", 60)
-			task.LAN = b.Config.Network.LAN
-			task.DNS = b.Config.Network.DNS
+			task.LAN = b.Config.VirtualBox.Network.LAN
+			task.DNS = b.Config.VirtualBox.Network.DNS
 			task.Router = &Node{ID: wire.ID(), UUID: wire.UUID(), MAC: "08:00:27:12:34:56"}
 			task.RouterPassword = wire.ID() + wire.ID()
 			if e := os.MkdirAll(b.runtime(task), 0700); e != nil {

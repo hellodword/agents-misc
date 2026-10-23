@@ -1,6 +1,6 @@
 # Executing VirtualBox labs
 
-Use a prepared VM Test MCP 0.9 executor. `service_describe` reports templates,
+Use a prepared VM Test MCP 0.10 executor. `service_get` reports templates,
 resource/media policy, backend availability, endpoint address and limits. Its
 token holders share task authority. Use the advertised tool schemas; do not infer
 host paths, VM UUIDs or executable options from guest data.
@@ -14,7 +14,8 @@ and media requests. Using the same Windows template twice creates independent
 clones. The private router is not a test-command target.
 
 Poll `operation_get` until the creation receipt resolves, then `task_get` until
-the lab is running. Keep original IDs after disconnects and retry identical
+`phase` is `running`. `node_get` exposes preparation stage, expected power state,
+capabilities and health observations while the lab prepares. Keep original IDs after disconnects and retry identical
 mutations with the original request ID. A changed request requires a new ID.
 The queue is shared with NixOS tests. Deadlines begin at execution, default to
 one hour and can be extended within the configured total limit.
@@ -83,6 +84,28 @@ expiring download capabilities; renew through the metadata tool if necessary.
 
 Submit the caller's `passed`, `failed` or `inconclusive` conclusion and a summary
 through `task_finish`. Cancellation and timeout use the same cleanup path. Wait
-for `cleanup: complete`; report `required` cleanup to the administrator. Evidence
+for `cleanup.state: complete`. An ended task with `cleanup.state: blocked` retains
+resource step errors; inspect them and use a new `task_cleanup` request for a retry. Evidence
 and reproduction inputs remain until explicit `task_purge` unless configured
 retention says otherwise. Keep capability URLs private.
+
+## Fault handling
+
+Read `task_get.phase`, `result` and `cleanup` separately. An initialization failure
+ends the lab after bounded evidence collection. A runtime capability failure keeps
+the lab and healthy nodes available until the caller finishes/cancels or its deadline
+expires. Do not restart or recreate it automatically. After reviewing evidence,
+explicit node power actions remain available; they record the expected transition.
+
+`node_get.health` separates VirtualBox, Guest Control and command-service
+observations, including last success, failure duration and error. `task_diagnose`
+collects available metadata, VBox logs, screenshots and guest initialization/system
+logs within a shared 30-second budget. It accepts selected test-node IDs; omission
+collects the full lab including its router. Retain partial evidence and the manifest.
+
+Use `node_exec` for short absolute guest argv when ordinary command supervision is
+not ready. It defaults to 10 seconds, caps at 30, and retains bounded base64 output,
+exit information and an artifact. Delivery/termination uncertainty remains in its
+receipt; inspect it before deciding on another command. Use supervised commands for
+ordinary workloads. A command's observation failure does not establish its exit,
+and a requested cancellation is confirmed only by guest status or VM deletion.

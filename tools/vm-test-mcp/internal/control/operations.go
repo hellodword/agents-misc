@@ -43,7 +43,7 @@ func (s *Server) query(ctx context.Context, name string, args any) (any, error) 
 			backends[kind] = map[string]any{"available": e == nil && reason == "", "waiting_reason": reason}
 		}
 		s.mu.Lock()
-		return map[string]any{"version": wire.Version, "templates": templates, "backends": backends, "active_task_id": s.active, "limits": map[string]any{"default_seconds": s.cfg.Scheduler.DefaultSeconds, "max_seconds": s.cfg.Scheduler.MaxSeconds, "max_upload_bytes": s.cfg.Retention.MaxUploadBytes, "max_nodes": 64}, "endpoint_address": s.cfg.Network.Listen}, nil
+		return map[string]any{"version": wire.Version, "templates": templates, "backends": backends, "active_task_id": s.active, "limits": map[string]any{"default_seconds": s.cfg.Tasks.DefaultTimeout.Seconds(), "max_seconds": s.cfg.Tasks.MaxDuration.Seconds(), "max_upload_bytes": s.cfg.Storage.MaxUploadBytes, "max_nodes": 64, "startup_timeout": s.cfg.VirtualBox.StartupTimeout.Value().String(), "shutdown_timeout": s.cfg.VirtualBox.ShutdownTimeout.Value().String(), "cleanup_timeout": s.cfg.Tasks.CleanupTimeout.Value().String(), "probe_interval": probeInterval.String(), "probe_timeout": probeTimeout.String(), "unavailable_after": s.cfg.VirtualBox.UnavailableAfter.Value().String(), "failure_threshold": 3, "recovery_successes": 2, "diagnostic_timeout": diagnosticBudget.String(), "node_exec_default_seconds": 10, "node_exec_max_seconds": 30}, "endpoint_address": s.cfg.VirtualBox.Network.Listen}, nil
 	case ListRequest:
 		start, end, e := page(a.Cursor, a.Limit, len(s.tasks))
 		if e != nil {
@@ -60,6 +60,16 @@ func (s *Server) query(ctx context.Context, name string, args any) (any, error) 
 			return nil, e
 		}
 		return t.Public(), nil
+	case NodeID:
+		t, err := s.task(a.TaskID.TaskID)
+		if err != nil {
+			return nil, err
+		}
+		n, err := t.Node(a.NodeID)
+		if err != nil {
+			return nil, err
+		}
+		return n.public(), nil
 	case OperationRequest:
 		o := s.operations[a.OperationID]
 		if o == nil {
@@ -161,6 +171,10 @@ func artifactView(a *Artifact) map[string]any {
 
 func (s *Server) mutate(name string, args any) (any, error) {
 	switch a := args.(type) {
+	case DiagnoseRequest:
+		return s.diagnose(s.ctx, a.TaskID.TaskID, a.NodeIDs, false)
+	case ExecRequest:
+		return s.execNode(a)
 	case LabRequest:
 		return s.createLab(a)
 	case NixRequest:
@@ -176,16 +190,20 @@ func (s *Server) mutate(name string, args any) (any, error) {
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		t, _, e := s.running(a.TaskID.TaskID)
+		t, r, e := s.running(a.TaskID.TaskID)
 		if e != nil {
 			return nil, e
 		}
 		t.State = "finished"
 		t.Conclusion = a.Conclusion
 		t.Summary = a.Summary
+		r.cancel()
 		s.save(t)
 		return t.Public(), nil
 	case TaskChange:
+		if name == "task_cleanup" {
+			return s.cleanupTask(a.TaskID.TaskID)
+		}
 		if name == "network_recover" {
 			return s.changeNetwork(a.TaskID.TaskID, NetworkRequest{}, true)
 		}
@@ -215,32 +233,7 @@ func (s *Server) mutate(name string, args any) (any, error) {
 		s.save(t)
 		return t.Public(), nil
 	case ExtendRequest:
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		t, e := s.task(a.TaskID.TaskID)
-		if e != nil {
-			return nil, e
-		}
-		if a.Seconds < 1 || a.Seconds > s.cfg.Scheduler.MaxSeconds || t.Started == nil || t.Terminal() || t.Deadline == nil {
-			return nil, wire.Fail("invalid_state", "Task cannot be extended")
-		}
-		deadline := t.Deadline.Add(time.Duration(a.Seconds) * time.Second)
-		if deadline.After(t.Started.Add(time.Duration(s.cfg.Scheduler.MaxSeconds) * time.Second)) {
-			return nil, wire.Fail("limit_exceeded", "Maximum total task duration exceeded")
-		}
-		if t.Kind == "nixos" {
-			copyTask := clone(t)
-			copyTask.Deadline = &deadline
-			ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
-			_, err := s.backend.Nix(ctx, "extend", copyTask)
-			cancel()
-			if err != nil {
-				return nil, err
-			}
-		}
-		t.Deadline = &deadline
-		s.save(t)
-		return t.Public(), nil
+		return s.extendTask(a)
 	case NetworkRequest:
 		return s.changeNetwork(a.TaskID.TaskID, a, false)
 	case GUIRequest:
@@ -264,6 +257,8 @@ func (s *Server) mutate(name string, args any) (any, error) {
 			return nil, e
 		}
 		id := NodeID{TaskID: a.TaskID, NodeID: c.NodeID}
+		c.Cancellation = "requested"
+		s.save(t)
 		s.mu.Unlock()
 		return s.action(id, NodeAction{Action: "command_cancel", CommandID: c.ID})
 	case PutRequest:
@@ -277,16 +272,7 @@ func (s *Server) mutate(name string, args any) (any, error) {
 		if !oneOf(a.Action, "start", "shutdown", "reboot", "poweroff", "pause", "resume", "reset") {
 			return nil, wire.Fail("invalid_argument", "Invalid power action")
 		}
-		v, e := s.action(a.NodeID, NodeAction{Action: a.Action})
-		if e == nil {
-			s.mu.Lock()
-			t, _ := s.task(a.TaskID.TaskID)
-			n, _ := t.Node(a.NodeID.NodeID)
-			n.State = "transitioning"
-			s.save(t)
-			s.mu.Unlock()
-		}
-		return v, e
+		return s.action(a.NodeID, NodeAction{Action: a.Action})
 	case EndpointRequest:
 		return s.createEndpoint(a)
 	case CloseEndpointRequest:
@@ -323,9 +309,13 @@ func (s *Server) mutate(name string, args any) (any, error) {
 		if e != nil {
 			return nil, e
 		}
-		r.gate.RLock()
+		ctx, cancel := context.WithTimeout(r.ctx, 30*time.Second)
+		defer cancel()
+		if e = readGate(ctx, &r.gate); e != nil {
+			return nil, e
+		}
 		defer r.gate.RUnlock()
-		e = s.stopCapture(r.ctx, t, r, a.CaptureID, false)
+		e = s.stopCapture(ctx, t, r, a.CaptureID, false)
 		return map[string]any{"capture_id": a.CaptureID}, e
 	}
 	return nil, wire.Fail("invalid_argument", "Unsupported operation")
@@ -354,9 +344,9 @@ func guestPath(p string) bool {
 }
 func (s *Server) duration(v int) (int, error) {
 	if v == 0 {
-		v = s.cfg.Scheduler.DefaultSeconds
+		v = s.cfg.Tasks.DefaultTimeout.Seconds()
 	}
-	if v < 1 || v > s.cfg.Scheduler.MaxSeconds {
+	if v < 1 || v > s.cfg.Tasks.MaxDuration.Seconds() {
 		return 0, wire.Fail("limit_exceeded", "Task duration exceeds configured bounds")
 	}
 	return v, nil
@@ -372,11 +362,11 @@ func (s *Server) createLab(a LabRequest) (any, error) {
 	if a.Nodes == nil || len(a.Nodes) > 64 {
 		return nil, wire.Fail("invalid_argument", "nodes must be an array of 0..64 test nodes")
 	}
-	if s.cfg.Router.ISO == "" {
+	if s.cfg.VirtualBox.Router.ISO == "" {
 		return nil, wire.Fail("router_unavailable", "Configure router.iso before creating a lab")
 	}
 	if a.LAN == "" {
-		a.LAN = s.cfg.Network.LAN
+		a.LAN = s.cfg.VirtualBox.Network.LAN
 	}
 	lan, e := netip.ParsePrefix(a.LAN)
 	if e != nil {
@@ -387,13 +377,13 @@ func (s *Server) createLab(a LabRequest) (any, error) {
 	t.DHCP = a.DHCP == nil || *a.DHCP
 	t.DNS = append([]string{}, a.DNS...)
 	if a.DNS == nil {
-		t.DNS = append([]string{}, s.cfg.Network.DNS...)
+		t.DNS = append([]string{}, s.cfg.VirtualBox.Network.DNS...)
 	}
-	t.RouterISO = s.cfg.Router.ISO
+	t.RouterISO = s.cfg.VirtualBox.Router.ISO
 	t.Internet = a.Internet == nil || *a.Internet
 	t.Network = "pending"
 	t.RouterPassword = wire.ID() + wire.ID()
-	policy := network.Policy{LAN: a.LAN, WAN: s.cfg.Network.WAN, DHCP: t.DHCP, Internet: t.Internet, DNS: t.DNS, LeaseSeconds: s.cfg.Network.LeaseSeconds}
+	policy := network.Policy{LAN: a.LAN, WAN: s.cfg.VirtualBox.Network.WAN, DHCP: t.DHCP, Internet: t.Internet, DNS: t.DNS, LeaseSeconds: s.cfg.VirtualBox.Network.LeaseSeconds}
 	used := map[string]bool{}
 	for _, n := range a.Nodes {
 		if n.IPv4 != "" {
@@ -501,37 +491,90 @@ func (s *Server) createNix(a NixRequest) (any, error) {
 	sort.SliceStable(s.tasks, func(i, j int) bool { return s.tasks[i].Created.Before(s.tasks[j].Created) })
 	return t.Public(), nil
 }
+func (s *Server) nodeAccess(id NodeID, action string) (*Task, *Runtime, *Node, error) {
+	t, err := s.task(id.TaskID.TaskID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	n, err := t.Node(id.NodeID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if t.Kind != "lab" || !n.Intent || n.Cleaned || t.Cleanup == "running" {
+		return nil, nil, nil, wire.Fail("invalid_state", "Node resource is not available for this operation")
+	}
+	diagnostic := oneOf(action, "node_exec", "screenshot", "diagnostics", "vm_info")
+	if t.Terminal() && !diagnostic {
+		return nil, nil, nil, wire.Fail("invalid_state", "Task execution has ended")
+	}
+	if strings.HasPrefix(action, "command_") && action != "command_cancel" && !n.capabilities()["commands"] {
+		return nil, nil, nil, wire.Fail("guest_not_ready", "Guest command capability is unavailable; inspect node_get or task_diagnose")
+	}
+	r := s.runtime[t.ID]
+	if r == nil {
+		ctx, cancel := context.WithCancel(s.ctx)
+		r = &Runtime{ctx: ctx, cancel: cancel, relays: map[string]*Relay{}}
+		s.runtime[t.ID] = r
+	}
+	return t, r, n, nil
+}
 func (s *Server) action(id NodeID, a NodeAction) (any, error) {
 	s.mu.Lock()
-	_, r, e := s.running(id.TaskID.TaskID)
+	t, r, _, err := s.nodeAccess(id, a.Action)
+	var parent context.Context
+	if err == nil {
+		parent = r.ctx
+		if t.Terminal() {
+			parent = s.ctx
+		}
+	}
 	s.mu.Unlock()
-	if e != nil {
-		return nil, e
+	if err != nil {
+		return nil, err
 	}
-	r.gate.RLock()
+	budget := 120 * time.Second
+	if a.Action == "shutdown" {
+		budget = s.cfg.VirtualBox.ShutdownTimeout.Value()
+	}
+	if a.Action == "node_exec" {
+		budget = time.Duration(a.TimeoutSeconds) * time.Second
+	}
+	if a.Action == "screenshot" || a.Action == "command_cancel" {
+		budget = 10 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(parent, budget)
+	defer cancel()
+	if err = readGate(ctx, &r.gate); err != nil {
+		return nil, err
+	}
 	defer r.gate.RUnlock()
-	lock := s.nodeLock(r, id.NodeID)
-	lock.Lock()
-	defer lock.Unlock()
-	s.mu.Lock()
-	t, _, e := s.running(id.TaskID.TaskID)
-	if e != nil {
-		s.mu.Unlock()
-		return nil, e
+	if !oneOf(a.Action, "node_exec", "screenshot", "command_cancel") {
+		lock := s.nodeLock(r, id.NodeID)
+		if err = lockContext(ctx, lock); err != nil {
+			return nil, wire.Fail("resource_busy", "Node operation did not acquire its execution slot before the deadline")
+		}
+		defer lock.Unlock()
 	}
-	n, e := t.Node(id.NodeID)
-	if e != nil {
+	s.mu.Lock()
+	t, _, n, err := s.nodeAccess(id, a.Action)
+	if err != nil {
 		s.mu.Unlock()
-		return nil, e
+		return nil, err
+	}
+	if oneOf(a.Action, "start", "shutdown", "reboot", "poweroff", "pause", "resume", "reset") {
+		power := "running"
+		if a.Action == "shutdown" || a.Action == "poweroff" {
+			power = "poweroff"
+		}
+		if a.Action == "pause" {
+			power = "paused"
+		}
+		until := time.Now().UTC().Add(s.cfg.VirtualBox.StartupTimeout.Value())
+		n.Expected = &ExpectedState{Action: a.Action, Power: power, Requested: time.Now().UTC(), Until: &until}
+		s.save(t)
 	}
 	tc, nc := clone(t), clone(n)
 	s.mu.Unlock()
-	seconds := 120
-	if a.Action == "shutdown" {
-		seconds = s.cfg.VirtualBox.ShutdownSeconds
-	}
-	ctx, cancel := context.WithTimeout(r.ctx, time.Duration(seconds)*time.Second)
-	defer cancel()
 	if strings.HasPrefix(a.Action, "input_") {
 		interval := s.cfg.VirtualBox.Templates[nc.Template].InputInterval
 		if interval != nil {
@@ -549,14 +592,14 @@ func (s *Server) action(id NodeID, a NodeAction) (any, error) {
 		s.save(t)
 		s.mu.Unlock()
 	}
-	raw, e := s.backend.Action(ctx, tc, nc, a)
-	if e != nil {
-		return nil, e
+	raw, err := s.backend.Action(ctx, tc, nc, a)
+	if err != nil {
+		return nil, err
 	}
-	var v any
+	var value any
 	if len(raw) > 0 {
-		if e = json.Unmarshal(raw, &v); e != nil {
-			return nil, e
+		if err = json.Unmarshal(raw, &value); err != nil {
+			return nil, err
 		}
 	}
 	s.mu.Lock()
@@ -568,8 +611,9 @@ func (s *Server) action(id NodeID, a NodeAction) (any, error) {
 	}
 	s.save(t)
 	s.mu.Unlock()
-	return v, nil
+	return value, nil
 }
+
 func (s *Server) startCommand(a StartRequest) (any, error) {
 	id := wire.ID()
 	spec := wire.CommandSpec{ID: id, Argv: a.Argv, Cwd: a.Cwd, Env: a.Env, TimeoutSeconds: a.TimeoutSeconds}
@@ -577,7 +621,7 @@ func (s *Server) startCommand(a StartRequest) (any, error) {
 		return nil, e
 	}
 	s.mu.Lock()
-	t, _, e := s.running(a.TaskID.TaskID)
+	t, _, _, e := s.nodeAccess(a.NodeID, "command_start")
 	if e != nil {
 		s.mu.Unlock()
 		return nil, e
@@ -608,10 +652,14 @@ func (s *Server) commandInput(a InputRequest) (any, error) {
 		return nil, wire.Fail("invalid_argument", "Invalid input packet")
 	}
 	s.mu.Lock()
-	t, _, e := s.running(a.TaskID.TaskID)
+	t, e := s.task(a.TaskID.TaskID)
 	if e != nil {
 		s.mu.Unlock()
 		return nil, e
+	}
+	if t.Kind != "lab" || !oneOf(t.State, "preparing", "running") {
+		s.mu.Unlock()
+		return nil, wire.Fail("invalid_state", "An executing lab is required")
 	}
 	c, e := t.Command(a.CommandID)
 	if e != nil {
@@ -655,10 +703,16 @@ func (s *Server) changeNetwork(id string, a NetworkRequest, recover bool) (any, 
 	if e != nil {
 		return nil, e
 	}
-	r.gate.RLock()
+	ctx, cancel := context.WithTimeout(r.ctx, 30*time.Second)
+	defer cancel()
+	if e = readGate(ctx, &r.gate); e != nil {
+		return nil, e
+	}
 	defer r.gate.RUnlock()
 	lock := s.nodeLock(r, "network")
-	lock.Lock()
+	if e = lockContext(ctx, lock); e != nil {
+		return nil, e
+	}
 	defer lock.Unlock()
 	s.mu.Lock()
 	if t.State != "running" || (!recover && t.Network != "ready") {
@@ -685,7 +739,7 @@ func (s *Server) changeNetwork(id string, a NetworkRequest, recover bool) (any, 
 		seen[addr.NodeID] = true
 		n.IPv4 = addr.IPv4
 	}
-	policy := taskPolicy(proposal, s.cfg.Network.WAN, s.cfg.Network.LeaseSeconds, nil)
+	policy := taskPolicy(proposal, s.cfg.VirtualBox.Network.WAN, s.cfg.VirtualBox.Network.LeaseSeconds, nil)
 	if err := policy.Validate(); err != nil {
 		s.mu.Unlock()
 		return nil, err
@@ -699,7 +753,7 @@ func (s *Server) changeNetwork(id string, a NetworkRequest, recover bool) (any, 
 	if recover {
 		s.closeRelays(t, r)
 	}
-	if e = s.refreshNetwork(t, r, recover); e != nil {
+	if e = s.refreshNetworkContext(ctx, t, r, recover); e != nil {
 		s.degrade(t, r)
 		return nil, e
 	}
@@ -726,10 +780,16 @@ func (s *Server) createEndpoint(a EndpointRequest) (any, error) {
 		return nil, wire.Fail("invalid_state", "Network unavailable or endpoint limit reached")
 	}
 	s.mu.Unlock()
-	r.gate.RLock()
+	ctx, cancel := context.WithTimeout(r.ctx, 30*time.Second)
+	defer cancel()
+	if e = readGate(ctx, &r.gate); e != nil {
+		return nil, e
+	}
 	defer r.gate.RUnlock()
 	lock := s.nodeLock(r, "network")
-	lock.Lock()
+	if e = lockContext(ctx, lock); e != nil {
+		return nil, e
+	}
 	defer lock.Unlock()
 	s.mu.Lock()
 	if t.State != "running" || t.Network != "ready" || len(t.Endpoints) >= 128 {
@@ -744,11 +804,11 @@ func (s *Server) createEndpoint(a EndpointRequest) (any, error) {
 		}
 	}
 	ports := []int{}
-	for p := s.cfg.Network.PortMin; p <= s.cfg.Network.PortMax && len(ports) < 2; p++ {
+	for p := s.cfg.VirtualBox.Network.PortMin; p <= s.cfg.VirtualBox.Network.PortMax && len(ports) < 2; p++ {
 		if used[p] {
 			continue
 		}
-		addr := fmt.Sprintf("%s:%d", s.cfg.Network.Listen, p)
+		addr := fmt.Sprintf("%s:%d", s.cfg.VirtualBox.Network.Listen, p)
 		if len(ports) == 1 {
 			addr = fmt.Sprintf("127.0.0.1:%d", p)
 		}
@@ -778,8 +838,8 @@ func (s *Server) createEndpoint(a EndpointRequest) (any, error) {
 	if e != nil {
 		return nil, e
 	}
-	if e = s.refreshNetwork(t, r, false); e == nil {
-		e = s.openRelay(r.ctx, t, r, entry)
+	if e = s.refreshNetworkContext(ctx, t, r, false); e == nil {
+		e = s.openRelay(ctx, t, r, entry)
 	}
 	s.mu.Lock()
 	if e == nil {
@@ -802,10 +862,16 @@ func (s *Server) closeEndpoint(a CloseEndpointRequest) (any, error) {
 	if e != nil {
 		return nil, e
 	}
-	r.gate.RLock()
+	ctx, cancel := context.WithTimeout(r.ctx, 30*time.Second)
+	defer cancel()
+	if e = readGate(ctx, &r.gate); e != nil {
+		return nil, e
+	}
 	defer r.gate.RUnlock()
 	lock := s.nodeLock(r, "network")
-	lock.Lock()
+	if e = lockContext(ctx, lock); e != nil {
+		return nil, e
+	}
 	defer lock.Unlock()
 	s.mu.Lock()
 	if t.State != "running" {
@@ -831,8 +897,8 @@ func (s *Server) closeEndpoint(a CloseEndpointRequest) (any, error) {
 	if relay != nil {
 		relay.Close()
 	}
-	if e = s.backend.Endpoint(r.ctx, tc, ec, false); e == nil && tc.Network == "ready" {
-		e = s.refreshNetwork(t, r, false)
+	if e = s.backend.Endpoint(ctx, tc, ec, false); e == nil && tc.Network == "ready" {
+		e = s.refreshNetworkContext(ctx, t, r, false)
 	}
 	if e != nil {
 		s.degrade(t, r)
@@ -932,12 +998,12 @@ func (s *Server) purge(t *Task) error {
 	return nil
 }
 func (s *Server) expireRetention() {
-	if s.cfg.Retention.Days == 0 {
+	if s.cfg.Storage.Days == 0 {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	cutoff := time.Now().Add(-time.Duration(s.cfg.Retention.Days) * 24 * time.Hour)
+	cutoff := time.Now().Add(-time.Duration(s.cfg.Storage.Days) * 24 * time.Hour)
 	for _, t := range s.tasks {
 		if !t.Purged && t.Ended != nil && t.Ended.Before(cutoff) && t.Cleanup == "complete" {
 			_ = s.purge(t)
@@ -947,7 +1013,7 @@ func (s *Server) expireRetention() {
 
 func (s *Server) collect(id NodeID, name string, a NodeAction) (any, error) {
 	s.mu.Lock()
-	t, _, err := s.running(id.TaskID.TaskID)
+	t, _, _, err := s.nodeAccess(id, a.Action)
 	if err == nil {
 		_, err = t.Node(id.NodeID)
 	}
@@ -969,7 +1035,7 @@ func (s *Server) collect(id NodeID, name string, a NodeAction) (any, error) {
 		return nil, e
 	}
 	defer f.Close()
-	size, hash, e := hashFile(f, s.cfg.Retention.MaxUploadBytes)
+	size, hash, e := hashFile(f, s.cfg.Storage.MaxUploadBytes)
 	if e != nil {
 		return nil, e
 	}
@@ -1041,7 +1107,9 @@ func (s *Server) stopCapture(ctx context.Context, t *Task, r *Runtime, id string
 	snapshot, nc, cc := clone(t), clone(n), clone(c)
 	s.mu.Unlock()
 	lock := s.nodeLock(r, n.ID)
-	lock.Lock()
+	if err := lockContext(ctx, lock); err != nil {
+		return err
+	}
 	defer lock.Unlock()
 	a := &Artifact{ID: wire.ID(), Name: "capture-" + c.Kind, Created: time.Now().UTC()}
 	a.Path = path.Join("tasks", t.ID, "artifacts", a.ID)
@@ -1051,7 +1119,7 @@ func (s *Server) stopCapture(ctx context.Context, t *Task, r *Runtime, id string
 		f, err := s.root.Regular(a.Path)
 		e = err
 		if e == nil {
-			a.Size, a.SHA256, e = hashFile(f, s.cfg.Retention.MaxUploadBytes)
+			a.Size, a.SHA256, e = hashFile(f, s.cfg.Storage.MaxUploadBytes)
 			f.Close()
 		}
 	}
@@ -1088,5 +1156,6 @@ func (s *Server) Reconcile(id string) error {
 	if t.Cleanup != "complete" {
 		return wire.Fail("cleanup_required", "Resources are still unresolved")
 	}
+	s.releaseScheduler(t)
 	return nil
 }

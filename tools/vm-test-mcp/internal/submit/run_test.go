@@ -45,7 +45,7 @@ func (f *runFixture) tool(_ context.Context, r *mcp.CallToolRequest) (*mcp.CallT
 	var value any
 	failed := false
 	switch r.Params.Name {
-	case "service_describe":
+	case "service_get":
 		value = map[string]any{"backends": map[string]any{"nixos": map[string]any{"available": f.available, "waiting_reason": f.waitingReason}}}
 	case "transfer_create":
 		f.creates++
@@ -76,7 +76,7 @@ func (f *runFixture) tool(_ context.Context, r *mcp.CallToolRequest) (*mcp.CallT
 		} else if f.polls == 2 {
 			cleanup = "running"
 		}
-		value = map[string]any{"id": strings.Repeat("b", 32), "state": state, "conclusion": "passed", "cleanup": cleanup, "artifacts": []any{map[string]any{"id": strings.Repeat("e", 32), "name": "test.log"}}}
+		value = map[string]any{"id": strings.Repeat("b", 32), "phase": map[bool]string{true: "queued", false: "ended"}[state == "queued"], "result": map[string]any{"termination": state, "conclusion": "passed"}, "cleanup": map[string]any{"state": cleanup}, "artifacts": []any{map[string]any{"id": strings.Repeat("e", 32), "name": "test.log"}}}
 	case "task_log":
 		if f.polls == 1 {
 			value, failed = map[string]any{"error": wire.Fail("not_found", "Log not created")}, true
@@ -98,7 +98,7 @@ func newRunFixture(t *testing.T) (*runFixture, RunOptions, string) {
 	t.Helper()
 	f := &runFixture{available: true, cleanup: "complete", log: append(bytes.Repeat([]byte("log line\n"), 9000), []byte("assertions passed\n")...)}
 	server := mcp.NewServer(&mcp.Implementation{Name: "synthetic", Version: "1"}, nil)
-	for _, name := range []string{"service_describe", "transfer_create", "transfer_get", "operation_get", "nixos_run", "task_get", "task_log"} {
+	for _, name := range []string{"service_get", "transfer_create", "transfer_get", "operation_get", "nixos_run", "task_get", "task_log"} {
 		server.AddTool(&mcp.Tool{Name: name, InputSchema: map[string]any{"type": "object"}}, f.tool)
 	}
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true, DisableLocalhostProtection: true})
@@ -152,7 +152,7 @@ func TestAutomaticRunWaitsForCleanupAndResumesLostReply(t *testing.T) {
 		t.Fatal("expected lost submission reply")
 	}
 	result, err := Run(ctx, options)
-	if err != nil || !bytes.Contains(result, []byte(`"cleanup":"complete"`)) {
+	if err != nil || !bytes.Contains(result, []byte(`"state":"complete"`)) {
 		t.Fatal(string(result), err)
 	}
 	f.mu.Lock()
@@ -185,9 +185,9 @@ func TestAutomaticRunWaitsForCleanupAndResumesLostReply(t *testing.T) {
 
 func TestAutomaticRunReportsRequiredCleanup(t *testing.T) {
 	f, options, _ := newRunFixture(t)
-	f.cleanup = "required"
+	f.cleanup = "blocked"
 	result, err := Run(context.Background(), options)
-	if err == nil || !strings.Contains(err.Error(), "cleanup=required") || !bytes.Contains(result, []byte(`"cleanup":"required"`)) {
+	if err == nil || !strings.Contains(err.Error(), "cleanup=blocked") || !bytes.Contains(result, []byte(`"state":"blocked"`)) {
 		t.Fatal(string(result), err)
 	}
 	if _, err := os.Stat(filepath.Join(options.WorkDir, "result.json")); err != nil {
@@ -218,7 +218,7 @@ func TestAutomaticRunQueuesWhileBackendBusy(t *testing.T) {
 			f, options, _ := newRunFixture(t)
 			f.available, f.waitingReason = false, reason
 			result, err := Run(context.Background(), options)
-			if err != nil || !bytes.Contains(result, []byte(`"cleanup":"complete"`)) {
+			if err != nil || !bytes.Contains(result, []byte(`"state":"complete"`)) {
 				t.Fatal(string(result), err)
 			}
 			f.mu.Lock()

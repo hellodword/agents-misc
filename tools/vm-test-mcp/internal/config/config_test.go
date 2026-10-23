@@ -5,10 +5,29 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
+func TestDurationConfigurationAndAnnotatedExample(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "config.yaml")
+	body := fmt.Sprintf("service:\n  token: fixture\n  public_url: http://localhost:8765\n  state_dir: %s\ntasks:\n  default_timeout: 2h\n  max_duration: 12h\n  cleanup_timeout: 45s\nvirtualbox:\n  startup_timeout: 8m\n  shutdown_timeout: 90s\n  unavailable_after: 40s\n  router:\n    iso: /fixture/router.iso\n  network:\n    lan: 10.99.0.0/24\nstorage:\n  retention_days: 7\n", t.TempDir())
+	if err := os.WriteFile(file, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Tasks.DefaultTimeout.Value() != 2*time.Hour || c.Tasks.CleanupTimeout.Value() != 45*time.Second || c.VirtualBox.StartupTimeout.Value() != 8*time.Minute || c.VirtualBox.Network.LAN != "10.99.0.0/24" || c.Storage.Days != 7 {
+		t.Fatal("duration or nested configuration differs")
+	}
+	if _, err = Load("../../config.example.yaml"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestStrictConfig(t *testing.T) {
-	for _, body := range []string{"service:\n  token: a\n  token: b\n", "service:\n  typo: a\n", "scheduler:\n  default_seconds: nope\n", "service: {}\n---\nservice: {}\n"} {
+	for _, body := range []string{"service:\n  token: a\n  token: b\n", "service:\n  typo: a\n", "tasks:\n  default_timeout: nope\n", "service: {}\n---\nservice: {}\n"} {
 		p := filepath.Join(t.TempDir(), "config.yaml")
 		if e := os.WriteFile(p, []byte(body), 0600); e != nil {
 			t.Fatal(e)
@@ -27,7 +46,7 @@ func TestStrictConfig(t *testing.T) {
 	if e := c.Validate(); e != nil {
 		t.Fatal(e)
 	}
-	c.Network.LAN = "10.0.2.0/24"
+	c.VirtualBox.Network.LAN = "10.0.2.0/24"
 	if c.Validate() == nil {
 		t.Fatal("WAN overlap accepted")
 	}
@@ -38,15 +57,15 @@ func TestRouterWithoutTemplatesValidatesISOAndPrograms(t *testing.T) {
 	c.Service.Token = "synthetic"
 	c.Service.StateDir = t.TempDir()
 	c.Service.PublicURL = "http://localhost:8765"
-	c.Router.ISO = "/fixture/router.iso"
+	c.VirtualBox.Router.ISO = "/fixture/router.iso"
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	c.Router.ISO = "relative/router.iso"
+	c.VirtualBox.Router.ISO = "relative/router.iso"
 	if c.Validate() == nil {
 		t.Fatal("relative router ISO accepted without templates")
 	}
-	c.Router.ISO = "/fixture/router.iso"
+	c.VirtualBox.Router.ISO = "/fixture/router.iso"
 	c.VirtualBox.ISOBuilder = "relative/xorriso"
 	if c.Validate() == nil {
 		t.Fatal("relative helper override accepted without templates")
@@ -123,7 +142,7 @@ func TestTemplateDefaultsAndUnboundedHTTPHosts(t *testing.T) {
 	c.Service.Token = "fixture"
 	c.Service.StateDir = t.TempDir()
 	c.Service.PublicURL = "http://example.test"
-	c.Router.ISO = "/fixture/router.iso"
+	c.VirtualBox.Router.ISO = "/fixture/router.iso"
 	c.VirtualBox.Templates = map[string]Template{"linux": {Kind: "linux", VM: "named-vm", Snapshot: "11111111-1111-4111-8111-111111111111", Username: "root", Password: "fixture"}}
 	if err := c.Validate(); err != nil {
 		t.Fatal(err)

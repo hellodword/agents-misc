@@ -82,9 +82,9 @@ The service uses an available logged-in administrator's elevated token for GUI
 commands; without one, it runs CLI commands as LocalSystem in the service session.
 Thus project commands have guest administrative privileges. The command supervisor
 puts Windows children in a kill-on-close Job Object **before** resuming them. The
-controller verifies and refreshes its packaged command binary in each clone;
-preparation installs the stable service launcher. Re-run preparation when changing
-the launcher protocol or baseline account. No project dependencies are installed
+controller probes the prepared command service and records its version/hash as
+diagnostic metadata. Re-run preparation when changing the guest protocol or
+baseline account. No project dependencies are installed
 implicitly by the MCP service.
 
 After Sysprep has shut down successfully, create a powered-off snapshot and put
@@ -146,16 +146,16 @@ snapshots/clones. MCP never deletes the source or its snapshots.
 ## Router Live ISO
 
 Build `nix build .#vm-test-router` in the container and place the resulting
-`vm-test-router.iso` at the host path configured by `router.iso`. No VM import,
+`vm-test-router.iso` at the host path configured by `virtualbox.router.iso`. No VM import,
 router account setup, installed disk or router snapshot is needed. Keep the build
 output rooted while it is configured. MCP creates a task-owned **1 vCPU / 256 MiB**
 EFI VM, attaches the read-only system ISO and a private read-only seed ISO, and
 connects Internal Network LAN plus VirtualBox NAT WAN.
 
 The ISO can be checked before preparing Windows/Linux templates. Configure only
-`router.iso`, restart the controller and create a lab with `nodes: []`. Wait for
-`state: running` and `network: ready`, exercise `network_set` for DHCP, upstream
-DNS and public egress, then finish the lab and verify `cleanup: complete`.
+`virtualbox.router.iso`, restart the controller and create a lab with `nodes: []`. Wait for
+`phase: running` and `network: ready`, exercise `network_set` for DHCP, upstream
+DNS and public egress, then finish the lab and verify `cleanup.state: complete`.
 Client DHCP/DNS traffic, NAT and TCP/UDP publication require a lab with test nodes.
 
 The ISO reads its squashfs store on demand and uses tmpfs for writable state; its
@@ -252,7 +252,16 @@ when changing policy or paths.
 
 ## Recovery
 
-An uncertain cleanup keeps scheduler occupancy. Stop the controller before local
+Inspect `node_get`, `task_events` and `task_diagnose` for node failures. `node_exec`
+provides a short Guest Control command even when first-boot initialization or the
+command service is unavailable. A running lab retains its nodes until the caller
+finishes/cancels or the task deadline expires. Startup failure collects what is
+available within its evidence budget and cleans the lab.
+
+For an ended VirtualBox task with `cleanup.state: blocked`, inspect each resource's
+steps and error, resolve the reported host problem, then call `task_cleanup` with
+a new request ID. It retries recorded ownership and verifies deletion before
+releasing the scheduler. If MCP is unavailable, stop the controller before local
 reconciliation; its private-directory lock prevents two owners. Review the SQLite
 task/resource records and VirtualBox state under the VM owner's account. Verify
 every recorded clone UUID, its task-owned configuration path, attached differencing

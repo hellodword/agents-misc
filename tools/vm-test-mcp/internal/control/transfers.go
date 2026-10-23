@@ -336,7 +336,7 @@ func (s *Server) Files(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 409, wire.Fail("sealed", "Transfer is sealed"))
 		return
 	}
-	quota := s.cfg.Retention.MaxUploadBytes
+	quota := s.cfg.Storage.MaxUploadBytes
 	for key, obj := range t.Objects {
 		if key != name {
 			quota -= obj.Size

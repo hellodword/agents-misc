@@ -60,7 +60,7 @@ Keep the worker untrusted and signature verification enabled. See the [Nix trust
 
 ## Acceptance and maintenance
 
-Use the skill's multi-node acceptance module with the consuming project's pinned nixpkgs and a fresh run ID. Retain node startup, CPU-count and network assertions. Then exercise a failing test and cancellation, checking logs, retained evidence and `cleanup: complete`.
+Use the skill's multi-node acceptance module with the consuming project's pinned nixpkgs and a fresh run ID. Retain node startup, CPU-count and network assertions. Then exercise a failing test and cancellation, checking logs, retained evidence and `cleanup.state: complete`.
 
 After interrupted daemon work, inspect the task and its builders from the host. Reconcile only that task after verifying its workers have stopped; the service keeps the resource occupied until then. Failure directories and store garbage collection remain administrator-owned maintenance.
 

@@ -41,7 +41,7 @@ let
       (nixpkgs + "/nixos/modules/profiles/minimal.nix")
       ({ ... }: {
         system.stateVersion = "26.05";
-        system.nixos.label = "vm-test-router-0.9.0";
+        system.nixos.label = "vm-test-router-0.10.0";
         networking.hostName = "vm-test-router";
         networking.useDHCP = false;
         networking.useNetworkd = false;
@@ -169,7 +169,7 @@ let
     ];
   };
 in
-pkgs.runCommand "vm-test-router-0.9.0"
+pkgs.runCommand "vm-test-router-0.10.0"
   {
     nativeBuildInputs = [
       pkgs.python3

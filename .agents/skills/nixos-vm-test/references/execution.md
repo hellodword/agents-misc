@@ -1,12 +1,12 @@
 # Executing NixOS VM tests
 
 Evaluate in the development container using the tested project's locked nixpkgs.
-The prepared VM Test MCP 0.9 worker submits the derivation to the physical host's
+The prepared VM Test MCP 0.10 worker submits the derivation to the physical host's
 Nix daemon; QEMU nodes run directly on host KVM inside its strict sandbox.
 
 ## Submission
 
-Use `service_describe` and `task_list`, then allocate a cache with
+Use `service_get` and `task_list`, then allocate a cache with
 `transfer_create(request_id=…, kind="cache")`. Poll `operation_get` for its transfer
 ID and upload URL. The prepared container provides Nix and `vm-test-submit`:
 
@@ -37,7 +37,9 @@ the worker a trusted Nix user to work around a cache failure.
 ## Observation and cleanup
 
 Follow the operation, then `task_get`, `task_events` and byte-offset `task_log`.
-Logs are base64 bytes with `next_offset`. The FIFO queue is shared with VirtualBox
+`task_get` separates `phase`, `result` and `cleanup.state`; completion is
+`phase: ended`, with the build conclusion under `result`. Logs are base64 bytes
+with `next_offset`. The FIFO queue is shared with VirtualBox
 labs. The daemon owns build parallelism; test definitions own node CPUs/RAM.
 
 List completed output files with `artifact_list` and retrieve scoped URLs with
@@ -47,7 +49,7 @@ do not authorize host file reads. Failed-build directories belong to administrat
 diagnosis; task stderr/logs remain available.
 
 `task_cancel` requests cancellation. An interrupted daemon build can have
-`cleanup: required`; this continues to occupy the scheduler until the administrator
+`cleanup.state: blocked`; this continues to occupy the scheduler until the administrator
 verifies teardown and performs local reconciliation. Reconnect to the original
 task after HTTP loss. `task_purge` is accepted only after terminal state and
 complete cleanup. Evidence is retained by default.

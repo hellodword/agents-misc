@@ -2,17 +2,12 @@ package control
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"io"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/hellodword/agents-misc/vm-test-mcp/internal/config"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
@@ -73,47 +68,44 @@ func (b *VBoxBackend) waitPowerOff(ctx context.Context, n *Node) error {
 	}
 }
 
-func (b *VBoxBackend) ensureSupervisor(ctx context.Context, t *Task, n *Node) error {
+func (b *VBoxBackend) nodeStatus(ctx context.Context, t *Task, n *Node) (*NodeStatus, error) {
+	info, err := b.info(ctx, n.UUID)
+	if err != nil {
+		return nil, err
+	}
+	status := &NodeStatus{State: info["VMState"]}
+	if status.State != "running" {
+		return status, nil
+	}
 	c := b.guestConfig(t, n)
-	local, err := config.GuestBinary(c.Kind)
+	probe := []string{"/bin/true"}
+	if c.Kind == "windows" {
+		probe = []string{`C:\Windows\System32\cmd.exe`, "/d", "/c", "exit", "0"}
+	}
+	if _, err = b.guestCommand(ctx, t, n, probe, "", nil); err != nil {
+		status.GuestError = wire.Safe(err)
+		return status, nil
+	}
+	raw, err := b.guestExec(ctx, t, n, false, "probe", "--root", c.WorkDir)
 	if err != nil {
-		return wire.Fail("guest_binary_missing", "Packaged guest supervisor was not found")
+		status.ServiceError = wire.Safe(err)
+	} else if json.Unmarshal(raw, &status.Guest) != nil || status.Guest == nil {
+		status.ServiceError = &wire.Error{Code: "guest_protocol_error", Message: "Guest probe did not return a status object"}
+	} else if status.Guest["prepared"] != true || status.Guest["privileged"] != true {
+		status.ServiceError = &wire.Error{Code: "guest_not_ready", Message: "Guest initialization or command service is not ready"}
 	}
-	f, err := os.Open(local)
-	if err != nil {
-		return err
-	}
-	h := sha256.New()
-	_, err = io.Copy(h, f)
-	f.Close()
-	if err != nil {
-		return err
-	}
-	expected := hex.EncodeToString(h.Sum(nil))
-	probe := func() error {
-		raw, err := b.guestExec(ctx, t, n, false, "probe", "--root", c.WorkDir)
-		if err != nil {
-			return err
+	if c.Kind == "linux" {
+		args := []string{"/bin/systemctl", "show", "--no-pager", "--property=Version", "--value"}
+		if status.Guest["prepared"] != true {
+			args = []string{"/bin/systemctl", "show", "vm-test-firstboot.service", "--no-pager", "--property=ActiveState", "--property=SubState", "--property=Result"}
 		}
-		var v struct {
-			Version    string `json:"version"`
-			SHA256     string `json:"sha256"`
-			Privileged bool   `json:"privileged"`
-			Prepared   bool   `json:"prepared"`
+		result, callErr := b.guestCommand(ctx, t, n, args, "", nil)
+		if callErr != nil {
+			status.ServiceError = wire.Safe(callErr)
+		} else if strings.Contains(string(result.Stdout), "ActiveState=failed") {
+			status.PreparationFailed = true
+			status.ServiceError = &wire.Error{Code: "initialization_failed", Message: "Guest first-boot service failed", Details: map[string]any{"status": string(result.Stdout)}}
 		}
-		if json.Unmarshal(raw, &v) != nil || v.Version != wire.Version || v.SHA256 != expected || !v.Privileged || !v.Prepared {
-			return wire.Fail("guest_preparation_required", "Prepare the baseline with the packaged guest preparation command")
-		}
-		return nil
 	}
-	if err = probe(); err == nil {
-		return nil
-	}
-	// The explicit baseline preparation creates the install/work directories,
-	// command privilege boundary and first-boot identity hook. Updating this
-	// command binary neither changes the source VM nor installs optional tools.
-	if err = b.copyTo(ctx, t, n, local, c.Supervisor); err != nil {
-		return err
-	}
-	return probe()
+	return status, nil
 }

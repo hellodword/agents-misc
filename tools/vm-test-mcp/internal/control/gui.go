@@ -98,10 +98,16 @@ func (s *Server) changeGUI(a GUIRequest) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	r.gate.RLock()
+	ctx, cancel := context.WithTimeout(r.ctx, 30*time.Second)
+	defer cancel()
+	if err = readGate(ctx, &r.gate); err != nil {
+		return nil, err
+	}
 	defer r.gate.RUnlock()
 	lock := s.nodeLock(r, "gui")
-	lock.Lock()
+	if err = lockContext(ctx, lock); err != nil {
+		return nil, err
+	}
 	defer lock.Unlock()
 	s.mu.Lock()
 	_, _, err = s.running(a.TaskID.TaskID)
@@ -109,8 +115,6 @@ func (s *Server) changeGUI(a GUIRequest) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(r.ctx, 30*time.Second)
-	defer cancel()
 	err = s.setGUI(ctx, t, a.MaxGuestResolution, false)
 	return map[string]any{"max_guest_resolution": a.MaxGuestResolution}, err
 }

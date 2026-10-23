@@ -1,4 +1,4 @@
-# VM Test MCP 0.9 contract
+# VM Test MCP 0.10 contract
 
 ## Transport and identity
 
@@ -19,15 +19,17 @@ Poll `operation_get`; reconnecting does not create another execution. A pending
 receipt found on controller restart becomes uncertain and is never blindly replayed.
 
 Errors are MCP tool errors with structured `{"error":{"code":"…","message":"…"}}`
-and the same JSON in text content. HTTP errors use that envelope. Messages exclude
-host paths, guest credentials and raw subprocess errors. `details`, when present,
-is an object; no current error requires it. Stable codes include `invalid_argument`,
+and the same JSON in text content. HTTP errors use that envelope. Messages are safe summaries. Backend errors retain a bounded diagnostic in
+`details`: `stage`, `exit_code`, `stderr`, `timed_out`. Configured credentials,
+baseline identifiers and the controller state directory are redacted. Node and
+cleanup failures can include `node_id`, `cause` or `last_error`. Stable codes include `invalid_argument`,
 `not_found`, `invalid_state`, `request_conflict`, `conflict`, `policy_denied`,
 `limit_exceeded`, `resource_busy`, `backend_error`, `network_degraded`,
 `cleanup_required`, `input_order`, `input_closed`, `invalid_cache`, `sealed`,
 `quota_exceeded`, `invalid_path`, `unauthorized`, `expired`, `host_denied`,
 `origin_denied`, `purged`, `worker_unavailable`, `gui_conflict`,
-`guest_preparation_required`, `guest_not_ready` and `router_unavailable`.
+`guest_not_ready`, `initialization_failed`, `node_stopped`, `backend_timeout`,
+`backend_cancelled`, `backend_protocol_error`, `node_unavailable`, `cleanup_timeout` and `router_unavailable`.
 
 ## Tools
 
@@ -37,11 +39,15 @@ No public tool accepts a host executable, directory, VM UUID or raw backend opti
 
 | Tool                          | Parameters and result                                                                                                                                                          |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `service_describe`            | No parameters; version, templates/policy, backend availability, active task and limits                                                                                         |
+| `service_get`                 | No parameters; version, templates/policy, backend availability, active task and limits                                                                                         |
 | `lab_create`                  | `nodes`, optional `lan`, `dhcp`, `dns`, `internet`, `timeout_seconds`; creates queued lab                                                                                      |
 | `nixos_run`                   | `cache_id`, `derivation`, `system`, optional `timeout_seconds`; seals cache and queues job                                                                                     |
 | `task_list`                   | Optional `cursor`, `limit`; submission-order items and next cursor                                                                                                             |
 | `task_get`                    | `task_id`; task, nodes, commands, entries, captures, artifacts and cleanup                                                                                                     |
+| `node_get`                    | `task_id`, `node_id`; power, expected state, preparation, health and capabilities                                                                                              |
+| `task_diagnose`               | `task_id`, optional `node_ids`; bounded evidence manifest and artifact IDs                                                                                                     |
+| `node_exec`                   | `task_id`, `node_id`, absolute guest `argv`, optional `cwd`, `env`, `timeout_seconds` (default 10, maximum 30); direct Guest Control result and artifact                       |
+| `task_cleanup`                | `task_id`; retry resource cleanup of an ended VirtualBox task                                                                                                                  |
 | `task_events`                 | `task_id`, optional `cursor`, `limit`; ordered events after cursor                                                                                                             |
 | `task_log`                    | `task_id`, optional byte `offset`, `limit`; base64 `data`, `next_offset`, `eof`                                                                                                |
 | `operation_get`               | `operation_id`; durable receipt                                                                                                                                                |
@@ -82,7 +88,7 @@ first host address. Node names, MACs and IPv4 addresses must be unique. Network
 and broadcast addresses are unavailable. Media defaults off even if policy permits
 it. Set a node `camera` alias when requesting `media.camera`; runtime camera operations also require an allowed alias. 3D is selected before boot. Router IDs are not exposed as test-node targets.
 
-An explicit `nodes: []` creates only the router, using `router.iso` without any
+An explicit `nodes: []` creates only the router, using `virtualbox.router.iso` without any
 registered templates. This supports boot and dynamic policy checks before guest
 baselines are prepared. Missing or null `nodes` is rejected. Router-only labs do
 not change the global GUI policy. Client DHCP, LAN forwarding and published
@@ -99,23 +105,92 @@ samples. Video caps at 1 GiB. Guest archives remain opaque on the host.
 
 ## Lifecycle and recovery
 
-Tasks move `queued → preparing → running → terminal`, with terminal states
-`finished`, `failed`, `cancelled`, `timed_out`, `interrupted`. Cleanup is independent:
-`pending`, `running`, `complete`, `required`; `cleanup_errors` exposes safe codes/messages when cleanup needs intervention. One task occupies the scheduler until
-cleanup is confirmed, including unresolved daemon work. Backend/resource conflicts
-remain queue waiting reasons. An unavailable worker rejects new `nixos_run` calls
-before allocating a receipt; the same request can be retried after startup. An
-accepted but still unsubmitted queued Nix task fails with complete cleanup if the
-worker disappears, allowing the next task to proceed. Once build submission may
-have occurred, daemon cleanup must be confirmed. Commands have independent
-supervision and exit states.
+`task_get` and list items expose three independent fields:
 
-Deadlines start when execution begins; defaults are one hour, maximum total duration
-24 hours, both configurable. Node operations do not reset deadlines. Lab conclusions
-are `passed`, `failed`, `inconclusive` with a caller summary. Nix conclusions come
-from the build result. Service restart interrupts and cleans labs before advancing
-the queue. A local administrator retries registered cleanup after investigation;
-HTTP cannot waive ownership checks or attest daemon cleanup.
+- `phase`: `queued`, `preparing`, `running`, `ended`. Queued tasks include
+  `waiting_reason`; backend/resource conflicts keep the first queued task waiting.
+- `result`: null until execution ends, then `termination` (`finished`, `failed`,
+  `cancelled`, `timed_out`, `interrupted`), `conclusion`, `summary`, `reason`, `error`.
+  Lab conclusions come from `task_finish`; Nix conclusions come from the build.
+- `cleanup`: `state` (`pending`, `running`, `complete`, `blocked`), `errors` and
+  resource records containing `id`, `name`, `released`, `steps`. Each step records
+  state, attempt count, update time and any error. Task events carry phase, result
+  and cleanup state at the event time.
+
+One task occupies the scheduler until resource cleanup is confirmed. An offline
+worker rejects new `nixos_run` calls before allocating a receipt; the request can
+be retried after startup. A queued Nix job which has not been submitted fails with
+complete cleanup if the worker disappears. Once build submission may have occurred,
+daemon cleanup must be confirmed locally.
+
+Deadlines start when execution begins, default to one hour and allow explicit
+extension up to 24 hours total. `tasks` configures these limits and a cleanup budget
+(default 5 minutes). Node operations do not reset task deadlines. Cleanup starts by
+closing published entries and cancelling in-flight calls, then collects bounded
+evidence and deletes registered resources. Evidence uses at most 30 seconds and
+one third of the remaining cleanup budget. Node deletions run independently, with
+up to three attempts and at most 30 seconds per attempt. Ownership conflicts stop
+that resource's retry. Partial progress is persisted; `task_cleanup` can retry the
+remaining VirtualBox resources with a new request ID. Cleanup failure keeps the
+scheduler occupied. Restart interrupts active tasks and resumes registered cleanup;
+a result already recorded remains unchanged.
+
+### Node observations and command results
+
+`node_get` returns observed VM `state`, `preparation` (`pending`, `creating`, `starting`,
+`guest_control`, `initializing`, `ready`, `failed`), `expected` power transition,
+`health` and `capabilities`. Health separates `virtualbox`, `guest_control` and
+`commands`. Observations contain `state`, `checked`, `last_success`, `failure_since`,
+consecutive `failures`/`successes` and `error`. An absent observation is `unknown`;
+other states are `available`, `suspect`, `unavailable` and `expected`.
+
+A probe has a 10-second total deadline and runs every 5 seconds without overlapping
+another probe of the same node. Three actual failures sustained for
+`virtualbox.unavailable_after` (default 30 seconds) mark the capability unavailable;
+local capacity waits do not count as backend failures. Two successful observations
+recover it. Explicit unexpected VM termination or a failed initialization unit is
+reported immediately. Intentional pause/shutdown and bounded restart transitions
+have expected states. Running faults collect evidence and retain the lab, including
+healthy nodes. They do not recreate/restart it. A responsive guest can continue initializing up to the startup deadline. Once
+Guest Control is established, sustained control loss or an unresponsive command
+service uses the shorter unavailability budget. Initialization failure ends the
+whole lab and cleans it after bounded evidence collection; a new run requires a
+new `lab_create` request.
+
+Guest Control is tested independently of the prepared command service. Guest
+version/hash are diagnostic metadata; readiness depends on the required live
+capabilities. Command polling retains the last confirmed execution state and a
+separate `observation`. `command_cancel` persists `cancellation: requested` and
+retries delivery until the guest confirms cancellation or task cleanup confirms
+VM deletion; a delivery receipt alone is not termination evidence.
+
+### Diagnostics and direct guest execution
+
+`task_diagnose` uses a shared 30-second budget. Windows PowerShell collectors
+receive up to 10 seconds per call to accommodate process startup; other items
+receive up to 5 seconds. Every call also respects the remaining shared budget. Its
+manifest lists each node's observation, selected VM metadata, available VBox log,
+screenshot, initialization and service/kernel evidence. An item is `collected`,
+`partial`, `unavailable` or `skipped`; successful items survive another item's
+failure. Omitting `node_ids` includes the router; selecting nodes accepts ordinary
+test-node IDs only. Preparation and running faults use the same collector.
+
+`node_exec` and screenshots are available during preparation and for surviving
+resources of an ended, blocked task. Direct commands use configured credentials,
+absolute guest executables and argv; they do not depend on the supervisor or lab
+LAN. Timeouts include local capacity/lock waits. Results contain base64 `stdout`
+and `stderr`, truncation flags, `backend_exit_code`, `exit_code` when known,
+`exit_code_min` for a truncated large exit status, `termination`,
+`termination_confirmed`, `state`, `error` and `artifact_id`. Stdout is bounded to
+1 MiB, stderr to 8 KiB. The stderr stream can include VBoxManage diagnostics.
+
+A completed nonzero guest exit is a completed operation, separate from an
+application assertion. VBoxManage maps guest exits 1..93 to host codes 33..125;
+host code 126 confirms a guest exit of at least 94. Timeouts can leave termination
+unconfirmed, in which case both result and receipt remain `uncertain`; retries
+with the original request ID retrieve that receipt. These mappings follow
+[VirtualBox's Guest Control implementation](https://github.com/VirtualBox/virtualbox/blob/main/src/VBox/Frontends/VBoxManage/VBoxManageGuestCtrl.cpp).
+Use `command_start` for durable output, stdin and process-group supervision.
 
 Endpoint ports default to 20000–29999; each entry uses a public relay port and
 a loopback NAT port. Up to 128 declared entries and 256 relay connections/UDP peers
@@ -155,6 +230,6 @@ upload prevents sealing. The default transfer limit is 8 GiB. File access uses
 directory handles and rejects symlinks; host archive extraction is not provided.
 
 Artifacts include length and SHA-256. Inputs/evidence are retained until explicit
-purge unless `retention.days` is positive. Purge retains task summary, conclusions,
+purge unless `storage.retention_days` is positive. Purge retains task summary, conclusions,
 receipt identity/hash/status, events and cleanup records. Old receipt payloads are replaced by a purged marker. The worker drops GC roots only
 on purge. Failed build directories remain administrator-managed.

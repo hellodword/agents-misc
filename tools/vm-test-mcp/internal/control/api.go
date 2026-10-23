@@ -194,6 +194,17 @@ type ArtifactGetRequest struct {
 	ArtifactID string `json:"artifact_id"`
 }
 
+type DiagnoseRequest struct {
+	TaskChange
+	NodeIDs []string `json:"node_ids,omitempty"`
+}
+type ExecRequest struct {
+	NodeChange
+	Argv           []string          `json:"argv"`
+	Cwd            string            `json:"cwd,omitempty"`
+	Env            map[string]string `json:"env,omitempty"`
+	TimeoutSeconds int               `json:"timeout_seconds,omitempty"`
+}
 type Definition struct {
 	Name, Description string
 	Args              any
@@ -201,10 +212,14 @@ type Definition struct {
 }
 
 var Definitions = []Definition{
-	{"service_describe", "Describe templates, backend availability and effective limits", struct{}{}, false},
+	{"service_get", "Describe templates, backend availability and effective limits", struct{}{}, false},
 	{"lab_create", "Queue independent linked-clone nodes and a private router", LabRequest{}, true},
 	{"nixos_run", "Queue an uploaded derivation closure for sandboxed host KVM execution", NixRequest{}, true},
 	{"task_list", "List tasks in submission order", ListRequest{}, false}, {"task_get", "Read task, nodes, commands, network and cleanup", TaskID{}, false},
+	{"node_get", "Read node capabilities, observations and expected state", NodeID{}, false},
+	{"task_diagnose", "Collect bounded host and guest evidence, including during preparation", DiagnoseRequest{}, true},
+	{"node_exec", "Run a short guest command through Guest Control independently of the command service", ExecRequest{}, true},
+	{"task_cleanup", "Release remaining resources of an ended VirtualBox lab and verify cleanup", TaskChange{}, true},
 	{"task_events", "Read events after a cursor", EventsRequest{}, false}, {"task_log", "Read task log bytes at an offset", LogRequest{}, false}, {"operation_get", "Read a durable operation receipt", OperationRequest{}, false},
 	{"task_finish", "Submit a lab conclusion and clean up its resources", FinishRequest{}, true}, {"task_cancel", "Cancel a task and clean up", TaskChange{}, true}, {"task_extend", "Extend an executing task within the configured total limit", ExtendRequest{}, true}, {"task_purge", "Remove retained data for a cleaned terminal task", TaskChange{}, true},
 	{"command_start", "Execute argv under the guest supervisor", StartRequest{}, true}, {"command_get", "Read a command's independent exit state", CommandRequest{}, false}, {"command_read", "Read command output by byte offset", ReadRequest{}, false}, {"command_input", "Persist ordered stdin or EOF", InputRequest{}, true}, {"command_cancel", "Cancel one supervised process group", CancelCommandRequest{}, true},
@@ -347,6 +362,11 @@ func (s *Server) Call(ctx context.Context, name string, raw []byte) (any, error)
 		defer s.mu.Unlock()
 		op.State = "succeeded"
 		op.Result = result
+		if name == "node_exec" && e == nil {
+			if value, ok := result.(map[string]any); ok && value["state"] == "uncertain" {
+				op.State = "uncertain"
+			}
+		}
 		if e == nil && (name == "lab_create" || name == "nixos_run") {
 			if task, ok := result.(map[string]any); ok {
 				op.TaskID, _ = task["id"].(string)
@@ -355,7 +375,7 @@ func (s *Server) Call(ctx context.Context, name string, raw []byte) (any, error)
 		if e != nil {
 			op.State = "failed"
 			op.Error = wire.Safe(e)
-			if name == "node_input" && op.Error.Code == "backend_error" {
+			if oneOf(name, "node_input", "node_control", "command_start", "command_cancel") && oneOf(op.Error.Code, "backend_error", "backend_timeout", "backend_cancelled") {
 				op.State = "uncertain"
 			}
 		}

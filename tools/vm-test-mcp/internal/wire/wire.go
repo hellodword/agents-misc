@@ -4,6 +4,7 @@ package wire
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -15,7 +16,7 @@ import (
 	"strings"
 )
 
-const Version = "0.9.0"
+const Version = "0.10.0"
 const MaxJSON = 1 << 20
 
 type Error struct {
@@ -30,6 +31,12 @@ func Safe(err error) *Error {
 	var e *Error
 	if errors.As(err, &e) {
 		return e
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return &Error{Code: "backend_timeout", Message: "Operation exceeded its time budget"}
+	}
+	if errors.Is(err, context.Canceled) {
+		return &Error{Code: "backend_cancelled", Message: "Operation was cancelled before its result was confirmed"}
 	}
 	return &Error{Code: "backend_error", Message: "Operation failed; inspect task events and administrator diagnostics"}
 }

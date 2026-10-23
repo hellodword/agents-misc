@@ -25,7 +25,8 @@ generic USB filters and host serial/parallel devices. Register the source VM
 name/UUID and snapshot UUID. Each lab linked-clones that snapshot directly; there
 is no full-copy preparation cache. The source is never a command target.
 
-The controller checks and refreshes the packaged command binary in its clones.
+The controller probes the prepared command service in its clones; its version and
+hash are evidence, while live capabilities determine readiness.
 Windows children enter Job Objects before execution; Linux commands enter system
 cgroups. Without a desktop login, Windows CLI commands can run through the prepared
 LocalSystem command service. With a logged-in administrator, it can run commands

@@ -191,7 +191,7 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 					Reason    string `json:"waiting_reason"`
 				} `json:"backends"`
 			}
-			if err := call(ctx, session, "service_describe", map[string]any{}, &description); err != nil {
+			if err := call(ctx, session, "service_get", map[string]any{}, &description); err != nil {
 				return nil, err
 			}
 			// Busy execution resources can accept queued work. The controller
@@ -274,12 +274,14 @@ func observe(ctx context.Context, session *mcp.ClientSession, root *safefs.Root,
 			return nil, err
 		}
 		var task struct {
-			State, Cleanup, Conclusion string
+			Phase   string
+			Result  struct{ Termination, Conclusion string }
+			Cleanup struct{ State string }
 		}
 		if err := json.Unmarshal(raw, &task); err != nil {
 			return nil, err
 		}
-		if status := task.State + "/" + task.Cleanup; status != previous {
+		if status := task.Phase + "/" + task.Cleanup.State; status != previous {
 			fmt.Fprintln(o.Progress, status)
 			previous = status
 		}
@@ -311,13 +313,13 @@ func observe(ctx context.Context, session *mcp.ClientSession, root *safefs.Root,
 				break
 			}
 		}
-		terminal := task.State == "finished" || task.State == "failed" || task.State == "cancelled" || task.State == "timed_out" || task.State == "interrupted"
-		if terminal && (task.Cleanup == "complete" || task.Cleanup == "required") {
+		terminal := task.Phase == "ended"
+		if terminal && (task.Cleanup.State == "complete" || task.Cleanup.State == "blocked") {
 			if _, _, err := root.Write("result.json", bytes.NewReader(raw), 4<<20); err != nil {
 				return nil, err
 			}
-			if task.State != "finished" || task.Conclusion != "passed" || task.Cleanup != "complete" {
-				return raw, fmt.Errorf("task %s: state=%s conclusion=%s cleanup=%s", id, task.State, task.Conclusion, task.Cleanup)
+			if task.Result.Termination != "finished" || task.Result.Conclusion != "passed" || task.Cleanup.State != "complete" {
+				return raw, fmt.Errorf("task %s: state=%s conclusion=%s cleanup=%s", id, task.Result.Termination, task.Result.Conclusion, task.Cleanup.State)
 			}
 			return raw, nil
 		}
