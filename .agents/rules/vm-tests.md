@@ -1,6 +1,7 @@
 # VM Test Execution
 
 - Select a prepared, authorized executor and registered template. Reuse an established project-local flow when it meets the task. Environment preparation belongs to a separately authorized setup task and its manual guide.
+- Default to headless VM execution. Select a host-visible GUI when explicitly required by the user or scoped project requirements, or when verified evidence shows that the test depends on that frontend. State the supporting requirement or evidence and apply GUI only to the nodes that need it.
 - Use the service's task IDs, scoped transfer URLs and artifact records. Retry identical submissions with the same ID; give new executions a fresh ID.
 - Keep execution bounded by task deadlines. HTTP connection state is separate from task state; reconnect to inspect the original task before submitting another execution.
 - Treat native input delivery and application success as separate observations. Inspect an unconfirmed delivery before sending another action. Keep capture identities and evidence errors alongside the task's cleanup result.

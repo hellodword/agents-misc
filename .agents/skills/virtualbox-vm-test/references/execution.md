@@ -13,6 +13,10 @@ name and a registered template, optional IPv4/CPU/memory overrides, per-node GUI
 and media requests. Using the same Windows template twice creates independent
 clones. The private router is not a test-command target.
 
+Each node's `gui` flag selects its host frontend: omitted or `false` uses headless;
+`true` opens a host-visible VirtualBox window. A GUI frontend requires the
+controller to run in the VM owner's graphical session.
+
 Poll `operation_get` until the creation receipt resolves, then `task_get` until
 `phase` is `running`. `node_get` exposes preparation stage, expected power state,
 capabilities and health observations while the lab prepares. Keep original IDs after disconnects and retry identical
@@ -65,11 +69,12 @@ IPv6 communication is possible, with no managed IPv6 egress/publication.
 
 ## Desktop and evidence
 
-Use `node_screenshot`, `node_display`, `node_input` and `node_media` only within
-advertised policy. Native input is serialized per node; delivery receipts are
+Headless nodes can run guest desktop applications. Use `node_screenshot`,
+`node_display`, `node_input` and `node_media` only within advertised policy.
+Native input is serialized per node; delivery receipts are
 independent of application assertions. If input is uncertain, inspect the current
 screen before deciding whether another action is appropriate. Media is off unless
-requested; 3D is selected before boot. GUI requires the controller's graphical session.
+requested; 3D is selected before boot.
 Automatic login is optional; inspect and log in/unlock through native input if
 needed. Use agent vision and assertions, not an assumed MCP vision component.
 `node_display(auto_resize=…)` controls per-node automatic resizing (default false).
