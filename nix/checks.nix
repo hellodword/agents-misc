@@ -5,6 +5,7 @@
   codexConfigAtlasFor,
   agentsViewerFor,
   formattingCheckFor,
+  vmTestFor,
 }:
 
 lib.genAttrs supportedSystems (
@@ -98,5 +99,10 @@ lib.genAttrs supportedSystems (
   }
   // lib.optionalAttrs pkgs.stdenv.isLinux {
     agents-viewer-e2e = agentsViewer.checks.e2e;
+  }
+  // lib.optionalAttrs (system == "x86_64-linux") {
+    vm-test-mcp = (vmTestFor system).package;
+    vm-test-native = (vmTestFor system).native;
+    vm-test-router = (vmTestFor system).router;
   }
 )

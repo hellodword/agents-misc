@@ -1,40 +1,64 @@
 # Executing NixOS VM tests
 
-The Agent evaluates the project in its container. A prepared HTTP MCP service submits the resulting derivation to the physical host's Nix daemon. The test framework starts its nodes directly on host KVM.
+Evaluate in the development container using the tested project's locked nixpkgs.
+The prepared VM Test MCP 0.9 worker submits the derivation to the physical host's
+Nix daemon; QEMU nodes run directly on host KVM inside its strict sandbox.
 
-## Prepare and submit
+## Submission
 
-Use `targets` to identify Nix availability, effective task limits and existing tasks. Allocate a binary cache with `transfer_create(kind="cache")`; its `id` and `url` identify one input transfer. Supply local Python 3.11+ and Nix through the project environment.
+Use `service_describe` and `task_list`, then allocate a cache with
+`transfer_create(request_id=…, kind="cache")`. Poll `operation_get` for its transfer
+ID and upload URL. The prepared container provides Nix and `vm-test-submit`:
 
 ```sh
-nix develop --command python3 scripts/nix-vm-test.py \
-  '.#checks.x86_64-linux.integration' \
-  --run-id project-integration-001 \
-  --cache-url 'HTTP_CACHE_URL_FROM_MCP'
+vm-test-submit --test '.#checks.x86_64-linux.integration' \
+  --request-id integration-001 --cache-id CACHE_ID --cache-url CACHE_URL \
+  --work-dir /absolute/ignored/task-workspace
 ```
 
-The helper evaluates with `--no-update-lock-file`, requires `config.qemu.forceAccel = true` and QEMU nodes, and uses `overrideTestDerivation` to give the top-level test a fresh name. Node images and dependencies retain their cache identities. Use a new run ID for a new execution, and the same ID when retrying an interrupted submission of identical inputs.
+The helper refuses lockfile updates, checks `qemu.forceAccel`, QEMU nodes and the
+absence of nspawn containers, and creates a fresh top-level test identity through
+`overrideTestDerivation`. It saves evaluated metadata in the task workspace so a
+retry uses that same derivation even if the checkout changes. Dependencies retain
+their cache identities. New executions need new request IDs and workspaces.
 
-It copies the derivation closure with `nix copy --derivation` and prints JSON containing `request_id`, `drv` and `system`. Submit these through `task_begin(kind="nixos", request_id=…, cache_id=…, drv=…)`. Submission seals the cache and queues execution. The service's configured deadline is the maximum accepted task timeout.
+It copies the derivation closure into a standard local binary cache, then uploads
+cache objects over bounded HTTP. Submit its JSON (`request_id`, `cache_id`,
+`derivation`, `system`) through `nixos_run`. Submission validates/seals the cache
+and queues work. `worker_unavailable` before acceptance does not reserve the
+request ID; retain the uploaded cache and retry the same request after the worker
+starts. Do not submit duplicate jobs to work around an uncertain accepted execution. If the project's wrapper hides standard test metadata/override
+interfaces, adapt that project's entrypoint within its existing output policy.
 
-The helper relies on the standard `runNixOSTest` inspection and override interfaces. If a project wrapper hides those interfaces, adapt that project's entrypoint to expose equivalent metadata and a fresh top-level derivation. Adding an entrypoint does not itself adopt new flake outputs.
+Use an administrator-approved `--signing-key /absolute/private/key` when local
+input-addressed objects need signatures. Preserve signature validation. Never make
+the worker a trusted Nix user to work around a cache failure.
 
-## Execution and evidence
+## Observation and cleanup
 
-Poll the compact `task_status(task_id)` and read `task_log` using `next_offset`. Status includes `outcome`, worker phase/exit code and cleanup confirmation. A queued task waits for current virtualization work to finish. The worker imports inputs through ordinary Nix verification and invokes the daemon with fixed build parameters, including local builder selection, `--keep-failed` and a builder timeout.
+Follow the operation, then `task_get`, `task_events` and byte-offset `task_log`.
+Logs are base64 bytes with `next_offset`. The FIFO queue is shared with VirtualBox
+labs. The daemon owns build parallelism; test definitions own node CPUs/RAM.
 
-Successful results expose named output roots in `artifacts.nix_outputs`. List a root or subdirectory, then use `artifact_download` for selected regular files. Previously exported files are listed in `artifacts.items`; follow `next_offset` until null for all pages. Test scripts should place useful reports, screenshots and diagnostics in their normal test output. Directory listings are limited to 2000 entries; descend into narrower directories when needed.
+List completed output files with `artifact_list` and retrieve scoped URLs with
+`artifact_get`. The worker reads only registered store output roots, rejects
+symlink boundaries, and retains GC roots until purge. Paths printed by test code
+do not authorize host file reads. Failed-build directories belong to administrator
+diagnosis; task stderr/logs remain available.
 
-Text logs remain available for failed builds. Nix retains failed build directories for the administrator; automatic downloads use recorded output roots, not paths printed by arbitrary build output. Successful outputs have task-owned GC roots during retention. Retrieve needed evidence before that retention period expires; failed build directories remain administrator-owned.
+`task_cancel` requests cancellation. An interrupted daemon build can have
+`cleanup: required`; this continues to occupy the scheduler until the administrator
+verifies teardown and performs local reconciliation. Reconnect to the original
+task after HTTP loss. `task_purge` is accepted only after terminal state and
+complete cleanup. Evidence is retained by default.
 
-`task_cancel` requests cancellation and reports its progress through `task_status`. A normal Nix completion establishes worker teardown. If the client is interrupted during a build, `cleanup_unknown` keeps virtualization occupancy until the worker administrator verifies cleanup and reconciles that task. Reconnect to the same task after an HTTP disconnect; task execution belongs to the service, not the client connection.
+## Acceptance and diagnosis
 
-## Diagnosis and acceptance
+Use a fresh execution of the linked multi-node smoke module for initial acceptance.
+Actual guest startup/assertions on KVM, a sandbox host-marker probe and rejection
+of `__noChroot` are required alongside administrator-confirmed daemon policy.
+Device presence or a `kvm` feature declaration alone is insufficient evidence.
 
-Compilation parallelism belongs to the host daemon; node CPUs and RAM belong to the NixOS test module. Device presence and declared `kvm` features are preliminary evidence. Initial acceptance requires a fresh test that actually starts its nodes and passes assertions in the sandbox.
-
-For assertion failures, inspect serial/journal output, collect relevant application logs in the test, and rerun a fresh derivation. For missing host tools, daemon access or sandbox KVM access, report the preparation requirement; do not provision the executor through this runtime workflow.
-
-For signature failures, compare the path's provenance, NarHash and signatures with an existing trusted cache. Prefer obtaining identical signed content from that cache, or building the producing derivation on the executor. Preserve signature verification. The [preparation guide](preparation.md) covers the administrator's trust and sandbox setup.
-
-The [Nix copy manual](https://nix.dev/manual/nix/2.34/command-ref/new-cli/nix3-copy.html) and [Nix configuration reference](https://nix.dev/manual/nix/2.34/command-ref/conf-file.html) describe the underlying interfaces.
+For assertions, collect relevant guest journals/serial output and change the test
+before a fresh run. For host daemon, KVM, trust or baseline prerequisites, report
+the preparation issue; this runtime workflow does not provision the executor.

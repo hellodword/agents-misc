@@ -4,15 +4,15 @@ This manual guide is for the host administrator. Runtime test execution uses an 
 
 ## Roles and tools
 
-| Role                | Requirements                                                                                                                |
-| ------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| Agent container     | Python 3.11+, Nix with `nix-command` and `flakes`, project inputs and HTTP access to the MCP service                        |
-| Physical Linux host | Multi-user Nix, hardware virtualization, working `/dev/kvm`, sufficient RAM and disk                                        |
-| MCP controller      | Python 3.11+, uv and its declared MCP SDK; an account owning registered VirtualBox test VMs when Windows testing is enabled |
-| Nix worker          | Separate ordinary account, Python 3.11+, Nix CLI, daemon socket access and a private state directory                        |
-| Test nodes          | Driver and guest packages supplied by the project's locked nixpkgs                                                          |
+| Role                | Requirements                                                                          |
+| ------------------- | ------------------------------------------------------------------------------------- |
+| Agent container     | `vm-test-submit`, Nix with `nix-command` and `flakes`, project inputs and HTTP access |
+| Physical Linux host | Multi-user Nix, hardware virtualization, working `/dev/kvm`, sufficient RAM and disk  |
+| MCP controller      | Go controller package; the VirtualBox owner account when labs are enabled             |
+| Nix worker          | Ordinary account, Go worker package, Nix CLI, daemon socket and private state         |
+| Test nodes          | Driver and guest packages supplied by the project's locked nixpkgs                    |
 
-The worker uses the existing host store and daemon. Store contents are readable task inputs. Keep its account outside `trusted-users`; Nix documents trusted users as effectively root-equivalent. The controller reaches the worker through a group-restricted Unix socket. The service's installation guide owns its executable paths, configuration and systemd examples.
+The worker uses the existing host store and daemon. Store contents are readable task inputs. Keep its account outside `trusted-users`; Nix documents trusted users as effectively root-equivalent. The controller reaches the worker through a UID-authenticated Unix socket. Controller and worker may share an account and read one shared YAML file; there is no special configuration-file permission requirement. Their state directories remain separate. When using different accounts, provide socket access through a shared group. The service installation guide owns executable paths, configuration and supervision examples. MCP remains available while the worker is offline.
 
 ## Daemon and KVM
 
@@ -37,7 +37,7 @@ Inspect `/dev/kvm`, the actual Nix build group and its access to the device. San
 
 Choose daemon `max-jobs` and `cores` from available CPU/RAM. They control build scheduling and parallelism hints, not strict per-task resource isolation. Systemd limits on the HTTP service or worker do not constrain separate daemon-owned builders. Limits applied to the shared daemon also affect other host builds. Ordinary Nix builds using KVM must participate in the same administrator scheduling policy as these tests.
 
-The controller serializes its Nix and VirtualBox tasks. Finish manually launched competing virtualization work before switching; registered idle VMs may be shut down automatically only when their registration permits it.
+The controller serializes its Nix and VirtualBox tasks. Finish manually launched competing virtualization work before switching; the service does not shut down unrelated administrator VMs.
 
 ## Cache trust
 
@@ -60,7 +60,7 @@ Keep the worker untrusted and signature verification enabled. See the [Nix trust
 
 ## Acceptance and maintenance
 
-Use the skill's multi-node acceptance module with the consuming project's pinned nixpkgs and a fresh run ID. Retain node startup, CPU-count and network assertions. Then exercise a failing test and cancellation, checking logs, retained evidence and `cleanup_confirmed`.
+Use the skill's multi-node acceptance module with the consuming project's pinned nixpkgs and a fresh run ID. Retain node startup, CPU-count and network assertions. Then exercise a failing test and cancellation, checking logs, retained evidence and `cleanup: complete`.
 
 After interrupted daemon work, inspect the task and its builders from the host. Reconcile only that task after verifying its workers have stopped; the service keeps the resource occupied until then. Failure directories and store garbage collection remain administrator-owned maintenance.
 

@@ -1,75 +1,187 @@
-# Host service preparation
+# Administrator preparation
 
-The host administrator performs these steps. The Agent container calls the HTTP service; it does not need a host login or a host shell endpoint.
+This guide prepares the host and baselines. Test execution uses the separate
+[runtime guide](README.md). Perform setup as the responsible administrator;
+controller requests cannot select host programs, directories or devices.
 
-## Account, directories and configuration
+## Accounts and shared configuration
 
-Both processes can run as the current VirtualBox VM owner. Use Python 3.11+, uv, VBoxManage for Windows targets, and the host Nix CLI/daemon for Nix tasks. The worker user must be an ordinary Nix client outside `trusted-users`, including group entries such as `@wheel`. The daemon runs builders under its own build identities; separating the controller and worker processes provides scheduling and recovery, not a separate filesystem identity when both use the same user.
+Install `.#vm-test-mcp` and an administrator-selected VirtualBox 7.2 runtime.
+The service package supplies `vbox-input-helper` and `xorriso`. `VBoxManage` is
+found in PATH by default; its runtime library is found beside the real executable
+or under its installation prefix. Absolute overrides are optional.
 
-Deploy the component to a stable host-owned directory. Copy [config.example.toml](config.example.toml) to its ignored `config.toml`, mode `0600`, and enable the required backends. Both processes read that same file. Keep literal guest credentials in this host-local file, outside the Nix store.
+`input_helper` is a small **host** program using the official VirtualBox C SDK
+for native mouse events and display geometry. Keyboard input uses VBoxManage.
+Neither needs guest Python. `iso_builder` is **host** xorriso: it writes each
+lab's credential/configuration seed ISO, not an OS installation image. The router
+OS ISO is a separate `.#vm-test-router` build product.
 
-For the same-user setup, use separate state directories and put the worker socket inside its directory:
+Both processes read the same [annotated YAML](config.example.yaml), outside the
+Nix store. There is no configuration-file permission requirement. Local
+`config.yaml` is Git-ignored. The mandatory token authenticates MCP requests.
+Omitted or empty `service.hosts` / `service.origins` allow any value; nonempty
+lists apply exact matching. Configure HTTP and published-service listeners
+separately; `network.source_cidrs` limits only TCP/UDP entry clients. Register
+host public/NAT addresses and extra management ranges for egress protection.
 
-```toml
-[service]
-state_dir = "/home/VM_OWNER/.local/state/vm-test-controller"
+Run the controller as the VirtualBox owner. Run the worker as an ordinary account
+outside Nix `trusted-users`, including trusted groups. Both processes may use the
+same account. Their state directories remain separate, real, owner-matched `0700`
+directories without symlink components. Set `nix.controller_uid` to the controller
+account's UID (`id -u` when using the same account); connections are checked using
+`SO_PEERCRED`.
 
-[nix]
-state_dir = "/home/VM_OWNER/.local/state/vm-test-nix"
-socket = "/home/VM_OWNER/.local/state/vm-test-nix/worker.sock"
+With one account, the socket may reside inside the worker's state directory. If
+using different accounts, give them a dedicated socket group and place the socket
+outside either private state directory. A worker-owned `0750` directory such as
+`/run/vm-test-bridge`, with that group also used by the worker process, lets the
+controller access the `0660` socket.
+
+## Windows baseline
+
+The administrator installs and activates Windows, disables Windows Update through
+group policy, and installs matching Guest Additions. Use a password-bearing local
+administrator account for Guest Control, and VDI disks. The runtime verifies the
+prepared command service; administrator membership alone is not evidence of an
+elevated Guest Control token.
+
+Recommend automatic login for repeated desktop work, and disabling sleep,
+screensavers and automatic lock. These are recommendations, not service
+prerequisites. Native screenshots/keyboard/mouse also work on the login or secure
+desktop. An agent can inspect screenshots and log in/unlock; the MCP server has no
+vision model. CLI commands remain usable without an interactive login. Python on
+Windows/Linux, and Docker Engine plus Compose on Linux, are useful optional
+preinstalls. Do not configure executable paths in YAML: test commands probe PATH
+and actual versions/imports, then install missing dependencies in the disposable
+node, optionally from uploaded offline packages. No fixed scaling, language or
+keyboard layout is required.
+
+Copy `share/vm-test-mcp/guest/vm-test-guest-windows-amd64.exe` into the source guest.
+From an **elevated administrator terminal**, run:
+
+```powershell
+.\vm-test-guest-windows-amd64.exe prepare
+# For a configured custom work_dir instead:
+# .\vm-test-guest-windows-amd64.exe prepare --root C:\Users\vmtest\vm-tests
 ```
 
-The processes create private state directories. Existing directories must belong to the corresponding process user with mode `0700`; use real paths without symlink components. If startup reports a permission mismatch, inspect that specific directory and set its owner/mode while the services are stopped. Existing task records and artifacts remain usable.
+This explicit preparation command asks for the current local administrator's
+credential, installs the `VMTestGuest` LocalSystem service and the command binary
+under `C:\ProgramData\vm-test`, grants the selected account access, writes an
+unattend file and invokes Sysprep `/generalize /oobe /shutdown`. The answer file
+preserves the current language, region and keyboard settings so clones do not
+stop at those OOBE prompts. It also preserves the administrator's autologon choice.
+If enabled, the prepared account must be the
+autologon account. It does not enable autologon when disabled. Each clone specializes
+with a new Windows identity/computer name. The specialize hook marks preparation
+complete without waiting for login. See Microsoft's [Sysprep answer-file
+reference](https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/use-answer-files-with-sysprep?view=windows-11).
 
-A dedicated worker account is also supported. In that setup, give the controller and worker a dedicated socket group, put the socket in a worker-owned `0750` runtime directory, and make the common configuration readable by both accounts (for example `root:vm-test-bridge`, `0640`). Keep each state directory private to its owner. Both accounts can read the guest credentials in the shared configuration.
+The service uses an available logged-in administrator's elevated token for GUI
+commands; without one, it runs CLI commands as LocalSystem in the service session.
+Thus project commands have guest administrative privileges. The command supervisor
+puts Windows children in a kill-on-close Job Object **before** resuming them. The
+controller verifies and refreshes its packaged command binary in each clone;
+preparation installs the stable service launcher. Re-run preparation when changing
+the launcher protocol or baseline account. No project dependencies are installed
+implicitly by the MCP service.
 
-For a container client, set `service.host` to the host bridge IP. The public origin defaults to that address and `service.port`; the worker's cache origin inherits it. Override `service.public_url` or `nix.cache_base_url` when the client and worker use different routes to the same controller. Both routes must reach its HTTP listener.
+After Sysprep has shut down successfully, create a powered-off snapshot and put
+its UUID and the source VM name/UUID in the template. Do not boot the generalized
+source again before snapshotting it. Verify the full process on two disposable
+clones as real-host acceptance; do not infer Sysprep success from compilation.
 
-## Start and supervise
+## Linux and Compose baseline
 
-First start the worker and controller using the commands in [README.md](README.md#prepare-and-start). Requests default to headless. To support explicitly requested `gui=true` starts, run the controller in the VM owner's graphical session with the required display/session variables. Configuration supplies the startup environment and capability policy. Prewarm the uv environment with the controller's `--help` before unattended startup.
+Install Linux and Guest Additions. Configure root credentials for Guest Control;
+Linux command execution requires **systemd and cgroup v2**. The supervisor uses
+system-level transient units, not user sessions or linger.
 
-Prepare and register optional controls/vision interpreters using the [Windows baseline guide](../../.agents/skills/windows-vm-test/references/preparation.md). Its resources keep automation dependencies separate from the guest supervisor and document GUI autoresize/resolution settings, normal shutdown and snapshot acceptance. Baseline installation is separate from running project-owned tests inside a disposable task.
+Copy `share/vm-test-mcp/guest/vm-test-guest-linux-amd64` into the source guest and run
+as root:
 
-Once verified, user systemd units can supervise both processes. For example, create `~/.config/systemd/user/vm-test-nix.service`:
-
-```ini
-[Unit]
-Description=Nix worker for VM tests
-
-[Service]
-WorkingDirectory=/path/to/vm-test-mcp
-ExecStart=/path/to/python3 /path/to/vm-test-mcp/nix_worker.py --config config.toml
-Restart=on-failure
-UMask=0077
-
-[Install]
-WantedBy=default.target
+```sh
+chmod +x ./vm-test-guest-linux-amd64
+./vm-test-guest-linux-amd64 prepare
+# An optional --root must match the template's work_dir.
 ```
 
-For `~/.config/systemd/user/vm-test-controller.service`:
+Preparation verifies the prerequisites, installs `/opt/vm-test/vm-test-guest` and
+the first-boot unit, creates the work directory, clears machine-id and SSH host
+keys, and powers off. Take the snapshot before starting the source again. Each
+clone generates its own machine-id, hostname and SSH host keys when SSH is installed.
+Snapshot a working Guest Additions setup. Recommend Python and, for Compose tests,
+Docker Engine/Compose with the daemon enabled at boot; test workflows handle absent
+tools without changing the source VM.
 
-```ini
-[Unit]
-Description=VM test HTTP MCP controller
-After=graphical-session.target vm-test-nix.service
-PartOf=graphical-session.target
+Remove raw disks, host shares, PCI passthrough, generic USB filters and host
+serial/parallel devices from source VMs. The controller also sanitizes and checks
+clones before boot. Allowed camera/audio/3D policy is independent of baseline
+installation; media stays off unless explicitly requested. Graphics controller,
+VRAM and virtualization tuning remain baseline choices.
 
-[Service]
-WorkingDirectory=/path/to/vm-test-mcp
-ExecStart=/path/to/uv run --no-project /path/to/vm-test-mcp/server.py --config config.toml
-Restart=on-failure
-UMask=0077
+## Snapshots and host disk use
 
-[Install]
-WantedBy=graphical-session.target
-```
+There is one administrator-owned source and its powered-off snapshot. Each lab
+creates linked clones directly from that snapshot. There is no additional full
+copy, preparation generation or service-owned baseline cache.
 
-Replace the executable/component paths with their actual host locations and enable the units with `systemctl --user`. Both processes read configuration at startup; restart them after current tasks finish when changing shared settings. The controller's user manager needs the working graphical session environment.
+For example, suppose the source's actual VDI/snapshot files occupy **30 GiB** on
+the host, irrespective of their advertised virtual capacity. Two linked clones
+initially add mostly metadata. If their changed blocks grow to 2 GiB and 3 GiB,
+the approximate total is **35 GiB**, plus VM metadata, the shared router ISO,
+small seed ISOs and retained evidence. The router adds no persistent virtual disk.
+Guest writes, Sysprep specialization and installs all grow the clone's delta.
+Deleting the lab removes those 5 GiB of deltas; retained logs/artifacts remain.
 
-## Nix daemon isolation
+Preinstalling a repeatedly used tool in the source can reduce repeated installs
+and per-clone growth. Uploading an offline installer only saves downloads; its
+installed files still occupy each clone's delta. To update the baseline, finish
+using the old snapshot, boot/update the source, run preparation again and create
+a new powered-off snapshot. Update `snapshot` explicitly and restart the controller
+after active tasks finish. Keep any parent disks still referenced by existing
+snapshots/clones. MCP never deletes the source or its snapshots.
 
-The worker imports submitted derivations and asks the daemon to build them; derivations can contain arbitrary builder code. Configure the daemon for strict sandboxing and dedicated build identities. For NixOS, retain its normal build-user setup and merge the following settings into the host configuration:
+## Router Live ISO
+
+Build `nix build .#vm-test-router` in the container and place the resulting
+`vm-test-router.iso` at the host path configured by `router.iso`. No VM import,
+router account setup, installed disk or router snapshot is needed. Keep the build
+output rooted while it is configured. MCP creates a task-owned **1 vCPU / 256 MiB**
+EFI VM, attaches the read-only system ISO and a private read-only seed ISO, and
+connects Internal Network LAN plus VirtualBox NAT WAN.
+
+The ISO can be checked before preparing Windows/Linux templates. Configure only
+`router.iso`, restart the controller and create a lab with `nodes: []`. Wait for
+`state: running` and `network: ready`, exercise `network_set` for DHCP, upstream
+DNS and public egress, then finish the lab and verify `cleanup: complete`.
+Client DHCP/DNS traffic, NAT and TCP/UDP publication require a lab with test nodes.
+
+The ISO reads its squashfs store on demand and uses tmpfs for writable state; its
+default boot does not copy the ISO into RAM. The seed stays attached until cleanup
+so each reboot can reconstruct credentials and interfaces. Both media are detached
+before VM deletion; the administrator's boot ISO is never deleted. No permanent
+router password or SSH service is needed. Static builds do not prove the 256 MiB
+runtime target.
+
+Live operation still supports changing public egress, DHCP, public upstream DNS and
+registered node IPv4 addresses using `network_set`. The LAN subnet is fixed for the
+lab. DHCP/DNS reservations and endpoint forwarding are regenerated; change guest
+addresses/routes/DNS/firewalls with ordinary privileged guest commands and renew
+leases as needed. Disabling DHCP does not erase an existing guest address.
+
+Boot and policy failures keep egress/entries closed. Controller-detected restart or
+lease expiry requires `network_recover`, which checks the router, protection and
+port bindings before restoring declared state. It does not restore a RAM snapshot
+of the previous router. The dnsmasq memory cap is 32 MiB and volatile logs are
+bounded to 8 MiB.
+
+## Nix daemon and cache trust
+
+Use multi-user Nix with dedicated build users. Configure the **running daemon**
+with strict sandboxing, no fallback, local KVM access for builders, and trusted
+cache keys. For NixOS, merge through the host's managed configuration:
 
 ```nix
 nix.settings = {
@@ -80,95 +192,110 @@ nix.settings = {
 };
 ```
 
-Review the effective host configuration for `trusted-users`, build identities, `sandbox-paths` and `extra-sandbox-paths`. Expose only the resources needed by tests, such as `/dev/kvm`; user homes, credentials, daemon sockets and container-engine sockets belong outside the build sandbox. Keep private data outside `/nix/store`, whose contents are normally readable by local users. Follow the linked executor guide below for builder access to KVM and cache signing.
+Worker startup checks that its account is non-root and its client configuration
+sets `sandbox = true` and `sandbox-fallback = false`. It then runs
+`nix store info --store daemon --json` to verify that the daemon is reachable and
+reports this client as untrusted. A failed connection or missing trust status
+stops startup. The client's `build-users-group` may be empty: Nix uses different
+defaults for an ordinary client and the root daemon. Build-user selection and
+trust are not inferred from the client's configuration dump.
 
-Apply changes through the host's normal NixOS deployment so the running daemon loads them. `nix config show` describes the client's configuration and is supporting evidence, not proof of the daemon's active sandbox. Fixed-output derivations retain their normal network access. See the [Nix sandbox and configuration reference](https://nix.dev/manual/nix/2.34/command-ref/conf-file.html#conf-sandbox).
+Startup does not run a build or start a VM. Verify the daemon's build identities,
+effective sandbox isolation and KVM access during administrator acceptance.
 
-After setup, run this small acceptance from a Bash shell on the host as the worker user. It uses the host's existing Nix-store Bash, creates a readable synthetic marker outside the store, and gives each attempt a fresh derivation identity. The marker is passed as a string so Nix does not import it into the build inputs.
+Review `trusted-users`, `build-users-group`, `sandbox-paths` and
+`extra-sandbox-paths`. Expose `/dev/kvm` only as needed; do not expose home directories,
+credentials, daemon sockets or container-engine sockets. Verify KVM permissions for
+the actual build identity, including after reboot. A worker client configuration
+dump is supporting evidence, not proof of the daemon's active policy.
 
-```bash
-VM_TEST_PROBE_DIR=$(mktemp -d /tmp/vm-test-isolation.XXXXXXXX)
-VM_TEST_PROBE_SHELL=$(readlink -f "$(command -v bash)")
-VM_TEST_PROBE_UID=$(id -u)
-export VM_TEST_PROBE_DIR VM_TEST_PROBE_SHELL VM_TEST_PROBE_UID
-chmod 0755 "$VM_TEST_PROBE_DIR"
-printf 'synthetic host marker\n' > "$VM_TEST_PROBE_DIR/marker"
-chmod 0644 "$VM_TEST_PROBE_DIR/marker"
-cat > "$VM_TEST_PROBE_DIR/probe.nix" <<'NIX'
-derivation {
-  name = builtins.baseNameOf (builtins.getEnv "VM_TEST_PROBE_DIR");
-  system = builtins.currentSystem;
-  builder = builtins.storePath (builtins.getEnv "VM_TEST_PROBE_SHELL");
-  hostMarker = builtins.getEnv "VM_TEST_PROBE_DIR" + "/marker";
-  workerUid = builtins.getEnv "VM_TEST_PROBE_UID";
-  __noChroot = builtins.getEnv "VM_TEST_NO_CHROOT" == "1";
-  args = [ "-c" ''
-    if [[ -e "$hostMarker" ]]; then
-      printf 'host marker is visible\n' >&2
-      exit 1
-    fi
-    if (( EUID == 0 || EUID == workerUid )); then
-      printf 'expected a separate build identity\n' >&2
-      exit 1
-    fi
-    printf 'isolated build identity: %s\n' "$EUID" > "$out"
-  '' ];
-}
-NIX
-VM_TEST_NO_CHROOT=0 nix build --store daemon --impure --no-link -L --file "$VM_TEST_PROBE_DIR/probe.nix"
-VM_TEST_NO_CHROOT=1 nix build --store daemon --impure --no-link -L --file "$VM_TEST_PROBE_DIR/probe.nix"
+The helper uploads a standard binary cache. The daemon verifies imported content
+and signatures. For locally produced input-addressed objects, configure an
+administrator-approved cache signing key with the submission environment and its
+public key in the daemon. The helper's `--signing-key` applies the local binary
+cache `secret-key` setting. Do not mark the worker trusted or disable signatures
+to resolve an import failure. Review the
+[Nix sandbox settings](https://nix.dev/manual/nix/2.34/command-ref/conf-file.html#conf-sandbox)
+and [binary cache settings](https://nix.dev/manual/nix/2.34/store/types/local-binary-cache-store.html).
+
+Daemon `max-jobs`/`cores` and host scheduling policy govern other build activity;
+controller/worker process limits do not constrain daemon-owned builders. Finish
+competing manually started virtualization before using this scheduler.
+
+## Service supervision
+
+For an initial foreground run, enter `tools/vm-test-mcp` and use `just serve` and
+`just nix-worker` in separate terminals. Both may run under the same ordinary account.
+Both default to the shared `config.yaml`; append `--config /absolute/config.yaml`
+when needed. Run `just nixos-test` from the same directory in the container once they are available.
+These commands build/run the package without changing accounts or provisioning the
+host. The worker's socket must be accessible to the controller; with different
+accounts, place it outside the worker's private `0700` state directory.
+
+Start the worker when Nix tests are needed. MCP and VirtualBox remain usable without it.
+For a system service using the same `vm-owner` account as the controller:
+
+```ini
+[Service]
+User=vm-owner
+ExecStart=/opt/vm-test-mcp/bin/vm-test-nix-worker --config /etc/vm-test/config.yaml
+UMask=0077
+Restart=on-failure
 ```
 
-The first build must succeed; the second must be rejected specifically because strict sandboxing disallows `__noChroot`. An unrelated evaluation, permission or download failure leaves acceptance incomplete. Retain the results with local task evidence, then remove only this probe's temporary directory when finished. This establishes those isolation properties for the tested daemon; pair it with the configuration review and actual multi-node KVM acceptance.
+For GUI support, use a user service in the VM owner's graphical session with its
+display/session environment. Its command is
+`/opt/vm-test-mcp/bin/vm-test-mcp --config /etc/vm-test/config.yaml`, also with
+`UMask=0077` and `Restart=on-failure`. A headless-only controller can use ordinary
+account supervision. Use `--check-config --config /etc/vm-test/config.yaml` on either program to validate its role without starting it or creating state. Configuration is loaded at startup. Restart after tasks finish
+when changing policy or paths.
 
-## Executor and baseline
+## Recovery
 
-Follow the [Nix executor guide](../../.agents/skills/nixos-vm-test/references/preparation.md) for builder KVM access, cache trust and direct multi-node acceptance. Configure daemon limits according to the host's total workload; controller service limits do not constrain daemon-owned builds.
-
-Follow the [Windows baseline guide](../../.agents/skills/windows-vm-test/references/preparation.md) for installation media, Guest Additions, Python, interactive login, hardware acceleration and the powered-off snapshot. Register only disposable test VMs whose reset boundary is acceptable.
-
-## Native mouse input
-
-Build the Linux amd64 helper against the C bindings from an [official VirtualBox SDK](https://www.virtualbox.org/wiki/Downloads) for native mouse input. Run these commands in the component directory containing `config.toml`. The build locates the SDK within the configured VBoxManage installation. The SDK's generated header and glue retain their own license notices; the glue is compiled from the provided SDK without modification.
+An uncertain cleanup keeps scheduler occupancy. Stop the controller before local
+reconciliation; its private-directory lock prevents two owners. Review the SQLite
+task/resource records and VirtualBox state under the VM owner's account. Verify
+every recorded clone UUID, its task-owned configuration path, attached differencing
+disks, absence of active entries and remaining VM processes. Resolve the concrete
+failure, then retry registered cleanup:
 
 ```sh
-just build-helper
-just test-helper
+vm-test-mcp --config /etc/vm-test/config.yaml --reconcile TASK_ID
 ```
 
-If the installation does not include the C SDK, supply its root, containing `bindings/c`, as the optional argument to either command: `just build-helper /path/to/sdk` or `just test-helper /path/to/sdk`.
+This command cannot waive the ownership/path checks. It also restores the recorded global `GUI/MaxGuestResolution`; if another application changed that value, inspect the recorded original/expected values and resolve the conflict locally before retrying. Preserve baselines and unrelated
+VMs; never substitute names or paths printed by untrusted test code as deletion authority.
 
-`service.input_helper` defaults to `build/vbox-input-helper` relative to the configuration file. The controller resolves VBoxManage's executable symlink and looks for `VBoxXPCOMC.so` in that installation's executable and library directories. For a custom layout, set the absolute `service.vbox_library_dir`. These paths are controlled by the host administrator. Run the helper through the controller as the VM owner. The host's VirtualBox hardening configuration remains enabled. Runtime use negotiates the C function table and required object interfaces; a matching product version string alone is not the compatibility criterion. Reported helper failures affect native mouse availability independently of CLI controls.
-
-Prepare a suitable virtual pointing device and verify both a relative move and an absolute click against a screenshot. Test a guest UAC prompt using isolated guest credentials and confirm the resulting application state. The helper addresses the VM's input devices, independently of the host desktop pointer.
-
-For development memory checks, run `python3 build_helper.py SDK_DIR --sanitize --test` in a C compiler environment. These tests use a synthetic C API library; actual host/guest acceptance is separate.
-
-## Webcam input
-
-VirtualBox 7.2.2 and later include webcam passthrough in the base package; consult the installed release's [release notes](https://docs.oracle.com/en/virtualization/virtualbox/7.2/relnotes/ChangeLog.html) for its requirements. The administrator prepares device access and the VM's USB controller.
-
-From the VM owner's host session, enumerate visible cameras:
+For an interrupted Nix build, stop the worker and inspect daemon build processes,
+build-user activity and the recorded derivation. Only after verifying teardown,
+run as the worker identity:
 
 ```sh
-VBoxManage list webcams
+vm-test-nix-worker --config /etc/vm-test/config.yaml --reconcile TASK_ID
 ```
 
-The VM process must have permission to use the chosen camera device. Prepare a USB controller in the Windows baseline and allow camera access for the test application inside Windows. Keep microphone and speaker settings in the baseline; runtime camera attachment uses `controlvm` and does not change the snapshot.
+This is a local administrator attestation, unavailable through the Unix protocol
+or MCP. Restart the worker, reconcile/restart the controller, and check the original
+task's cleanup before submitting another task. Failed build directories remain
+administrator-managed. Successful output GC roots remain until task purge.
 
-Check the target's effective webcam capability with `targets`. After starting a test task, use `webcams` to choose a device and call `vm_webcam(attach)` for that VM. Confirm it appears in the guest and that the application can receive frames. Call `vm_webcam(detach)` after use, then finish the task and verify poweroff. The attachment result proves the VirtualBox device state; application input needs its own assertion.
+## Acceptance
 
-## Interrupted Nix work
+Record these real-host results separately from the default adapter suite:
 
-Read the task state and worker journal, then verify from the host that the affected build's workers have stopped. The worker records task ID, derivation and timestamps under its private state directory. Retained failed-build directories remain available to the administrator.
-
-After verifying cleanup, run reconciliation as the worker identity:
-
-```sh
-python3 /path/to/vm-test-mcp/nix_worker.py \
-  --config config.toml --reconcile TASK_ID
-```
-
-The Unix peer UID must match the worker owner for this operation. The HTTP controller does not expose reconciliation. Read the original task again to confirm its updated state before continuing.
-
-Keep private runtime directories on a filesystem with capacity suitable for input caches, images and logs. Completed evidence expires according to `retention_days`; unresolved cleanup remains retained. Plan periodic administrator cleanup of Nix failed-build directories and normal store GC after useful evidence has been collected.
+1. Two nodes from one generalized Windows snapshot have independent identities,
+   MACs and disk state; the baseline remains unchanged.
+2. Windows and a Linux Compose app communicate over LAN DNS; the development
+   container reaches published TCP and UDP services; disallowed sources cannot.
+3. Public IPv4 works while host, metadata and protected ranges are blocked. Egress
+   disable terminates public flows while retaining LAN/entries. Router and controller
+   heartbeat failures close networking; explicit recovery restores declared state.
+4. Requested GUI, native input, screenshots, multiple commands, ordered UTF-8 stdin,
+   EOF, descendant cleanup and each explicitly enabled media device work.
+5. Cancellation, timeout, partial creation and controller restart remove all clones,
+   NAT rules, relays and temporary resources while preserving evidence.
+6. The router boots and sustains DHCP, DNS, NAT and interactive traffic at 256 MiB.
+7. A fresh multi-node Nix test starts guests on host KVM. A synthetic readable host
+   marker is inaccessible inside the sandbox; a request with `__noChroot = true`
+   is rejected specifically for isolation policy; build identities differ from the
+   worker and root. Interrupt a build and verify the cleanup hold/recovery procedure.

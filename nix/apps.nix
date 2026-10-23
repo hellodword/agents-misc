@@ -4,6 +4,7 @@
   codexFor,
   codexConfigAtlasFor,
   agentsViewerFor,
+  vmTestFor,
 }:
 
 lib.genAttrs supportedSystems (
@@ -38,5 +39,12 @@ lib.genAttrs supportedSystems (
       meta.description = "Read-only local Codex conversation viewer";
     };
 
+  }
+  // lib.optionalAttrs (system == "x86_64-linux") {
+    vm-test-mcp = {
+      type = "app";
+      program = "${(vmTestFor system).package}/bin/vm-test-mcp";
+      meta.description = "Authenticated VM test controller";
+    };
   }
 )

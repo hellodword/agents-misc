@@ -107,5 +107,16 @@ lib.genAttrs supportedSystems (
     codex = codexShell;
     codex-config-atlas = atlasShell;
     agents-viewer = agentsViewerShell;
+    vm-test-mcp = pkgs.mkShell {
+      packages = with pkgs; [
+        go
+        gcc
+        pkg-config
+        sqlite
+        python3
+        ruff
+        unzip
+      ];
+    };
   }
 )

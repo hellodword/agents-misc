@@ -1,0 +1,140 @@
+package config
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestStrictConfig(t *testing.T) {
+	for _, body := range []string{"service:\n  token: a\n  token: b\n", "service:\n  typo: a\n", "scheduler:\n  default_seconds: nope\n", "service: {}\n---\nservice: {}\n"} {
+		p := filepath.Join(t.TempDir(), "config.yaml")
+		if e := os.WriteFile(p, []byte(body), 0600); e != nil {
+			t.Fatal(e)
+		}
+		if _, e := Load(p); e == nil {
+			t.Fatalf("accepted %s", body)
+		}
+	}
+	c := Defaults()
+	c.Service.StateDir = t.TempDir()
+	c.Service.PublicURL = "http://localhost:8765"
+	if c.Validate() == nil {
+		t.Fatal("empty token accepted")
+	}
+	c.Service.Token = "synthetic"
+	if e := c.Validate(); e != nil {
+		t.Fatal(e)
+	}
+	c.Network.LAN = "10.0.2.0/24"
+	if c.Validate() == nil {
+		t.Fatal("WAN overlap accepted")
+	}
+}
+
+func TestRouterWithoutTemplatesValidatesISOAndPrograms(t *testing.T) {
+	c := Defaults()
+	c.Service.Token = "synthetic"
+	c.Service.StateDir = t.TempDir()
+	c.Service.PublicURL = "http://localhost:8765"
+	c.Router.ISO = "/fixture/router.iso"
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	c.Router.ISO = "relative/router.iso"
+	if c.Validate() == nil {
+		t.Fatal("relative router ISO accepted without templates")
+	}
+	c.Router.ISO = "/fixture/router.iso"
+	c.VirtualBox.ISOBuilder = "relative/xorriso"
+	if c.Validate() == nil {
+		t.Fatal("relative helper override accepted without templates")
+	}
+}
+
+func TestSharedConfigurationAndPermissions(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.yaml")
+	body := fmt.Sprintf("service:\n  token: synthetic\n  public_url: http://127.0.0.1:8765\n  state_dir: %s/controller\nnix:\n  socket: %s/worker.sock\n  state_dir: %s/worker\n  executable: /fixture/nix\n  controller_uid: %d\n", dir, dir, dir, os.Getuid())
+	if err := os.WriteFile(p, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := LoadWorker(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Nix.Socket != w.Socket || w.CacheURL != c.Service.PublicURL || len(c.Service.Hosts) != 0 || len(c.Service.Origins) != 0 {
+		t.Fatal("shared configuration or defaults differ")
+	}
+	st, _ := os.Stat(p)
+	if st.Mode().Perm() != 0644 {
+		t.Fatal("configuration permissions changed")
+	}
+	if err = os.WriteFile(p, []byte(body+"  unknown_field: true\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = LoadWorker(p); err == nil {
+		t.Fatal("worker accepted unknown shared field")
+	}
+}
+
+func TestExecutableLibraryDiscovery(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	lib := filepath.Join(dir, "lib", "virtualbox")
+	if err := os.MkdirAll(bin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(lib, 0755); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(bin, "VBoxManage")
+	if err := os.WriteFile(exe, []byte("fixture"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lib, "VBoxXPCOMC.so"), nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "VBoxManage")
+	if err := os.Symlink(exe, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", filepath.Dir(link))
+	resolved, err := Program("", "VBoxManage")
+	if err != nil || resolved != link {
+		t.Fatal(resolved, err)
+	}
+	resolved, err = LibraryDir("", resolved)
+	if err != nil || resolved != lib {
+		t.Fatal(resolved, err)
+	}
+	if resolved, err = LibraryDir("/administrator/override", exe); err != nil || resolved != "/administrator/override" {
+		t.Fatal(resolved, err)
+	}
+}
+
+func TestTemplateDefaultsAndUnboundedHTTPHosts(t *testing.T) {
+	c := Defaults()
+	c.Service.Token = "fixture"
+	c.Service.StateDir = t.TempDir()
+	c.Service.PublicURL = "http://example.test"
+	c.Router.ISO = "/fixture/router.iso"
+	c.VirtualBox.Templates = map[string]Template{"linux": {Kind: "linux", VM: "named-vm", Snapshot: "11111111-1111-4111-8111-111111111111", Username: "root", Password: "fixture"}}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	v := c.VirtualBox.Templates["linux"]
+	if v.Supervisor != "/opt/vm-test/vm-test-guest" || v.WorkDir != "/var/lib/vm-test/work" || v.CPUs != 2 || *v.InputInterval != 1 || len(c.Service.Hosts) != 0 {
+		t.Fatal(v)
+	}
+	v.Username = "ordinary-user"
+	c.VirtualBox.Templates["linux"] = v
+	if c.Validate() == nil {
+		t.Fatal("non-root Linux template accepted")
+	}
+}

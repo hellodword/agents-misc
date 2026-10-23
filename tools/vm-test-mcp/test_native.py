@@ -8,8 +8,8 @@ from pathlib import Path
 
 
 @unittest.skipUnless(
-    os.environ.get("VM_TEST_SDK_DIR"),
-    "run just test-helper SDK_DIR for native ABI tests",
+    os.environ.get("VM_TEST_SDK_DIR") and os.environ.get("VM_TEST_NATIVE_BINARY"),
+    "run just --justfile tools/vm-test-mcp/justfile test-helper for native ABI tests",
 )
 class NativeTests(unittest.TestCase):
     @classmethod
@@ -41,11 +41,7 @@ class NativeTests(unittest.TestCase):
             ],
             check=True,
         )
-        cls.binary = (
-            cls.root
-            / "build"
-            / ("vbox-input-helper-sanitize" if sanitize else "vbox-input-helper")
-        )
+        cls.binary = Path(os.environ["VM_TEST_NATIVE_BINARY"])
 
     def call(
         self,
@@ -79,6 +75,7 @@ class NativeTests(unittest.TestCase):
             capture_output=True,
             text=True,
             timeout=10,
+            check=False,
         )
 
     def test_absolute_screen_coordinates_drag_and_release(self):

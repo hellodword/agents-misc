@@ -4,6 +4,7 @@
   codexFor,
   codexConfigAtlasFor,
   agentsViewerFor,
+  vmTestFor,
 }:
 
 lib.genAttrs supportedSystems (
@@ -22,5 +23,10 @@ lib.genAttrs supportedSystems (
     codex-config-atlas-site = codexConfigAtlas.codexConfigAtlasSite;
 
     default = codex;
+  }
+  // lib.optionalAttrs (system == "x86_64-linux") {
+    vm-test-mcp = (vmTestFor system).package;
+    vm-test-router = (vmTestFor system).router;
+    vm-test-all = (vmTestFor system).all;
   }
 )

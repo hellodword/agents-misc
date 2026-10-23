@@ -68,9 +68,16 @@
           treefmt-nix
           ;
       };
+      vmTestFor =
+        system:
+        import ./nix/vm-test-mcp.nix {
+          inherit lib nixpkgs;
+          pkgs = import nixpkgs { inherit system; };
+        };
     in
     {
       packages = import ./nix/packages.nix {
+        inherit vmTestFor;
         inherit
           lib
           codexConfigAtlasFor
@@ -81,6 +88,7 @@
       };
 
       apps = import ./nix/apps.nix {
+        inherit vmTestFor;
         inherit
           lib
           codexConfigAtlasFor
@@ -91,6 +99,7 @@
       };
 
       checks = import ./nix/checks.nix {
+        inherit vmTestFor;
         inherit
           lib
           nixpkgs

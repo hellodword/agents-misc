@@ -1,21 +1,42 @@
-ruff := "ruff==0.15.20"
+set working-directory := "../.."
+set positional-arguments
 
-worker:
-    nix-shell -p python3 --run 'exec python3 nix_worker.py --config config.toml'
+# Run on the host as the controller account; foreground, shared YAML by default.
+serve *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    vm_test_package="$(nix build --no-link --print-out-paths --no-write-lock-file .#vm-test-mcp)"
+    exec "$vm_test_package/bin/vm-test-mcp" --config tools/vm-test-mcp/config.yaml "$@"
 
-server:
-    nix-shell -p python3 uv --run 'exec uv run --no-project --python python3 server.py --config config.toml'
+# Run on the host as an ordinary Nix account; may use the controller account.
+nix-worker *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    vm_test_package="$(nix build --no-link --print-out-paths --no-write-lock-file .#vm-test-mcp)"
+    exec "$vm_test_package/bin/vm-test-nix-worker" --config tools/vm-test-mcp/config.yaml "$@"
 
-[positional-arguments]
-build-helper sdk_dir="":
-    VM_TEST_SDK_DIR="$1" nix-shell -p python3 stdenv.cc --run 'exec python3 build_helper.py "$VM_TEST_SDK_DIR"'
-
-[positional-arguments]
-test-helper sdk_dir="":
-    VM_TEST_SDK_DIR="$1" nix-shell -p python3 stdenv.cc --run 'exec python3 build_helper.py "$VM_TEST_SDK_DIR" --test'
+# Run in the container: submit the three-node KVM smoke test and wait for cleanup.
+nixos-test *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    vm_test_package="$(nix build --no-link --print-out-paths --no-write-lock-file .#vm-test-mcp)"
+    exec "$vm_test_package/bin/vm-test-submit" --config tools/vm-test-mcp/config.yaml "$@"
 
 test:
-    nix-shell -p python3 uv --run 'uv tool run {{ruff}} check *.py && uv run --no-project --isolated --python python3 --with-requirements server.py python -B -m unittest -v'
+    nix develop .#vm-test-mcp --command bash tools/vm-test-mcp/scripts/check.sh
 
 fmt:
-    nix-shell -p python3 uv --run 'uv tool run {{ruff}} format *.py'
+    nix develop .#vm-test-mcp --command gofmt -w tools/vm-test-mcp/cmd tools/vm-test-mcp/internal
+
+build:
+    nix build .#vm-test-mcp --out-link result-vm-test-mcp
+
+# Build the services, guest supervisors and router ISO into one output directory.
+build-all:
+    nix build .#vm-test-all --out-link result-vm-test-all --print-out-paths
+
+router:
+    nix build .#vm-test-router
+
+test-helper:
+    nix build --no-link .#checks.x86_64-linux.vm-test-native

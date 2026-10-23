@@ -1,1 +1,2 @@
-config.toml
+# Local shared runtime configuration; the annotated example remains tracked.
+/config.yaml

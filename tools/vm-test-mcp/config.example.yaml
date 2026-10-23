@@ -1,0 +1,161 @@
+# VM Test MCP：控制服务和 Nix worker 共用此文件。
+# 两个程序均使用 --config /绝对路径/config.yaml；配置文件不要求特定权限。
+# config.yaml 被 Git 忽略；本示例只使用合成值。两个进程可共用账户，状态目录必须不同。
+# YAML 拒绝未知字段、重复字段及多个文档。不展开 ~、环境变量或命令替换。
+# 宿主路径使用规范化绝对路径；Windows guest 路径可用单引号保留反斜杠。
+# 可选配置均列为注释，按需取消注释。未配置模板/worker socket 时对应后端关闭。
+
+service:
+  # 必填，生成传输和产物 URL 使用的 HTTP origin，不包含 /mcp 或查询参数。
+  # 可用 http:// 或 https://；HTTPS 由前置代理提供，服务本身监听 HTTP。
+  public_url: http://127.0.0.1:8765
+  # 必填，非空字符串，不能含换行；客户端发送 Authorization: Bearer <token>。
+  token: REPLACE_WITH_RANDOM_TOKEN
+  # 必填，控制服务账户拥有的 0700 状态目录；不得与 nix.state_dir 相同。
+  # 不允许路径组件为符号链接。目录保存 SQLite、任务日志、传输和产物。
+  state_dir: /home/vm-owner/.local/state/vm-test-controller
+  # 可选，默认 127.0.0.1:8765。IPv4 字面地址:端口，端口 1..65535。
+  # 供开发容器连接时可用宿主桥接地址，例如 172.17.0.1:8765。
+  # listen: 127.0.0.1:8765
+  # 可选，省略或 [] 允许任意 Host；非空时精确匹配 host[:port]，无通配符。
+  # hosts: [127.0.0.1:8765, localhost:8765]
+  # 可选，省略或 [] 允许任意 Origin；非空时精确匹配完整 HTTP(S) origin。
+  # 不带 Origin 的客户端始终允许；这两个选项不代替 Bearer 认证。
+  # origins: [https://vm-tests.example.test]
+
+# 可选，两个后端共用 FIFO 队列，同一时间执行一个任务。
+# scheduler:
+#   # 默认 3600，单位秒，整数 1..max_seconds。从进入执行阶段起计时。
+#   default_seconds: 3600
+#   # 默认 86400，范围 default_seconds..2592000（30 天），含显式延长的时间。
+#   max_seconds: 86400
+
+# 可选。配置 router.iso 即启用 VirtualBox；templates 可留空，先验证路由器。
+# virtualbox:
+#   # 可选，默认从 PATH 找 VBoxManage。覆盖时填写管理员安装程序的绝对路径。
+#   # executable: /opt/VirtualBox/VBoxManage
+#   # 可选，默认沿 executable 的真实路径、安装前缀查找 VBoxXPCOMC.so。
+#   # 指向运行库目录，不是 SDK；特殊安装布局才需要手动填写。
+#   # library_dir: /opt/VirtualBox
+#   # 可选，默认使用服务包的 vbox-input-helper，再查 PATH。
+#   # 宿主原生鼠标/显示几何辅助程序，调用 VirtualBox SDK；不在 guest 安装。
+#   # 键盘通过 VBoxManage 注入，均不依赖 guest Python 或自动登录。
+#   # input_helper: /opt/vm-test-mcp/bin/vbox-input-helper
+#   # 可选，默认使用包内 xorriso，再查 PATH。覆盖程序必须支持 -as mkisofs。
+#   # 它只制作每个 lab 的 seed ISO（路由凭据和初始化参数），不制作系统安装盘。
+#   # iso_builder: /opt/vm-test-mcp/bin/xorriso
+#   # 可选，默认 600；1..3600 秒。等待每个节点首次启动及 supervisor 就绪。
+#   ready_seconds: 600
+#   # 可选，默认 600；1..3600 秒。node_control shutdown 等待关机的上限。
+#   shutdown_seconds: 600
+#   templates:
+#     # 模板别名：小写字母开头，小写字母/数字/-，1..31 字符。
+#     windows:
+#       # 必填，windows 或 linux。
+#       kind: windows
+#       # 必填，已准备并关机的源 VM 名称或 UUID；服务只从快照创建 linked clone。
+#       vm: vm-test-windows
+#       # 必填，关机快照 UUID；源 VM 完成准备后由管理员创建此快照。
+#       snapshot: 22222222-2222-4222-8222-222222222222
+#       # 必填，Windows 管理员账户及非空密码；用于 Guest Control。
+#       username: vmtest
+#       password: REPLACE_WITH_GUEST_PASSWORD
+#       # 可选，默认空。本地账户通常省略，必要时填写 Guest Control 登录域。
+#       # domain: ""
+#       # 可选，默认 C:\ProgramData\vm-test\work（Linux 为 /var/lib/vm-test/work）。
+#       # 必须与 guest prepare --root 一致；supervisor 安装位置由程序固定管理。
+#       # work_dir: 'C:\ProgramData\vm-test\work'
+#       # 可选，默认 {}。传给启动 VM 的宿主进程，键值均为字符串。
+#       # 仅管理员配置可设置；例如显卡调试环境，不是 guest 命令环境。
+#       # startup_env: {ANV_DEBUG: 'video-decode,video-encode'}
+#       # 可选，默认 1.0；0..60 秒。相邻原生输入操作的最小间隔，0 不额外等待。
+#       input_interval_seconds: 1.0
+#       # 可选，默认 2；1..max_cpus。lab_create 可覆盖。
+#       cpus: 2
+#       # 可选，Windows 默认 4096，Linux 默认 2048；128..max_memory_mib，单位 MiB。
+#       memory_mib: 4096
+#       # 可选，默认 8 和 16384；不得小于默认资源值。限制调用方的资源覆盖。
+#       max_cpus: 8
+#       max_memory_mib: 16384
+#       # 可选，各项 true/false，省略均 false；示例显式授权四种能力。
+#       # 授权不代表自动开启，节点请求仍须显式选择。3D 只支持创建节点时选择。
+#       media:
+#         camera: true
+#         audio_input: true
+#         audio_output: true
+#         accelerate_3d: true
+#       # 可选，默认 {}。别名格式同模板名，值来自宿主 VBoxManage list webcams。
+#       # 请求只引用别名；使用摄像头还需 media.camera: true。
+#       # cameras: {front: /dev/video0}
+#     linux:
+#       kind: linux
+#       vm: vm-test-linux
+#       snapshot: 44444444-4444-4444-8444-444444444444
+#       # Linux 必须为 root，domain 必须为空；基线使用 systemd 和 cgroup v2。
+#       username: root
+#       password: REPLACE_WITH_GUEST_PASSWORD
+#       # 其余可选字段及媒体策略同上。CPU 默认 2，内存默认 2048 MiB。
+#       # 推荐预装 Python、Docker Engine 和 Compose；运行时从 guest PATH 查找。
+#       # 缺少时由测试工作流安装，不填写解释器、Docker 或 Compose 路径。
+
+# 启用 VirtualBox 时必填。仅设置 iso 即可创建 nodes: [] 的 lab 验证路由器。
+# 路由器由 MCP 创建，不需要导入 VM 或建立快照。
+# router:
+#   # nix build .#vm-test-router 得到的 Live ISO 的宿主绝对路径。
+#   # MCP 创建 1 vCPU / 256 MiB 无磁盘 VM，挂载此只读 ISO 和私有 seed ISO。
+#   # 重启保留挂载；结束只删除服务拥有的资源，不删除此 ISO。
+#   iso: /opt/vm-test-router/vm-test-router.iso
+
+# 可选，普通测试无需设置 LAN/DHCP/DNS/地址。网络默认自动配置。
+# network:
+#   # 默认 10.77.0.0/24，规范 RFC1918 IPv4 子网，至少 /29 容量，不与 WAN 重叠。
+#   # 可选 10/8、172.16/12、192.168/16 内子网，首个主机地址为路由器。
+#   # lab_create 可覆盖 LAN；任务创建后 LAN 网段固定。
+#   lan: 10.77.0.0/24
+#   # 默认 10.0.2.0/24，VirtualBox NAT WAN。规范 IPv4 子网，/28 或更大容量。
+#   wan: 10.0.2.0/24
+#   # 默认如下，1..8 个公网 IPv4 DNS 地址，无主机名或 IPv6；network_set 可修改。
+#   dns: [1.1.1.1, 9.9.9.9]
+#   # 默认 []，额外禁止访问的规范 IPv4 CIDR；不会放宽固定保护规则。
+#   # protected_cidrs: [203.0.113.0/24]
+#   # 默认 []，宿主网卡上不可见的公网/NAT 对外 IPv4 地址，无 /32 后缀。
+#   # 宿主网卡地址自动刷新并保护；刷新失败时关闭外联。
+#   # public_host_addresses: [198.51.100.10]
+#   # 默认 127.0.0.1，TCP/UDP 入口的宿主 IPv4 监听地址，不含端口。
+#   # 供容器连接时可设 172.17.0.1；独立于 service.listen。
+#   listen: 127.0.0.1
+#   # 默认 [127.0.0.1/32]，必须非空；允许访问入口的来源 IPv4 CIDR。
+#   # 容器网段例 [172.17.0.0/16]；[0.0.0.0/0] 允许任何 IPv4 来源。
+#   # 此字段只控制发布入口，不控制 MCP HTTP。
+#   source_cidrs: [127.0.0.1/32]
+#   # 默认 20000..29999，闭区间，1024 <= port_min <= port_max <= 65535。
+#   # 每个入口需要公开中继端口和 loopback NAT 端口。
+#   port_min: 20000
+#   port_max: 29999
+#   # 默认 15，5..60 秒。心跳约每三分之一周期续租；过期须 network_recover。
+#   lease_seconds: 15
+
+# 可选，任务数据保留和传输大小限制。
+# retention:
+#   # 默认 0，保留到显式 task_purge；正整数表示自动保留天数。
+#   # 仅清理完成的终态任务可删除数据，摘要/结论/清理记录保留。
+#   days: 0
+#   # 默认 8589934592（8 GiB），正整数字节，用于传输和导出产物限额。
+#   max_upload_bytes: 8589934592
+
+# 可选。控制服务和 worker 从同一文件读取此块；worker 不在线不影响其它 MCP 工具。
+# nix:
+#   # 控制服务可省略或设 "" 来关闭 Nix 后端；启动 worker 时必填绝对路径。
+#   # 同账户运行时可放在 worker 状态目录内；分账户时使用共享组目录，参见 preparation.md。
+#   socket: /home/vm-owner/.local/state/vm-test-nix/worker.sock
+#   # 启动 worker 时必填，worker 账户拥有的 0700 状态目录，不含符号链接。
+#   # 不得与 service.state_dir 相同。
+#   state_dir: /home/vm-owner/.local/state/vm-test-nix
+#   # 启动 worker 时必填，允许连接 socket 的控制服务 Unix UID，整数 >= 0。
+#   # 可与 worker 自身 UID 相同；例如 id -u vm-owner 输出的值。
+#   controller_uid: 1000
+#   # 可选，默认从 PATH 找 nix；覆盖时填 Nix 客户端的绝对路径。
+#   # executable: /nix/var/nix/profiles/default/bin/nix
+#   # 可选，默认 service.public_url。worker 取输入 cache 时可达的 HTTP(S) origin。
+#   # cache_url: http://127.0.0.1:8765
+#   # worker 必须是 Nix trusted-users 之外的普通账户；daemon 隔离/KVM 由管理员配置。
