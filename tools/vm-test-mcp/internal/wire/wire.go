@@ -14,31 +14,53 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"time"
 )
 
-const Version = "0.10.0"
+const Version = "0.11.0"
 const MaxJSON = 1 << 20
 
+// NixExecution reports worker execution independently of scheduler and daemon
+// cleanup. Process results describe the local Nix client, not a QEMU exit.
+type NixExecution struct {
+	Stage            string            `json:"stage"`
+	Process          *NixProcessResult `json:"process,omitempty"`
+	Error            *Error            `json:"error,omitempty"`
+	PersistenceError *Error            `json:"persistence_error,omitempty"`
+	Finished         *time.Time        `json:"finished,omitempty"`
+}
+type NixProcessResult struct {
+	Stage      string `json:"stage"`
+	Source     string `json:"source"`
+	Exited     bool   `json:"exited"`
+	ExitCode   *int   `json:"exit_code,omitempty"`
+	ExitSignal string `json:"exit_signal,omitempty"`
+	CoreDumped bool   `json:"core_dumped,omitempty"`
+}
+
 type Error struct {
-	Code    string         `json:"code"`
-	Message string         `json:"message"`
-	Details map[string]any `json:"details,omitempty"`
+	Code       string         `json:"code"`
+	Message    string         `json:"message"`
+	Category   string         `json:"category,omitempty"`
+	Retry      string         `json:"retry,omitempty"`
+	NextAction string         `json:"next_action,omitempty"`
+	Details    map[string]any `json:"details,omitempty"`
 }
 
 func (e *Error) Error() string        { return e.Code + ": " + e.Message }
-func Fail(code, message string) error { return &Error{Code: code, Message: message} }
+func Fail(code, message string) error { return classifyError(&Error{Code: code, Message: message}) }
 func Safe(err error) *Error {
 	var e *Error
 	if errors.As(err, &e) {
-		return e
+		return classifyError(e)
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return &Error{Code: "backend_timeout", Message: "Operation exceeded its time budget"}
+		return classifyError(&Error{Code: "backend_timeout", Message: "Operation exceeded its time budget"})
 	}
 	if errors.Is(err, context.Canceled) {
-		return &Error{Code: "backend_cancelled", Message: "Operation was cancelled before its result was confirmed"}
+		return classifyError(&Error{Code: "backend_cancelled", Message: "Operation was cancelled before its result was confirmed"})
 	}
-	return &Error{Code: "backend_error", Message: "Operation failed; inspect task events and administrator diagnostics"}
+	return classifyError(&Error{Code: "backend_error", Message: "Operation failed; inspect task events and administrator diagnostics"})
 }
 
 // CheckJSON rejects duplicate keys at every depth before any decoder can discard
@@ -225,6 +247,7 @@ func ValidText(s string, max int) bool { return len(s) <= max && !strings.Contai
 type CommandSpec struct {
 	ID             string            `json:"id"`
 	Argv           []string          `json:"argv"`
+	Context        string            `json:"context,omitempty"`
 	Cwd            string            `json:"cwd,omitempty"`
 	Env            map[string]string `json:"env,omitempty"`
 	TimeoutSeconds int               `json:"timeout_seconds,omitempty"`
@@ -235,14 +258,57 @@ type Input struct {
 	EOF      bool   `json:"eof"`
 }
 type CommandStatus struct {
-	State       string `json:"state"`
-	ExitCode    *int   `json:"exit_code,omitempty"`
-	NextInput   int    `json:"next_input"`
-	InputClosed bool   `json:"input_closed"`
-	Error       string `json:"error,omitempty"`
+	State       string            `json:"state"`
+	ExitCode    *int              `json:"exit_code,omitempty"`
+	ExitSignal  string            `json:"exit_signal,omitempty"`
+	CoreDumped  bool              `json:"core_dumped,omitempty"`
+	NextInput   int               `json:"next_input"`
+	InputClosed bool              `json:"input_closed"`
+	Error       string            `json:"error,omitempty"`
+	Stage       string            `json:"stage,omitempty"`
+	Final       bool              `json:"final"`
+	Started     *time.Time        `json:"started,omitempty"`
+	Deadline    *time.Time        `json:"deadline,omitempty"`
+	Updated     *time.Time        `json:"updated,omitempty"`
+	Finished    *time.Time        `json:"finished,omitempty"`
+	Supervisor  *ProcessIdentity  `json:"supervisor,omitempty"`
+	Termination *Termination      `json:"termination,omitempty"`
+	Output      *CommandOutput    `json:"output,omitempty"`
+	Execution   *CommandExecution `json:"execution,omitempty"`
+}
+
+type CommandExecution struct {
+	Context         string   `json:"context"`
+	Identity        string   `json:"identity"`
+	Cwd             string   `json:"cwd"`
+	Inherited       string   `json:"inherited"`
+	EnvironmentKeys []string `json:"environment_keys"`
+}
+
+type Termination struct {
+	Reason           string    `json:"reason"`
+	Requested        time.Time `json:"requested"`
+	ProcessExited    bool      `json:"process_exited"`
+	RequestDelivered *bool     `json:"request_delivered,omitempty"`
+	GroupStopped     bool      `json:"group_stopped"`
+	Source           string    `json:"source"`
+	Error            *Error    `json:"error,omitempty"`
+}
+type CommandOutput struct {
+	State           string `json:"state"`
+	StdoutBytes     int64  `json:"stdout_bytes"`
+	StderrBytes     int64  `json:"stderr_bytes"`
+	StdoutSHA256    string `json:"stdout_sha256,omitempty"`
+	StderrSHA256    string `json:"stderr_sha256,omitempty"`
+	StdoutTruncated bool   `json:"stdout_truncated"`
+	StderrTruncated bool   `json:"stderr_truncated"`
+	Error           *Error `json:"error,omitempty"`
 }
 
 func (s CommandSpec) Validate() error {
+	if s.Context != "" && s.Context != "service" && s.Context != "desktop" {
+		return Fail("invalid_argument", "context must be service or desktop")
+	}
 	if !IDPattern.MatchString(s.ID) || len(s.Argv) == 0 || len(s.Argv) > 256 || s.Argv[0] == "" || s.TimeoutSeconds < 0 || s.TimeoutSeconds > 86400*30 {
 		return Fail("invalid_argument", "Invalid command")
 	}

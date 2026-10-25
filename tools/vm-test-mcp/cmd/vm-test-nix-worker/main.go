@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/config"
+	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/worker"
 )
 
@@ -20,10 +21,15 @@ func main() { os.Exit(run()) }
 func run() int {
 	f := flag.NewFlagSet("vm-test-nix-worker", flag.ContinueOnError)
 	file := f.String("config", "", "shared YAML configuration file")
+	version := f.Bool("version", false, "print JSON build and running-binary identity without configuration or state access")
 	check := f.Bool("check-config", false, "validate worker configuration without starting it or creating state")
 	reconcile := f.String("reconcile", "", "attest locally verified daemon cleanup for task ID")
 	if e := f.Parse(os.Args[1:]); e != nil {
 		return 2
+	}
+	if *version {
+		fmt.Println(string(wire.JSON(wire.Identity())))
+		return 0
 	}
 	if *file == "" || f.NArg() != 0 {
 		return 2

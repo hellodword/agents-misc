@@ -1,16 +1,28 @@
 # Project-owned desktop automation
 
-Use pywinauto's Win32/UIA backends for exposed controls and Airtest for image matching. Start exploration with ordinary scripts and control inspection. Transfer the working flow into the project's existing framework and command, together with image templates, dependency declarations, assertions and reports. Keep these assets runnable from a Windows console without MCP.
+Use the project's existing harness for product tests and cover its actual toolkits,
+features and affected boundaries. For a new Windows harness, the example uses
+pywinauto's Win32/UIA backends for exposed controls and Airtest for image matching.
+Start exploration with ordinary scripts and control inspection. Keep working
+flows, templates, dependencies, assertions and reports in the project, runnable
+from a Windows console without MCP. Network-only tests do not need this GUI harness.
 
 The project owns test behavior. MCP owns disposable clones and power, transfer,
 bounded Go command supervision, native input and evidence. Keep controls/vision
-interpreter paths in the tested project's environment context and use `command_start`
+interpreter paths in the tested project's environment context and use `command_start(context="desktop")`
 to probe actual versions and imports. Missing packages can be prepared in the
 node's workspace using project dependency tooling.
 
 ## Copyable example
 
-Copy the entire `assets/desktop-example` directory from this skill into the tested project's test assets. Its `run.py` accepts an application path, controls and vision interpreters, a new output directory, timeout, input interval, flow and backend. `scenario.py` owns selectors and assertions: adapt it to the application before pointing `--app` at another program. The supplied `fixture.py` is a disposable Win32 application with an Edit, an Apply button, a modal dialog and a painted PNG target.
+When adopting this example as a new harness, copy `assets/desktop-example` into the
+project's test assets. Existing harnesses can reuse relevant techniques without
+adding a second runner. Its `run.py` accepts an application path, controls and
+vision interpreters, a new output directory, timeout, input interval, flow and
+backend. `scenario.py` owns selectors and assertions: adapt it to the application
+before pointing `--app` at another program. The supplied `fixture.py` is a
+disposable Win32 application with an Edit, an Apply button, a modal dialog and a
+painted PNG target.
 
 From a Windows PowerShell console, with prepared interpreters:
 
@@ -55,4 +67,19 @@ For network feature tests, prepare firewall rules scoped to the executable, prot
 
 For prompt-behavior tests, retain the real firewall prompt, exercise the intended accept/cancel choice, then inspect generated rules and actual communication. Disabling the firewall is not an equivalent assertion.
 
-When accepting a target, cover Qt Widgets, Qt Quick, Win32/WPF and a custom-painted application; include control states, modal windows, Chinese input, matching, movement and dragging. Observe 1280×1024, 1920×1080 and 3840×2160 at 100%/150% scaling where supported. Record unsupported or unavailable combinations separately. Exercise UAC accept/cancel, administrator windows and recovery after a blocked UIA call. Move the same assets to another directory and run the same console command to compare reports and tree cleanup. Finish with at least 45 sequential guest commands, observing Guest Control session/process counts and final clone deletion with task `cleanup.state: complete`.
+## Automation framework and executor acceptance
+
+When maintaining the general automation framework or executor adapter, exercise
+the supported toolkit matrix: Qt Widgets, Qt Quick, Win32/WPF and a custom-painted
+application; include control states, modals, Chinese input, matching and dragging.
+Check supported resolutions/DPI, UAC accept/cancel, administrator windows and
+recovery after a blocked UIA call. Move the assets to another directory and compare
+console reports and process-tree cleanup. A session-stability experiment should
+run beyond the backend's concurrent-session limit (45 sequential commands covers
+a 32-session limit), observing remote session/process counts and final clone
+deletion. Keep unsupported and unverified combinations explicit.
+
+This matrix validates the automation infrastructure. Ordinary product acceptance
+uses that product's supported configurations and assertions, with no minimum
+command count or unrelated toolkit coverage. Both scopes release their batch
+after evidence collection and confirm `cleanup.state: complete`.

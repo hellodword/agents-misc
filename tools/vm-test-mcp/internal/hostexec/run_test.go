@@ -42,11 +42,17 @@ func TestCapturedExitTimeoutAndLimits(t *testing.T) {
 	if !errors.As(err, &failure) || out.ExitCode != 7 || string(out.Stdout) != "partial output" || string(out.Stderr) != "diagnostic reason" {
 		t.Fatal(out, err)
 	}
+	if out.ProcessID <= 1 || !out.Reaped {
+		t.Fatal("missing observed host process identity", out)
+	}
 	ctx, stop := context.WithTimeout(context.Background(), time.Second)
 	defer stop()
 	out, err = run(ctx, "timeout")
 	if !errors.Is(err, context.DeadlineExceeded) || !out.TimedOut || string(out.Stdout) != "before timeout" {
 		t.Fatal(out, err)
+	}
+	if out.ProcessID <= 1 || !out.Reaped {
+		t.Fatal("host timeout was not reaped", out)
 	}
 	out, err = run(context.Background(), "bounded")
 	if err != nil || len(out.Stdout) != 1<<20 || len(out.Stderr) != 8192 || !out.StdoutTruncated || !out.StderrTruncated {

@@ -260,14 +260,22 @@ func TestRunningFaultPreservesLabAndHealthyPeer(t *testing.T) {
 		t.Fatal("a running fault recreated or deleted a node")
 	}
 	op := successful(t, s, "command_start", StartRequest{NodeChange: NodeChange{Change: Change{"peer-command"}, NodeID: NodeID{TaskID: TaskID{task.ID}, NodeID: task.Nodes[1].ID}}, Argv: []string{"cmd", "/c", "echo", "ok"}})
-	if op.Result.(map[string]any)["state"] != "running" {
+	if op.Result.(map[string]any)["state"] != "starting" {
 		t.Fatal(op)
+	}
+	id := op.Result.(map[string]any)["id"].(string)
+	s.pollCommand(task, r, id)
+	c, err := task.Command(id)
+	if err != nil || c.State != "running" || c.Observation.State != "available" {
+		t.Fatal(c, err)
 	}
 }
 
 type probeRunner struct {
-	failed bool
-	calls  [][]string
+	failed      bool
+	mismatch    bool
+	unsupported bool
+	calls       [][]string
 }
 
 func (r *probeRunner) Run(_ context.Context, _ string, args []string, _ io.Reader) ([]byte, error) {
@@ -288,7 +296,15 @@ func (r *probeRunner) Run(_ context.Context, _ string, args []string, _ io.Reade
 		}
 		return []byte("257\n"), nil
 	}
-	return wire.JSON(map[string]any{"version": "0.9.0", "sha256": "different-build", "prepared": !r.failed, "privileged": true}), nil
+	protocol := wire.CommandProtocol
+	if r.mismatch {
+		protocol++
+	}
+	guest := map[string]any{"version": "0.9.0", "sha256": "different-build", "command_protocol": protocol, "prepared": !r.failed, "privileged": true}
+	if r.unsupported {
+		guest["command_service"] = map[string]any{"state": "unavailable", "error": &wire.Error{Code: "guest_execution_unavailable", Message: "cgroup.kill unavailable", Details: map[string]any{"requirements": map[string]any{"cgroup_kill": false}}}}
+	}
+	return wire.JSON(guest), nil
 }
 func TestGuestReadinessUsesCapabilitiesAndExplicitInitializationFailure(t *testing.T) {
 	c := testConfig(t)
@@ -310,6 +326,18 @@ func TestGuestReadinessUsesCapabilitiesAndExplicitInitializationFailure(t *testi
 	if err != nil || status.GuestError != nil || status.ServiceError != nil || status.Guest["version"] != "0.9.0" {
 		t.Fatal(status, err)
 	}
+	r.mismatch = true
+	status, err = b.nodeStatus(context.Background(), task, n)
+	if err != nil || status.ServiceError == nil || status.ServiceError.Code != "guest_protocol_mismatch" || status.GuestError != nil {
+		t.Fatal(status, err)
+	}
+	r.mismatch = false
+	r.unsupported = true
+	status, err = b.nodeStatus(context.Background(), task, n)
+	if err != nil || status.GuestError != nil || status.ServiceError == nil || status.ServiceError.Code != "guest_execution_unavailable" || wire.Safe(status.ServiceError).Category != "precondition" || status.ServiceError.Details["requirements"].(map[string]any)["cgroup_kill"] != false {
+		t.Fatal(status, err)
+	}
+	r.unsupported = false
 	r.failed = true
 	status, err = b.nodeStatus(context.Background(), task, n)
 	if err != nil || !status.PreparationFailed || status.ServiceError.Code != "initialization_failed" || status.GuestError != nil {
@@ -400,7 +428,8 @@ func TestPreparingLabSupportsReadyPeerAndEndsAfterInitializationFailure(t *testi
 	}
 	s.mu.Lock()
 	started, _ := task.Command(cid)
-	if len(started.Input) != 2 || started.Input[0].Data != "ready-peer-input" || !started.Input[1].EOF {
+	packets, err := s.db.Inputs(context.Background(), task.ID, cid, 0, 16)
+	if err != nil || started.Stdin.NextSequence != 2 || !started.Stdin.Closed || len(packets) != 2 || packets[0].Data != "ready-peer-input" || !packets[1].EOF {
 		t.Fatal("ready peer input was not persisted in order", started)
 	}
 	s.mu.Unlock()

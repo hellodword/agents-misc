@@ -36,6 +36,11 @@ DECL(IMachine, IMACHINE_IID)
 DECL(IConsole, ICONSOLE_IID)
 DECL(IMouse, IMOUSE_IID)
 DECL(IDisplay, IDISPLAY_IID)
+DECL(IGuest, IGUEST_IID)
+DECL(IGuestSession, IGUESTSESSION_IID)
+static IGuestSession guest_sessions[3];
+static int guest_closed[3];
+static int to_utf16(const char *text, PRUnichar **out);
 #define BASE(type)                                                             \
   .QueryInterface = type##_query, .AddRef = type##_add,                        \
   .Release = type##_release
@@ -51,6 +56,39 @@ GET(IVirtualBoxClient, ISession, get_session)
 GET(ISession, IConsole, get_console)
 GET(IConsole, IMouse, get_mouse)
 GET(IConsole, IDisplay, get_display)
+GET(IConsole, IGuest, get_guest)
+
+static nsresult get_guest_sessions(IGuest *self, PRUint32 *count, IGuestSession ***out) {
+  (void)self;
+  if (fail("guest_list")) return 1U << 31;
+  *count = 0;
+  *out = calloc(3, sizeof(IGuestSession *));
+  if (!*out) return 1U << 31;
+  for (int i = 0; i < 3; ++i) {
+    if (guest_closed[i]) continue;
+    (*out)[(*count)++] = &guest_sessions[i];
+    ++references;
+  }
+  return 0;
+}
+static nsresult guest_name(IGuestSession *self, PRUnichar **out) {
+  if (fail("guest_name")) return 1U << 31;
+  int i = (int)(self - guest_sessions);
+  const char *name = getenv(i == 0 ? "VM_TEST_NATIVE_OWNED_NAME" : "VM_TEST_NATIVE_ACTIVE_NAME");
+  if (i == 1 || !name) name = "unrelated session";
+  return to_utf16(name, out) ? (1U << 31) : 0;
+}
+static nsresult guest_user(IGuestSession *self, PRUnichar **out) {
+  (void)self;
+  return to_utf16(fail("guest_user") ? "foreign" : "synthetic", out) ? (1U << 31) : 0;
+}
+static nsresult guest_close(IGuestSession *self) {
+  if (fail("guest_close")) return 1U << 31;
+  int i = (int)(self - guest_sessions);
+  guest_closed[i] = 1;
+  fprintf(stderr, "CLOSE_GUEST %d\n", i);
+  return 0;
+}
 
 static nsresult find_machine(IVirtualBox *self, PRUnichar *uuid,
                              IMachine **out) {
@@ -72,6 +110,12 @@ static nsresult unlock_machine(ISession *self) {
   (void)self;
   --locks;
   return 0;
+}
+static nsresult session_state(IMachine *self, PRUint32 *state) {
+  (void)self;
+  const char *s = getenv("VM_TEST_NATIVE_SESSION");
+  *state = s ? (PRUint32)strtoul(s, NULL, 10) : SessionState_Unlocked;
+  return fail("session_read") ? (1U << 31) : 0;
 }
 static nsresult abs_supported(IMouse *self, PRBool *out) {
   (void)self;
@@ -118,15 +162,19 @@ static struct IVirtualBoxVtbl vbox_vtable = {BASE(IVirtualBox),
 static struct ISessionVtbl session_vtable = {
     BASE(ISession), .GetConsole = get_console, .UnlockMachine = unlock_machine};
 static struct IMachineVtbl machine_vtable = {BASE(IMachine),
-                                             .LockMachine = lock_machine};
+                                             .LockMachine = lock_machine,
+                                             .GetSessionState = session_state};
 static struct IConsoleVtbl console_vtable = {
-    BASE(IConsole), .GetMouse = get_mouse, .GetDisplay = get_display};
+    BASE(IConsole), .GetMouse = get_mouse, .GetDisplay = get_display, .GetGuest = get_guest};
 static struct IMouseVtbl mouse_vtable = {
     BASE(IMouse), .GetAbsoluteSupported = abs_supported,
     .GetRelativeSupported = rel_supported, .PutMouseEvent = mouse_relative,
     .PutMouseEventAbsolute = mouse_absolute};
 static struct IDisplayVtbl display_vtable = {BASE(IDisplay),
                                              .GetScreenResolution = resolution};
+static struct IGuestVtbl guest_vtable = {BASE(IGuest), .GetSessions = get_guest_sessions};
+static struct IGuestSessionVtbl guest_session_vtable = {
+    BASE(IGuestSession), .GetName = guest_name, .GetUser = guest_user, .Close = guest_close};
 
 static unsigned version(void) {
   const char *v = getenv("VM_TEST_NATIVE_VERSION");
@@ -142,6 +190,9 @@ static HRESULT initialize(const char *iid, IVirtualBoxClient **out) {
   IConsole_object.lpVtbl = &console_vtable;
   IMouse_object.lpVtbl = &mouse_vtable;
   IDisplay_object.lpVtbl = &display_vtable;
+  IGuest_object.lpVtbl = &guest_vtable;
+  IGuestSession_object.lpVtbl = &guest_session_vtable;
+  for (int i = 0; i < 3; ++i) guest_sessions[i].lpVtbl = &guest_session_vtable;
   *out = &IVirtualBoxClient_object;
   ++references;
   return 0;
@@ -160,6 +211,32 @@ static int to_utf16(const char *text, PRUnichar **out) {
   return 0;
 }
 static void free_utf16(PRUnichar *text) { free(text); }
+static int to_utf8(const PRUnichar *text, char **out) {
+  size_t n = 0;
+  while (text[n]) ++n;
+  *out = calloc(n+1, 1);
+  if (!*out) return -1;
+  for (size_t i = 0; i < n; ++i) (*out)[i] = (char)text[i];
+  return 0;
+}
+static void free_utf8(char *text) { free(text); }
+static SAFEARRAY *array_alloc(void) { return calloc(1, sizeof(SAFEARRAY)); }
+static HRESULT array_copy(IUnknown ***out, ULONG *count, SAFEARRAY *array) {
+  *count = array->c;
+  *out = calloc(array->c ? array->c : 1, sizeof(IUnknown *));
+  if (!*out) return (HRESULT)0x8007000eU;
+  for (ULONG i = 0; i < array->c; ++i) {
+    (*out)[i] = ((IUnknown **)array->pv)[i];
+    IUnknown_AddRef((*out)[i]);
+  }
+  return 0;
+}
+static HRESULT array_destroy(SAFEARRAY *array) {
+  for (ULONG i = 0; i < array->c; ++i) IUnknown_Release(((IUnknown **)array->pv)[i]);
+  free(array->pv); free(array);
+  return 0;
+}
+static HRESULT array_free(void *memory) { free(memory); return 0; }
 static VBOXCAPI functions = {.cb = sizeof(VBOXCAPI),
                              .uVersion = VBOX_CAPI_VERSION,
                              .pfnGetVersion = version,
@@ -167,6 +244,13 @@ static VBOXCAPI functions = {.cb = sizeof(VBOXCAPI),
                              .pfnClientUninitialize = uninitialize,
                              .pfnUtf8ToUtf16 = to_utf16,
                              .pfnUtf16Free = free_utf16,
+                             .pfnComUnallocString = free_utf16,
+                             .pfnUtf16ToUtf8 = to_utf8,
+                             .pfnUtf8Free = free_utf8,
+                             .pfnSafeArrayOutParamAlloc = array_alloc,
+                             .pfnSafeArrayCopyOutIfaceParamHelper = array_copy,
+                             .pfnSafeArrayDestroy = array_destroy,
+                             .pfnArrayOutFree = array_free,
                              .uEndVersion = VBOX_CAPI_VERSION};
 
 PCVBOXCAPI VBoxGetCAPIFunctions(unsigned requested) {

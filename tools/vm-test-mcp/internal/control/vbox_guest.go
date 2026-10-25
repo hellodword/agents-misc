@@ -77,6 +77,7 @@ func (b *VBoxBackend) nodeStatus(ctx context.Context, t *Task, n *Node) (*NodeSt
 	if status.State != "running" {
 		return status, nil
 	}
+	status.GuestSessions = b.observeGuestSessions(ctx, t, n)
 	c := b.guestConfig(t, n)
 	probe := []string{"/bin/true"}
 	if c.Kind == "windows" {
@@ -86,19 +87,27 @@ func (b *VBoxBackend) nodeStatus(ctx context.Context, t *Task, n *Node) (*NodeSt
 		status.GuestError = wire.Safe(err)
 		return status, nil
 	}
-	raw, err := b.guestExec(ctx, t, n, false, "probe", "--root", c.WorkDir)
+	raw, err := b.guestExec(ctx, t, n, "probe", "--root", c.WorkDir)
 	if err != nil {
 		status.ServiceError = wire.Safe(err)
 	} else if json.Unmarshal(raw, &status.Guest) != nil || status.Guest == nil {
 		status.ServiceError = &wire.Error{Code: "guest_protocol_error", Message: "Guest probe did not return a status object"}
 	} else if status.Guest["prepared"] != true || status.Guest["privileged"] != true {
 		status.ServiceError = &wire.Error{Code: "guest_not_ready", Message: "Guest initialization or command service is not ready"}
+	} else if status.Guest["command_protocol"] != float64(wire.CommandProtocol) {
+		status.ServiceError = &wire.Error{Code: "guest_protocol_mismatch", Message: "Guest command protocol does not match this controller", Details: map[string]any{"expected": wire.CommandProtocol, "observed": status.Guest["command_protocol"]}}
 	}
 	if c.Kind == "linux" {
-		args := []string{"/bin/systemctl", "show", "--no-pager", "--property=Version", "--value"}
-		if status.Guest["prepared"] != true {
-			args = []string{"/bin/systemctl", "show", "vm-test-firstboot.service", "--no-pager", "--property=ActiveState", "--property=SubState", "--property=Result"}
+		if service, ok := status.Guest["command_service"].(map[string]any); ok && service["error"] != nil {
+			var failure wire.Error
+			if err := json.Unmarshal(wire.JSON(service["error"]), &failure); err == nil && failure.Code != "" {
+				status.ServiceError = &failure
+			}
 		}
+		if status.Guest["prepared"] == true {
+			return status, nil
+		}
+		args := []string{"/bin/systemctl", "show", "vm-test-firstboot.service", "--no-pager", "--property=ActiveState", "--property=SubState", "--property=Result"}
 		result, callErr := b.guestCommand(ctx, t, n, args, "", nil)
 		if callErr != nil {
 			status.ServiceError = wire.Safe(callErr)

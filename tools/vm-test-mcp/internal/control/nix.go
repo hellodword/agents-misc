@@ -96,8 +96,9 @@ func (b *VBoxBackend) workerEvidence(ctx context.Context, t *Task, raw json.RawM
 		return raw, nil
 	}
 	var data struct {
-		State     string `json:"state"`
-		Cleanup   string `json:"cleanup"`
+		State     string             `json:"state"`
+		Cleanup   string             `json:"cleanup"`
+		Execution *wire.NixExecution `json:"execution"`
 		Artifacts []struct {
 			ID   string `json:"id"`
 			Name string `json:"name"`
@@ -128,5 +129,5 @@ func (b *VBoxBackend) workerEvidence(ctx context.Context, t *Task, raw json.RawM
 		}
 		collected = append(collected, &Artifact{ID: a.ID, Name: a.Name, Size: n, SHA256: h, Path: filepath.ToSlash(relative), Created: time.Now().UTC()})
 	}
-	return wire.JSON(map[string]any{"cleanup": data.Cleanup, "artifacts": collected}), nil
+	return wire.JSON(map[string]any{"cleanup": data.Cleanup, "artifacts": collected, "execution": data.Execution}), nil
 }

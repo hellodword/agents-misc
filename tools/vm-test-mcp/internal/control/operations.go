@@ -14,13 +14,28 @@ import (
 
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/network"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/state"
+	"github.com/hellodword/agents-misc/vm-test-mcp/internal/telemetry"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
-func (s *Server) query(ctx context.Context, name string, args any) (any, error) {
+func (s *Server) query(ctx context.Context, name string, args any) (result any, err error) {
+	started := time.Now()
 	s.mu.Lock()
+	acquired := time.Now()
+	defer func() {
+		s.performance.Record(telemetry.Call{Started: started.UTC(), Finished: time.Now().UTC(), Scope: "query", Operation: name, WaitUS: acquired.Sub(started).Microseconds(), ExecutionUS: time.Since(acquired).Microseconds(), Failed: err != nil})
+	}()
 	defer s.mu.Unlock()
 	switch a := args.(type) {
+	case ObserveRequest:
+		if a.Seconds == 0 {
+			a.Seconds = 30
+		}
+		if a.Seconds < 1 || a.Seconds > 240 {
+			return nil, wire.Fail("invalid_argument", "seconds must be 1..240")
+		}
+		now := time.Now().UTC()
+		return s.performance.Window(now.Add(-time.Duration(a.Seconds)*time.Second), now), nil
 	case struct{}:
 		templates := map[string]any{}
 		for name, template := range s.cfg.VirtualBox.Templates {
@@ -32,6 +47,8 @@ func (s *Server) query(ctx context.Context, name string, args any) (any, error) 
 			}
 			sort.Strings(cameras)
 			v["cameras"] = cameras
+			v["identity"] = map[string]any{"state": "configured", "configured_sha256": configuredTemplateIdentity(template), "observed": "node_get.identity after cloning; guest.build after probe"}
+			v["optional_capabilities"] = map[string]any{"os_sleep": "unverified", "os_hibernation": "unverified", "new_user_secret_service": "unverified", "scope": "No template acceptance is inferred from backend availability or command readiness"}
 			templates[name] = v
 		}
 		backends := map[string]any{}
@@ -40,26 +57,30 @@ func (s *Server) query(ctx context.Context, name string, args any) (any, error) 
 			c, cancel := context.WithTimeout(ctx, 3*time.Second)
 			reason, e := s.backend.Available(c, kind)
 			cancel()
-			backends[kind] = map[string]any{"available": e == nil && reason == "", "waiting_reason": reason}
+			view := map[string]any{"available": e == nil && reason == "", "waiting_reason": reason, "scope": "Current admission prerequisites, not execution or optional capability acceptance"}
+			if provider, ok := s.backend.(interface{ BackendIdentity(string) any }); ok {
+				view["identity"] = provider.BackendIdentity(kind)
+			}
+			if e != nil {
+				view["error"] = wire.Safe(e)
+			}
+			backends[kind] = view
 		}
 		s.mu.Lock()
-		return map[string]any{"version": wire.Version, "templates": templates, "backends": backends, "active_task_id": s.active, "limits": map[string]any{"default_seconds": s.cfg.Tasks.DefaultTimeout.Seconds(), "max_seconds": s.cfg.Tasks.MaxDuration.Seconds(), "max_upload_bytes": s.cfg.Storage.MaxUploadBytes, "max_nodes": 64, "startup_timeout": s.cfg.VirtualBox.StartupTimeout.Value().String(), "shutdown_timeout": s.cfg.VirtualBox.ShutdownTimeout.Value().String(), "cleanup_timeout": s.cfg.Tasks.CleanupTimeout.Value().String(), "probe_interval": probeInterval.String(), "probe_timeout": probeTimeout.String(), "unavailable_after": s.cfg.VirtualBox.UnavailableAfter.Value().String(), "failure_threshold": 3, "recovery_successes": 2, "diagnostic_timeout": diagnosticBudget.String(), "node_exec_default_seconds": 10, "node_exec_max_seconds": 30}, "endpoint_address": s.cfg.VirtualBox.Network.Listen}, nil
-	case ListRequest:
-		start, end, e := page(a.Cursor, a.Limit, len(s.tasks))
-		if e != nil {
-			return nil, e
-		}
-		items := []any{}
-		for _, t := range s.tasks[start:end] {
-			items = append(items, t.Public())
-		}
-		return map[string]any{"items": items, "next_cursor": end}, nil
+		return map[string]any{"version": wire.Version, "build": wire.Identity(), "performance": s.performance.Latest(), "templates": templates, "backends": backends, "active_task_id": s.active, "limits": map[string]any{"default_seconds": s.cfg.Tasks.DefaultTimeout.Seconds(), "max_seconds": s.cfg.Tasks.MaxDuration.Seconds(), "max_upload_bytes": s.cfg.Storage.MaxUploadBytes, "max_nodes": 64, "startup_timeout": s.cfg.VirtualBox.StartupTimeout.Value().String(), "shutdown_timeout": s.cfg.VirtualBox.ShutdownTimeout.Value().String(), "cleanup_timeout": s.cfg.Tasks.CleanupTimeout.Value().String(), "probe_interval": probeInterval.String(), "probe_timeout": probeTimeout.String(), "unavailable_after": s.cfg.VirtualBox.UnavailableAfter.Value().String(), "failure_threshold": 3, "recovery_successes": 2, "diagnostic_timeout": diagnosticBudget.String(), "node_exec_default_seconds": 10, "node_exec_max_seconds": 30, "max_retained_endpoints_per_task": 128, "command_protocol": wire.CommandProtocol, "stdin_packet_bytes": wire.InputPacketLimit, "stdin_packets": wire.InputPacketCount, "stdin_bytes": wire.CommandInputLimit, "output_bytes_per_stream": wire.CommandOutputLimit, "guest_read_bytes_per_stream": wire.CommandReadLimit}, "endpoint_address": s.cfg.VirtualBox.Network.Listen}, nil
+	case TaskListRequest:
+		return s.listTasks(a)
 	case TaskID:
 		t, e := s.task(a.TaskID)
 		if e != nil {
 			return nil, e
 		}
-		return t.Public(), nil
+		v := t.Public().(map[string]any)
+		s.queueView(t, v)
+		if until := s.performancePending[t.ID]; !until.IsZero() {
+			v["evidence_pending_until"] = until
+		}
+		return v, nil
 	case NodeID:
 		t, err := s.task(a.TaskID.TaskID)
 		if err != nil {
@@ -93,7 +114,7 @@ func (s *Server) query(ctx context.Context, name string, args any) (any, error) 
 			return nil, e
 		}
 		return s.readLog(path.Join("tasks", a.TaskID.TaskID, "task.log"), a.Offset, a.Limit)
-	case CommandRequest:
+	case CommandGetRequest:
 		t, e := s.task(a.TaskID.TaskID)
 		if e != nil {
 			return nil, e
@@ -102,19 +123,53 @@ func (s *Server) query(ctx context.Context, name string, args any) (any, error) 
 		if e != nil {
 			return nil, e
 		}
-		return clone(c), nil
+		if a.InputLimit < 0 || a.InputLimit > 16 || a.InputFrom != nil && *a.InputFrom < 0 || a.InputFrom == nil && a.InputLimit != 0 {
+			return nil, wire.Fail("invalid_argument", "input_from must be nonnegative; input_limit requires input_from and ranges from 1 to 16")
+		}
+		detail := &CommandDetails{Command: clone(c), Spec: wire.CommandSpec{ID: c.ID}}
+		if !t.Purged {
+			if detail.Spec, e = s.db.CommandSpec(ctx, t.ID, c.ID); e != nil {
+				return nil, e
+			}
+		}
+		if a.InputFrom != nil {
+			limit := a.InputLimit
+			if limit == 0 {
+				limit = 16
+			}
+			if detail.Input, e = s.db.Inputs(ctx, t.ID, c.ID, *a.InputFrom, limit); e != nil {
+				return nil, e
+			}
+			next := *a.InputFrom + len(detail.Input)
+			detail.NextSequence = &next
+		}
+		return detail, nil
 	case ReadRequest:
 		t, e := s.task(a.TaskID.TaskID)
 		if e != nil {
 			return nil, e
 		}
-		if _, e = t.Command(a.CommandID); e != nil {
+		c, e := t.Command(a.CommandID)
+		if e != nil {
 			return nil, e
 		}
 		if a.Stream != "stdout" && a.Stream != "stderr" {
 			return nil, wire.Fail("invalid_argument", "stream must be stdout or stderr")
 		}
-		return s.readLog(path.Join("tasks", t.ID, "commands", a.CommandID, a.Stream), a.Offset, a.Limit)
+		v, e := s.readLog(path.Join("tasks", t.ID, "commands", a.CommandID, a.Stream), a.Offset, a.Limit)
+		if e != nil {
+			return nil, e
+		}
+		retained := c.Retained.Stdout
+		if a.Stream == "stderr" {
+			retained = c.Retained.Stderr
+		}
+		result := v.(map[string]any)
+		result["encoding"], result["offset"] = "base64", a.Offset
+		result["at_end"] = result["eof"]
+		result["eof"] = retained.State == "complete" && result["next_offset"].(int64) >= retained.Bytes
+		result["retained"], result["execution_final"] = retained, c.Final
+		return result, nil
 	case TransferGetRequest:
 		t := s.transfers[a.TransferID]
 		if t == nil || t.State == "purged" {
@@ -224,9 +279,14 @@ func (s *Server) mutate(name string, args any) (any, error) {
 		t.State = "cancelled"
 		t.Conclusion = "inconclusive"
 		if queued {
-			t.Cleanup = "complete"
 			now := time.Now().UTC()
 			t.Ended = &now
+			if uploads := s.retainTransfers(t.ID); len(uploads) == 0 {
+				t.Cleanup = "complete"
+			} else {
+				s.wg.Add(1)
+				go func() { defer s.wg.Done(); s.cleanup(t) }()
+			}
 		} else if r := s.runtime[t.ID]; r != nil {
 			r.cancel()
 		}
@@ -255,6 +315,11 @@ func (s *Server) mutate(name string, args any) (any, error) {
 		if e != nil {
 			s.mu.Unlock()
 			return nil, e
+		}
+		if !c.Observing() {
+			result := clone(c)
+			s.mu.Unlock()
+			return result, nil
 		}
 		id := NodeID{TaskID: a.TaskID, NodeID: c.NodeID}
 		c.Cancellation = "requested"
@@ -296,6 +361,9 @@ func (s *Server) mutate(name string, args any) (any, error) {
 			if !scanCode.MatchString(code) {
 				return nil, wire.Fail("invalid_argument", "Scancodes must be two hex digits")
 			}
+		}
+		if oneOf(a.Action, "click", "drag") && a.Button == 0 {
+			a.Button = 1
 		}
 		return s.action(a.NodeID, NodeAction{Action: "input_" + a.Action, Screen: a.Screen, X: a.X, Y: a.Y, EndX: a.EndX, EndY: a.EndY, Button: a.Button, DZ: a.DZ, DW: a.DW, Relative: a.Relative, Scancodes: a.Scancodes})
 	case MediaRequest:
@@ -483,10 +551,12 @@ func (s *Server) createNix(a NixRequest) (any, error) {
 	t.CacheID = a.CacheID
 	t.Derivation = a.Derivation
 	t.System = a.System
-	cache.TaskID = t.ID
-	if e = s.db.Save(context.Background(), state.Document{Kind: "task", ID: t.ID, Value: t}, state.Document{Kind: "transfer", ID: cache.ID, Value: cache}); e != nil {
+	attached := *cache
+	attached.TaskID = t.ID
+	if e = s.db.Save(context.Background(), state.Document{Kind: "task", ID: t.ID, Value: t}, state.Document{Kind: "transfer", ID: cache.ID, Value: &attached}); e != nil {
 		return nil, e
 	}
+	cache.TaskID = attached.TaskID
 	s.tasks = append(s.tasks, t)
 	sort.SliceStable(s.tasks, func(i, j int) bool { return s.tasks[i].Created.Before(s.tasks[j].Created) })
 	return t.Public(), nil
@@ -573,7 +643,7 @@ func (s *Server) action(id NodeID, a NodeAction) (any, error) {
 		n.Expected = &ExpectedState{Action: a.Action, Power: power, Requested: time.Now().UTC(), Until: &until}
 		s.save(t)
 	}
-	tc, nc := clone(t), clone(n)
+	tc, nc := t.executionSnapshot(), clone(n)
 	s.mu.Unlock()
 	if strings.HasPrefix(a.Action, "input_") {
 		interval := s.cfg.VirtualBox.Templates[nc.Template].InputInterval
@@ -616,7 +686,7 @@ func (s *Server) action(id NodeID, a NodeAction) (any, error) {
 
 func (s *Server) startCommand(a StartRequest) (any, error) {
 	id := wire.ID()
-	spec := wire.CommandSpec{ID: id, Argv: a.Argv, Cwd: a.Cwd, Env: a.Env, TimeoutSeconds: a.TimeoutSeconds}
+	spec := wire.CommandSpec{ID: id, Argv: a.Argv, Context: a.Context, Cwd: a.Cwd, Env: a.Env, TimeoutSeconds: a.TimeoutSeconds}
 	if e := spec.Validate(); e != nil {
 		return nil, e
 	}
@@ -626,13 +696,23 @@ func (s *Server) startCommand(a StartRequest) (any, error) {
 		s.mu.Unlock()
 		return nil, e
 	}
-	if _, e = t.Node(a.NodeID.NodeID); e != nil {
+	n, e := t.Node(a.NodeID.NodeID)
+	if e != nil {
 		s.mu.Unlock()
 		return nil, e
 	}
-	c := &Command{ID: id, NodeID: a.NodeID.NodeID, Spec: spec, CommandStatus: wire.CommandStatus{State: "starting"}, Input: []wire.Input{}, Created: time.Now().UTC()}
+	if a.Context == "desktop" && s.cfg.VirtualBox.Templates[n.Template].Kind != "windows" {
+		s.mu.Unlock()
+		return nil, wire.Fail("unsupported_context", "desktop requires a Windows template; select the Linux user/session in the guest fixture")
+	}
+	now := time.Now().UTC()
+	statusDeadline := now.Add(120*time.Second + commandStatusGrace)
+	c := &Command{ID: id, NodeID: a.NodeID.NodeID, CommandStatus: wire.CommandStatus{State: "starting", Stage: "submitting"}, StatusDeadline: &statusDeadline, Retained: RetainedOutput{Stdout: RetainedStream{State: "pending"}, Stderr: RetainedStream{State: "pending"}}, Created: now}
 	t.Commands = append(t.Commands, c)
-	e = s.db.Save(context.Background(), state.Document{Kind: "task", ID: t.ID, Value: t})
+	e = s.db.CreateCommand(context.Background(), state.Document{Kind: "task", ID: t.ID, Value: t}, id, spec)
+	if e != nil {
+		t.Commands = t.Commands[:len(t.Commands)-1]
+	}
 	s.mu.Unlock()
 	if e != nil {
 		return nil, e
@@ -640,15 +720,22 @@ func (s *Server) startCommand(a StartRequest) (any, error) {
 	_, e = s.action(a.NodeID, NodeAction{Action: "command_start", Spec: &spec})
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	c.State = "running"
-	if e != nil {
-		c.State = "uncertain"
+	if !c.Final && c.Observation.LastSuccess == nil {
+		c.State, c.Stage = "starting", "awaiting_status"
+		end := time.Now().UTC().Add(commandStatusGrace)
+		if end.Before(*c.StatusDeadline) {
+			c.StatusDeadline = &end
+		}
+		if e != nil {
+			c.State = "uncertain"
+			c.Observation.update(time.Now().UTC(), wire.Safe(e), s.cfg.VirtualBox.UnavailableAfter.Value(), false)
+		}
 	}
 	s.save(t)
 	return clone(c), e
 }
 func (s *Server) commandInput(a InputRequest) (any, error) {
-	if a.Sequence < 0 || len(a.Data) > 65536 {
+	if a.Sequence < 0 || len(a.Data) > wire.InputPacketLimit {
 		return nil, wire.Fail("invalid_argument", "Invalid input packet")
 	}
 	s.mu.Lock()
@@ -666,21 +753,29 @@ func (s *Server) commandInput(a InputRequest) (any, error) {
 		s.mu.Unlock()
 		return nil, e
 	}
-	if a.Sequence != len(c.Input) {
+	if a.Sequence != c.Stdin.NextSequence {
 		s.mu.Unlock()
 		return nil, wire.Fail("input_order", "sequence must equal the next persisted input sequence")
 	}
-	if !oneOf(c.State, "running", "starting", "uncertain") || len(c.Input) >= 1000000 {
+	if !c.Observing() {
 		s.mu.Unlock()
 		return nil, wire.Fail("invalid_state", "Command cannot accept more input")
 	}
-	if len(c.Input) > 0 && c.Input[len(c.Input)-1].EOF {
+	if c.Stdin.Closed {
 		s.mu.Unlock()
 		return nil, wire.Fail("input_closed", "stdin already ended")
 	}
+	if c.Stdin.NextSequence >= wire.InputPacketCount || c.Stdin.Bytes+int64(len(a.Data)) > wire.CommandInputLimit {
+		s.mu.Unlock()
+		return nil, wire.Fail("input_limit", "stdin accepts at most 4096 packets and 64MiB; upload larger inputs as files")
+	}
 	packet := wire.Input{Sequence: a.Sequence, Data: a.Data, EOF: a.EOF}
-	c.Input = append(c.Input, packet)
-	e = s.db.Save(context.Background(), state.Document{Kind: "task", ID: t.ID, Value: t})
+	previous := c.Stdin
+	c.Stdin.Accept(packet)
+	e = s.db.AppendInput(context.Background(), state.Document{Kind: "task", ID: t.ID, Value: t}, c.ID, packet)
+	if e != nil {
+		c.Stdin = previous
+	}
 	nodeID := c.NodeID
 	s.mu.Unlock()
 	if e != nil {
@@ -754,7 +849,7 @@ func (s *Server) changeNetwork(id string, a NetworkRequest, recover bool) (any, 
 		s.closeRelays(t, r)
 	}
 	if e = s.refreshNetworkContext(ctx, t, r, recover); e != nil {
-		s.degrade(t, r)
+		s.degrade(t, r, e)
 		return nil, e
 	}
 	s.mu.Lock()
@@ -775,9 +870,9 @@ func (s *Server) createEndpoint(a EndpointRequest) (any, error) {
 		s.mu.Unlock()
 		return nil, e
 	}
-	if t.Network != "ready" || len(t.Endpoints) >= 128 {
+	if e = endpointAdmission(t); e != nil {
 		s.mu.Unlock()
-		return nil, wire.Fail("invalid_state", "Network unavailable or endpoint limit reached")
+		return nil, e
 	}
 	s.mu.Unlock()
 	ctx, cancel := context.WithTimeout(r.ctx, 30*time.Second)
@@ -792,9 +887,9 @@ func (s *Server) createEndpoint(a EndpointRequest) (any, error) {
 	}
 	defer lock.Unlock()
 	s.mu.Lock()
-	if t.State != "running" || t.Network != "ready" || len(t.Endpoints) >= 128 {
+	if e = endpointAdmission(t); e != nil {
 		s.mu.Unlock()
-		return nil, wire.Fail("invalid_state", "Lab or network state changed")
+		return nil, e
 	}
 	used := map[int]bool{}
 	for _, v := range t.Endpoints {
@@ -851,9 +946,21 @@ func (s *Server) createEndpoint(a EndpointRequest) (any, error) {
 	result := clone(entry)
 	s.mu.Unlock()
 	if e != nil {
-		s.degrade(t, r)
+		s.degrade(t, r, e)
 	}
 	return result, e
+}
+func endpointAdmission(t *Task) error {
+	if t.State != "running" {
+		return &wire.Error{Code: "invalid_state", Message: "Endpoint publication requires a running lab", Details: map[string]any{"phase": t.phase(), "required_phase": "running", "next_action": "Inspect task_get; wait for preparation or create another batch after cleanup"}}
+	}
+	if t.Network != "ready" {
+		return &wire.Error{Code: "network_not_ready", Message: "Endpoint publication requires a ready router policy and protection", Details: map[string]any{"network": t.Network, "observation": t.NetworkObservation, "next_action": "Inspect task_get network observation; use network_recover after resolving a degraded network"}}
+	}
+	if len(t.Endpoints) >= 128 {
+		return &wire.Error{Code: "endpoint_limit", Message: "Task reached its retained endpoint limit", Details: map[string]any{"limit": 128, "count": len(t.Endpoints), "scope": "task_history", "next_action": "Finish this batch, confirm cleanup, and create a new task"}}
+	}
+	return nil
 }
 func (s *Server) closeEndpoint(a CloseEndpointRequest) (any, error) {
 	s.mu.Lock()
@@ -901,7 +1008,7 @@ func (s *Server) closeEndpoint(a CloseEndpointRequest) (any, error) {
 		e = s.refreshNetworkContext(ctx, t, r, false)
 	}
 	if e != nil {
-		s.degrade(t, r)
+		s.degrade(t, r, e)
 	}
 	return ec, e
 }
@@ -956,6 +1063,11 @@ func (s *Server) purge(t *Task) error {
 	if !t.Terminal() || t.Cleanup != "complete" {
 		return wire.Fail("invalid_state", "Only a terminal, fully cleaned task can be purged")
 	}
+	for id, x := range s.transfers {
+		if x.TaskID == t.ID && s.uploading[id] != nil {
+			return wire.Fail("conflict", "A task upload is still settling")
+		}
+	}
 	for _, o := range s.operations {
 		if o.TaskID == t.ID && o.State == "pending" && o.Tool != "task_purge" {
 			return wire.Fail("conflict", "A task operation is still settling")
@@ -978,14 +1090,13 @@ func (s *Server) purge(t *Task) error {
 				return e
 			}
 			x.State = "purged"
+			s.transferLocks.Delete(x.ID)
 			s.persist(state.Document{Kind: "transfer", ID: x.ID, Value: x})
 		}
 	}
+	wasPurged := t.Purged
 	t.Purged = true
-	for _, c := range t.Commands {
-		c.Input = nil
-		c.Spec = wire.CommandSpec{ID: c.ID}
-	}
+	delete(s.performancePending, t.ID)
 	// Receipts keep their identity/hash/status for idempotency, but old task or
 	// command snapshots must not retain the payload that was explicitly purged.
 	for _, o := range s.operations {
@@ -994,7 +1105,10 @@ func (s *Server) purge(t *Task) error {
 			s.persist(state.Document{Kind: "operation", ID: o.ID, Value: o})
 		}
 	}
-	s.save(t)
+	if err := s.db.PurgeCommandData(context.Background(), state.Document{Kind: "task", ID: t.ID, Value: t}); err != nil {
+		t.Purged = wasPurged
+		return err
+	}
 	return nil
 }
 func (s *Server) expireRetention() {

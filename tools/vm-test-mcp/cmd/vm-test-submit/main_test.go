@@ -2,10 +2,24 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
+
+func TestVersionDoesNotRequirePreparedClientConfiguration(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runCLI([]string{"--version"}, &stdout, &stderr); code != 0 || stderr.Len() != 0 {
+		t.Fatal(code, stderr.String())
+	}
+	var build wire.BuildIdentity
+	if err := json.Unmarshal(stdout.Bytes(), &build); err != nil || build.Version != wire.Version || build.BinaryState != "observed" || build.SHA256 == "" {
+		t.Fatal(build, err)
+	}
+}
 
 func TestCLIUsage(t *testing.T) {
 	for _, test := range []struct {

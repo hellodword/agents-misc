@@ -62,9 +62,22 @@ func (s *Server) cleanup(t *Task) {
 		e.State = "closed"
 	}
 	s.save(t)
+	uploads := s.retainTransfers(t.ID)
 	s.mu.Unlock()
 	s.closeRelays(t, r)
 	var errs []error
+	uploadCtx, stopUploads := context.WithTimeout(ctx, 5*time.Second)
+	for _, done := range uploads {
+		select {
+		case <-done:
+		case <-uploadCtx.Done():
+			errs = append(errs, wire.Fail("cleanup_timeout", "Task uploads did not settle within the cleanup budget"))
+		}
+		if uploadCtx.Err() != nil {
+			break
+		}
+	}
+	stopUploads()
 	if err := writeGate(ctx, &r.gate); err != nil {
 		errs = append(errs, &wire.Error{Code: "cleanup_timeout", Message: "Operations did not release task resources within the cleanup budget"})
 	} else {
@@ -73,7 +86,7 @@ func (s *Server) cleanup(t *Task) {
 		snapshot := clone(t)
 		s.mu.Unlock()
 		if snapshot.Kind == "nixos" {
-			errs = s.cleanupNix(ctx, t, snapshot)
+			errs = append(errs, s.cleanupNix(ctx, t, snapshot)...)
 		} else {
 			// Evidence cannot consume the resource cleanup budget. All collectors
 			// share one deadline, including cancellation and capture retrieval.
@@ -81,7 +94,7 @@ func (s *Server) cleanup(t *Task) {
 			evidence, stop := context.WithTimeout(ctx, budget)
 			s.cleanupEvidence(evidence, t, r, snapshot)
 			stop()
-			errs = s.cleanupNodes(ctx, t, snapshot)
+			errs = append(errs, s.cleanupNodes(ctx, t, snapshot)...)
 			if snapshot.GUI != nil && !snapshot.GUI.Restored {
 				if err := s.setGUI(ctx, t, "", true); err != nil {
 					errs = append(errs, err)
@@ -105,8 +118,15 @@ func (s *Server) cleanup(t *Task) {
 		s.event(t, "cleanup_blocked", "Resource cleanup is incomplete; scheduling remains occupied")
 	} else {
 		for _, c := range t.Commands {
-			if oneOf(c.State, "running", "starting", "uncertain") {
-				c.State, c.Cancellation = "cancelled", "confirmed"
+			c.Release = &CommandRelease{Source: "vm_deleted", Time: time.Now().UTC()}
+			c.Retained.stop(wire.Fail("vm_released", "VM was released before all command output was retained"))
+			if c.Observing() {
+				c.State, c.Stage, c.Final = "uncertain", "finished", true
+				if c.Error == "" {
+					c.Error = "Guest execution result was not observed before VM release"
+				}
+				now := time.Now().UTC()
+				c.Finished = &now
 			}
 		}
 		s.event(t, "cleanup_complete", "Task resources were released")
@@ -125,14 +145,16 @@ func (s *Server) cleanupEvidence(ctx context.Context, t *Task, r *Runtime, snaps
 		}
 	}
 	for _, c := range snapshot.Commands {
-		if !oneOf(c.State, "running", "starting", "uncertain") || ctx.Err() != nil {
+		if !c.Polling() || ctx.Err() != nil {
 			continue
 		}
 		n, _ := snapshot.Node(c.NodeID)
-		cctx, stop := context.WithTimeout(ctx, 2*time.Second)
-		_, _ = s.backend.Action(cctx, snapshot, n, NodeAction{Action: "command_cancel", CommandID: c.ID})
-		stop()
-		cctx, stop = context.WithTimeout(ctx, 2*time.Second)
+		if c.Observing() {
+			cctx, stop := context.WithTimeout(ctx, 2*time.Second)
+			_, _ = s.backend.Action(cctx, snapshot, n, NodeAction{Action: "command_cancel", CommandID: c.ID})
+			stop()
+		}
+		cctx, stop := context.WithTimeout(ctx, min(5*time.Second, time.Until(deadline(ctx))))
 		s.pollCommandContext(cctx, t, c.ID, false)
 		stop()
 	}
@@ -156,6 +178,7 @@ func (s *Server) cleanupNodes(ctx context.Context, t, snapshot *Task) []error {
 				defer func() { <-slots }()
 			case <-ctx.Done():
 			}
+			var attemptDeadline time.Time
 			progress := cleanupProgress(func(stage, state string, err error) {
 				s.mu.Lock()
 				defer s.mu.Unlock()
@@ -173,6 +196,8 @@ func (s *Server) cleanupNodes(ctx context.Context, t, snapshot *Task) []error {
 				}
 				if state == "running" {
 					step.Attempts++
+					now, end := time.Now().UTC(), attemptDeadline
+					step.Started, step.Deadline = &now, &end
 				}
 				step.State, step.Updated, step.Error = state, time.Now().UTC(), nil
 				if err != nil {
@@ -183,9 +208,10 @@ func (s *Server) cleanupNodes(ctx context.Context, t, snapshot *Task) []error {
 			var err error
 			for attempt := 0; attempt < 3; attempt++ {
 				attemptCtx, stop := context.WithTimeout(context.WithValue(ctx, cleanupKey{}, progress), 30*time.Second)
+				attemptDeadline = deadline(attemptCtx).UTC()
 				err = cleanupStep(attemptCtx, "delete", func() error { return s.backend.Delete(attemptCtx, snapshot, n) })
 				stop()
-				if err == nil || ctx.Err() != nil || oneOf(wire.Safe(err).Code, "ownership_mismatch", "policy_denied") {
+				if err == nil || ctx.Err() != nil || oneOf(wire.Safe(err).Code, "ownership_mismatch", "policy_denied", "cleanup_conflict") {
 					break
 				}
 				if attempt < 2 {
@@ -222,11 +248,24 @@ func (s *Server) cleanupNix(ctx context.Context, t, snapshot *Task) []error {
 		return []error{err}
 	}
 	var result struct {
-		Cleanup       string      `json:"cleanup"`
-		Artifacts     []*Artifact `json:"artifacts"`
-		EvidenceError bool        `json:"evidence_error"`
+		Cleanup       string             `json:"cleanup"`
+		Artifacts     []*Artifact        `json:"artifacts"`
+		EvidenceError bool               `json:"evidence_error"`
+		Execution     *wire.NixExecution `json:"execution"`
 	}
-	if json.Unmarshal(raw, &result) != nil || result.Cleanup != "complete" {
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return []error{err}
+	}
+	s.mu.Lock()
+	if result.Execution != nil {
+		t.NixExecution, t.Failure = result.Execution, result.Execution.Error
+		if t.Failure == nil {
+			t.Failure = result.Execution.PersistenceError
+		}
+		s.save(t)
+	}
+	s.mu.Unlock()
+	if result.Cleanup != "complete" {
 		return []error{wire.Fail("cleanup_required", "Nix daemon cleanup is not confirmed")}
 	}
 	s.mu.Lock()

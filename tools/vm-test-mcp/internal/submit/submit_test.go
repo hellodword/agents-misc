@@ -2,9 +2,11 @@ package submit
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +16,62 @@ import (
 
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
+
+func TestCacheUploadReportsServerRejectionAndBoundsResponse(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "input.nar")
+	if err := os.WriteFile(file, []byte("cache input"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, response string
+		structured     bool
+	}{
+		{"structured", `{"error":{"code":"invalid_path","message":"Publication requires the same directory","details":{"stage":"publication"}}}`, true},
+		{"malformed", "upstream error: synthetic-capability", false},
+		{"oversized", strings.Repeat("x", 65537), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil || r.Method != "PUT" || string(body) != "cache input" {
+					t.Error("upload bytes changed", r.Method, string(body), err)
+				}
+				w.WriteHeader(http.StatusConflict)
+				io.WriteString(w, tc.response)
+			}))
+			defer server.Close()
+			err := uploadCacheObject(context.Background(), server.Client(), server.URL+"/files/synthetic-capability", "nar/input.nar", file)
+			if err == nil || !strings.Contains(err.Error(), "nar/input.nar") || !strings.Contains(err.Error(), "409") || strings.Contains(err.Error(), "synthetic-capability") {
+				t.Fatal("missing object/status or leaked capability", err)
+			}
+			var failure *wire.Error
+			if errors.As(err, &failure) != tc.structured {
+				t.Fatal("invalid response accepted as a server error", err)
+			}
+			if tc.structured && (failure.Code != "invalid_path" || failure.Details["stage"] != "publication" || failure.Details["boundary"] != "cache_upload" || failure.Details["object"] != "nar/input.nar" || failure.Details["http_status"] != 409) {
+				t.Fatal("server rejection lost its cause or boundary", failure)
+			}
+		})
+	}
+}
+
+type uploadFailureTransport struct{}
+
+func (uploadFailureTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return nil, &url.Error{Op: "Put", URL: r.URL.String(), Err: context.DeadlineExceeded}
+}
+
+func TestCacheUploadTimeoutOmitsCapability(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "input.nar")
+	if err := os.WriteFile(file, []byte("cache input"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := uploadCacheObject(context.Background(), &http.Client{Transport: uploadFailureTransport{}}, "https://fixture.invalid/files/synthetic-capability", "nar/input.nar", file)
+	var failure *wire.Error
+	if !errors.As(err, &failure) || failure.Code != "backend_timeout" || strings.Contains(err.Error(), "synthetic-capability") || !strings.Contains(err.Error(), "nar/input.nar") {
+		t.Fatal("upload timeout lost its classification or disclosed the URL", err)
+	}
+}
 
 func TestRetryReusesEvaluationAndUploadsStandardCache(t *testing.T) {
 	dir := t.TempDir()

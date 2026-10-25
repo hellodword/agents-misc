@@ -82,7 +82,7 @@ type Template struct {
 type VirtualBox struct {
 	Executable       string              `yaml:"executable"`
 	LibraryDir       string              `yaml:"library_dir"`
-	InputHelper      string              `yaml:"input_helper"`
+	APIHelper        string              `yaml:"api_helper"`
 	ISOBuilder       string              `yaml:"iso_builder"`
 	StartupTimeout   Duration            `yaml:"startup_timeout"`
 	ShutdownTimeout  Duration            `yaml:"shutdown_timeout"`
@@ -276,7 +276,7 @@ func (c *Config) Validate() error {
 		}
 	}
 	if c.VirtualBoxEnabled() {
-		for _, p := range []string{c.VirtualBox.Executable, c.VirtualBox.LibraryDir, c.VirtualBox.InputHelper, c.VirtualBox.ISOBuilder} {
+		for _, p := range []string{c.VirtualBox.Executable, c.VirtualBox.LibraryDir, c.VirtualBox.APIHelper, c.VirtualBox.ISOBuilder} {
 			if p != "" && !absolute(p) {
 				return bad("VirtualBox path overrides must be absolute")
 			}

@@ -1,4 +1,4 @@
-/* Guest input through the VirtualBox C API. */
+/* Structured VirtualBox observations and guest input through the C API. */
 #define _POSIX_C_SOURCE 200809L
 #include "VBoxCAPIGlue.h"
 #include <errno.h>
@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 static volatile sig_atomic_t interrupted;
 static void on_signal(int sig) {
@@ -54,6 +55,79 @@ static HRESULT require_interface(void **object, const nsID *iid) {
       IUnknown_Release((IUnknown *)(object));                                  \
   } while (0)
 
+/* Only the exact name of a controller-observed, reaped VBoxManage invocation
+ * can be selected. A currently live/reused host PID is never closed. */
+static int stopped_owner(const char *name, const char *uuid) {
+  char *end;
+  if (*name != '[') return 0;
+  errno = 0;
+  long pid = strtol(name + 1, &end, 10);
+  if (errno || pid <= 1 || pid > INT_MAX) return 0;
+  char tail[128];
+  snprintf(tail, sizeof(tail), "] VBoxManage Guest Control [%s] - ", uuid);
+  size_t n = strlen(tail);
+  if (strncmp(end, tail, n)) return 0;
+  const char *op = end + n;
+  if (strcmp(op, "run") && strcmp(op, "copyto") && strcmp(op, "copyfrom")) return 0;
+  return kill((pid_t)pid, 0) == -1 && errno == ESRCH;
+}
+
+typedef struct SessionScan {
+  unsigned count, matched, requested, errors, live, foreign;
+  uint32_t close_error;
+  int remaining[8];
+} SessionScan;
+
+static HRESULT scan_sessions(IGuest *guest, const char *uuid, const char *user,
+                             int name_count, char **names, int close_owned,
+                             SessionScan *scan) {
+  HRESULT rc = 0;
+  SAFEARRAY *array = g_pVBoxFuncs->pfnSafeArrayOutParamAlloc();
+  IGuestSession **sessions = NULL;
+  ULONG count = 0;
+  PRUnichar *wide = NULL;
+  char *name = NULL, *actual_user = NULL;
+  static const nsID iid = IGUESTSESSION_IID;
+  if (!array) return (HRESULT)0x8007000eU;
+  CHECK(IGuest_GetSessions(guest, ComSafeArrayAsOutIfaceParam(array, IGuestSession *)));
+  CHECK(g_pVBoxFuncs->pfnSafeArrayCopyOutIfaceParamHelper((IUnknown ***)&sessions, &count, array));
+  scan->count = count;
+  for (ULONG i = 0; i < count; ++i) {
+    REQUIRE(sessions[i], iid);
+    CHECK(IGuestSession_GetName(sessions[i], &wide));
+    CHECK(g_pVBoxFuncs->pfnUtf16ToUtf8(wide, &name));
+    g_pVBoxFuncs->pfnComUnallocString(wide); wide = NULL;
+    for (int j = 0; j < name_count; ++j) {
+      if (strcmp(name, names[j])) continue;
+      scan->remaining[j] = 1;
+      ++scan->matched;
+      CHECK(IGuestSession_GetUser(sessions[i], &wide));
+      CHECK(g_pVBoxFuncs->pfnUtf16ToUtf8(wide, &actual_user));
+      g_pVBoxFuncs->pfnComUnallocString(wide); wide = NULL;
+      if (strcmp(user, actual_user)) ++scan->foreign;
+      else if (!stopped_owner(name, uuid)) ++scan->live;
+      else if (close_owned) {
+        ++scan->requested;
+        HRESULT closed = IGuestSession_Close(sessions[i]);
+        if (NS_FAILED(closed)) { ++scan->errors; scan->close_error = (uint32_t)closed; }
+      }
+      g_pVBoxFuncs->pfnUtf8Free(actual_user); actual_user = NULL;
+      break;
+    }
+    g_pVBoxFuncs->pfnUtf8Free(name); name = NULL;
+  }
+done:
+  if (wide) g_pVBoxFuncs->pfnComUnallocString(wide);
+  if (name) g_pVBoxFuncs->pfnUtf8Free(name);
+  if (actual_user) g_pVBoxFuncs->pfnUtf8Free(actual_user);
+  if (sessions) {
+    for (ULONG i = 0; i < count; ++i) RELEASE(sessions[i]);
+    g_pVBoxFuncs->pfnArrayOutFree(sessions);
+  }
+  g_pVBoxFuncs->pfnSafeArrayDestroy(array);
+  return rc;
+}
+
 int main(int argc, char **argv) {
   int a[9], exit_code = 1, locked = 0, initialized = 0, touched = 0;
   HRESULT rc = 0;
@@ -64,6 +138,7 @@ int main(int argc, char **argv) {
   IConsole *console = NULL;
   IMouse *mouse = NULL;
   IDisplay *display = NULL;
+  IGuest *guest = NULL;
   PRUnichar *uuid = NULL;
   PRUint32 width = 0, height = 0, bpp = 0, status = 0;
   PRInt32 origin_x = 0, origin_y = 0;
@@ -76,25 +151,32 @@ int main(int argc, char **argv) {
   static const nsID console_iid = ICONSOLE_IID;
   static const nsID mouse_iid = IMOUSE_IID;
   static const nsID display_iid = IDISPLAY_IID;
+  static const nsID guest_iid = IGUEST_IID;
 
   if (argc < 4 || argv[1][0] != '/' || strlen(argv[2]) != 36) {
-    fprintf(stderr, "Usage: vbox-input-helper LIBRARY_DIR VM_UUID ACTION "
-                    "SCREEN X Y END_X END_Y BUTTON DZ DW RELATIVE\n");
+    fprintf(stderr, "Usage: vbox-api-helper LIBRARY_DIR VM_UUID "
+                    "session | guest-sessions USER [EXACT_SESSION_NAME ...] | "
+                    "ACTION SCREEN X Y END_X END_Y BUTTON DZ DW RELATIVE\n");
     return 2;
   }
   const char *action = argv[3];
-  if (argc != 13 || (strcmp(action, "probe") && strcmp(action, "geometry") &&
+  int session_read = !strcmp(action, "session");
+  int guest_sessions = !strcmp(action, "guest-sessions");
+  int input = !session_read && !guest_sessions;
+  if ((input && argc != 13) || (session_read && argc != 4) ||
+      (guest_sessions && (argc < 5 || argc > 13)) ||
+      (input && strcmp(action, "probe") && strcmp(action, "geometry") &&
                      strcmp(action, "move") && strcmp(action, "click") &&
                      strcmp(action, "drag") && strcmp(action, "scroll") &&
                      strcmp(action, "release")))
     return 2;
-  for (int i = 0; i < 9; ++i)
+  for (int i = 0; input && i < 9; ++i)
     if (!number(argv[i + 4], &a[i]))
       return 2;
-  if (a[0] < 0 || a[0] > 63 ||
+  if (input && (a[0] < 0 || a[0] > 63 ||
       (a[5] != 0 && a[5] != 1 && a[5] != 2 && a[5] != 4) ||
       (a[8] != 0 && a[8] != 1) || a[6] < -100 || a[6] > 100 || a[7] < -100 ||
-      a[7] > 100)
+      a[7] > 100))
     return 2;
   if (setenv("VBOX_APP_HOME", argv[1], 1) != 0)
     return 1;
@@ -117,15 +199,50 @@ int main(int argc, char **argv) {
   REQUIRE(client, client_iid);
   CHECK(IVirtualBoxClient_GetVirtualBox(client, &vbox));
   REQUIRE(vbox, vbox_iid);
-  CHECK(IVirtualBoxClient_GetSession(client, &session));
-  REQUIRE(session, session_iid);
   CHECK(g_pVBoxFuncs->pfnUtf8ToUtf16(argv[2], &uuid));
   CHECK(IVirtualBox_FindMachine(vbox, uuid, &machine));
   REQUIRE(machine, machine_iid);
+  if (session_read) {
+    PRUint32 state = 0;
+    CHECK(IMachine_GetSessionState(machine, &state));
+    const char *name = "unknown";
+    switch (state) {
+    case SessionState_Unlocked: name = "unlocked"; break;
+    case SessionState_Locked: name = "locked"; break;
+    case SessionState_Spawning: name = "spawning"; break;
+    case SessionState_Unlocking: name = "unlocking"; break;
+    }
+    printf("{\"state\":\"%s\",\"runtime_version\":%u}\n", name,
+           g_pVBoxFuncs->pfnGetVersion());
+    exit_code = 0;
+    goto done;
+  }
+  CHECK(IVirtualBoxClient_GetSession(client, &session));
+  REQUIRE(session, session_iid);
   CHECK(IMachine_LockMachine(machine, session, LockType_Shared));
   locked = 1;
   CHECK(ISession_GetConsole(session, &console));
   REQUIRE(console, console_iid);
+  if (guest_sessions) {
+    if (g_pVBoxFuncs->cb < offsetof(VBOXCAPI, pfnArrayOutFree) + sizeof(g_pVBoxFuncs->pfnArrayOutFree) ||
+        !g_pVBoxFuncs->pfnSafeArrayOutParamAlloc || !g_pVBoxFuncs->pfnSafeArrayCopyOutIfaceParamHelper ||
+        !g_pVBoxFuncs->pfnSafeArrayDestroy || !g_pVBoxFuncs->pfnArrayOutFree ||
+        !g_pVBoxFuncs->pfnUtf16ToUtf8 || !g_pVBoxFuncs->pfnUtf8Free || !g_pVBoxFuncs->pfnComUnallocString) {
+      fprintf(stderr, "Unsupported VirtualBox session array functions\n");
+      goto done;
+    }
+    CHECK(IConsole_GetGuest(console, &guest));
+    REQUIRE(guest, guest_iid);
+    SessionScan before = {0}, after = {0};
+    CHECK(scan_sessions(guest, argv[2], argv[4], argc-5, argv+5, 1, &before));
+    CHECK(scan_sessions(guest, argv[2], argv[4], argc-5, argv+5, 0, &after));
+    printf("{\"before\":%u,\"after\":%u,\"matched\":%u,\"close_requested\":%u,\"close_errors\":%u,\"close_error\":%u,\"live_owner\":%u,\"foreign_owner\":%u,\"remaining\":[",
+           before.count, after.count, before.matched, before.requested, before.errors, before.close_error, before.live, before.foreign);
+    for (int i = 0; i < argc-5; ++i) printf("%s%s", i ? "," : "", after.remaining[i] ? "true" : "false");
+    printf("],\"runtime_version\":%u}\n", g_pVBoxFuncs->pfnGetVersion());
+    exit_code = 0;
+    goto done;
+  }
   CHECK(IConsole_GetMouse(console, &mouse));
   REQUIRE(mouse, mouse_iid);
   CHECK(IMouse_GetAbsoluteSupported(mouse, &absolute));
@@ -240,6 +357,7 @@ done:
       fprintf(stderr, "Mouse release failed (0x%08x)\n", (unsigned)rc);
   }
   RELEASE(display);
+  RELEASE(guest);
   RELEASE(mouse);
   RELEASE(console);
   if (locked) {

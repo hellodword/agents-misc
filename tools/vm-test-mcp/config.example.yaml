@@ -40,10 +40,10 @@ service:
 #   # 可选，默认沿 executable 的真实路径、安装前缀查找 VBoxXPCOMC.so。
 #   # 指向运行库目录，不是 SDK；特殊安装布局才需要手动填写。
 #   # library_dir: /opt/VirtualBox
-#   # 可选，默认使用服务包的 vbox-input-helper，再查 PATH。
-#   # 宿主原生鼠标/显示几何辅助程序，调用 VirtualBox SDK；不在 guest 安装。
+#   # 可选，默认使用服务包的 vbox-api-helper，再查 PATH。
+#   # 宿主原生鼠标、显示几何、VM 解锁观测和 Guest Control 会话回收；调用 VirtualBox SDK。
 #   # 键盘通过 VBoxManage 注入，均不依赖 guest Python 或自动登录。
-#   # input_helper: /opt/vm-test-mcp/bin/vbox-input-helper
+#   # api_helper: /opt/vm-test-mcp/bin/vbox-api-helper
 #   # 可选，默认使用包内 xorriso，再查 PATH。覆盖程序必须支持 -as mkisofs。
 #   # 它只制作每个 lab 的 seed ISO（路由凭据和初始化参数），不制作系统安装盘。
 #   # iso_builder: /opt/vm-test-mcp/bin/xorriso
@@ -52,7 +52,7 @@ service:
 #   # 可选，默认 1m，范围 1s..1h。node_control shutdown 等待关机的上限。
 #   shutdown_timeout: 1m
 #   # 默认 30s，范围 1s..1h。至少连续 3 次实际探测失败且持续达到此时间，判定能力不可用。
-#   # 探测每 5s 发起一次，每轮总上限 10s；同节点不重叠，恢复需要连续 2 次成功。
+#   # 正常每 5s 探测，失败带抖动退避至 30s；每轮上限 10s，同节点不重叠，恢复需 2 次成功。
 #   # 明确的 VM 终止或首次初始化失败立即报告；主动暂停/关机按预期状态处理。
 #   # 运行中失联保留 lab 等待调用方处理；准备失败限时取证后清理整个 lab。
 #   unavailable_after: 30s

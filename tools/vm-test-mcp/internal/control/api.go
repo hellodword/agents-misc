@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/state"
+	"github.com/hellodword/agents-misc/vm-test-mcp/internal/telemetry"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
@@ -36,6 +37,11 @@ type ListRequest struct {
 	Cursor int `json:"cursor,omitempty"`
 	Limit  int `json:"limit,omitempty"`
 }
+type TaskListRequest struct {
+	Cursor string `json:"cursor,omitempty"`
+	Limit  int    `json:"limit,omitempty"`
+	Phase  string `json:"phase,omitempty"`
+}
 type EventsRequest struct {
 	TaskID
 	Cursor int64 `json:"cursor,omitempty"`
@@ -49,6 +55,9 @@ type LogRequest struct {
 type OperationRequest struct {
 	OperationID string `json:"operation_id"`
 }
+type ObserveRequest struct {
+	Seconds int `json:"seconds,omitempty"`
+}
 type FinishRequest struct {
 	TaskChange
 	Conclusion string `json:"conclusion"`
@@ -56,7 +65,8 @@ type FinishRequest struct {
 }
 type ExtendRequest struct {
 	TaskChange
-	Seconds int `json:"seconds"`
+	Seconds int    `json:"seconds"`
+	Reason  string `json:"reason"`
 }
 type NixRequest struct {
 	Change
@@ -68,6 +78,7 @@ type NixRequest struct {
 type StartRequest struct {
 	NodeChange
 	Argv           []string          `json:"argv"`
+	Context        string            `json:"context,omitempty"`
 	Cwd            string            `json:"cwd,omitempty"`
 	Env            map[string]string `json:"env,omitempty"`
 	TimeoutSeconds int               `json:"timeout_seconds,omitempty"`
@@ -75,6 +86,11 @@ type StartRequest struct {
 type CommandRequest struct {
 	TaskID
 	CommandID string `json:"command_id"`
+}
+type CommandGetRequest struct {
+	CommandRequest
+	InputFrom  *int `json:"input_from,omitempty"`
+	InputLimit int  `json:"input_limit,omitempty"`
 }
 type ReadRequest struct {
 	CommandRequest
@@ -213,17 +229,18 @@ type Definition struct {
 
 var Definitions = []Definition{
 	{"service_get", "Describe templates, backend availability and effective limits", struct{}{}, false},
+	{"service_observe", "Read bounded host pressure, controller cgroup quotas and call timings from the last 1..240 seconds (default 30); missing data is explicit and no argv, environment or output is included", ObserveRequest{}, false},
 	{"lab_create", "Queue independent linked-clone nodes and a private router", LabRequest{}, true},
 	{"nixos_run", "Queue an uploaded derivation closure for sandboxed host KVM execution", NixRequest{}, true},
-	{"task_list", "List tasks in submission order", ListRequest{}, false}, {"task_get", "Read task, nodes, commands, network and cleanup", TaskID{}, false},
+	{"task_list", "Page through compact task summaries; phase defaults to active (queued, preparing, running or blocked cleanup). Use phase=ended or all for history; cursor is the last scanned task ID", TaskListRequest{}, false}, {"task_get", "Read task, nodes, command statuses, network and cleanup; command_get provides command details", TaskID{}, false},
 	{"node_get", "Read node capabilities, observations and expected state", NodeID{}, false},
-	{"task_diagnose", "Collect bounded host and guest evidence, including during preparation", DiagnoseRequest{}, true},
+	{"task_diagnose", "Collect bounded host and guest evidence, including the private router boot console before Guest Additions is ready", DiagnoseRequest{}, true},
 	{"node_exec", "Run a short guest command through Guest Control independently of the command service", ExecRequest{}, true},
 	{"task_cleanup", "Release remaining resources of an ended VirtualBox lab and verify cleanup", TaskChange{}, true},
 	{"task_events", "Read events after a cursor", EventsRequest{}, false}, {"task_log", "Read task log bytes at an offset", LogRequest{}, false}, {"operation_get", "Read a durable operation receipt", OperationRequest{}, false},
-	{"task_finish", "Submit a lab conclusion and clean up its resources", FinishRequest{}, true}, {"task_cancel", "Cancel a task and clean up", TaskChange{}, true}, {"task_extend", "Extend an executing task within the configured total limit", ExtendRequest{}, true}, {"task_purge", "Remove retained data for a cleaned terminal task", TaskChange{}, true},
-	{"command_start", "Execute argv under the guest supervisor", StartRequest{}, true}, {"command_get", "Read a command's independent exit state", CommandRequest{}, false}, {"command_read", "Read command output by byte offset", ReadRequest{}, false}, {"command_input", "Persist ordered stdin or EOF", InputRequest{}, true}, {"command_cancel", "Cancel one supervised process group", CancelCommandRequest{}, true},
-	{"transfer_create", "Allocate a file or standard Nix binary cache upload", TransferRequest{}, true}, {"transfer_get", "Inspect an upload and renew its scoped credentials", TransferGetRequest{}, false},
+	{"task_finish", "Submit a running lab conclusion and release resources; wait for cleanup.state=complete", FinishRequest{}, true}, {"task_cancel", "Cancel a queued or executing task; wait for cleanup.state=complete", TaskChange{}, true}, {"task_extend", "Extend an executing task with a concrete continued-work reason; independent startup deadlines do not change", ExtendRequest{}, true}, {"task_purge", "Remove retained data for a cleaned terminal task", TaskChange{}, true},
+	{"command_start", "Submit argv to a ready guest supervisor; command_get confirms execution separately from this receipt", StartRequest{}, true}, {"command_get", "Read command state and spec; input_from explicitly reads retained stdin packets, input_limit defaults to 16 (max 16)", CommandGetRequest{}, false}, {"command_read", "Read base64 output by byte offset; at_end is the current prefix, eof requires complete retention", ReadRequest{}, false}, {"command_input", "Persist ordered UTF-8 stdin or EOF (64KiB per packet, 64MiB and 4096 packets per command)", InputRequest{}, true}, {"command_cancel", "Request cancellation of one supervised process group; inspect command_get for confirmed termination", CancelCommandRequest{}, true},
+	{"transfer_create", "Prepare a file upload for a queued/preparing/running lab, or an unbound standard Nix cache before nixos_run", TransferRequest{}, true}, {"transfer_get", "Inspect upload state, write permission, active upload and retained checksums; renew scoped credentials", TransferGetRequest{}, false},
 	{"guest_file_put", "Copy a sealed upload to a guest path", PutRequest{}, true}, {"guest_file_get", "Archive a guest file or directory as an artifact", GetRequest{}, true},
 	{"node_control", "Start, shut down, reboot, power off, pause, resume or reset a lab node", PowerRequest{}, true},
 	{"network_set", "Set public egress, DHCP, DNS and node address registrations within the lab LAN", NetworkRequest{}, true}, {"network_recover", "Revalidate router, host protection and declared endpoints", TaskChange{}, true},
@@ -267,7 +284,9 @@ func Schema(t reflect.Type) map[string]any {
 				required = append(required, name)
 			}
 		}
-		return map[string]any{"type": "object", "properties": props, "required": required, "additionalProperties": false}
+		result := map[string]any{"type": "object", "properties": props, "required": required, "additionalProperties": false}
+		constrainSchema(t, result)
+		return result
 	case reflect.String:
 		return map[string]any{"type": "string"}
 	case reflect.Bool:
@@ -300,6 +319,9 @@ func (s *Server) Call(ctx context.Context, name string, raw []byte) (any, error)
 	if e := wire.Decode(raw, v.Interface()); e != nil {
 		return nil, e
 	}
+	if e := validateArguments(reflect.TypeOf(def.Args), raw); e != nil {
+		return nil, e
+	}
 	args := v.Elem().Interface()
 	if !def.Mutating {
 		return s.query(ctx, name, args)
@@ -311,6 +333,7 @@ func (s *Server) Call(ctx context.Context, name string, raw []byte) (any, error)
 	}
 	h := sha256.Sum256(append([]byte(name+"\n"), wire.JSON(args)...))
 	hash := hex.EncodeToString(h[:])
+	accepted := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -357,7 +380,9 @@ func (s *Server) Call(ctx context.Context, name string, raw []byte) (any, error)
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
+		started := time.Now()
 		result, e := s.mutate(name, args)
+		s.performance.Record(telemetry.Call{Started: accepted.UTC(), Finished: time.Now().UTC(), Scope: "operation", Operation: name, TaskID: binding.TaskID, WaitUS: started.Sub(accepted).Microseconds(), ExecutionUS: time.Since(started).Microseconds(), Failed: e != nil})
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		op.State = "succeeded"

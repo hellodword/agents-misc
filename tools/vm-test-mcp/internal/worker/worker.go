@@ -47,14 +47,16 @@ type File struct {
 	Size     int64  `json:"size"`
 }
 type Job struct {
-	Request  Request           `json:"request"`
-	State    string            `json:"state"`
-	Cleanup  string            `json:"cleanup"`
-	Outputs  map[string]string `json:"outputs"`
-	Files    []File            `json:"files"`
-	ExitCode int               `json:"exit_code"`
-	Started  time.Time         `json:"started"`
-	Deadline time.Time         `json:"deadline"`
+	Request Request           `json:"request"`
+	State   string            `json:"state"`
+	Cleanup string            `json:"cleanup"`
+	Outputs map[string]string `json:"outputs"`
+	Files   []File            `json:"files"`
+	// Retain the historical on-disk field; it has no observed-exit provenance.
+	ExitCode  int                `json:"exit_code"`
+	Execution *wire.NixExecution `json:"execution,omitempty"`
+	Started   time.Time          `json:"started"`
+	Deadline  time.Time          `json:"deadline"`
 }
 type Worker struct {
 	mu     sync.Mutex
@@ -97,6 +99,9 @@ func New(c config.Worker) (*Worker, error) {
 			j.State = "interrupted"
 			j.Cleanup = "complete"
 		}
+		if (j.State == "interrupted" || j.State == "cleanup_required") && j.Execution != nil && j.Execution.Error == nil {
+			j.Execution.Error = wire.Safe(wire.Fail("worker_restarted", "Worker restarted before the execution result was durable"))
+		}
 		w.jobs[j.Request.TaskID] = &j
 		if e = w.save(&j); e != nil {
 			w.Close()
@@ -105,6 +110,7 @@ func New(c config.Worker) (*Worker, error) {
 	}
 	return w, nil
 }
+
 func (w *Worker) save(j *Job) error {
 	return w.db.Save(context.Background(), state.Document{Kind: "job", ID: j.Request.TaskID, Value: j})
 }
@@ -190,7 +196,7 @@ func (w *Worker) Call(method string, a Request) (any, error) {
 		return nil, wire.Fail("invalid_argument", "Unexpected worker operation parameter")
 	}
 	if method == "describe" {
-		return map[string]any{"version": wire.Version, "busy": w.active != "", "active_task_id": w.active}, nil
+		return map[string]any{"version": wire.Version, "build": wire.Identity(), "busy": w.active != "", "active_task_id": w.active}, nil
 	}
 	if !wire.IDPattern.MatchString(a.TaskID) {
 		return nil, wire.Fail("invalid_argument", "Invalid task ID")
@@ -219,7 +225,7 @@ func (w *Worker) Call(method string, a Request) (any, error) {
 			return nil, wire.Fail("invalid_argument", "Expected controller-issued cache path")
 		}
 		now := time.Now().UTC()
-		j := &Job{Request: a, State: "importing", Cleanup: "pending", Outputs: map[string]string{}, Files: []File{}, Started: now, Deadline: now.Add(time.Duration(a.TimeoutSeconds) * time.Second)}
+		j := &Job{Request: a, State: "importing", Cleanup: "pending", Execution: &wire.NixExecution{Stage: "import"}, Outputs: map[string]string{}, Files: []File{}, Started: now, Deadline: now.Add(time.Duration(a.TimeoutSeconds) * time.Second)}
 		if e = w.root.MkdirAll(a.TaskID, 0700); e != nil {
 			return nil, e
 		}
@@ -283,7 +289,12 @@ func public(j *Job) map[string]any {
 	for _, f := range j.Files {
 		files = append(files, map[string]any{"id": f.ID, "name": f.Name, "size": f.Size})
 	}
-	return map[string]any{"state": j.State, "cleanup": j.Cleanup, "artifacts": files, "exit_code": j.ExitCode}
+	v := map[string]any{"state": j.State, "cleanup": j.Cleanup, "artifacts": files}
+	if j.Execution != nil {
+		// Copy under the worker mutex; JSON encoding happens after Call returns.
+		v["execution"] = *j.Execution
+	}
+	return v
 }
 func (w *Worker) readFile(root, relative string, offset int64) (any, error) {
 	if offset < 0 {
@@ -371,17 +382,22 @@ func (w *Worker) run(ctx context.Context, j *Job) {
 	copy.Stdout = logs
 	copy.Stderr = logs
 	e = copy.Run()
+	w.processResult(j, "import", copy)
 	if e != nil {
 		w.complete(j, e, false)
 		return
 	}
-	if e = w.validateDerivation(ctx, j.Request); e != nil {
+	if e = w.stage(j, "validate"); e == nil {
+		e = w.validateDerivation(ctx, j)
+	}
+	if e != nil {
 		fmt.Fprintln(log, "Derivation policy rejected")
 		w.complete(j, e, false)
 		return
 	}
 	w.mu.Lock()
 	j.State = "building"
+	j.Execution.Stage, j.Execution.Process = "build", nil
 	e = w.save(j)
 	w.mu.Unlock()
 	if e != nil {
@@ -393,9 +409,13 @@ func (w *Worker) run(ctx context.Context, j *Job) {
 	build.Stdout = &capped{w: out, max: 4 << 20}
 	build.Stderr = logs
 	e = build.Run()
+	w.processResult(j, "build", build)
 	interrupted := ctx.Err() != nil || (build.ProcessState != nil && build.ProcessState.ExitCode() < 0)
 	result := &Job{Outputs: map[string]string{}, Files: []File{}}
 	if e == nil {
+		w.mu.Lock()
+		j.Execution.Stage = "collect"
+		w.mu.Unlock()
 		var results []struct {
 			Outputs map[string]string `json:"outputs"`
 		}
@@ -423,15 +443,50 @@ func (w *Worker) run(ctx context.Context, j *Job) {
 	w.mu.Unlock()
 	w.complete(j, e, interrupted)
 }
-func (w *Worker) validateDerivation(ctx context.Context, a Request) error {
-	b, e := w.command(ctx, "derivation", "show", a.Derivation).Output()
+func (w *Worker) validateDerivation(ctx context.Context, j *Job) error {
+	c := w.command(ctx, "derivation", "show", j.Request.Derivation)
+	var output strings.Builder
+	c.Stdout = &capped{w: &output, max: (4 << 20) + 1}
+	e := c.Run()
+	w.processResult(j, "validate", c)
 	if e != nil {
 		return e
 	}
-	if len(b) > 4<<20 {
-		return fmt.Errorf("derivation metadata too large")
+	if output.Len() > 4<<20 {
+		return wire.Fail("limit_exceeded", "Derivation metadata exceeds 4 MiB")
 	}
-	return derivationPolicy(b, a)
+	return derivationPolicy([]byte(output.String()), j.Request)
+}
+
+func (w *Worker) stage(j *Job, stage string) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	j.Execution.Stage, j.Execution.Process = stage, nil
+	return w.save(j)
+}
+
+func (w *Worker) processResult(j *Job, stage string, c *exec.Cmd) {
+	v := &wire.NixProcessResult{Stage: stage, Source: "unconfirmed"}
+	if c.ProcessState != nil {
+		if status, ok := c.ProcessState.Sys().(syscall.WaitStatus); ok {
+			v.Source = "nix_client_wait"
+			if status.Exited() {
+				v.Exited = true
+				v.ExitCode = new(status.ExitStatus())
+			}
+			if status.Signaled() {
+				v.Exited = true
+				v.ExitSignal = unix.SignalName(status.Signal())
+				if v.ExitSignal == "" {
+					v.ExitSignal = fmt.Sprintf("SIG%d", status.Signal())
+				}
+				v.CoreDumped = status.CoreDump()
+			}
+		}
+	}
+	w.mu.Lock()
+	j.Execution.Process = v
+	w.mu.Unlock()
 }
 func derivationPolicy(b []byte, a Request) error {
 	type metadata struct {
@@ -529,20 +584,32 @@ func (w *Worker) complete(j *Job, e error, uncertain bool) {
 	defer w.mu.Unlock()
 	j.State = "succeeded"
 	j.Cleanup = "complete"
+	if j.Execution == nil {
+		j.Execution = &wire.NixExecution{Stage: "unknown"}
+	}
+	now := time.Now().UTC()
+	j.Execution.Finished = &now
 	if e != nil {
 		j.State = "failed"
+		j.Execution.Error = wire.Safe(e)
 	}
 	if uncertain {
 		j.State = "cleanup_required"
 		j.Cleanup = "required"
-	} else {
-		w.active = ""
 	}
 	if cancel := w.cancel[j.Request.TaskID]; cancel != nil {
 		cancel()
 		delete(w.cancel, j.Request.TaskID)
 	}
-	_ = w.save(j)
+	if err := w.save(j); err != nil {
+		// Keep the scheduler occupied when the terminal record is not durable.
+		// A previous building record also requires reconciliation after restart.
+		j.State, j.Cleanup = "cleanup_required", "required"
+		j.Execution.PersistenceError = wire.Safe(wire.Fail("terminal_write", "Nix execution result could not be persisted"))
+		w.active = j.Request.TaskID
+	} else if !uncertain {
+		w.active = ""
+	}
 }
 func (w *Worker) Reconcile(id string) error {
 	w.mu.Lock()
@@ -554,10 +621,14 @@ func (w *Worker) Reconcile(id string) error {
 	if j.State != "cleanup_required" {
 		return wire.Fail("invalid_state", "Only unresolved daemon cleanup can be reconciled")
 	}
-	j.State = "interrupted"
-	j.Cleanup = "complete"
+	next := *j
+	next.State, next.Cleanup = "interrupted", "complete"
+	if err := w.save(&next); err != nil {
+		return err
+	}
+	*j = next
 	w.active = ""
-	return w.save(j)
+	return nil
 }
 
 type peerKey struct{}

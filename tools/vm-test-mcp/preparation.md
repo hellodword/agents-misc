@@ -17,12 +17,13 @@ controller requests cannot select host programs, directories or devices.
 ## Accounts and shared configuration
 
 Install `.#vm-test-mcp` and an administrator-selected VirtualBox 7.2 runtime.
-The service package supplies `vbox-input-helper` and `xorriso`. `VBoxManage` is
+The service package supplies `vbox-api-helper` and `xorriso`. `VBoxManage` is
 found in PATH by default; its runtime library is found beside the real executable
 or under its installation prefix. Absolute overrides are optional.
 
-`input_helper` is a small **host** program using the official VirtualBox C SDK
-for native mouse events and display geometry. Keyboard input uses VBoxManage.
+`api_helper` is a small **host** program using the official VirtualBox C SDK
+for native mouse events, display geometry, VM session unlock observations and
+scoped Guest Control session release. Keyboard input uses VBoxManage.
 Neither needs guest Python. `iso_builder` is **host** xorriso: it writes each
 lab's credential/configuration seed ISO, not an OS installation image. The router
 OS ISO is a separate `.#vm-test-router` build product.
@@ -88,12 +89,25 @@ with a new Windows identity/computer name. The specialize hook marks preparation
 complete without waiting for login. See Microsoft's [Sysprep answer-file
 reference](https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/use-answer-files-with-sysprep?view=windows-11).
 
-The service uses an available logged-in administrator's elevated token for GUI
-commands; without one, it runs CLI commands as LocalSystem in the service session.
+Commands default to LocalSystem in the service session. Windows desktop workloads
+explicitly request `context="desktop"`; the service requires a logged-in
+administrator's elevated token and returns a terminal startup failure when it
+cannot obtain one. It does not change the requested execution identity.
 Thus project commands have guest administrative privileges. The command supervisor
 puts Windows children in a kill-on-close Job Object **before** resuming them. The
 controller probes the prepared command service and records its version/hash as
-diagnostic metadata. Re-run preparation when changing the guest protocol or
+diagnostic metadata. Both `vm-test-guest.exe` and the resident
+`vm-test-service.exe` must come from the selected package. A fresh heartbeat must
+identify a live service process with the same hash and command protocol as the
+probed executable; replacing just the command binary leaves the node unready.
+Preparation records the selected local Guest Control account in the service's
+`--control-user` argument. The service and each supervisor resolve its current
+local SID after specialization and grant that account process identity-query and
+wait rights, preserving the remaining process DACL. This permits filtered Guest
+Control tokens to verify creation time and termination without granting process
+termination, memory access, or control over unrelated processes. Failed identity
+queries remain distinct from a confirmed exit or reused PID.
+Re-run preparation when changing the guest protocol or
 baseline account. No project dependencies are installed
 implicitly by the MCP service.
 
@@ -105,8 +119,22 @@ clones as real-host acceptance; do not infer Sysprep success from compilation.
 ## Linux and Compose baseline
 
 Install Linux and Guest Additions. Configure root credentials for Guest Control;
-Linux command execution requires **systemd and cgroup v2**. The supervisor uses
-system-level transient units, not user sessions or linger.
+Linux command execution requires **systemd 254 or newer, cgroup v2 with
+`cgroup.kill` (Linux 5.14 or newer), and an available `clone3` syscall**.
+The guest probe reports these execution requirements and observed support.
+Each command has its own system-level transient supervisor unit with delegated
+subgroups. The supervisor directly waits for the business process; `clone3`
+places that process in its subgroup before execution. Cancellation kills the
+entire subgroup, and `cgroup.events` confirms it is empty. Systemd also cleans
+up descendants if the supervisor dies. User sessions and linger are unnecessary.
+Clone firstboot has a 90-second total budget, 30 seconds per hostname/SSH-key
+step and a 100-second systemd startup limit. It durably installs `/etc/hostname`
+and sets the kernel hostname directly, independently of D-Bus service activation.
+The existing journal records each step, elapsed time and structured errors;
+subprocess results include their actual exit code or signal and at most 8 KiB of stderr
+with a truncation flag. Failed initialization retains `firstboot-pending`; a prepared marker while
+pending does not permit commands. Diagnose the recorded step and retry initialization
+inside the disposable clone; no failure symptom alone identifies a D-Bus or CPU cause.
 
 Copy `share/vm-test-mcp/guest/vm-test-guest-linux-amd64` into the source guest and run
 as root:
@@ -168,6 +196,16 @@ a new powered-off snapshot. Update `snapshot` explicitly and restart the control
 after active tasks finish. Keep any parent disks still referenced by existing
 snapshots/clones. MCP never deletes the source or its snapshots.
 
+Candidate guest releases use this same snapshot workflow. During an administrator
+maintenance window, update the existing source VM and take a new powered-off
+snapshot, preserving the previous snapshots and their referenced disks. Prepare a
+separate full clone when the source VM's current state must also remain unchanged
+or other users need that source during preparation. Independent acceptance VMs
+are the disposable clones MCP creates from the selected snapshot. Select its UUID
+explicitly in the configuration, retain the previous references for rollback, and
+record package `--version`, guest probe/service identities and node
+template/hardware fingerprints with the actual test results.
+
 ## Router Live ISO
 
 Build `nix build .#vm-test-router` in the container and place the resulting
@@ -179,7 +217,7 @@ connects Internal Network LAN plus VirtualBox NAT WAN.
 
 The ISO can be checked before preparing Windows/Linux templates. Configure only
 `virtualbox.router.iso`, restart the controller and create a lab with `nodes: []`. Wait for
-`phase: running` and `network: ready`, exercise `network_set` for DHCP, upstream
+`phase: running` and `network.state: ready`, exercise `network_set` for DHCP, upstream
 DNS and public egress, then finish the lab and verify `cleanup.state: complete`.
 Client DHCP/DNS traffic, NAT and TCP/UDP publication require a lab with test nodes.
 
@@ -307,6 +345,14 @@ display/session environment. Its command is
 account supervision. Use `--check-config --config /etc/vm-test/config.yaml` on either program to validate its role without starting it or creating state. Configuration is loaded at startup. Restart after tasks finish
 when changing policy or paths.
 
+Before a controller state-schema upgrade, wait for all task cleanup to complete,
+stop the owning processes and preserve an owner-private backup of their entire
+state directories, including SQLite WAL files when present. The schema migration
+is transactional but older executables cannot read a newer schema. A rollback
+must account for any work accepted after the upgrade; do not overwrite that new
+history with the backup. Configuration and state backups may contain credentials
+and command inputs and stay outside the Nix store and version control.
+
 ## Recovery
 
 Inspect `node_get`, `task_events` and `task_diagnose` for node failures. `node_exec`
@@ -370,6 +416,14 @@ Record these real-host results separately from the default adapter suite:
    specifically for isolation policy; build identities differ from the worker and
    root. Exercise a failing test and cancellation, retaining logs, evidence and
    cleanup state. Interrupt a build and verify the cleanup hold/recovery procedure.
+8. Classify required OS sleep, hibernation and new-user Secret Service behavior as
+   supported, unsupported or unverified for the observed template/kernel/desktop
+   versions. OS transitions require kernel, timing and original-process continuity
+   evidence, with the actual wake source recorded. For a new account, initialize
+   its native keyring through the login flow before starting the Secret Service;
+   verify collection calls, real item read/write, locking and persistence. An
+   advertised alias or a prepared guest alone does not establish that behavior.
+   Preserve encrypted keyring bytes when diagnosing an owned daemon restart.
 
 Record rendering, decoding and encoding results from actual application behavior
 when graphics or media devices are exposed; device availability and the basic KVM

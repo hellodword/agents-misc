@@ -28,6 +28,122 @@ func fixture(t *testing.T, uid int) (*Worker, config.Worker) {
 	return w, c
 }
 
+func TestExecutionRetainsPhaseAndObservedClientResult(t *testing.T) {
+	for _, tc := range []struct {
+		name, copy, features, build, stage, processStage, state, code string
+		exit                                                          int
+		signal                                                        bool
+	}{
+		{"import failure", "exit 7", "kvm", "exit 0", "import", "import", "failed", "backend_error", 7, false},
+		{"policy rejection", "exit 0", "", "exit 99", "validate", "validate", "failed", "policy_denied", 0, false},
+		{"build failure", "exit 0", "kvm", "exit 23", "build", "build", "failed", "backend_error", 23, false},
+		{"client signal", "exit 0", "kvm", "kill -KILL $$", "build", "build", "cleanup_required", "backend_error", 0, true},
+		{"invalid outputs", "exit 0", "kvm", "printf 'invalid'", "collect", "build", "failed", "backend_error", 0, false},
+		{"success", "exit 0", "kvm", "printf '[]'", "collect", "build", "succeeded", "", 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, cfg := fixture(t, os.Getuid())
+			shell, err := exec.LookPath("sh")
+			if err != nil {
+				t.Fatal(err)
+			}
+			drv := "/nix/store/" + strings.Repeat("0", 32) + "-test.drv"
+			metadata := wire.JSON(map[string]any{drv: map[string]any{"system": "x86_64-linux", "env": map[string]string{"requiredSystemFeatures": tc.features}}})
+			w.cfg.Nix = filepath.Join(w.root.Path, "fake-nix")
+			script := fmt.Sprintf("#!%s\ncase \"$1\" in\ncopy) %s;;\nderivation) printf '%%s' '%s';;\nbuild) %s;;\n*) exit 98;;\nesac\n", shell, tc.copy, metadata, tc.build)
+			if err = os.WriteFile(w.cfg.Nix, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			id := wire.ID()
+			if _, err = w.Call("start", Request{TaskID: id, Derivation: drv, System: "x86_64-linux", Cache: "/files/synthetic-private-capability", TimeoutSeconds: 60}); err != nil {
+				t.Fatal(err)
+			}
+			w.wg.Wait()
+			check := func() {
+				t.Helper()
+				v, err := w.Call("status", Request{TaskID: id})
+				if err != nil {
+					t.Fatal(err)
+				}
+				j := w.jobs[id]
+				e := j.Execution
+				if j.State != tc.state || e == nil || e.Stage != tc.stage || e.Finished == nil || e.Process == nil || e.Process.Stage != tc.processStage || !e.Process.Exited || e.Process.Source != "nix_client_wait" {
+					t.Fatal(v)
+				}
+				if tc.code == "" {
+					if e.Error != nil {
+						t.Fatal(e.Error)
+					}
+				} else if e.Error == nil || e.Error.Code != tc.code {
+					t.Fatal(e.Error)
+				}
+				if tc.signal {
+					if e.Process.ExitCode != nil || e.Process.ExitSignal != "SIGKILL" || e.Process.CoreDumped || j.Cleanup != "required" || w.active != id {
+						t.Fatal(v, w.active)
+					}
+				} else if e.Process.ExitCode == nil || *e.Process.ExitCode != tc.exit || e.Process.ExitSignal != "" || j.Cleanup != "complete" {
+					t.Fatal(v)
+				}
+				if strings.Contains(string(wire.JSON(v)), "synthetic-private-capability") {
+					t.Fatal("cache credential entered status")
+				}
+			}
+			check()
+			w.Close()
+			w, err = New(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer w.Close()
+			check()
+		})
+	}
+}
+
+func TestTerminalPersistenceFailureRetainsOccupancy(t *testing.T) {
+	w, cfg := fixture(t, os.Getuid())
+	id := wire.ID()
+	j := &Job{Request: Request{TaskID: id}, State: "building", Cleanup: "pending", Execution: &wire.NixExecution{Stage: "build"}}
+	w.jobs[id], w.active = j, id
+	if err := w.save(j); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	j.Execution.Process = &wire.NixProcessResult{Stage: "build", Source: "nix_client_wait", Exited: true, ExitCode: new(7)}
+	w.complete(j, fmt.Errorf("synthetic build failure"), false)
+	if w.active != id || j.Cleanup != "required" || j.State != "cleanup_required" || j.Execution.PersistenceError == nil || j.Execution.Process.ExitCode == nil || *j.Execution.Process.ExitCode != 7 {
+		t.Fatal(j, w.active)
+	}
+	if err := w.Reconcile(id); err == nil || w.active != id || j.Cleanup != "required" {
+		t.Fatal("failed reconciliation released ownership", err, w.active, j.Cleanup)
+	}
+	w.Close()
+	w, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if w.active != id || w.jobs[id].Execution.Error.Code != "worker_restarted" || w.jobs[id].Execution.Process != nil {
+		t.Fatal("restart invented an unpersisted result", w.jobs[id])
+	}
+}
+
+func TestClientLaunchFailureHasNoInventedExit(t *testing.T) {
+	w, _ := fixture(t, os.Getuid())
+	defer w.Close()
+	id := wire.ID()
+	if _, err := w.Call("start", Request{TaskID: id, Derivation: "/nix/store/" + strings.Repeat("0", 32) + "-test.drv", System: "x86_64-linux", Cache: "/files/synthetic", TimeoutSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	w.wg.Wait()
+	e := w.jobs[id].Execution
+	if e == nil || e.Stage != "import" || e.Process == nil || e.Process.Exited || e.Process.ExitCode != nil || e.Process.ExitSignal != "" || e.Process.Source != "unconfirmed" || e.Error == nil {
+		t.Fatal(e)
+	}
+}
+
 func TestPreflightDaemonAndClientPolicy(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("worker preflight requires a non-root account")

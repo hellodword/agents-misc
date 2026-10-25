@@ -78,9 +78,13 @@ func (f *fakeBackend) Action(_ context.Context, t *Task, n *Node, a NodeAction) 
 	case "command_start":
 		f.commandState[a.Spec.ID] = wire.CommandStatus{State: "running"}
 	case "command_poll":
-		return wire.JSON(f.commandState[a.CommandID]), nil
+		status, ok := f.commandState[a.CommandID]
+		if !ok {
+			return wire.JSON(wire.CommandSnapshot{Protocol: wire.CommandProtocol, CommandID: a.CommandID, Checked: time.Now().UTC(), Pending: true}), nil
+		}
+		return wire.JSON(snapshotFixture(a.CommandID, status, nil, nil, a.StdoutOffset, a.StderrOffset, wire.CommandReadLimit)), nil
 	case "command_cancel":
-		f.commandState[a.CommandID] = wire.CommandStatus{State: "cancelled"}
+		f.commandState[a.CommandID] = wire.CommandStatus{State: "cancelled", Final: true}
 	case "command_input":
 		f.input = append(f.input, *a.Input)
 	case "input_click":
@@ -103,7 +107,7 @@ func testConfig(t *testing.T) config.Config {
 	os.Chmod(c.Service.StateDir, 0700)
 	c.Tasks.DefaultTimeout = config.Duration(60 * time.Second)
 	c.Tasks.MaxDuration = config.Duration(600 * time.Second)
-	c.VirtualBox = config.VirtualBox{StartupTimeout: c.VirtualBox.StartupTimeout, ShutdownTimeout: c.VirtualBox.ShutdownTimeout, UnavailableAfter: c.VirtualBox.UnavailableAfter, Network: c.VirtualBox.Network, Executable: "/fake/VBoxManage", LibraryDir: "/fake/lib", InputHelper: "/fake/input", ISOBuilder: "/fake/xorriso", Templates: map[string]config.Template{"windows": {Kind: "windows", VM: "11111111-1111-4111-8111-111111111111", Snapshot: "22222222-2222-4222-8222-222222222222", Username: "synthetic", Password: "synthetic", Supervisor: "C:\\guest.exe", WorkDir: "C:\\work", CPUs: 1, MemoryMiB: 512, MaxCPUs: 4, MaxMemoryMiB: 4096}}}
+	c.VirtualBox = config.VirtualBox{StartupTimeout: c.VirtualBox.StartupTimeout, ShutdownTimeout: c.VirtualBox.ShutdownTimeout, UnavailableAfter: c.VirtualBox.UnavailableAfter, Network: c.VirtualBox.Network, Executable: "/fake/VBoxManage", LibraryDir: "/fake/lib", APIHelper: "/fake/input", ISOBuilder: "/fake/xorriso", Templates: map[string]config.Template{"windows": {Kind: "windows", VM: "11111111-1111-4111-8111-111111111111", Snapshot: "22222222-2222-4222-8222-222222222222", Username: "synthetic", Password: "synthetic", Supervisor: "C:\\guest.exe", WorkDir: "C:\\work", CPUs: 1, MemoryMiB: 512, MaxCPUs: 4, MaxMemoryMiB: 4096}}}
 	c.VirtualBox.Router = config.Router{ISO: "/fake/router.iso"}
 	return c
 }
@@ -330,8 +334,18 @@ func TestTransferSealArtifactsAndCrossTaskIDs(t *testing.T) {
 	bad := put
 	bad.RequestID = "forged"
 	bad.NodeID.NodeID = "../../host"
+	if _, err := s.Call(context.Background(), "guest_file_put", wire.JSON(bad)); err == nil || wire.Safe(err).Code != "invalid_argument" {
+		t.Fatal("accepted forged node", err)
+	}
+	s.mu.Lock()
+	forged := s.requests[bad.RequestID]
+	s.mu.Unlock()
+	if forged != nil {
+		t.Fatal("forged path allocated a receipt", forged)
+	}
+	bad.RequestID, bad.NodeID.NodeID = "unowned-node", wire.ID()
 	if operation(t, s, "guest_file_put", bad).Error.Code != "not_found" {
-		t.Fatal("accepted forged node")
+		t.Fatal("accepted unowned node identity")
 	}
 	o := successful(t, s, "node_screenshot", ScreenshotRequest{NodeChange: NodeChange{Change: Change{"screen"}, NodeID: put.NodeID}})
 	a := o.Result.(map[string]any)

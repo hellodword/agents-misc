@@ -97,9 +97,12 @@ func (h *Health) startupFailure(now time.Time, status *NodeStatus, err error, af
 }
 
 type Preparation struct {
-	Stage   string      `json:"stage"`
-	Updated time.Time   `json:"updated"`
-	Error   *wire.Error `json:"error,omitempty"`
+	Stage        string      `json:"stage"`
+	Started      *time.Time  `json:"started,omitempty"`
+	StageStarted *time.Time  `json:"stage_started,omitempty"`
+	Deadline     *time.Time  `json:"deadline,omitempty"`
+	Updated      time.Time   `json:"updated"`
+	Error        *wire.Error `json:"error,omitempty"`
 }
 type ExpectedState struct {
 	Action    string     `json:"action"`
@@ -108,15 +111,20 @@ type ExpectedState struct {
 	Until     *time.Time `json:"until,omitempty"`
 }
 type NodeStatus struct {
-	State             string         `json:"state"`
-	Guest             map[string]any `json:"guest,omitempty"`
-	GuestError        *wire.Error    `json:"guest_error,omitempty"`
-	ServiceError      *wire.Error    `json:"service_error,omitempty"`
-	PreparationFailed bool           `json:"preparation_failed,omitempty"`
+	Identity          *NodeIdentity      `json:"identity,omitempty"`
+	Polling           *PollSchedule      `json:"polling,omitempty"`
+	State             string             `json:"state"`
+	GuestSessions     *GuestSessionState `json:"guest_sessions,omitempty"`
+	Guest             map[string]any     `json:"guest,omitempty"`
+	GuestError        *wire.Error        `json:"guest_error,omitempty"`
+	ServiceError      *wire.Error        `json:"service_error,omitempty"`
+	PreparationFailed bool               `json:"preparation_failed,omitempty"`
 }
 type CleanupStep struct {
 	State    string      `json:"state"`
 	Attempts int         `json:"attempts"`
+	Started  *time.Time  `json:"started,omitempty"`
+	Deadline *time.Time  `json:"deadline,omitempty"`
 	Updated  time.Time   `json:"updated"`
 	Error    *wire.Error `json:"error,omitempty"`
 }
@@ -142,7 +150,7 @@ func (s *Server) observeNode(n *Node, status *NodeStatus, err error, now time.Ti
 		}
 	} else {
 		n.Health.VirtualBox.update(now, nil, after, false)
-		n.State, n.Guest = status.State, status.Guest
+		n.State, n.Guest, n.GuestSessions = status.State, status.Guest, status.GuestSessions
 		expected := n.Expected != nil && ((n.Expected.Until != nil && now.Before(*n.Expected.Until)) || (status.State != "running" && n.Expected.Power == status.State))
 		if oneOf(status.State, "aborted", "stuck", "gurumeditation") || status.PreparationFailed {
 			expected = false
@@ -203,8 +211,19 @@ func (n *Node) public() any {
 	for _, key := range []string{"uuid", "intent", "cleaned"} {
 		delete(v, key)
 	}
+	delete(v, "ipv4")
+	v["planned_ipv4"] = n.IPv4
+	v["network_observation"] = n.networkObservation()
 	v["capabilities"] = n.capabilities()
 	return v
+}
+
+func (n *Node) networkObservation() any {
+	var observed wire.GuestNetwork
+	if n.Guest == nil || n.Guest["network"] == nil || wire.Decode(wire.JSON(n.Guest["network"]), &observed) != nil {
+		return map[string]any{"state": "unknown", "reason": "Guest has not provided network observations"}
+	}
+	return observed
 }
 
 func lockContext(ctx context.Context, lock *sync.Mutex) error {

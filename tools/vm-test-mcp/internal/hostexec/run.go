@@ -22,6 +22,11 @@ type Result struct {
 	TimedOut        bool
 	StdoutTruncated bool
 	StderrTruncated bool
+	ExecutionUS     int64
+	UserUS          *int64
+	SystemUS        *int64
+	ProcessID       int
+	Reaped          bool
 }
 type Failure struct {
 	Result
@@ -39,12 +44,13 @@ func Capture(ctx context.Context, runner Runner, exe string, args []string, inpu
 	}); ok {
 		return r.RunResult(ctx, exe, args, input)
 	}
+	start := time.Now()
 	out, err := runner.Run(ctx, exe, args, input)
 	var failed *Failure
 	if errors.As(err, &failed) {
 		return failed.Result, err
 	}
-	result := Result{Stdout: out}
+	result := Result{Stdout: out, ExecutionUS: time.Since(start).Microseconds()}
 	if err != nil {
 		result.ExitCode = -1
 	}
@@ -77,6 +83,7 @@ func (Exec) Run(ctx context.Context, exe string, args []string, input io.Reader)
 	return result.Stdout, err
 }
 func (Exec) RunResult(ctx context.Context, exe string, args []string, input io.Reader) (Result, error) {
+	started := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 	c := exec.CommandContext(ctx, exe, args...)
@@ -90,9 +97,12 @@ func (Exec) RunResult(ctx context.Context, exe string, args []string, input io.R
 	c.Stdout = out
 	c.Stderr = errout
 	err := c.Run()
-	result := Result{Stdout: out.Bytes(), Stderr: errout.Bytes(), ExitCode: -1, TimedOut: errors.Is(ctx.Err(), context.DeadlineExceeded), StdoutTruncated: out.truncated, StderrTruncated: errout.truncated}
+	result := Result{Stdout: out.Bytes(), Stderr: errout.Bytes(), ExitCode: -1, TimedOut: errors.Is(ctx.Err(), context.DeadlineExceeded), StdoutTruncated: out.truncated, StderrTruncated: errout.truncated, ExecutionUS: time.Since(started).Microseconds()}
 	if c.ProcessState != nil {
+		result.ProcessID, result.Reaped = c.ProcessState.Pid(), true
 		result.ExitCode = c.ProcessState.ExitCode()
+		user, system := c.ProcessState.UserTime().Microseconds(), c.ProcessState.SystemTime().Microseconds()
+		result.UserUS, result.SystemUS = &user, &system
 	}
 	if err != nil {
 		return result, &Failure{Result: result, Cause: errors.Join(err, ctx.Err())}

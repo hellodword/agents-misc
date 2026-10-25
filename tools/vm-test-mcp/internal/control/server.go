@@ -9,37 +9,38 @@ import (
 	"log/slog"
 	"net/netip"
 	"os"
-	"path"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/config"
-	"github.com/hellodword/agents-misc/vm-test-mcp/internal/network"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/safefs"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/state"
+	"github.com/hellodword/agents-misc/vm-test-mcp/internal/telemetry"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
 type Server struct {
-	mu            sync.Mutex
-	wg            sync.WaitGroup
-	cfg           config.Config
-	root          *safefs.Root
-	db            *state.DB
-	backend       Backend
-	tasks         []*Task
-	operations    map[string]*Operation
-	requests      map[string]*Operation
-	transfers     map[string]*Transfer
-	runtime       map[string]*Runtime
-	active        string
-	ctx           context.Context
-	cancel        context.CancelFunc
-	closed        bool
-	secret        []byte
-	transferLocks sync.Map
-	uploading     map[string]bool
+	mu                 sync.Mutex
+	wg                 sync.WaitGroup
+	cfg                config.Config
+	root               *safefs.Root
+	db                 *state.DB
+	backend            Backend
+	tasks              []*Task
+	operations         map[string]*Operation
+	requests           map[string]*Operation
+	transfers          map[string]*Transfer
+	runtime            map[string]*Runtime
+	active             string
+	ctx                context.Context
+	cancel             context.CancelFunc
+	closed             bool
+	secret             []byte
+	transferLocks      sync.Map
+	uploading          map[string]*Upload
+	performance        *telemetry.Monitor
+	performancePending map[string]time.Time
 }
 
 func New(cfg config.Config, b Backend) (*Server, error) {
@@ -56,7 +57,12 @@ func New(cfg config.Config, b Backend) (*Server, error) {
 		return nil, e
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &Server{cfg: cfg, root: root, db: db, backend: b, ctx: ctx, cancel: cancel, operations: map[string]*Operation{}, requests: map[string]*Operation{}, transfers: map[string]*Transfer{}, runtime: map[string]*Runtime{}, uploading: map[string]bool{}}
+	s := &Server{cfg: cfg, root: root, db: db, backend: b, ctx: ctx, cancel: cancel, operations: map[string]*Operation{}, requests: map[string]*Operation{}, transfers: map[string]*Transfer{}, runtime: map[string]*Runtime{}, uploading: map[string]*Upload{}}
+	s.performance = telemetry.New()
+	s.performancePending = map[string]time.Time{}
+	if vbox, ok := b.(*VBoxBackend); ok {
+		vbox.Performance = s.performance
+	}
 	fail := func(e error) (*Server, error) { db.Close(); root.Close(); cancel(); return nil, e }
 	if s.secret, e = root.Read("capability-key", 128); os.IsNotExist(e) {
 		s.secret = []byte(wire.ID() + wire.ID())
@@ -97,6 +103,12 @@ func New(cfg config.Config, b Backend) (*Server, error) {
 				if e = json.Unmarshal(row, &t); e != nil {
 					return fail(e)
 				}
+				if t.Objects, t.Bytes, e = db.TransferObjects(ctx, t.ID); e != nil {
+					return fail(e)
+				}
+				if e = s.recoverTransfer(ctx, &t); e != nil {
+					return fail(e)
+				}
 				s.transfers[t.ID] = &t
 			}
 		}
@@ -125,7 +137,13 @@ func (s *Server) persist(docs ...state.Document) {
 }
 func (s *Server) save(t *Task) { s.persist(state.Document{Kind: "task", ID: t.ID, Value: t}) }
 func (s *Server) event(t *Task, code, msg string) {
-	e := s.db.Event(context.Background(), t.ID, map[string]any{"time": time.Now().UTC(), "code": code, "message": msg, "phase": t.phase(), "result": t.result(), "cleanup": t.cleanupState()})
+	s.eventDetails(t, code, msg, nil)
+}
+func (s *Server) eventDetails(t *Task, code, msg string, details any) {
+	if oneOf(code, "prepare_failed", "network_degraded", "network_observation_late", "node_unavailable", "cleanup_blocked", "command_unavailable") {
+		s.retainPerformance(t, code)
+	}
+	e := s.db.Event(context.Background(), t.ID, map[string]any{"time": time.Now().UTC(), "code": code, "message": msg, "phase": t.phase(), "result": t.result(), "cleanup": t.cleanupState(), "details": details})
 	if e != nil {
 		slog.Error("event write failed", "error", e)
 		s.cancel()
@@ -149,7 +167,11 @@ func (s *Server) running(id string) (*Task, *Runtime, error) {
 	}
 	return t, s.runtime[id], nil
 }
-func (s *Server) Start() { s.wg.Add(1); go s.schedule() }
+func (s *Server) Start() {
+	s.wg.Add(2)
+	go s.schedule()
+	go func() { defer s.wg.Done(); s.performance.Run(s.ctx) }()
+}
 func (s *Server) Close() {
 	s.mu.Lock()
 	s.closed = true
@@ -159,6 +181,11 @@ func (s *Server) Close() {
 	}
 	s.mu.Unlock()
 	s.wg.Wait()
+	if closer, ok := s.backend.(io.Closer); ok {
+		if err := closer.Close(); err != nil {
+			slog.Error("Backend collectors could not be closed", "error", wire.Safe(err))
+		}
+	}
 	s.db.Close()
 	s.root.Close()
 }
@@ -312,7 +339,7 @@ func (s *Server) execute(t *Task) {
 		err = s.prepare(t, r)
 	} else {
 		s.mu.Lock()
-		snapshot := clone(t)
+		snapshot := t.executionSnapshot()
 		s.mu.Unlock()
 		_, err = s.backend.Nix(r.ctx, "start", snapshot)
 	}
@@ -354,11 +381,14 @@ func (s *Server) prepare(t *Task, r *Runtime) error {
 		}
 	}
 	prepare := func(n *Node) error {
+		prepareCtx, stop := context.WithTimeout(ctx, s.cfg.VirtualBox.StartupTimeout.Value())
+		defer stop()
+		started, until := time.Now().UTC(), deadline(prepareCtx).UTC()
 		s.mu.Lock()
 		n.Intent = true
-		n.Preparation = Preparation{Stage: "creating", Updated: time.Now().UTC()}
+		n.Preparation = Preparation{Stage: "creating", Started: &started, StageStarted: &started, Deadline: &until, Updated: started}
 		err := s.db.Save(context.Background(), state.Document{Kind: "task", ID: t.ID, Value: t})
-		tc, nc := clone(t), clone(n)
+		tc, nc := t.executionSnapshot(), clone(n)
 		s.mu.Unlock()
 		if err != nil {
 			cancel(err)
@@ -367,19 +397,45 @@ func (s *Server) prepare(t *Task, r *Runtime) error {
 		progress := progressFunc(func(stage string, status *NodeStatus, err error) {
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			n.Preparation = Preparation{Stage: stage, Updated: time.Now().UTC()}
+			now := time.Now().UTC()
+			if n.Preparation.Stage != stage {
+				n.Preparation.StageStarted = &now
+			}
+			n.Preparation.Stage, n.Preparation.Updated, n.Preparation.Error = stage, now, nil
 			if err != nil {
 				n.Preparation.Error = wire.Safe(err)
 			}
-			if status != nil {
+			if status != nil && status.Identity != nil {
+				n.Identity = status.Identity
+			}
+			if status != nil && status.State != "" {
 				s.observeNode(n, status, nil, time.Now().UTC())
+			}
+			if status != nil && status.Polling != nil {
+				n.Polling = *status.Polling
 			}
 			s.save(t)
 		})
-		prepareCtx, stop := context.WithTimeout(ctx, s.cfg.VirtualBox.StartupTimeout.Value())
 		err = s.backend.Prepare(context.WithValue(prepareCtx, progressKey{}, progress), tc, nc)
-		stop()
+		if err == nil {
+			err = prepareCtx.Err()
+		}
+		if err != nil {
+			// Only the initiating failure cancels peers. A peer's adapter may
+			// report its last probe error after cancellation; preserve the cause.
+			if cause := context.Cause(ctx); cause != nil {
+				err = &wire.Error{Code: "preparation_cancelled", Message: "Node preparation was cancelled", Details: map[string]any{"node_id": n.ID, "cause": wire.Safe(cause), "last_error": wire.Safe(err)}}
+			} else {
+				s.mu.Lock()
+				stage := n.Preparation.Stage
+				s.mu.Unlock()
+				cause := wire.Safe(err)
+				err = &wire.Error{Code: cause.Code, Message: cause.Message, Details: map[string]any{"node_id": n.ID, "stage": stage, "started": started, "deadline": until, "elapsed_ms": time.Since(started).Milliseconds(), "cause": cause}}
+				cancel(err)
+			}
+		}
 		s.mu.Lock()
+		n.Polling = PollSchedule{}
 		n.Preparation.Updated = time.Now().UTC()
 		if err == nil {
 			n.State = "running"
@@ -388,15 +444,21 @@ func (s *Server) prepare(t *Task, r *Runtime) error {
 			n.Health = Health{VirtualBox: Observation{State: "available", LastSuccess: &now}, GuestControl: Observation{State: "available", LastSuccess: &now}, Commands: Observation{State: "available", LastSuccess: &now}}
 		} else {
 			n.Preparation.Stage, n.Preparation.Error = "failed", wire.Safe(err)
+			if wire.Safe(err).Code == "preparation_cancelled" {
+				n.Preparation.Stage = "cancelled"
+			}
 		}
+		n.Preparation.StageStarted = &n.Preparation.Updated
 		s.save(t)
 		s.mu.Unlock()
-		if err != nil {
-			cancel(err)
-		}
 		return err
 	}
 	if err := prepare(t.Router); err != nil {
+		return err
+	}
+	// All clone MACs and reservations are fixed at admission. Establish DHCP,
+	// DNS and host protection before any client starts its network manager.
+	if err := s.refreshNetworkContext(ctx, t, r, false); err != nil {
 		return err
 	}
 	var wg sync.WaitGroup
@@ -408,13 +470,12 @@ func (s *Server) prepare(t *Task, r *Runtime) error {
 	if err := context.Cause(ctx); err != nil {
 		return err
 	}
-	return s.refreshNetwork(t, r, false)
+	return nil
 }
 func (s *Server) observe(t *Task, r *Runtime) {
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	nextNetwork := time.Now()
-	nextNodes := time.Now()
 	var polls sync.Map
 	var wg sync.WaitGroup
 	defer func() { r.cancel(); wg.Wait() }()
@@ -453,29 +514,53 @@ func (s *Server) observe(t *Task, r *Runtime) {
 				return
 			}
 			kind := t.Kind
-			healthy := t.Network == "ready"
-			snapshot := clone(t)
+			healthy := oneOf(t.Network, "ready", "suspect")
+			expired := healthy && !t.NetworkLeaseExpires.IsZero() && !time.Now().Before(t.NetworkLeaseExpires)
+			snapshot := t.executionSnapshot()
 			s.mu.Unlock()
+			if expired {
+				s.degrade(t, r, wire.Fail("network_lease_expired", "Confirmed network lease expired; explicit recovery is required"))
+				healthy = false
+			}
 			if kind == "nixos" {
 				raw, e := s.backend.Nix(r.ctx, "status", snapshot)
 				if e != nil {
 					continue
 				}
 				var v struct {
-					State     string     `json:"state"`
-					Cleanup   string     `json:"cleanup"`
-					Artifacts []Artifact `json:"artifacts"`
+					State     string             `json:"state"`
+					Cleanup   string             `json:"cleanup"`
+					Artifacts []Artifact         `json:"artifacts"`
+					Execution *wire.NixExecution `json:"execution"`
 				}
 				if json.Unmarshal(raw, &v) != nil {
 					continue
 				}
-				if v.State == "succeeded" || v.State == "failed" || v.State == "cleanup_required" {
+				s.mu.Lock()
+				if v.Execution != nil && string(wire.JSON(t.NixExecution)) != string(wire.JSON(v.Execution)) {
+					t.NixExecution, t.Failure = v.Execution, v.Execution.Error
+					if t.Failure == nil {
+						t.Failure = v.Execution.PersistenceError
+					}
+					s.save(t)
+				}
+				s.mu.Unlock()
+				if v.State == "succeeded" || v.State == "failed" || v.State == "cleanup_required" || v.State == "interrupted" {
 					s.mu.Lock()
+					// A reply already in flight can arrive after task cancellation or
+					// timeout. Its execution evidence remains valid independently.
+					if t.Terminal() {
+						s.mu.Unlock()
+						return
+					}
 					t.State = "finished"
 					t.Conclusion = "passed"
 					if v.State != "succeeded" {
 						t.State = "failed"
 						t.Conclusion = "failed"
+					}
+					if v.State == "interrupted" {
+						t.State, t.Conclusion = "interrupted", "inconclusive"
 					}
 					s.save(t)
 					s.mu.Unlock()
@@ -485,36 +570,20 @@ func (s *Server) observe(t *Task, r *Runtime) {
 			}
 			if healthy && !time.Now().Before(nextNetwork) {
 				poll("network", func() {
-					ctx, stop := context.WithTimeout(r.ctx, 5*time.Second)
+					ctx, stop := context.WithTimeout(r.ctx, networkBudget)
 					defer stop()
-					lock := s.nodeLock(r, "network")
-					if lockContext(ctx, lock) != nil {
-						s.degrade(t, r)
-						return
-					}
-					defer lock.Unlock()
-					s.mu.Lock()
-					active := t.Network == "ready" && !t.Terminal()
-					s.mu.Unlock()
-					if active {
-						if err := s.refreshNetwork(t, r, false); err != nil {
-							s.degrade(t, r)
-						}
-					}
+					s.heartbeatNetwork(ctx, t, r)
 				})
 				nextNetwork = time.Now().Add(time.Duration(s.cfg.VirtualBox.Network.LeaseSeconds/3) * time.Second)
 			}
 
-			if !time.Now().Before(nextNodes) {
-				for _, n := range snapshot.Nodes {
-					if n.Preparation.Stage == "ready" {
-						poll("node/"+n.ID, func() { s.pollNode(t, r, n.ID) })
-					}
+			for _, n := range snapshot.Nodes {
+				if n.Preparation.Stage == "ready" && n.Polling.due(time.Now()) {
+					poll("node/"+n.ID, func() { s.pollNode(t, r, n.ID) })
 				}
-				nextNodes = time.Now().Add(probeInterval)
 			}
 			for _, c := range snapshot.Commands {
-				if c.State == "running" || c.State == "starting" || c.State == "uncertain" {
+				if c.Polling() && c.Schedule.due(time.Now()) {
 					poll("command/"+c.ID, func() { s.pollCommand(t, r, c.ID) })
 				}
 			}
@@ -541,7 +610,7 @@ func (s *Server) pollNode(t *Task, r *Runtime, id string) {
 		r.gate.RUnlock()
 		return
 	}
-	tc, nc := clone(t), clone(n)
+	tc, nc := t.executionSnapshot(), clone(n)
 	s.mu.Unlock()
 	raw, err := s.backend.Action(ctx, tc, nc, NodeAction{Action: "node_status"})
 	r.gate.RUnlock()
@@ -559,6 +628,7 @@ func (s *Server) pollNode(t *Task, r *Runtime, id string) {
 	}
 	before := n.Health.unavailable()
 	incident := s.observeNode(n, &status, err, time.Now().UTC())
+	n.nextProbe(time.Now().UTC())
 	if incident {
 		s.event(t, "node_unavailable", "Node "+n.Name+" has an unavailable capability")
 	}
@@ -575,6 +645,37 @@ func (s *Server) pollNode(t *Task, r *Runtime, id string) {
 	s.mu.Unlock()
 }
 func (s *Server) pollCommand(t *Task, r *Runtime, id string) {
+	s.mu.Lock()
+	c, err := t.Command(id)
+	if err != nil {
+		s.mu.Unlock()
+		return
+	}
+	n, err := t.Node(c.NodeID)
+	if err != nil {
+		s.mu.Unlock()
+		return
+	}
+	if c.Retained.Deadline != nil && !time.Now().Before(*c.Retained.Deadline) && !c.Retained.done() {
+		c.Retained.stop(wire.Fail("output_timeout", "Final output collection exceeded its time budget"))
+		s.save(t)
+	}
+	if !c.Polling() {
+		s.mu.Unlock()
+		return
+	}
+	if n.blocksCommands() {
+		// One low-frequency node probe owns recovery of the shared channel.
+		// Per-command polls do not each create another session during an outage.
+		c.Schedule = n.Polling
+		c.Schedule.Reason = "node_unavailable"
+		if c.Schedule.Next == nil || c.Schedule.due(time.Now()) {
+			c.Schedule.set(time.Now().UTC(), probeInterval, "node_unavailable")
+		}
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Unlock()
 	ctx, cancel := context.WithTimeout(r.ctx, 10*time.Second)
 	defer cancel()
 	if readGate(ctx, &r.gate) != nil {
@@ -582,59 +683,6 @@ func (s *Server) pollCommand(t *Task, r *Runtime, id string) {
 	}
 	defer r.gate.RUnlock()
 	s.pollCommandContext(ctx, t, id, true)
-}
-func (s *Server) pollCommandContext(ctx context.Context, t *Task, id string, sendInput bool) {
-	s.mu.Lock()
-	c, e := t.Command(id)
-	if e != nil {
-		s.mu.Unlock()
-		return
-	}
-	n, e := t.Node(c.NodeID)
-	if e != nil {
-		s.mu.Unlock()
-		return
-	}
-	tc, nc := clone(t), clone(n)
-	s.mu.Unlock()
-	local := path.Join(s.root.Path, "tasks", t.ID, "commands", id)
-	_ = s.root.MkdirAll(path.Join("tasks", t.ID, "commands", id), 0700)
-	raw, e := s.backend.Action(ctx, tc, nc, NodeAction{Action: "command_poll", CommandID: id, Local: local})
-	var status wire.CommandStatus
-	if e == nil {
-		e = wire.Decode(raw, &status)
-		if e == nil && !oneOf(status.State, "starting", "running", "exited", "cancelled", "failed") {
-			e = wire.Fail("backend_protocol_error", "Guest command status has no recognized execution state")
-		}
-	}
-	if e != nil {
-		s.mu.Lock()
-		c.Observation.update(time.Now().UTC(), wire.Safe(e), s.cfg.VirtualBox.UnavailableAfter.Value(), false)
-		s.save(t)
-		s.mu.Unlock()
-		return
-	}
-	// Persisted stdin is an outbox. Re-send unacknowledged packets; the guest
-	// publishes each sequence exclusively, making loss of a delivery reply safe.
-	cc, _ := tc.Command(id)
-	if sendInput && cc.Cancellation == "requested" && oneOf(status.State, "running", "starting") {
-		_, _ = s.backend.Action(ctx, tc, nc, NodeAction{Action: "command_cancel", CommandID: id})
-	}
-	if sendInput && (status.State == "running" || status.State == "starting") && status.NextInput >= 0 && status.NextInput < len(cc.Input) {
-		for _, packet := range cc.Input[status.NextInput:] {
-			if _, err := s.backend.Action(ctx, tc, nc, NodeAction{Action: "command_input", CommandID: id, Input: &packet}); err != nil {
-				break
-			}
-		}
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	c.CommandStatus = status
-	c.Observation.update(time.Now().UTC(), nil, 0, false)
-	if status.State == "cancelled" {
-		c.Cancellation = "confirmed"
-	}
-	s.save(t)
 }
 func (s *Server) closeRelays(t *Task, r *Runtime) {
 	s.mu.Lock()
@@ -645,80 +693,32 @@ func (s *Server) closeRelays(t *Task, r *Runtime) {
 		relay.Close()
 	}
 }
-func (s *Server) degrade(t *Task, r *Runtime) {
-	s.closeRelays(t, r)
+func (s *Server) degrade(t *Task, r *Runtime, err error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if t.Terminal() || t.Network == "degraded" {
+		s.mu.Unlock()
+		return
+	}
+	// A renewal may have completed between the observer's expiry snapshot and
+	// this transition. Never suspend a newly confirmed lease using stale data.
+	if wire.Safe(err).Code == "network_lease_expired" && time.Now().Before(t.NetworkLeaseExpires) {
+		s.mu.Unlock()
 		return
 	}
 	t.Network = "degraded"
+	relays := r.relays
+	r.relays = map[string]*Relay{}
 	for _, e := range t.Endpoints {
 		if e.State == "open" {
 			e.State = "suspended"
 		}
 	}
-	s.event(t, "network_degraded", "Network requires explicit recovery")
-	s.save(t)
-}
-func (s *Server) protections() ([]string, error) {
-	extra := append([]string{}, s.cfg.VirtualBox.Network.Protected...)
-	for _, a := range s.cfg.VirtualBox.Network.PublicHostAddresses {
-		extra = append(extra, a+"/32")
-	}
-	return network.HostProtection(extra)
-}
-func (s *Server) refreshNetwork(t *Task, r *Runtime, recover bool) error {
-	ctx, cancel := context.WithTimeout(r.ctx, 30*time.Second)
-	defer cancel()
-	return s.refreshNetworkContext(ctx, t, r, recover)
-}
-func (s *Server) refreshNetworkContext(parent context.Context, t *Task, r *Runtime, recover bool) error {
-	protected, e := s.protections()
-	if e != nil {
-		return e
-	}
-	s.mu.Lock()
-	copyTask := clone(t)
-	s.mu.Unlock()
-	timeout := 5 * time.Second
-	if recover {
-		timeout = 30 * time.Second
-	}
-	ctx, cancel := context.WithTimeout(parent, timeout)
-	defer cancel()
-	if !recover && copyTask.Network == "ready" && time.Since(copyTask.NetworkUpdated) > time.Duration(s.cfg.VirtualBox.Network.LeaseSeconds)*time.Second {
-		return wire.Fail("network_degraded", "Network lease expired; explicit recovery is required")
-	}
-	bootID, err := s.backend.Network(ctx, copyTask, protected, recover)
-	if err != nil {
-		return err
-	}
-	if recover {
-		for _, entry := range copyTask.Endpoints {
-			if entry.State == "closed" {
-				continue
-			}
-			if e = s.openRelay(ctx, t, r, entry); e != nil {
-				s.closeRelays(t, r)
-				return e
-			}
-		}
-	}
-	s.mu.Lock()
-	t.Network = "ready"
-	t.RouterBootID = bootID
-	t.NetworkUpdated = time.Now().UTC()
-	if recover {
-		for _, e := range t.Endpoints {
-			if e.State != "closed" {
-				e.State = "open"
-			}
-		}
-	}
+	s.eventDetails(t, "network_degraded", "Network requires explicit recovery", map[string]any{"cause": wire.Safe(err), "observation": t.NetworkObservation, "policy_updated": t.NetworkUpdated, "lease_expires": t.NetworkLeaseExpires, "router_identity": routerIdentity(t)})
 	s.save(t)
 	s.mu.Unlock()
-	return nil
+	for _, relay := range relays {
+		relay.Close()
+	}
 }
 func (s *Server) openRelay(ctx context.Context, t *Task, r *Runtime, e *Endpoint) error {
 	s.mu.Lock()

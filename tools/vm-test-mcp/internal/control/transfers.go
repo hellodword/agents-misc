@@ -8,7 +8,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"io"
+	"log/slog"
 	"net/http"
+	"os"
 	"path"
 	"regexp"
 	"strconv"
@@ -25,6 +27,63 @@ type capability struct {
 	ID      string `json:"id"`
 	Right   string `json:"right"`
 	Expires int64  `json:"expires"`
+}
+
+const uploadBudget = 5 * time.Minute
+
+type Upload struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+type uploadReader struct {
+	ctx context.Context
+	io.Reader
+}
+
+func (r uploadReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.Reader.Read(p)
+}
+
+// Called under s.mu. Completed inputs remain readable after task termination;
+// pending writes are cancelled and cannot replace those retained bytes.
+func (s *Server) retainTransfers(taskID string) []<-chan struct{} {
+	done := []<-chan struct{}{}
+	for id, t := range s.transfers {
+		if t.TaskID != taskID {
+			continue
+		}
+		if t.State == "open" {
+			t.State = "retained"
+			s.persist(state.Document{Kind: "transfer", ID: t.ID, Value: t})
+		}
+		if upload := s.uploading[id]; upload != nil {
+			upload.cancel()
+			done = append(done, upload.done)
+		}
+	}
+	return done
+}
+
+func (s *Server) uploadAllowed(t *Transfer) error {
+	if s.closed {
+		return wire.Fail("unavailable", "Service is stopping")
+	}
+	if t.State != "open" {
+		return wire.Fail("sealed", "Transfer is read-only")
+	}
+	if t.TaskID != "" {
+		task, err := s.task(t.TaskID)
+		if err != nil {
+			return err
+		}
+		if task.Terminal() || task.Purged {
+			return wire.Fail("invalid_state", "Upload requires a queued, preparing or running task")
+		}
+	}
+	return nil
 }
 
 func (s *Server) capURL(kind, id, right string) (string, time.Time) {
@@ -67,28 +126,43 @@ func (s *Server) decodeCap(token string) (capability, error) {
 }
 func (s *Server) transferView(t *Transfer) map[string]any {
 	right := "read"
-	if t.State == "open" {
+	canUpload := s.uploadAllowed(t) == nil
+	if canUpload {
 		right = "write"
 	}
 	u, expires := s.capURL("transfer", t.ID, right)
 	if t.Kind == "file" {
 		u += "/blob"
 	}
-	return map[string]any{"id": t.ID, "kind": t.Kind, "state": t.State, "objects": clone(&t.Objects), "url": u, "expires": expires}
+	type metadata struct {
+		Size   int64  `json:"size"`
+		SHA256 string `json:"sha256"`
+	}
+	objects := make(map[string]metadata, len(t.Objects))
+	for name, object := range t.Objects {
+		objects[name] = metadata{object.Size, object.SHA256}
+	}
+	return map[string]any{"id": t.ID, "task_id": t.TaskID, "kind": t.Kind, "state": t.State, "can_upload": canUpload, "uploading": s.uploading[t.ID] != nil, "objects": objects, "url": u, "expires": expires}
 }
 func (s *Server) createTransfer(a TransferRequest) (any, error) {
 	if a.Kind != "file" && a.Kind != "cache" {
 		return nil, wire.Fail("invalid_argument", "Transfer kind must be file or cache")
 	}
+	if a.Kind == "cache" && a.TaskID != "" {
+		return nil, wire.Fail("invalid_argument", "Cache uploads are prepared before nixos_run and must omit task_id")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if a.TaskID != "" {
-		t, _, e := s.running(a.TaskID)
+		t, e := s.task(a.TaskID)
 		if e != nil {
 			return nil, e
 		}
 		if t.Purged {
 			return nil, wire.Fail("purged", "Task was purged")
+		}
+		if t.Kind != "lab" || !oneOf(t.State, "queued", "preparing", "running") {
+			return nil, wire.Fail("invalid_state", "File preparation requires a queued, preparing or running lab")
 		}
 	} else if a.Kind == "file" {
 		return nil, wire.Fail("invalid_argument", "File uploads require a task_id")
@@ -103,9 +177,10 @@ func (s *Server) createTransfer(a TransferRequest) (any, error) {
 		if e != nil {
 			return nil, e
 		}
-		t.Objects["nix-cache-info"] = Object{n, h}
+		t.Objects["nix-cache-info"] = Object{Size: n, SHA256: h, File: "nix-cache-info"}
+		t.Bytes = n
 	}
-	if e := s.db.Save(context.Background(), state.Document{Kind: "transfer", ID: t.ID, Value: t}); e != nil {
+	if e := s.db.CreateTransfer(context.Background(), state.Document{Kind: "transfer", ID: t.ID, Value: t}, t.Objects); e != nil {
 		return nil, e
 	}
 	s.transfers[t.ID] = t
@@ -201,7 +276,7 @@ func (s *Server) seal(t *Transfer) error {
 	if t.State == "sealed" {
 		return nil
 	}
-	if t.State != "open" || s.uploading[t.ID] {
+	if t.State != "open" || s.uploading[t.ID] != nil {
 		return wire.Fail("conflict", "Transfer is unavailable or upload is still in progress")
 	}
 	if t.Kind == "file" {
@@ -210,12 +285,12 @@ func (s *Server) seal(t *Transfer) error {
 		}
 	} else {
 		count := 0
-		for name := range t.Objects {
+		for name, object := range t.Objects {
 			if !cacheKey.MatchString(name) {
 				continue
 			}
 			count++
-			data, e := s.root.Read(path.Join("transfers", t.ID, name), 65536)
+			data, e := s.root.Read(path.Join("transfers", t.ID, object.File), 65536)
 			if e != nil {
 				return e
 			}
@@ -237,8 +312,13 @@ func (s *Server) seal(t *Transfer) error {
 			return wire.Fail("invalid_cache", "Cache contains no derivations")
 		}
 	}
-	t.State = "sealed"
-	return s.db.Save(context.Background(), state.Document{Kind: "transfer", ID: t.ID, Value: t})
+	sealed := *t
+	sealed.State = "sealed"
+	if err := s.db.Save(context.Background(), state.Document{Kind: "transfer", ID: t.ID, Value: &sealed}); err != nil {
+		return err
+	}
+	t.State = sealed.State
+	return nil
 }
 func (s *Server) putGuest(a PutRequest) (any, error) {
 	if !guestPath(a.Path) {
@@ -250,12 +330,16 @@ func (s *Server) putGuest(a PutRequest) (any, error) {
 		s.mu.Unlock()
 		return nil, wire.Fail("not_found", "Transfer does not belong to task")
 	}
+	if _, _, _, err := s.nodeAccess(a.NodeID, "file_put"); err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
 	e := s.seal(t)
 	s.mu.Unlock()
 	if e != nil {
 		return nil, e
 	}
-	return s.action(a.NodeID, NodeAction{Action: "file_put", Path: a.Path, Local: path.Join(s.root.Path, "transfers", t.ID, "blob")})
+	return s.action(a.NodeID, NodeAction{Action: "file_put", Path: a.Path, Local: path.Join(s.root.Path, "transfers", t.ID, t.Objects["blob"].File)})
 }
 func httpError(w http.ResponseWriter, status int, e error) {
 	w.Header().Set("Content-Type", "application/json")
@@ -309,9 +393,16 @@ func (s *Server) Files(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 404, wire.Fail("not_found", "Object not found"))
 		return
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), uploadBudget)
+	defer cancel()
+	stopService := context.AfterFunc(s.ctx, cancel)
+	defer stopService()
 	v, _ := s.transferLocks.LoadOrStore(cap.ID, &sync.Mutex{})
 	lock := v.(*sync.Mutex)
-	lock.Lock()
+	if err := lockContext(ctx, lock); err != nil {
+		httpError(w, 408, err)
+		return
+	}
 	defer lock.Unlock()
 	s.mu.Lock()
 	t := s.transfers[cap.ID]
@@ -320,40 +411,46 @@ func (s *Server) Files(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 404, wire.Fail("not_found", "Object not found"))
 		return
 	}
-	file := path.Join("transfers", t.ID, name)
 	if r.Method != "PUT" {
-		_, ok := t.Objects[name]
+		object, ok := t.Objects[name]
 		s.mu.Unlock()
 		if !ok {
 			httpError(w, 404, wire.Fail("not_found", "Object not found"))
 			return
 		}
-		s.serveFile(w, r, file)
+		s.serveFile(w, r, path.Join("transfers", t.ID, object.File))
 		return
 	}
-	if cap.Right != "write" || t.State != "open" {
+	if cap.Right != "write" {
 		s.mu.Unlock()
 		httpError(w, 409, wire.Fail("sealed", "Transfer is sealed"))
 		return
 	}
-	quota := s.cfg.Storage.MaxUploadBytes
-	for key, obj := range t.Objects {
-		if key != name {
-			quota -= obj.Size
-		}
+	if err := s.uploadAllowed(t); err != nil {
+		s.mu.Unlock()
+		httpError(w, 409, err)
+		return
 	}
-	if len(t.Objects) > 100000 {
-		quota = 0
+	previous, exists := t.Objects[name]
+	if !exists && len(t.Objects) >= 100000 {
+		s.mu.Unlock()
+		httpError(w, 413, wire.Fail("quota_exceeded", "Transfer object count exceeds 100000"))
+		return
 	}
+	quota := s.cfg.Storage.MaxUploadBytes - t.Bytes + previous.Size
 	if strings.HasSuffix(name, ".narinfo") || name == "nix-cache-info" {
 		quota = min(quota, 65536)
 	}
-	s.uploading[t.ID] = true
+	upload := &Upload{cancel: cancel, done: make(chan struct{})}
+	s.uploading[t.ID] = upload
+	s.wg.Add(1)
 	s.mu.Unlock()
-	defer func() { s.mu.Lock(); delete(s.uploading, t.ID); s.mu.Unlock() }()
-	var reader io.Reader = r.Body
+	defer func() { s.mu.Lock(); delete(s.uploading, t.ID); close(upload.done); s.mu.Unlock(); s.wg.Done() }()
+	stopBody := context.AfterFunc(ctx, func() { _ = http.NewResponseController(w).SetReadDeadline(time.Now()); _ = r.Body.Close() })
+	defer stopBody()
+	var reader io.Reader = uploadReader{ctx, r.Body}
 	if strings.HasSuffix(name, ".narinfo") || name == "nix-cache-info" {
-		data, err := io.ReadAll(io.LimitReader(r.Body, quota+1))
+		data, err := io.ReadAll(io.LimitReader(reader, quota+1))
 		e = err
 		if e == nil && name != "nix-cache-info" {
 			_, e = parseNarInfo(name, data)
@@ -367,20 +464,128 @@ func (s *Server) Files(w http.ResponseWriter, r *http.Request) {
 		}
 		reader = bytesReader(data)
 	}
-	n, h, e := s.root.Write(file, reader, quota)
+	// Each revision has its own file. SQLite publishes only a fully synced file;
+	// a lost process before commit cannot replace the last accepted bytes.
+	storageName := ".object-" + wire.ID()
+	staged := path.Join("transfers", t.ID, storageName)
+	published := false
+	defer func() {
+		if !published {
+			_ = s.root.Remove(staged)
+		}
+	}()
+	n, h, e := s.root.Write(staged, reader, quota)
 	if e != nil {
-		httpError(w, 413, e)
+		if ctx.Err() != nil {
+			httpError(w, 408, wire.Fail("upload_cancelled", "Upload ended before publication"))
+		} else {
+			httpError(w, 413, e)
+		}
 		return
 	}
 	s.mu.Lock()
-	t.Objects[name] = Object{Size: n, SHA256: h}
-	e = s.db.Save(context.Background(), state.Document{Kind: "transfer", ID: t.ID, Value: t})
+	e = ctx.Err()
+	if e == nil {
+		e = s.uploadAllowed(t)
+	}
+	if e == nil {
+		e = s.publishTransferObject(ctx, t, name, Object{Size: n, SHA256: h, File: storageName})
+		published = e == nil
+	}
 	s.mu.Unlock()
 	if e != nil {
-		httpError(w, 500, e)
+		httpError(w, 409, e)
 		return
 	}
 	w.WriteHeader(200)
+}
+
+// The caller holds s.mu and the transfer lock. Old files are unreachable only
+// after commit; restart removes any unreferenced revisions left by interruption.
+func (s *Server) publishTransferObject(ctx context.Context, t *Transfer, name string, object Object) error {
+	if err := s.db.StoreTransferObject(ctx, t.ID, name, object); err != nil {
+		return err
+	}
+	old := t.Objects[name]
+	t.Bytes += object.Size - old.Size
+	t.Objects[name] = object
+	if old.File != "" {
+		if err := s.root.Remove(path.Join("transfers", t.ID, old.File)); err != nil && !os.IsNotExist(err) {
+			slog.Warn("superseded input file retained until restart", "transfer_id", t.ID, "error", err)
+		}
+	}
+	return nil
+}
+
+var transferScratch = regexp.MustCompile(`^\.(object|upload)-[a-f0-9]{32}(\.[a-f0-9]{32}\.partial)?$`)
+
+// The durable index is the sole publication boundary. Reclaim only recognized,
+// unreferenced upload files, including a revision left before/after index commit.
+// Retained objects and unrelated directory entries are never removed here.
+func (s *Server) recoverTransfer(ctx context.Context, t *Transfer) error {
+	if !wire.IDPattern.MatchString(t.ID) || !oneOf(t.Kind, "file", "cache") {
+		return wire.Fail("invalid_transfer", "Invalid retained transfer identity")
+	}
+	referenced := make(map[string]bool, len(t.Objects))
+	for name, object := range t.Objects {
+		if !objectName(t.Kind, name) || !(object.File == name || strings.HasPrefix(object.File, ".object-") && wire.IDPattern.MatchString(strings.TrimPrefix(object.File, ".object-"))) {
+			return wire.Fail("invalid_transfer", "Invalid retained transfer object path")
+		}
+		referenced[object.File] = true
+	}
+	if t.State == "purged" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	for _, subdir := range []string{"", "nar"} {
+		dir := path.Join("transfers", t.ID, subdir)
+		st, err := s.root.Lstat(dir)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+			return wire.Fail("invalid_path", "Transfer storage must be an ordinary directory")
+		}
+		f, err := s.root.Open(dir)
+		if err != nil {
+			return err
+		}
+		err = func() error {
+			defer f.Close()
+			for {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				entries, err := f.ReadDir(256)
+				if err != nil && err != io.EOF {
+					return err
+				}
+				for _, entry := range entries {
+					name := path.Join(subdir, entry.Name())
+					if referenced[name] || !entry.Type().IsRegular() {
+						continue
+					}
+					if !transferScratch.MatchString(entry.Name()) {
+						continue
+					}
+					if err := s.root.Remove(path.Join(dir, entry.Name())); err != nil {
+						return err
+					}
+				}
+				if err == io.EOF {
+					return nil
+				}
+			}
+		}()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, name string) {
 	f, e := s.root.Regular(name)

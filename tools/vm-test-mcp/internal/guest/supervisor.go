@@ -7,12 +7,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
+	syncatomic "sync/atomic"
 	"time"
 
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
@@ -59,177 +60,378 @@ func atomic(file string, v any) error {
 }
 
 type Child interface {
-	Wait() (int, error)
-	Kill() error
+	Wait(context.Context) (processExit, error)
+	Kill(context.Context) error
+	Drain(context.Context) error
 	Close() error
 }
+
+// A signal is an observed exit, but has no process exit code. Keep those two
+// outcomes distinct from a failed or interrupted wait.
+type processExit struct {
+	code       *int
+	signal     string
+	coreDumped bool
+}
+
+func exitedWithCode(code int) processExit { return processExit{code: &code} }
+func (e processExit) confirmed() bool     { return e.code != nil || e.signal != "" }
+
 type launchFunc func(context.Context, wire.CommandSpec, io.Reader, io.Writer, io.Writer) (Child, error)
 type limitWriter struct {
-	f *os.File
-	n int64
+	f         *os.File
+	n         syncatomic.Int64
+	truncated syncatomic.Bool
+	hash      hash.Hash
 }
 
 func (w *limitWriter) Write(b []byte) (int, error) {
 	n := len(b)
-	if w.n < 64<<20 {
-		p := b[:min(int64(n), (64<<20)-w.n)]
-		written, e := w.f.Write(p)
-		w.n += int64(written)
-		if e != nil {
-			return written, e
+	remaining := max(int64(0), wire.CommandOutputLimit-w.n.Load())
+	if int64(n) > remaining {
+		w.truncated.Store(true)
+	}
+	if remaining > 0 {
+		written, err := w.f.Write(b[:min(int64(n), remaining)])
+		w.n.Add(int64(written))
+		_, _ = w.hash.Write(b[:written])
+		if err != nil {
+			return written, err
 		}
 	}
 	return n, nil
 }
 
+type supervisionLimits struct{ start, stop, wait, drain time.Duration }
+
+var commandLimits = supervisionLimits{30 * time.Second, 5 * time.Second, 5 * time.Second, 2 * time.Second}
+
 func Run(ctx context.Context, root, request string) error     { return submit(ctx, root, request) }
 func Execute(ctx context.Context, root, request string) error { return run(ctx, root, request, launch) }
 func run(ctx context.Context, root, request string, start launchFunc) error {
-	var spec wire.CommandSpec
-	if e := readJSON(request, &spec); e != nil {
-		return e
+	return supervise(ctx, root, request, start, commandLimits, atomic)
+}
+
+// Each backend phase receives its own bounded context. The outer timer also
+// bounds a malfunctioning adapter; such a result remains unconfirmed.
+func boundedPhase(budget time.Duration, fn func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- fn(ctx) }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	if e := spec.Validate(); e != nil {
-		return e
+}
+func phaseFailure(phase string, err error) *wire.Error {
+	if err == nil {
+		return nil
+	}
+	return &wire.Error{Code: "supervision_failed", Message: "Command supervision could not confirm a phase", Details: map[string]any{"stage": phase, "cause": wire.Safe(err)}}
+}
+
+type inputProgress struct {
+	next   syncatomic.Int64
+	closed syncatomic.Bool
+}
+
+func feedInput(ctx context.Context, dir string, stdin *io.PipeWriter, progress *inputProgress, updates chan<- struct{}) error {
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	var inputBytes int64
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-tick.C:
+		}
+		seq := int(progress.next.Load())
+		var packet wire.Input
+		if err := readJSON(filepath.Join(dir, fmt.Sprintf("input-%08d.json", seq)), &packet); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		if packet.Sequence != seq {
+			return wire.Fail("input_order", "Guest input sequence does not match its queue")
+		}
+		inputBytes += int64(len(packet.Data))
+		if seq >= wire.InputPacketCount || len(packet.Data) > wire.InputPacketLimit || inputBytes > wire.CommandInputLimit {
+			return wire.Fail("input_limit", "Guest stdin exceeded its packet or byte budget")
+		}
+		if _, err := io.WriteString(stdin, packet.Data); err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		if packet.EOF {
+			_ = stdin.Close()
+		}
+		progress.next.Add(1)
+		progress.closed.Store(packet.EOF)
+		select {
+		case updates <- struct{}{}:
+		default:
+		}
+		if packet.EOF {
+			return nil
+		}
+	}
+}
+
+func supervise(parent context.Context, root, request string, start launchFunc, limits supervisionLimits, write func(string, any) error) error {
+	var spec wire.CommandSpec
+	if err := readJSON(request, &spec); err != nil {
+		return err
+	}
+	if err := spec.Validate(); err != nil {
+		return err
 	}
 	dir := filepath.Join(root, spec.ID)
-	if e := os.Mkdir(dir, 0700); e != nil {
-		return e
+	if err := os.Mkdir(dir, 0700); err != nil {
+		return err
 	}
-	status := wire.CommandStatus{State: "starting"}
+	began := time.Now().UTC()
+	status := wire.CommandStatus{State: "starting", Stage: "starting", Started: &began, Output: &wire.CommandOutput{State: "open"}}
+	identity, _, identityErr := processIdentity(os.Getpid())
+	if identityErr == nil {
+		status.Supervisor = &identity
+	}
 	statusPath := filepath.Join(dir, "status.json")
-	if e := atomic(statusPath, status); e != nil {
-		return e
-	}
-	out, e := os.OpenFile(filepath.Join(dir, "stdout"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if e != nil {
-		return e
-	}
-	defer out.Close()
-	errout, e := os.OpenFile(filepath.Join(dir, "stderr"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if e != nil {
-		return e
-	}
-	defer errout.Close()
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	if spec.TimeoutSeconds > 0 {
 		var stop context.CancelFunc
 		ctx, stop = context.WithTimeout(ctx, time.Duration(spec.TimeoutSeconds)*time.Second)
 		defer stop()
 	}
+	if d, ok := ctx.Deadline(); ok {
+		d = d.UTC()
+		status.Deadline = &d
+	}
+	persist := func() error { now := time.Now().UTC(); status.Updated = &now; return write(statusPath, status) }
+	if err := persist(); err != nil {
+		return err
+	}
+	failStart := func(err error) error {
+		status.State, status.Stage, status.Final, status.Error = "failed", "finished", true, "Could not start supervised process"
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			status.State, status.Error = "uncertain", "Process startup could not be confirmed"
+		}
+		status.Output.State = "incomplete"
+		status.Termination = &wire.Termination{Reason: "start_failed", Requested: time.Now().UTC(), Source: "guest_supervisor", Error: phaseFailure("start", err)}
+		now := time.Now().UTC()
+		status.Finished = &now
+		return errors.Join(err, persist())
+	}
+	if identityErr != nil {
+		return failStart(identityErr)
+	}
+	var environmentErr error
+	spec, status.Execution, environmentErr = commandEnvironment(spec)
+	if environmentErr != nil {
+		return failStart(environmentErr)
+	}
+	if err := persist(); err != nil {
+		return err
+	}
+	out, err := os.OpenFile(filepath.Join(dir, "stdout"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return failStart(err)
+	}
+	defer out.Close()
+	errout, err := os.OpenFile(filepath.Join(dir, "stderr"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return failStart(err)
+	}
+	defer errout.Close()
+	stdout, stderr := &limitWriter{f: out, hash: sha256.New()}, &limitWriter{f: errout, hash: sha256.New()}
 	stdinR, stdinW := io.Pipe()
 	defer stdinR.Close()
 	defer stdinW.Close()
-	child, e := start(ctx, spec, stdinR, &limitWriter{f: out}, &limitWriter{f: errout})
-	if e != nil {
-		status.State = "failed"
-		status.Error = "Could not start supervised process"
-		_ = atomic(statusPath, status)
-		return e
+	startCtx, stopStart := context.WithTimeout(ctx, limits.start)
+	defer stopStart()
+	type launchResult struct {
+		child Child
+		err   error
 	}
-	defer child.Close()
-	status.State = "running"
-	if e = atomic(statusPath, status); e != nil {
-		child.Kill()
-		return e
-	}
-	done := make(chan struct{})
-	var code int
-	var waitErr error
-	go func() { code, waitErr = child.Wait(); close(done) }()
-	var mu sync.Mutex
-	inputDone := make(chan struct{})
-	inputCtx, inputCancel := context.WithCancel(ctx)
-	defer inputCancel()
+	launched := make(chan launchResult)
+	abandoned := make(chan struct{})
 	go func() {
-		defer close(inputDone)
-		tick := time.NewTicker(50 * time.Millisecond)
-		defer tick.Stop()
-		for {
-			select {
-			case <-inputCtx.Done():
-				return
-			case <-done:
-				return
-			case <-tick.C:
-				mu.Lock()
-				seq := status.NextInput
-				closed := status.InputClosed
-				mu.Unlock()
-				if closed {
-					continue
-				}
-				var packet wire.Input
-				if e := readJSON(filepath.Join(dir, fmt.Sprintf("input-%08d.json", seq)), &packet); e != nil {
-					if os.IsNotExist(e) {
-						continue
-					}
-					cancel()
-					return
-				}
-				if packet.Sequence != seq {
-					cancel()
-					return
-				}
-				if _, e := io.WriteString(stdinW, packet.Data); e != nil {
-					return
-				}
-				if packet.EOF {
-					stdinW.Close()
-				}
-				mu.Lock()
-				status.NextInput++
-				status.InputClosed = packet.EOF
-				e := atomic(statusPath, status)
-				mu.Unlock()
-				if e != nil {
-					cancel()
-					return
-				}
+		child, err := start(startCtx, spec, stdinR, stdout, stderr)
+		select {
+		case launched <- launchResult{child, err}:
+		case <-abandoned:
+			if child != nil {
+				_ = boundedPhase(limits.stop, child.Kill)
+				_ = child.Close()
 			}
 		}
 	}()
-	tick := time.NewTicker(50 * time.Millisecond)
-	defer tick.Stop()
-	cancelled := false
-waiting:
-	for {
-		select {
-		case <-done:
-			break waiting
-		case <-ctx.Done():
-			cancelled = true
-			child.Kill()
-			<-done
-			break waiting
-		case <-tick.C:
-			if _, e := os.Stat(filepath.Join(dir, "cancel")); e == nil {
-				cancelled = true
-				child.Kill()
-				<-done
+	var child Child
+	select {
+	case result := <-launched:
+		child, err = result.child, result.err
+	case <-startCtx.Done():
+		close(abandoned)
+		return failStart(startCtx.Err())
+	}
+	if err != nil {
+		if child != nil {
+			_ = boundedPhase(limits.stop, child.Kill)
+			_ = child.Close()
+		}
+		return failStart(err)
+	}
+	if child == nil {
+		return failStart(wire.Fail("backend_protocol_error", "Process adapter returned no child"))
+	}
+	defer child.Close()
+	type exitResult struct {
+		processExit
+		err error
+	}
+	exit := make(chan exitResult, 1)
+	waitCtx, stopWait := context.WithCancel(context.Background())
+	defer stopWait()
+	go func() { result, e := child.Wait(waitCtx); exit <- exitResult{result, e} }()
+	inputCtx, stopInput := context.WithCancel(ctx)
+	defer stopInput()
+	progress := &inputProgress{}
+	updates := make(chan struct{}, 1)
+	inputDone := make(chan error, 1)
+	go func() { inputDone <- feedInput(inputCtx, dir, stdinW, progress, updates) }()
+	readProgress := func() { status.NextInput = int(progress.next.Load()); status.InputClosed = progress.closed.Load() }
+	status.State, status.Stage = "running", "running"
+	reason := "exited"
+	var failure error
+	var result *exitResult
+	inputFinished := false
+	if err = persist(); err != nil {
+		reason, failure = "status_write_failed", err
+	} else {
+		tick := time.NewTicker(50 * time.Millisecond)
+	waiting:
+		for {
+			select {
+			case r := <-exit:
+				result = &r
 				break waiting
+			case <-ctx.Done():
+				reason = "supervisor_cancelled"
+				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					reason = "timeout"
+				}
+				break waiting
+			case err := <-inputDone:
+				inputFinished = true
+				if err != nil {
+					reason, failure = "input_failed", err
+					break waiting
+				}
+			case <-updates:
+				readProgress()
+				if err = persist(); err != nil {
+					reason, failure = "status_write_failed", err
+					break waiting
+				}
+			case <-tick.C:
+				if _, err := os.Stat(filepath.Join(dir, "cancel")); err == nil {
+					reason = "cancelled"
+					break waiting
+				}
+			}
+		}
+		tick.Stop()
+	}
+	stopInput()
+	_ = stdinR.Close()
+	_ = stdinW.Close()
+	status.Stage = "stopping"
+	status.Termination = &wire.Termination{Reason: reason, Requested: time.Now().UTC(), Source: "guest_supervisor"}
+	_ = persist() // A terminal write is retried after process and stream settlement.
+	killErr := boundedPhase(limits.stop, child.Kill)
+	status.Termination.GroupStopped = killErr == nil
+	if killErr == nil {
+		status.Termination.RequestDelivered = new(true)
+	} else {
+		var known *wire.Error
+		if errors.As(killErr, &known) {
+			if delivered, ok := known.Details["request_delivered"].(bool); ok {
+				status.Termination.RequestDelivered = &delivered
 			}
 		}
 	}
-	inputCancel()
-	stdinR.Close()
-	stdinW.Close()
-	<-inputDone
-	_ = out.Sync()
-	_ = errout.Sync()
-	mu.Lock()
-	defer mu.Unlock()
+	if killErr != nil {
+		status.Termination.Error = phaseFailure("terminate", killErr)
+	}
+	if result == nil {
+		timer := time.NewTimer(limits.wait)
+		select {
+		case r := <-exit:
+			result = &r
+		case <-timer.C:
+		}
+		timer.Stop()
+	}
+	stopWait()
+	if result != nil && result.confirmed() {
+		status.ExitCode = result.code
+		status.ExitSignal, status.CoreDumped = result.signal, result.coreDumped
+		status.Termination.ProcessExited = true
+	} else if status.Termination.Error == nil {
+		cause := error(context.DeadlineExceeded)
+		if result != nil {
+			cause = result.err
+		}
+		status.Termination.Error = phaseFailure("wait", cause)
+	}
+	status.Stage = "draining"
+	_ = persist()
+	drainErr := boundedPhase(limits.drain, child.Drain)
+	if !inputFinished {
+		timer := time.NewTimer(limits.drain)
+		select {
+		case <-inputDone:
+		case <-timer.C:
+			drainErr = errors.Join(drainErr, wire.Fail("input_unsettled", "Guest input reader did not settle"))
+		}
+		timer.Stop()
+	}
+	drainErr = errors.Join(drainErr, out.Sync(), errout.Sync())
+	readProgress()
+	status.Output = &wire.CommandOutput{State: "complete", StdoutBytes: stdout.n.Load(), StderrBytes: stderr.n.Load(), StdoutTruncated: stdout.truncated.Load(), StderrTruncated: stderr.truncated.Load()}
+	if drainErr != nil {
+		status.Output.State = "incomplete"
+		status.Output.Error = phaseFailure("drain", drainErr)
+	} else {
+		status.Output.StdoutSHA256 = hex.EncodeToString(stdout.hash.Sum(nil))
+		status.Output.StderrSHA256 = hex.EncodeToString(stderr.hash.Sum(nil))
+	}
 	status.State = "exited"
-	status.ExitCode = &code
-	if cancelled {
-		status.State = "cancelled"
+	if !status.Termination.ProcessExited || !status.Termination.GroupStopped {
+		status.State, status.Error = "uncertain", "Process termination could not be fully confirmed"
+	} else {
+		switch reason {
+		case "timeout":
+			status.State = "timed_out"
+		case "cancelled", "supervisor_cancelled":
+			status.State = "cancelled"
+		case "input_failed", "status_write_failed":
+			status.State, status.Error = "failed", "Command supervision failed"
+		}
 	}
-	if waitErr != nil && code < 0 {
-		status.State = "failed"
-		status.Error = "Process supervision failed"
+	if failure != nil && status.Termination.Error == nil {
+		status.Termination.Error = phaseFailure(reason, failure)
 	}
-	return atomic(statusPath, status)
+	now := time.Now().UTC()
+	status.Final, status.Stage, status.Finished = true, "finished", &now
+	return errors.Join(failure, killErr, drainErr, persist())
 }
 func Input(root, id, request string) error {
 	if !wire.IDPattern.MatchString(id) {
@@ -239,7 +441,7 @@ func Input(root, id, request string) error {
 	if e := readJSON(request, &p); e != nil {
 		return e
 	}
-	if p.Sequence < 0 || p.Sequence > 1000000 || len(p.Data) > 65536 {
+	if p.Sequence < 0 || p.Sequence >= wire.InputPacketCount || len(p.Data) > wire.InputPacketLimit {
 		return wire.Fail("invalid_argument", "Invalid input")
 	}
 	dir := filepath.Join(root, id)
@@ -309,22 +511,18 @@ func Cancel(root, id string) error {
 }
 func Probe(roots ...string) map[string]any {
 	host, _ := os.Hostname()
-	v := map[string]any{"version": wire.Version, "hostname": host}
-	if exe, err := os.Executable(); err == nil {
-		if f, err := os.Open(exe); err == nil {
-			h := sha256.New()
-			if _, err = io.Copy(h, f); err == nil {
-				v["sha256"] = hex.EncodeToString(h.Sum(nil))
-			}
-			f.Close()
-		}
-	}
+	build := wire.Identity()
+	v := map[string]any{"version": wire.Version, "hostname": host, "build": build, "sha256": build.SHA256}
 	root := DefaultRoot
 	if len(roots) > 0 && roots[0] != "" {
 		root = roots[0]
 	}
 	privileged, prepared := readiness(root)
 	v["privileged"], v["prepared"] = privileged, prepared
+	v["network"] = observeNetwork()
+	v["command_protocol"] = wire.CommandProtocol
+	v["command_service"] = commandServiceObservation(root)
+	v["command_environment"] = environmentContract()
 	return v
 }
 

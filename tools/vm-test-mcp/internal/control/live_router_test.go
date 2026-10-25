@@ -108,11 +108,11 @@ func TestRouterOnlyLabLifecycle(t *testing.T) {
 // It refuses incompatible boot settings, a second SATA controller and deletion
 // with borrowed media attached.
 type liveRouterRunner struct {
-	info           map[string]string
-	uuid, cfg, iso string
-	registered     bool
-	controllers    int
-	calls          [][]string
+	info                map[string]string
+	uuid, cfg, iso, api string
+	registered          bool
+	controllers         int
+	calls               [][]string
 }
 
 func (r *liveRouterRunner) Run(_ context.Context, exe string, args []string, _ io.Reader) ([]byte, error) {
@@ -128,6 +128,13 @@ func (r *liveRouterRunner) Run(_ context.Context, exe string, args []string, _ i
 	if exe == "/fake/xorriso" {
 		return nil, os.WriteFile(option("-o"), []byte("synthetic seed"), 0600)
 	}
+	if exe == r.api && len(args) == 3 && args[2] == "session" {
+		state := "locked"
+		if r.info["VMState"] == "poweroff" {
+			state = "unlocked"
+		}
+		return wire.JSON(map[string]any{"state": state, "runtime_version": 7002020}), nil
+	}
 	switch args[0] {
 	case "createvm":
 		r.registered = true
@@ -136,6 +143,16 @@ func (r *liveRouterRunner) Run(_ context.Context, exe string, args []string, _ i
 		aliases := map[string]string{"clipboard-mode": "clipboard", "drag-and-drop": "draganddrop", "teleporter": "teleporterenabled", "usb-ohci": "usb", "usb-ehci": "ehci", "usb-xhci": "xhci", "audio-in": "audio_in", "audio-out": "audio_out", "accelerate-3d": "accelerate3d"}
 		for i := 2; i+1 < len(args); i += 2 {
 			k := strings.TrimPrefix(args[i], "--")
+			if k == "uart1" && args[i+1] != "off" {
+				r.info["uart1"] = "0x03f8," + args[i+2]
+				i++
+				continue
+			}
+			if k == "uart-mode1" {
+				r.info["uartmode1"] = args[i+1] + "," + args[i+2]
+				i++
+				continue
+			}
 			if a, ok := aliases[k]; ok {
 				k = a
 			}
@@ -188,6 +205,7 @@ func (r *liveRouterRunner) Run(_ context.Context, exe string, args []string, _ i
 
 func TestDisklessRouterOwnsVMAndSeedButNeverBootISO(t *testing.T) {
 	b := &VBoxBackend{Config: testConfig(t)}
+	t.Cleanup(func() { _ = b.Close() })
 	task := newTask("lab", 60)
 	task.LAN = b.Config.VirtualBox.Network.LAN
 	task.RouterPassword = wire.ID() + wire.ID()
@@ -200,7 +218,7 @@ func TestDisklessRouterOwnsVMAndSeedButNeverBootISO(t *testing.T) {
 		t.Fatal(err)
 	}
 	task.Router = &Node{ID: wire.ID(), UUID: wire.UUID(), MAC: "08:00:27:01:02:03", NodeRequest: NodeRequest{Name: "router", CPUs: 1, MemoryMiB: 256}, Intent: true}
-	r := &liveRouterRunner{uuid: task.Router.UUID, cfg: filepath.Join(b.vmDir(task, task.Router), "router.vbox"), iso: realISO}
+	r := &liveRouterRunner{uuid: task.Router.UUID, cfg: filepath.Join(b.vmDir(task, task.Router), "router.vbox"), iso: realISO, api: b.Config.VirtualBox.APIHelper}
 	b.Runner = r
 	if err := b.Prepare(context.Background(), task, task.Router); err != nil {
 		t.Fatal(err)
@@ -214,11 +232,32 @@ func TestDisklessRouterOwnsVMAndSeedButNeverBootISO(t *testing.T) {
 	if r.info["VMTestMedia-0-0"] != realISO {
 		t.Fatal("Nix-style ISO symlink was not resolved")
 	}
+	console, ok := b.bootConsoles.Load(task.Router.UUID)
+	if !ok || r.info["uartmode1"] != "client,"+console.(*bootConsole).socket {
+		t.Fatal("router console was not attached to its private collector")
+	}
+	// Readback must reject host devices and other sockets, including for a router.
+	copyTask := *task
+	copyTask.RouterISO = realISO
+	for _, unsafe := range []string{"/dev/ttyS0", "file,/tmp/log", "client,/tmp/other.sock"} {
+		mode := r.info["uartmode1"]
+		r.info["uartmode1"] = unsafe
+		if err := b.verify(&copyTask, task.Router, r.info); wire.Safe(err).Code != "unsafe_device" {
+			t.Fatal("unowned console accepted", unsafe, err)
+		}
+		r.info["uartmode1"] = mode
+	}
 	if _, err := os.Stat(filepath.Join(b.runtime(task), "seed.iso")); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.Delete(context.Background(), task, task.Router); err != nil {
 		t.Fatal(err)
+	}
+	if _, ok := b.bootConsoles.Load(task.Router.UUID); ok {
+		t.Fatal("released router retained its console collector")
+	}
+	if _, err := os.Stat(console.(*bootConsole).socket); !os.IsNotExist(err) {
+		t.Fatal("released router retained its console socket", err)
 	}
 	data, err := os.ReadFile(task.RouterISO)
 	if err != nil || string(data) != "borrowed ISO" || r.registered {

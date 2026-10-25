@@ -14,6 +14,7 @@ import (
 
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/config"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/submit"
+	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
 func main() { os.Exit(run()) }
@@ -24,6 +25,7 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 	f := flag.NewFlagSet("vm-test-submit", flag.ContinueOnError)
 	f.SetOutput(stderr)
 	o := submit.Options{}
+	version := f.Bool("version", false, "print JSON build and running-binary identity without configuration, evaluation or upload")
 	configFile := f.String("config", "", "shared YAML: automatically allocate, submit and observe through MCP")
 	project := f.String("project", ".", "locked project for the default three-node smoke test")
 	timeout := f.Int("timeout-seconds", 0, "remote task deadline; 0 uses the server default")
@@ -39,6 +41,12 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 			return 0
 		}
 		return 2
+	}
+	if *version {
+		if err := json.NewEncoder(stdout).Encode(wire.Identity()); err != nil {
+			return 1
+		}
+		return 0
 	}
 	if f.NArg() != 0 || *timeout < 0 || *timeout > 30*86400 ||
 		(*configFile != "" && (o.CacheID != "" || o.CacheURL != "")) ||

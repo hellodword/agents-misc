@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -34,7 +35,7 @@ func Open(dir string) (*DB, error) {
 		return nil, fmt.Errorf("build with -tags sqlite_omit_load_extension")
 	}
 	var version int
-	if e = db.QueryRow("PRAGMA user_version").Scan(&version); e != nil || (version != 0 && version != 9) {
+	if e = db.QueryRow("PRAGMA user_version").Scan(&version); e != nil || (version != 0 && version != 9 && version != 10 && version != 11) {
 		db.Close()
 		return nil, fmt.Errorf("unsupported state schema version: %d", version)
 	}
@@ -43,12 +44,21 @@ func Open(dir string) (*DB, error) {
  body BLOB NOT NULL, UNIQUE(kind,id));
  CREATE TABLE IF NOT EXISTS events (
  sequence INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, body BLOB NOT NULL);
- PRAGMA user_version=9;`)
+ `)
 	if e != nil {
 		db.Close()
 		return nil, e
 	}
-	return &DB{db}, nil
+	d := &DB{db}
+	if e = d.migrateCommands(version); e != nil {
+		db.Close()
+		return nil, e
+	}
+	if e = d.migrateTransfers(version); e != nil {
+		db.Close()
+		return nil, e
+	}
+	return d, nil
 }
 
 type Document struct {
@@ -57,21 +67,36 @@ type Document struct {
 }
 
 func (d *DB) Save(ctx context.Context, docs ...Document) error {
+	return d.transaction(ctx, docs, nil)
+}
+
+func (d *DB) transaction(ctx context.Context, docs []Document, change func(context.Context, *sql.Tx) error) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	tx, e := d.BeginTx(ctx, nil)
 	if e != nil {
 		return e
 	}
 	defer tx.Rollback()
+	if change != nil {
+		if e = change(ctx, tx); e != nil {
+			return e
+		}
+	}
 	for _, doc := range docs {
 		b, e := json.Marshal(doc.Value)
 		if e != nil {
 			return e
 		}
-		if _, e = tx.ExecContext(ctx, `INSERT INTO documents(kind,id,body) VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body`, doc.Kind, doc.ID, b); e != nil {
+		if _, e = putDocument(ctx, tx, doc.Kind, doc.ID, b); e != nil {
 			return e
 		}
 	}
 	return tx.Commit()
+}
+
+func putDocument(ctx context.Context, tx *sql.Tx, kind, id string, body []byte) (sql.Result, error) {
+	return tx.ExecContext(ctx, `INSERT INTO documents(kind,id,body) VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body`, kind, id, body)
 }
 func (d *DB) Load(ctx context.Context, kind, id string, v any) error {
 	var b []byte

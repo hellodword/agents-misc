@@ -19,6 +19,7 @@ import (
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/hostexec"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/network"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/safefs"
+	"github.com/hellodword/agents-misc/vm-test-mcp/internal/telemetry"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
@@ -26,12 +27,16 @@ type WorkerClient interface {
 	Call(context.Context, string, any) (json.RawMessage, error)
 }
 type VBoxBackend struct {
-	Config     config.Config
-	Runner     hostexec.Runner
-	Worker     WorkerClient
-	CacheURL   func(string) string
-	cloneLocks sync.Map
-	guestSlots sync.Map
+	Config            config.Config
+	Runner            hostexec.Runner
+	Worker            WorkerClient
+	CacheURL          func(string) string
+	Performance       *telemetry.Monitor
+	cloneLocks        sync.Map
+	guestSlots        sync.Map
+	guestSessions     sync.Map
+	bootConsoles      sync.Map
+	backendIdentities sync.Map
 }
 
 func (b *VBoxBackend) run(ctx context.Context, args ...string) ([]byte, error) {
@@ -39,8 +44,10 @@ func (b *VBoxBackend) run(ctx context.Context, args ...string) ([]byte, error) {
 	if err != nil {
 		return nil, wire.Fail("virtualbox_unavailable", "VBoxManage was not found in PATH")
 	}
-	out, err := b.Runner.Run(ctx, exe, args, nil)
-	return out, b.executionError(args[0], err)
+	started := time.Now()
+	result, err := hostexec.Capture(ctx, b.Runner, exe, args, nil)
+	b.recordCall(started, 0, "virtualbox", args[0], "", "", result, err)
+	return result.Stdout, b.executionError(args[0], err)
 }
 func (b *VBoxBackend) redact(value string) string {
 	values := []string{b.Config.Service.Token, b.Config.Service.StateDir}
@@ -70,6 +77,9 @@ func (b *VBoxBackend) executionError(stage string, err error) error {
 		details["exit_code"] = failure.ExitCode
 		details["stderr"] = b.redact(string(failure.Stderr))
 		details["timed_out"] = failure.TimedOut
+		details["execution_us"] = failure.ExecutionUS
+		details["user_us"] = failure.UserUS
+		details["system_us"] = failure.SystemUS
 		if failure.TimedOut {
 			code = "backend_timeout"
 		}
@@ -141,6 +151,7 @@ func (b *VBoxBackend) info(ctx context.Context, uuid string) (map[string]string,
 }
 func (b *VBoxBackend) Available(ctx context.Context, kind string) (string, error) {
 	if kind == "nixos" {
+		b.backendIdentities.Store(kind, backendIdentity{State: "unobserved", Observed: time.Now().UTC()})
 		if b.Worker == nil {
 			return "nix_disabled", nil
 		}
@@ -149,11 +160,17 @@ func (b *VBoxBackend) Available(ctx context.Context, kind string) (string, error
 			return "worker_unavailable", e
 		}
 		var v struct {
-			Busy bool `json:"busy"`
+			Busy  bool                `json:"busy"`
+			Build *wire.BuildIdentity `json:"build"`
 		}
 		if e = json.Unmarshal(raw, &v); e != nil {
 			return "worker_unavailable", e
 		}
+		identity := backendIdentity{State: "observed", Observed: time.Now().UTC(), Build: v.Build}
+		if v.Build == nil {
+			identity.State = "build_unavailable"
+		}
+		b.backendIdentities.Store(kind, identity)
 		if v.Busy {
 			return "worker_busy", nil
 		}
@@ -171,10 +188,16 @@ func (b *VBoxBackend) Available(ctx context.Context, kind string) (string, error
 	if !b.Config.VirtualBoxEnabled() {
 		return "virtualbox_disabled", nil
 	}
-	_, e := b.run(ctx, "--version")
+	b.backendIdentities.Store(kind, backendIdentity{State: "unobserved", Observed: time.Now().UTC()})
+	raw, e := b.run(ctx, "--version")
 	if e != nil {
 		return "virtualbox_unavailable", e
 	}
+	version := strings.TrimSpace(string(raw))
+	if len(version) > 128 || !regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9._+-]*$`).MatchString(version) {
+		return "virtualbox_unavailable", wire.Fail("backend_protocol_error", "VBoxManage did not return a recognizable version")
+	}
+	b.backendIdentities.Store(kind, backendIdentity{State: "observed", Observed: time.Now().UTC(), RuntimeVersion: version})
 	return "", e
 }
 func (b *VBoxBackend) runtime(t *Task) string {
@@ -207,6 +230,7 @@ func (b *VBoxBackend) Prepare(ctx context.Context, t *Task, n *Node) error {
 		return e
 	}
 	var e error
+	var baseID string
 	if router {
 		// Nix result paths normally contain symlinks. Register the real medium
 		// path so VirtualBox's attachment readback can be compared exactly.
@@ -223,7 +247,8 @@ func (b *VBoxBackend) Prepare(ctx context.Context, t *Task, n *Node) error {
 		}
 		_, e = b.run(ctx, "createvm", "--name", "vm-"+n.UUID, "--uuid", n.UUID, "--basefolder", b.runtime(t), "--ostype", "Linux_64", "--register")
 	} else {
-		baseID, err := b.resolveVM(ctx, template.VM)
+		var err error
+		baseID, err = b.resolveVM(ctx, template.VM)
 		if err != nil {
 			return err
 		}
@@ -263,6 +288,15 @@ func (b *VBoxBackend) Prepare(ctx context.Context, t *Task, n *Node) error {
 		args = append(args, fmt.Sprintf("--nic%d", i), "none")
 	}
 	for i := 1; i <= 4; i++ {
+		if router && i == 1 {
+			console, err := newBootConsole(b.consoleDir(t))
+			if err != nil {
+				return wire.Fail("console_unavailable", "Router boot console could not be prepared")
+			}
+			b.bootConsoles.Store(n.UUID, console)
+			args = append(args, "--uart1", "0x3f8", "4", "--uart-mode1", "client", console.socket)
+			continue
+		}
 		args = append(args, fmt.Sprintf("--uart%d", i), "off")
 	}
 	for i := 1; i <= 2; i++ {
@@ -298,6 +332,7 @@ func (b *VBoxBackend) Prepare(ctx context.Context, t *Task, n *Node) error {
 		return e
 	}
 	if !router {
+		reportProgress(ctx, "configured", &NodeStatus{Identity: cloneIdentity(template, baseID, info)}, nil)
 		if _, e = b.run(ctx, "setextradata", n.UUID, "GUI/AutoresizeGuest", "false"); e != nil {
 			return e
 		}
@@ -308,15 +343,18 @@ func (b *VBoxBackend) Prepare(ctx context.Context, t *Task, n *Node) error {
 	}
 	ready := ctx
 	var startup Health
+	var polling preparationPolling
 	for {
 		probe, stop := context.WithTimeout(ready, probeTimeout)
+		stage := "guest_control"
+		status := &NodeStatus{}
+		var failure error
 		if router {
-			_, e = b.guestExec(probe, t, n, false, "probe")
-			reportProgress(ctx, "guest_control", nil, e)
+			_, e = b.guestExec(probe, t, n, "probe")
 		} else {
-			status, err := b.nodeStatus(probe, t, n)
+			var err error
+			status, err = b.nodeStatus(probe, t, n)
 			e = err
-			stage := "guest_control"
 			if err == nil {
 				if status.GuestError != nil {
 					e = status.GuestError
@@ -333,24 +371,33 @@ func (b *VBoxBackend) Prepare(ctx context.Context, t *Task, n *Node) error {
 					e = wire.Fail("guest_not_ready", "Guest initialization is in progress")
 				}
 			}
-			reportProgress(ctx, stage, status, e)
 			if status != nil && (status.PreparationFailed || oneOf(status.State, "aborted", "poweroff", "stuck")) {
-				stop()
-				return e
-			}
-			if failure := startup.startupFailure(time.Now().UTC(), status, err, b.Config.VirtualBox.UnavailableAfter.Value()); failure != nil {
-				stop()
-				return failure
+				failure = e
+			} else {
+				failure = startup.startupFailure(time.Now().UTC(), status, err, b.Config.VirtualBox.UnavailableAfter.Value())
 			}
 		}
 		stop()
+		var schedule PollSchedule
+		if e != nil && failure == nil {
+			schedule = polling.next(n.ID, stage, time.Now().UTC())
+		}
+		if status == nil {
+			status = &NodeStatus{}
+		}
+		status.Polling = &schedule
+		reportProgress(ctx, stage, status, e)
+		if failure != nil {
+			return failure
+		}
 		if e == nil {
 			break
 		}
-		select {
-		case <-ready.Done():
+		if schedule.wait(ready) != nil {
+			if ready.Err() == context.Canceled {
+				return &wire.Error{Code: "backend_cancelled", Message: "Preparation was cancelled before readiness", Details: map[string]any{"node_id": n.ID, "cause": wire.Safe(context.Cause(ready)), "last_error": wire.Safe(e)}}
+			}
 			return &wire.Error{Code: "guest_not_ready", Message: "Node did not become ready before its startup deadline", Details: map[string]any{"node_id": n.ID, "last_error": wire.Safe(e)}}
-		case <-time.After(2 * time.Second):
 		}
 	}
 	reportProgress(ctx, "ready", nil, nil)
@@ -451,6 +498,14 @@ func (b *VBoxBackend) verify(t *Task, n *Node, i map[string]string) error {
 	for slot := 1; slot <= 4; slot++ {
 		expected[fmt.Sprintf("uart%d", slot)] = "off"
 	}
+	if t.Router != nil && n.ID == t.Router.ID {
+		console, ok := b.bootConsoles.Load(n.UUID)
+		if !ok {
+			return wire.Fail("unsafe_device", "Router console ownership could not be verified")
+		}
+		expected["uart1"] = "0x03f8,4"
+		expected["uartmode1"] = "client," + console.(*bootConsole).socket
+	}
 	for slot := 1; slot <= 2; slot++ {
 		expected[fmt.Sprintf("lpt%d", slot)] = "off"
 	}
@@ -509,22 +564,13 @@ func (b *VBoxBackend) guest(ctx context.Context, t *Task, n *Node, operation str
 	return result.Stdout, err
 }
 
-func (b *VBoxBackend) guestExec(ctx context.Context, t *Task, n *Node, start bool, args ...string) ([]byte, error) {
+func (b *VBoxBackend) guestExec(ctx context.Context, t *Task, n *Node, args ...string) ([]byte, error) {
 	c := b.guestConfig(t, n)
-	op := "run"
-	options := []string{"--exe", c.Supervisor}
-	if start {
-		op = "start"
-		// The supervisor owns the command deadline. Guest Control must not kill
-		// long-running supervisors after a fixed transport timeout.
-		options = append(options, "--timeout", "0")
-	} else {
-		options = append(options, "--timeout", guestTimeout(ctx), "--wait-stdout", "--wait-stderr")
-	}
+	options := []string{"--exe", c.Supervisor, "--timeout", guestTimeout(ctx), "--wait-stdout", "--wait-stderr"}
 	// VBoxManage supplies argv[0] from --exe. Arguments after -- start at argv[1].
 	options = append(options, "--")
 	options = append(options, args...)
-	return b.guest(ctx, t, n, op, options...)
+	return b.guest(ctx, t, n, "run", options...)
 }
 func (b *VBoxBackend) copyTo(ctx context.Context, t *Task, n *Node, local, remote string) error {
 	_, e := b.guest(ctx, t, n, "copyto", "--target-directory", remote, "--", local)
@@ -638,6 +684,25 @@ func (b *VBoxBackend) Delete(ctx context.Context, t *Task, n *Node) error {
 		}); err != nil {
 			return err
 		}
+		if err = cleanupStep(ctx, "session_unlock", func() error { return b.waitUnlocked(ctx, t, n) }); err != nil {
+			return err
+		}
+		if err = cleanupStep(ctx, "ownership_recheck", func() error {
+			var err error
+			info, err = b.info(ctx, n.UUID)
+			if err != nil {
+				return err
+			}
+			if err = b.owned(t, n, info); err != nil {
+				return err
+			}
+			if !oneOf(info["VMState"], "poweroff", "aborted") {
+				return wire.Fail("cleanup_conflict", "VM power state changed while its session was being released")
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
 		// Optical media may be administrator-owned. Detach them before deleting
 		// the VM, and never close borrowed images in the global medium registry.
 		if err = cleanupStep(ctx, "detach_media", func() error {
@@ -672,7 +737,12 @@ func (b *VBoxBackend) Delete(ctx context.Context, t *Task, n *Node) error {
 	}); err != nil {
 		return err
 	}
+	b.guestSlots.Delete(n.UUID)
+	b.guestSessions.Delete(n.UUID)
 	if t.Router != nil && n.ID == t.Router.ID {
+		if err = cleanupStep(ctx, "console", func() error { return b.stopConsole(ctx, n.UUID) }); err != nil {
+			return err
+		}
 		return cleanupStep(ctx, "seed", func() error { return b.closeSeed(ctx, t) })
 	}
 	return nil
@@ -705,7 +775,7 @@ func (b *VBoxBackend) closeSeed(ctx context.Context, t *Task) error {
 	return nil
 }
 func (b *VBoxBackend) Action(ctx context.Context, t *Task, n *Node, a NodeAction) (json.RawMessage, error) {
-	if n == nil || (t.Router != nil && n.ID == t.Router.ID && !oneOf(a.Action, "diagnostics", "vm_info", "screenshot")) {
+	if n == nil || (t.Router != nil && n.ID == t.Router.ID && !oneOf(a.Action, "diagnostics", "vm_info", "screenshot", "boot_log")) {
 		return nil, wire.Fail("policy_denied", "Router is not a test target")
 	}
 	c := b.guestConfig(t, n)
@@ -715,6 +785,11 @@ func (b *VBoxBackend) Action(ctx context.Context, t *Task, n *Node, a NodeAction
 		return b.run(ctx, append([]string{"controlvm", n.UUID}, args...)...)
 	}
 	switch a.Action {
+	case "boot_log":
+		if t.Router == nil || n.ID != t.Router.ID {
+			return nil, wire.Fail("policy_denied", "Boot console collection belongs to the private router")
+		}
+		return b.consoleLog(ctx, t, a.Local)
 	case "node_status":
 		status, err := b.nodeStatus(ctx, t, n)
 		return wire.JSON(status), err
@@ -743,36 +818,29 @@ func (b *VBoxBackend) Action(ctx context.Context, t *Task, n *Node, a NodeAction
 	case "network_link":
 		raw, e = control("setlinkstate1", on(a.Enabled))
 	case "reboot":
-		raw, e = b.guestExec(ctx, t, n, false, "reboot")
+		raw, e = b.guestExec(ctx, t, n, "reboot")
 	case "command_start":
 		var p string
 		p, e = b.requestFile(ctx, t, n, a.Spec.ID+".json", a.Spec)
 		if e == nil {
-			raw, e = b.guestExec(ctx, t, n, false, "run", "--root", c.WorkDir, "--request", p)
+			raw, e = b.guestExec(ctx, t, n, "run", "--root", c.WorkDir, "--request", p)
 		}
 	case "command_input":
 		var p string
 		p, e = b.requestFile(ctx, t, n, a.CommandID+"-input-"+strconv.Itoa(a.Input.Sequence)+".json", a.Input)
 		if e == nil {
-			raw, e = b.guestExec(ctx, t, n, false, "input", "--root", c.WorkDir, "--id", a.CommandID, "--request", p)
+			raw, e = b.guestExec(ctx, t, n, "input", "--root", c.WorkDir, "--id", a.CommandID, "--request", p)
 		}
 	case "command_cancel":
-		raw, e = b.guestExec(ctx, t, n, false, "cancel", "--root", c.WorkDir, "--id", a.CommandID)
+		raw, e = b.guestExec(ctx, t, n, "cancel", "--root", c.WorkDir, "--id", a.CommandID)
 	case "command_poll":
-		// Terminal status is written after both streams are drained. Read it
-		// first so that reporting completion also guarantees final log bytes.
-		for _, file := range []string{"status.json", "stdout", "stderr"} {
-			if e = b.copyFrom(ctx, t, n, guestJoin(c.WorkDir, a.CommandID, file), filepath.Join(a.Local, file)); e != nil {
-				return nil, e
-			}
-		}
-		raw, e = os.ReadFile(filepath.Join(a.Local, "status.json"))
+		raw, e = b.guestExec(ctx, t, n, "read", "--root", c.WorkDir, "--id", a.CommandID, "--stdout-offset", strconv.FormatInt(a.StdoutOffset, 10), "--stderr-offset", strconv.FormatInt(a.StderrOffset, 10), "--limit", strconv.Itoa(wire.CommandReadLimit))
 		return raw, e
 	case "file_put":
 		e = b.copyTo(ctx, t, n, a.Local, a.Path)
 	case "file_get":
 		out := guestJoin(c.WorkDir, "archive-"+wire.ID()+".tar")
-		if _, e = b.guestExec(ctx, t, n, false, "archive", "--path", a.Path, "--output", out); e == nil {
+		if _, e = b.guestExec(ctx, t, n, "archive", "--path", a.Path, "--output", out); e == nil {
 			e = b.copyFrom(ctx, t, n, out, a.Local)
 		}
 	case "diagnostics":
@@ -812,20 +880,11 @@ func (b *VBoxBackend) Action(ctx context.Context, t *Task, n *Node, a NodeAction
 		if a.Relative {
 			values[8] = 1
 		}
-		library, err := config.LibraryDir(b.Config.VirtualBox.LibraryDir, b.Config.VirtualBox.Executable)
-		if err != nil {
-			return nil, wire.Fail("backend_unavailable", "VirtualBox runtime library could not be located")
-		}
-		helper, err := config.Program(b.Config.VirtualBox.InputHelper, "vbox-input-helper")
-		if err != nil {
-			return nil, wire.Fail("backend_unavailable", "Native input helper could not be located")
-		}
-		args := []string{library, n.UUID, strings.TrimPrefix(a.Action, "input_")}
+		args := []string{}
 		for _, v := range values {
 			args = append(args, strconv.Itoa(v))
 		}
-		raw, e = b.Runner.Run(ctx, helper, args, nil)
-		e = b.executionError("input_helper", e)
+		raw, e = b.native(ctx, t, n, strings.TrimPrefix(a.Action, "input_"), args...)
 		if e == nil {
 			return raw, nil
 		}
@@ -880,7 +939,7 @@ func (b *VBoxBackend) recoverRouter(ctx context.Context, t *Task) error {
 	for {
 		remote, err := b.requestFile(ctx, t, n, "recovery.json", b.seedData(t))
 		if err == nil {
-			_, err = b.guestExec(ctx, t, n, false, "recover", "--request", remote)
+			_, err = b.guestExec(ctx, t, n, "recover", "--request", remote)
 		}
 		if err == nil {
 			return nil
@@ -894,34 +953,38 @@ func (b *VBoxBackend) recoverRouter(ctx context.Context, t *Task) error {
 }
 func (b *VBoxBackend) Network(ctx context.Context, t *Task, protected []string, recover bool) (string, error) {
 	if recover {
+		reportNetworkProgress(ctx, "router_recovery")
 		if e := b.recoverRouter(ctx, t); e != nil {
-			return "", e
+			return "", networkStage(e, "router_recovery")
 		}
 	}
-	raw, err := b.guestExec(ctx, t, t.Router, false, "probe")
+	reportNetworkProgress(ctx, "router_probe")
+	raw, err := b.guestExec(ctx, t, t.Router, "probe")
 	if err != nil {
-		return "", err
+		return "", networkStage(err, "router_probe")
 	}
 	var status struct {
 		Ready  bool   `json:"ready"`
 		BootID string `json:"boot_id"`
 	}
 	if json.Unmarshal(raw, &status) != nil || !status.Ready || !wire.UUIDPattern.MatchString(status.BootID) {
-		return "", wire.Fail("network_degraded", "Router identity could not be verified")
+		return "", networkStage(wire.Fail("network_degraded", "Router identity could not be verified"), "router_identity")
 	}
 	if !recover && t.RouterBootID != "" && t.RouterBootID != status.BootID {
-		return "", wire.Fail("network_degraded", "Router restarted; explicit network_recover is required")
+		return "", networkStage(wire.Fail("network_degraded", "Router restarted; explicit network_recover is required"), "router_identity")
 	}
 	p := taskPolicy(t, b.Config.VirtualBox.Network.WAN, b.Config.VirtualBox.Network.LeaseSeconds, protected)
 	if e := p.Validate(); e != nil {
 		return "", e
 	}
+	reportNetworkProgress(ctx, "policy_upload")
 	remote, e := b.requestFile(ctx, t, t.Router, "policy.json", p)
 	if e != nil {
-		return "", e
+		return "", networkStage(e, "policy_upload")
 	}
-	_, e = b.guestExec(ctx, t, t.Router, false, "apply", "--request", remote)
-	return status.BootID, e
+	reportNetworkProgress(ctx, "policy_apply")
+	_, e = b.guestExec(ctx, t, t.Router, "apply", "--request", remote)
+	return status.BootID, networkStage(e, "policy_apply")
 }
 func (b *VBoxBackend) Endpoint(ctx context.Context, t *Task, e *Endpoint, open bool) error {
 	name := "vm-test-" + e.ID
@@ -1048,10 +1111,11 @@ func (b *VBoxBackend) Nix(ctx context.Context, action string, t *Task) (json.Raw
 			return collected, nil
 		}
 		var status struct {
-			Cleanup string `json:"cleanup"`
+			Cleanup   string             `json:"cleanup"`
+			Execution *wire.NixExecution `json:"execution"`
 		}
 		if json.Unmarshal(raw, &status) == nil && status.Cleanup == "complete" {
-			return wire.JSON(map[string]any{"cleanup": "complete", "evidence_error": true}), nil
+			return wire.JSON(map[string]any{"cleanup": "complete", "evidence_error": true, "execution": status.Execution}), nil
 		}
 		return nil, e
 	}

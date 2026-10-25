@@ -1,14 +1,23 @@
 # Executing NixOS VM tests
 
 Evaluate in the development container using the tested project's locked nixpkgs.
-The prepared VM Test MCP 0.10 worker submits the derivation to the physical host's
+The prepared VM Test MCP 0.11 worker submits the derivation to the physical host's
 Nix daemon; QEMU nodes run directly on host KVM inside its strict sandbox.
 
 ## Submission
 
 Use `service_get` and `task_list`, then allocate a cache with
 `transfer_create(request_id=…, kind="cache")`. Poll `operation_get` for its transfer
-ID and upload URL. The prepared container provides Nix and `vm-test-submit`:
+ID and upload URL. Locate the prepared `vm-test-submit` executable first and run
+`vm-test-submit --version`; this reads no configuration and performs no upload.
+Compare its source/build identity with `service_get.build` and the worker identity
+under `service_get.backends.nixos.identity.build`. A missing helper is a consumer
+environment prerequisite, not a failed Nix test. The administrator supplies a
+stable container-visible executable from the service package; do not assume the
+host's executable path exists in the container. In this repository the documented
+`just --justfile tools/vm-test-mcp/justfile nixos-test` entry selects the packaged
+helper, while another consumer project uses its administrator-provided path.
+With Nix and that helper available:
 
 ```sh
 vm-test-submit --test '.#checks.x86_64-linux.integration' \
@@ -48,7 +57,14 @@ symlink boundaries, and retains GC roots until purge. Paths printed by test code
 do not authorize host file reads. Failed-build directories belong to administrator
 diagnosis; task stderr/logs remain available.
 
-`task_cancel` requests cancellation. An interrupted daemon build can have
+Prepare and evaluate inputs before submitting a batch to the shared executor.
+`task_list` defaults to compact active tasks; use `phase=ended` or `all` for
+history and its task-ID cursor for paging. Queue details identify occupied or
+blocked cleanup without exposing another task's command inputs.
+
+`task_cancel` requests cancellation, including abandonment while queued.
+Wait for `cleanup.state: complete` before lengthy local edits or reporting;
+the next execution rejoins the queue. An interrupted daemon build can have
 `cleanup.state: blocked`; this continues to occupy the scheduler until the administrator
 verifies teardown and performs local reconciliation. Reconnect to the original
 task after HTTP loss. `task_purge` is accepted only after terminal state and
@@ -60,6 +76,11 @@ Use a fresh execution of the linked multi-node smoke module for initial acceptan
 Actual guest startup/assertions on KVM, a sandbox host-marker probe and rejection
 of `__noChroot` are required alongside administrator-confirmed daemon policy.
 Device presence or a `kvm` feature declaration alone is insufficient evidence.
+Backend `available` reports admission prerequisites only. Keep acceptance evidence
+with the actual controller/worker/client build IDs, project lock identity, test
+derivation and task artifacts. A changed build, daemon policy, KVM permissions or
+test framework requires verification of the affected boundary; unknown evidence
+remains unverified.
 
 For assertions, collect relevant guest journals/serial output and change the test
 before a fresh run. For host daemon, KVM, trust or baseline prerequisites, report

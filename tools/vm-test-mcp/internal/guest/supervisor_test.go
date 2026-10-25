@@ -2,6 +2,8 @@ package guest
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,10 +15,11 @@ import (
 )
 
 type fakeChild struct {
-	done chan struct{}
-	once sync.Once
-	in   io.Reader
-	out  io.Writer
+	done    chan struct{}
+	drained chan struct{}
+	once    sync.Once
+	in      io.Reader
+	out     io.Writer
 }
 
 func TestCommandPATHOverride(t *testing.T) {
@@ -34,12 +37,27 @@ func TestCommandPATHOverride(t *testing.T) {
 	}
 }
 
-func (p *fakeChild) Wait() (int, error) { <-p.done; return 0, nil }
-func (p *fakeChild) Kill() error        { p.once.Do(func() { close(p.done) }); return nil }
-func (p *fakeChild) Close() error       { return p.Kill() }
+func (p *fakeChild) Wait(ctx context.Context) (processExit, error) {
+	select {
+	case <-p.done:
+		return exitedWithCode(0), nil
+	case <-ctx.Done():
+		return processExit{}, ctx.Err()
+	}
+}
+func (p *fakeChild) Kill(context.Context) error { p.once.Do(func() { close(p.done) }); return nil }
+func (p *fakeChild) Drain(ctx context.Context) error {
+	select {
+	case <-p.drained:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func (p *fakeChild) Close() error { return p.Kill(context.Background()) }
 func fakeLaunch(_ context.Context, _ wire.CommandSpec, in io.Reader, out, errout io.Writer) (Child, error) {
-	p := &fakeChild{done: make(chan struct{}), in: in, out: out}
-	go func() { io.Copy(out, in); p.Kill() }()
+	p := &fakeChild{done: make(chan struct{}), drained: make(chan struct{}), in: in, out: out}
+	go func() { defer close(p.drained); io.Copy(out, in); p.Kill(context.Background()) }()
 	return p, nil
 }
 func TestOrderedInputEOFAndIndependentCancellation(t *testing.T) {
@@ -88,6 +106,11 @@ func TestOrderedInputEOFAndIndependentCancellation(t *testing.T) {
 	out, e := os.ReadFile(filepath.Join(root, ids[0], "stdout"))
 	if e != nil || string(out) != "first:second" {
 		t.Fatal(string(out), e)
+	}
+	var final wire.CommandStatus
+	hash := sha256.Sum256(out)
+	if e = readJSON(filepath.Join(root, ids[0], "status.json"), &final); e != nil || final.Output.State != "complete" || final.Output.StdoutSHA256 != hex.EncodeToString(hash[:]) || !final.InputClosed || final.NextInput != 2 {
+		t.Fatal("EOF or retained output identity was lost", final, e)
 	}
 	wait(ids[1], "running")
 	if e = Cancel(root, ids[1]); e != nil {

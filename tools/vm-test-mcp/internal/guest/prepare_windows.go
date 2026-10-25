@@ -5,6 +5,7 @@ package guest
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -58,7 +59,10 @@ func Prepare(root string) error {
 	return c.Run()
 }
 
-func FirstBoot(root string) error {
+func FirstBoot(ctx context.Context, root string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		return fmt.Errorf("firstboot requires an elevated token")
 	}
@@ -69,11 +73,7 @@ func FirstBoot(root string) error {
 }
 
 func readiness(root string) (bool, bool) {
-	var heartbeat struct {
-		Time       time.Time `json:"time"`
-		Privileged bool      `json:"privileged"`
-	}
-	service := readJSON(filepath.Join(root, "service.json"), &heartbeat) == nil && heartbeat.Privileged && time.Since(heartbeat.Time) < 10*time.Second
+	service := commandServiceObservation(root).State == "ready"
 	_, err := os.Stat(filepath.Join(root, "prepared"))
 	if err != nil || oobeComplete.Find() != nil {
 		return service, false
@@ -85,6 +85,10 @@ func readiness(root string) (bool, bool) {
 	var complete int32
 	ok, _, _ := oobeComplete.Call(uintptr(unsafe.Pointer(&complete)))
 	return service, ok != 0 && complete != 0
+}
+
+func commandServiceObservation(root string) serviceObservation {
+	return observeService(root, time.Now().UTC(), wire.Identity(), processIdentity)
 }
 
 // Guest Control need not carry an elevated interactive token. A service
@@ -116,15 +120,25 @@ func submit(ctx context.Context, root, request string) error {
 	}
 }
 
-type commandService struct{ root string }
+type commandService struct{ root, controlUser string }
 
-func Service(root string) error { return svc.Run("VMTestGuest", commandService{root: root}) }
+func Service(root, controlUser string) error {
+	if err := AllowProcessObservation(controlUser); err != nil {
+		return err
+	}
+	return svc.Run("VMTestGuest", commandService{root: root, controlUser: controlUser})
+}
 func (s commandService) Execute(_ []string, requests <-chan svc.ChangeRequest, status chan<- svc.Status) (bool, uint32) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := os.MkdirAll(filepath.Join(s.root, "inbox"), 0700); err != nil {
 		return false, 1
 	}
+	identity, alive, err := processIdentity(os.Getpid())
+	if err != nil || !alive {
+		return false, 1
+	}
+	heartbeat := serviceHeartbeat{Privileged: windows.GetCurrentProcessToken().IsElevated(), Protocol: wire.CommandProtocol, Build: wire.Identity(), Process: identity}
 	status <- svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -142,7 +156,12 @@ func (s commandService) Execute(_ []string, requests <-chan svc.ChangeRequest, s
 				return false, 0
 			}
 		case <-ticker.C:
-			_ = atomic(filepath.Join(s.root, "service.json"), map[string]any{"time": time.Now().UTC(), "privileged": windows.GetCurrentProcessToken().IsElevated()})
+			heartbeat.Time = time.Now().UTC()
+			if atomic(filepath.Join(s.root, "service.json"), heartbeat) != nil {
+				// Refuse new work when clients cannot observe this service's
+				// identity and liveness; existing supervisors retain their bounds.
+				continue
+			}
 			items, err := os.ReadDir(filepath.Join(s.root, "inbox"))
 			if err != nil {
 				continue
@@ -165,17 +184,11 @@ func (s commandService) Execute(_ []string, requests <-chan svc.ChangeRequest, s
 				go func() {
 					defer wg.Done()
 					defer os.Remove(claimed)
-					// Use the logged-in administrator's elevated linked token when
-					// available, allowing GUI programs on that desktop. Without a
-					// login the LocalSystem service still executes CLI commands.
-					if err := serviceCommand(ctx, s.root, claimed); err != nil {
-						dir := filepath.Join(s.root, id)
-						if _, err := os.Stat(filepath.Join(dir, "status.json")); os.IsNotExist(err) {
-							_ = os.MkdirAll(dir, 0700)
-							_ = os.WriteFile(filepath.Join(dir, "stdout"), nil, 0600)
-							_ = os.WriteFile(filepath.Join(dir, "stderr"), nil, 0600)
-							_ = atomic(filepath.Join(dir, "status.json"), wire.CommandStatus{State: "failed", Error: "Guest command service could not launch supervisor"})
-						}
+					started, ended, err := serviceCommand(ctx, s.root, claimed, spec.Context, s.controlUser)
+					if !started && err != nil {
+						_ = rejectSubmission(s.root, id, spec.Context, err)
+					} else if ended {
+						_ = Reconcile(s.root, id, err)
 					}
 				}()
 			}
@@ -183,15 +196,21 @@ func (s commandService) Execute(_ []string, requests <-chan svc.ChangeRequest, s
 	}
 }
 
-func serviceCommand(ctx context.Context, root, request string) error {
+func serviceCommand(ctx context.Context, root, request, executionContext, controlUser string) (bool, bool, error) {
+	if executionContext != "desktop" {
+		cmd := exec.CommandContext(ctx, installPath, "execute", "--root", root, "--request", request, "--control-user", controlUser)
+		cmd.WaitDelay = 2 * time.Second
+		err := cmd.Run()
+		return cmd.Process != nil, cmd.Process == nil || cmd.ProcessState != nil, err
+	}
 	token, err := desktopToken()
 	if err != nil {
-		return exec.CommandContext(ctx, installPath, "execute", "--root", root, "--request", request).Run()
+		return false, true, &wire.Error{Code: "desktop_unavailable", Message: "Requested Windows desktop requires a logged-in administrator with an elevated token", Details: map[string]any{"cause": wire.Safe(err)}}
 	}
 	defer token.Close()
 	env, err := token.Environ(false)
 	if err != nil {
-		return err
+		return false, true, err
 	}
 	var block []uint16
 	for _, v := range env {
@@ -200,45 +219,37 @@ func serviceCommand(ctx context.Context, root, request string) error {
 	}
 	block = append(block, 0)
 	app, _ := windows.UTF16PtrFromString(installPath)
-	args := []string{installPath, "execute", "--root", root, "--request", request}
+	args := []string{installPath, "execute", "--root", root, "--request", request, "--control-user", controlUser}
 	for i, arg := range args {
 		args[i] = syscall.EscapeArg(arg)
 	}
 	line, err := windows.UTF16PtrFromString(strings.Join(args, " "))
 	if err != nil {
-		return err
+		return false, true, err
 	}
 	desktop, _ := windows.UTF16PtrFromString(`winsta0\default`)
 	si := windows.StartupInfo{Desktop: desktop}
 	si.Cb = uint32(unsafe.Sizeof(si))
 	pi := windows.ProcessInformation{}
 	if err = windows.CreateProcessAsUser(token, app, line, nil, nil, false, windows.CREATE_UNICODE_ENVIRONMENT|windows.CREATE_NO_WINDOW, &block[0], nil, &si, &pi); err != nil {
-		return err
+		return false, true, err
 	}
 	defer windows.CloseHandle(pi.Process)
 	defer windows.CloseHandle(pi.Thread)
-	for {
-		result, err := windows.WaitForSingleObject(pi.Process, 100)
-		if err != nil {
-			return err
+	code, err := waitProcess(ctx, pi.Process)
+	if err == nil {
+		if code != 0 {
+			return true, true, fmt.Errorf("command supervisor exited with code %d", code)
 		}
-		if result == windows.WAIT_OBJECT_0 {
-			var exit uint32
-			if err = windows.GetExitCodeProcess(pi.Process, &exit); err != nil {
-				return err
-			}
-			if exit != 0 {
-				return fmt.Errorf("command supervisor exited unsuccessfully")
-			}
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			_ = windows.TerminateProcess(pi.Process, 1)
-			return ctx.Err()
-		default:
-		}
+		return true, true, nil
 	}
+	if e := windows.TerminateProcess(pi.Process, 1); e != nil {
+		return true, false, errors.Join(err, e)
+	}
+	settle, stop := context.WithTimeout(context.Background(), 2*time.Second)
+	defer stop()
+	_, settleErr := waitProcess(settle, pi.Process)
+	return true, settleErr == nil, errors.Join(err, settleErr)
 }
 
 func desktopToken() (windows.Token, error) {

@@ -42,7 +42,7 @@ func TestMaliciousNarinfoAndCacheSeal(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	cache.Objects[name] = Object{Size: int64(len(valid))}
+	cache.Objects[name] = Object{Size: int64(len(valid)), File: name}
 	if e = s.seal(cache); e == nil {
 		t.Fatal("missing referenced NAR accepted")
 	}
@@ -238,9 +238,9 @@ func TestDeadlineExtensionNetworkAndPurge(t *testing.T) {
 	task, _ := s.task(lab.ID)
 	old := *task.Deadline
 	s.mu.Unlock()
-	successful(t, s, "task_extend", ExtendRequest{TaskChange: TaskChange{Change: Change{"extend"}, TaskID: TaskID{lab.ID}}, Seconds: 10})
+	successful(t, s, "task_extend", ExtendRequest{TaskChange: TaskChange{Change: Change{"extend"}, TaskID: TaskID{lab.ID}}, Seconds: 10, Reason: "Complete network recovery assertions"})
 	s.mu.Lock()
-	if !task.Deadline.Equal(old.Add(10 * time.Second)) {
+	if !task.Deadline.Equal(old.Add(10*time.Second)) || task.Hold == nil || !task.Hold.Until.Equal(*task.Deadline) || task.Hold.Reason != "Complete network recovery assertions" {
 		t.Fatal("wrong extended deadline")
 	}
 	s.mu.Unlock()
@@ -380,72 +380,6 @@ func TestGuestDownloadUsesExplicitFileAndRejectsSymlinks(t *testing.T) {
 	}
 }
 
-type completingCommandRunner struct{ finished bool }
-
-func (r *completingCommandRunner) Run(_ context.Context, _ string, args []string, _ io.Reader) ([]byte, error) {
-	if len(args) < 3 || args[0] != "guestcontrol" || args[2] != "copyfrom" {
-		return nil, fmt.Errorf("unexpected command poll operation")
-	}
-	source, destination := args[len(args)-2], args[len(args)-1]
-	var content string
-	switch filepath.Base(strings.ReplaceAll(source, `\`, "/")) {
-	case "status.json":
-		content = `{"state":"running"}`
-		if r.finished {
-			content = `{"state":"exited","exit_code":0}`
-		}
-	case "stdout":
-		content = "partial output\n"
-		if r.finished {
-			content += "last stdout bytes\n"
-		}
-	case "stderr":
-		if r.finished {
-			content = "last stderr bytes\n"
-		}
-	default:
-		return nil, fmt.Errorf("unexpected command file")
-	}
-	// The guest exits just after the first file's contents were captured.
-	r.finished = true
-	return nil, os.WriteFile(destination, []byte(content), 0600)
-}
-
-func TestTerminalCommandPollIncludesFinalOutput(t *testing.T) {
-	b := &VBoxBackend{Config: testConfig(t), Runner: &completingCommandRunner{}}
-	task := newTask("lab", 60)
-	task.Router = &Node{ID: wire.ID()}
-	node := &Node{ID: wire.ID(), UUID: wire.UUID(), NodeRequest: NodeRequest{Template: "windows"}}
-	command := wire.ID()
-	local := filepath.Join(b.Config.Service.StateDir, "tasks", task.ID, "commands", command)
-	for _, dir := range []string{b.runtime(task), local} {
-		if err := os.MkdirAll(dir, 0700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for range 2 {
-		raw, err := b.Action(context.Background(), task, node, NodeAction{Action: "command_poll", CommandID: command, Local: local})
-		if err != nil {
-			t.Fatal(err)
-		}
-		var status wire.CommandStatus
-		if err = wire.Decode(raw, &status); err != nil {
-			t.Fatal(err)
-		}
-		if status.State != "exited" {
-			continue
-		}
-		for file, want := range map[string]string{"stdout": "partial output\nlast stdout bytes\n", "stderr": "last stderr bytes\n"} {
-			got, err := os.ReadFile(filepath.Join(local, file))
-			if err != nil || string(got) != want {
-				t.Fatalf("terminal command lost %s: %q, %v", file, got, err)
-			}
-		}
-		return
-	}
-	t.Fatal("command did not reach a terminal state")
-}
-
 func TestHostCommandPreservesUnicodeLocale(t *testing.T) {
 	bash, err := exec.LookPath("bash")
 	if err != nil {
@@ -502,7 +436,7 @@ func TestVBoxArgumentsAreStructuredAndRouterIsPrivate(t *testing.T) {
 	}
 }
 
-func TestGuestSupervisorArgvAndLifetime(t *testing.T) {
+func TestGuestSubmissionArgvAndTransportBudget(t *testing.T) {
 	c := testConfig(t)
 	r := &recordingRunner{}
 	b := &VBoxBackend{Config: c, Runner: r}
@@ -512,7 +446,7 @@ func TestGuestSupervisorArgvAndLifetime(t *testing.T) {
 	if e := os.MkdirAll(b.runtime(task), 0700); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := b.guestExec(context.Background(), task, n, true, "run", "--root", `C:\work`); e != nil {
+	if _, e := b.guestExec(context.Background(), task, n, "run", "--root", `C:\work`); e != nil {
 		t.Fatal(e)
 	}
 	r.mu.Lock()
@@ -524,8 +458,8 @@ func TestGuestSupervisorArgvAndLifetime(t *testing.T) {
 				t.Fatal("unexpected argv[1]", args)
 			}
 		}
-		if v == "--timeout" && args[i+1] != "0" {
-			t.Fatal("supervisor has a transport lifetime", args)
+		if v == "--timeout" && args[i+1] != "30000" {
+			t.Fatal("submission transport is not bounded", args)
 		}
 	}
 }

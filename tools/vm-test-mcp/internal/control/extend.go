@@ -2,12 +2,16 @@ package control
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
 func (s *Server) extendTask(a ExtendRequest) (any, error) {
+	if strings.TrimSpace(a.Reason) == "" || !wire.ValidText(a.Reason, 1024) {
+		return nil, wire.Fail("invalid_argument", "A concrete continued-work reason of 1..1024 bytes is required")
+	}
 	s.mu.Lock()
 	t, err := s.task(a.TaskID.TaskID)
 	r := s.runtime[a.TaskID.TaskID]
@@ -49,6 +53,7 @@ func (s *Server) extendTask(a ExtendRequest) (any, error) {
 		return nil, wire.Fail("invalid_state", "Task ended before the extension was confirmed")
 	}
 	t.Deadline = &until
+	t.Hold = &Hold{Reason: a.Reason, Updated: time.Now().UTC(), Until: until}
 	s.save(t)
 	return t.Public(), nil
 }

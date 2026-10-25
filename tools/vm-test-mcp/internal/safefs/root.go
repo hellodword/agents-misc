@@ -145,16 +145,34 @@ func (r *Root) Write(name string, src io.Reader, limit int64) (int64, string, er
 	if err != nil {
 		return 0, "", err
 	}
-	if err = r.Rename(tmp, name); err != nil {
+	if err = r.Publish(tmp, name); err != nil {
 		return 0, "", err
+	}
+	return n, hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// Publish commits an already synced temporary file within the same directory.
+// Callers can validate cancellation/ownership before replacing a retained object.
+func (r *Root) Publish(tmp, name string) error {
+	if err := Name(tmp); err != nil {
+		return err
+	}
+	if err := Name(name); err != nil {
+		return err
+	}
+	if path.Dir(tmp) != path.Dir(name) {
+		return wire.Fail("invalid_path", "Publication requires the same directory")
+	}
+	if err := r.Rename(tmp, name); err != nil {
+		return err
 	}
 	d, err := r.Open(path.Dir(name))
 	if err != nil {
-		return 0, "", err
+		return err
 	}
 	err = d.Sync()
 	d.Close()
-	return n, hex.EncodeToString(h.Sum(nil)), err
+	return err
 }
 func (r *Root) Read(name string, max int64) ([]byte, error) {
 	f, err := r.Regular(name)

@@ -166,33 +166,52 @@ func Prepare(ctx context.Context, o Options) (map[string]any, error) {
 		if name == "nix-cache-info" {
 			return nil
 		}
-		f, e := os.Open(p)
-		if e != nil {
-			return e
-		}
-		defer f.Close()
-		request, e := http.NewRequestWithContext(ctx, "PUT", strings.TrimRight(o.CacheURL, "/")+"/"+filepath.ToSlash(name), f)
-		if e != nil {
-			return e
-		}
-		st, e := f.Stat()
-		if e != nil {
-			return e
-		}
-		request.ContentLength = st.Size()
-		response, e := client.Do(request)
-		if e != nil {
-			return e
-		}
-		defer response.Body.Close()
-		io.Copy(io.Discard, io.LimitReader(response.Body, 65536))
-		if response.StatusCode != 200 {
-			return fmt.Errorf("cache upload returned HTTP %d", response.StatusCode)
-		}
-		return nil
+		return uploadCacheObject(ctx, client, o.CacheURL, filepath.ToSlash(name), p)
 	})
 	if e != nil {
 		return nil, e
 	}
 	return map[string]any{"request_id": o.RequestID, "cache_id": o.CacheID, "derivation": meta.Derivation, "system": meta.System}, nil
+}
+
+// Keep the object and server rejection in errors without disclosing the scoped
+// capability URL. Successful uploads are idempotent when resuming a saved run.
+func uploadCacheObject(ctx context.Context, client *http.Client, base, name, file string) error {
+	f, err := os.Open(file)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	request, err := http.NewRequestWithContext(ctx, "PUT", strings.TrimRight(base, "/")+"/"+name, f)
+	if err != nil {
+		return fmt.Errorf("invalid cache upload URL")
+	}
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	request.ContentLength = st.Size()
+	response, err := client.Do(request)
+	if err != nil {
+		// net/url.Error includes the credential-bearing URL in Error().
+		return fmt.Errorf("cache object %q upload: %w", name, wire.Safe(err))
+	}
+	defer response.Body.Close()
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, 65537))
+	if response.StatusCode == http.StatusOK {
+		return nil
+	}
+	var envelope struct {
+		Error *wire.Error `json:"error"`
+	}
+	if readErr == nil && len(body) <= 65536 && wire.Decode(body, &envelope) == nil && envelope.Error != nil &&
+		requestIDPattern.MatchString(envelope.Error.Code) && envelope.Error.Message != "" && wire.ValidText(envelope.Error.Message, 1024) {
+		failure := wire.Safe(envelope.Error)
+		if failure.Details == nil {
+			failure.Details = map[string]any{}
+		}
+		failure.Details["boundary"], failure.Details["object"], failure.Details["http_status"] = "cache_upload", name, response.StatusCode
+		return fmt.Errorf("cache object %q upload returned HTTP %d: %w", name, response.StatusCode, failure)
+	}
+	return fmt.Errorf("cache object %q upload returned HTTP %d without a valid error response", name, response.StatusCode)
 }

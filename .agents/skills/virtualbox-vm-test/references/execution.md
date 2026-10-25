@@ -1,6 +1,6 @@
 # Executing VirtualBox labs
 
-Use a prepared VM Test MCP 0.10 executor. `service_get` reports templates,
+Use a prepared VM Test MCP 0.11 executor. `service_get` reports templates,
 resource/media policy, backend availability, endpoint address and limits. Its
 token holders share task authority. Use the advertised tool schemas; do not infer
 host paths, VM UUIDs or executable options from guest data.
@@ -21,21 +21,64 @@ Poll `operation_get` until the creation receipt resolves, then `task_get` until
 `phase` is `running`. `node_get` exposes preparation stage, expected power state,
 capabilities and health observations while the lab prepares. Keep original IDs after disconnects and retry identical
 mutations with the original request ID. A changed request requires a new ID.
+Task `router` exposes router preparation and health; each preparation record
+includes stage/start times and its independent deadline. A cancelled peer retains
+the primary preparation failure as its cause.
 The queue is shared with NixOS tests. Deadlines begin at execution, default to
-one hour and can be extended within the configured total limit.
+one hour and can be extended within the configured total limit. Choose a deadline
+for the continuous test batch. `task_list` defaults to compact active tasks;
+`phase=ended` or `all` selects history. Retain its task-ID `next_cursor` for paging.
+`task_get.queue` identifies the position, blocker and waiting reason without
+requiring another user's command payload. Activity counts describe supervised
+commands, open endpoints and captures; detached services can still be active.
+
+Finish tests and bounded diagnosis before returning to lengthy local work.
+`task_extend(seconds=…, reason=…)` records concrete continued work and the resulting
+deadline; it does not extend node startup budgets. A connection loss does not
+release the lab: reconnect and inspect the same task. Use `task_cancel` when
+abandoning a queued/preparing request, then wait for cleanup. Resources that were
+never created have `state=never_allocated`, distinct from `released`.
 
 ## Commands, files and Compose
 
-Use `transfer_create(kind="file", task_id=…)`, PUT bytes to its capability URL,
-then `guest_file_put` with node ID and an absolute guest path. This seals the
-upload. `command_start` takes argv, optional guest cwd/environment and an independent
-timeout. No host shell is involved. Commands on separate nodes and separate
+Use `transfer_create(kind="file", task_id=…)` and PUT locally prepared bytes while
+the task is queued or preparing. Once the node is available, use `guest_file_put`
+with node ID and an absolute guest path; successful sealing makes the upload
+read-only. Ending the task interrupts pending writes and retains complete inputs.
+`transfer_get.can_upload` and `uploading` expose the current upload boundary.
+`command_start` takes argv, optional absolute guest cwd/environment and an independent
+timeout. `context` defaults to `service`: Linux root or Windows LocalSystem.
+Windows GUI workloads select `context="desktop"`, which requires a logged-in
+administrator's elevated token and fails if it is unavailable. The default cwd
+is the selected account's home; Linux supplies HOME, USER, LOGNAME and PATH for
+each command. Inspect `node_get.guest.command_environment` and the live command's
+`execution` identity/cwd; set project cache directories explicitly in its env.
+No login shell or host shell is involved. Commands on separate nodes and separate
 supervised commands can run concurrently.
 
 Read `command_get` and byte-offset `command_read(stdout|stderr)`. Decode base64
-output and retain offsets. `command_input` starts at sequence 0; retain each
+output and retain byte offsets even for Unicode or binary data. `at_end` means
+the currently retained prefix ended; `eof` requires complete retention. After
+execution is final, wait within `retained_output.deadline` for both streams to
+be complete or explicitly incomplete before asserting their contents. An absent
+first status is pending until `status_deadline`; a receipt alone does not establish
+that the command started. `command_input` starts at sequence 0; retain each
 request ID for retries and send EOF explicitly. `command_cancel` affects its
 supervised process group. A failed command leaves the lab available for diagnosis.
+Input is raw UTF-8 text, at most 64 KiB per packet, 64 MiB and 4096 packets per
+command including EOF. Use files for larger inputs. The receipt's `persisted`
+and `delivery` do not prove guest consumption or application processing; compare
+`stdin.next_sequence` with guest `next_input` and assert the application's result.
+To inspect retained input, use `command_get(input_from=0)` and its `next_sequence`.
+
+Check the live command's `final`, actual `exit_code` or `exit_signal`, `termination`
+and output completeness. A Linux signal exit has no exit code; `exit_signal`
+identifies the signal and `core_dumped` records the kernel's core-dump status.
+`timed_out` records a deadline separately from user cancellation;
+`uncertain` means supervision could not confirm a phase. Preserve known exit codes
+even if output drainage failed. `release.source=vm_deleted` confirms resource
+release only; it does not supply a missing command result. The mutation receipt
+is a historical snapshot, so continue reconciliation through `command_get`.
 
 Probe optional executables through guest PATH and execute version/import checks;
 Python, Docker and Compose are not prerequisites for creating a lab. If the test
@@ -51,7 +94,12 @@ started outside a command process group can persist until lab destruction.
 
 The default LAN is `10.77.0.0/24`; DHCP reservations give `NAME.lab.test` names.
 Set node IPv4 values or disable DHCP when the test must configure addresses itself.
-Guest Control does not depend on LAN reachability. Use `endpoint_open` with a
+Reservations and protection are applied before clients boot. Node `planned_ipv4`
+is the declared address; `network_observation` shows actual guest interfaces,
+MACs and address prefixes, with `unknown` when no observation is available.
+Assert the test's required address, bind, LAN and DNS behavior before interpreting
+an application network failure. Guest Control does not depend on LAN reachability.
+Use `endpoint_open` with a
 node, TCP/UDP and a guest port to get an allocated host entry. The relay enforces
 administrator source CIDRs; source addresses may be rewritten. Test original
 source-address behavior entirely within the LAN.
@@ -62,9 +110,13 @@ whether guest renewal/reconfiguration is needed. Use privileged commands for gue
 addresses, DNS, routes and firewall rules. Disabling DHCP does not remove a guest's
 current address. `node_network_link` connects/disconnects its first NIC. Egress-only
 changes preserve LAN and published services.
-Host, metadata and protected destinations remain denied. Network faults suspend
-egress and entries while retaining VMs. Inspect task events and explicitly call
-`network_recover`; failed recovery must leave networking suspended. LAN-local
+Host, metadata and protected destinations remain denied. `network.state=suspect`
+means a late observation within the confirmed policy lease; inspect the retained
+stage/error/budget and wait for the next bounded observation. `degraded` suspends
+egress/entries while retaining VMs. Inspect task events and explicitly call
+`network_recover`; failed recovery must leave networking suspended. Reconcile the
+original command after a connection loss; endpoint EOF is not a command exit.
+LAN-local
 IPv6 communication is possible, with no managed IPv6 egress/publication.
 
 ## Desktop and evidence
@@ -92,14 +144,17 @@ through `task_finish`. Cancellation and timeout use the same cleanup path. Wait
 for `cleanup.state: complete`. An ended task with `cleanup.state: blocked` retains
 resource step errors; inspect them and use a new `task_cleanup` request for a retry. Evidence
 and reproduction inputs remain until explicit `task_purge` unless configured
-retention says otherwise. Keep capability URLs private.
+retention says otherwise. Enter local edits or reporting only after cleanup is
+complete; a later batch uses a new request and task. Keep capability URLs private.
 
 ## Fault handling
 
 Read `task_get.phase`, `result` and `cleanup` separately. An initialization failure
 ends the lab after bounded evidence collection. A runtime capability failure keeps
 the lab and healthy nodes available until the caller finishes/cancels or its deadline
-expires. Do not restart or recreate it automatically. After reviewing evidence,
+expires. Collect needed evidence within a stated diagnostic window, then release
+the shared executor before local investigation. Do not restart or recreate it
+automatically. After reviewing evidence,
 explicit node power actions remain available; they record the expected transition.
 
 `node_get.health` separates VirtualBox, Guest Control and command-service
@@ -108,9 +163,18 @@ collects available metadata, VBox logs, screenshots and guest initialization/sys
 logs within a shared 30-second budget. It accepts selected test-node IDs; omission
 collects the full lab including its router. Retain partial evidence and the manifest.
 
+For control latency or network lease faults, use `service_observe` and the retained
+`performance.json` window to compare host pressure, controller quota/throttling,
+capacity wait and execution time. Missing samples or unsupported metrics are not
+evidence of idle CPU. Correlate timestamps and preserve alternative causes; do not
+attribute historical failures to CPU without concurrent evidence or inject load
+on a shared executor. Fault-window collection continues after VM release.
+
 Use `node_exec` for short absolute guest argv when ordinary command supervision is
 not ready. It defaults to 10 seconds, caps at 30, and retains bounded base64 output,
 exit information and an artifact. Delivery/termination uncertainty remains in its
 receipt; inspect it before deciding on another command. Use supervised commands for
 ordinary workloads. A command's observation failure does not establish its exit,
-and a requested cancellation is confirmed only by guest status or VM deletion.
+and a requested command cancellation requires a guest terminal record with its
+termination evidence. VM deletion confirms resource release and cannot supply an
+execution result or missing exit code.

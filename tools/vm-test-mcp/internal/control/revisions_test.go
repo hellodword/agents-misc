@@ -108,6 +108,57 @@ func TestQueuedUnsubmittedNixFailsWithoutHoldingNextLab(t *testing.T) {
 	}
 }
 
+type nixExecutionBackend struct {
+	*fakeBackend
+	cancelled bool
+}
+
+func (f *nixExecutionBackend) Nix(_ context.Context, action string, _ *Task) (json.RawMessage, error) {
+	if action == "start" || f.cancelled && action == "status" {
+		return wire.JSON(map[string]any{"state": "building", "cleanup": "pending"}), nil
+	}
+	execution := &wire.NixExecution{Stage: "build", Process: &wire.NixProcessResult{Stage: "build", Source: "nix_client_wait", Exited: true, ExitCode: new(23)}, Error: wire.Safe(wire.Fail("backend_error", "Synthetic Nix build failed"))}
+	return wire.JSON(map[string]any{"state": "failed", "cleanup": "complete", "execution": execution}), nil
+}
+
+func TestNixTaskRetainsExecutionThroughCompletionAndCancellationCleanup(t *testing.T) {
+	for _, cancelled := range []bool{false, true} {
+		t.Run(fmt.Sprint(cancelled), func(t *testing.T) {
+			f := &nixExecutionBackend{fakeBackend: &fakeBackend{}, cancelled: cancelled}
+			s, err := New(testConfig(t), f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			job := newTask("nixos", 60)
+			s.tasks = append(s.tasks, job)
+			if err = s.db.Save(context.Background(), state.Document{Kind: "task", ID: job.ID, Value: job}); err != nil {
+				t.Fatal(err)
+			}
+			s.Start()
+			if cancelled {
+				waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return job.State == "running" })
+				successful(t, s, "task_cancel", TaskChange{Change: Change{"cancel-nix-result"}, TaskID: TaskID{job.ID}})
+			}
+			waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return job.Cleanup == "complete" })
+			s.mu.Lock()
+			got := clone(job)
+			s.mu.Unlock()
+			want := "failed"
+			if cancelled {
+				want = "cancelled"
+			}
+			if got.State != want || got.NixExecution == nil || got.NixExecution.Process.ExitCode == nil || *got.NixExecution.Process.ExitCode != 23 || got.Failure == nil || got.Failure.Code != "backend_error" {
+				t.Fatal(got.Public())
+			}
+			var stored Task
+			if err = s.db.Load(context.Background(), "task", job.ID, &stored); err != nil || stored.NixExecution == nil || *stored.NixExecution.Process.ExitCode != 23 {
+				t.Fatal(stored.Public(), err)
+			}
+		})
+	}
+}
+
 func TestGUIOwnershipRestoreAndExternalConflict(t *testing.T) {
 	for _, conflict := range []bool{false, true} {
 		t.Run(fmt.Sprint(conflict), func(t *testing.T) {
@@ -162,10 +213,11 @@ func TestNetworkChangesValidateAtomicallyAndRequireLeaseRecovery(t *testing.T) {
 		t.Fatal(v)
 	}
 	v.NetworkUpdated = time.Now().Add(-time.Minute)
+	v.NetworkLeaseExpires = v.NetworkUpdated.Add(time.Duration(s.cfg.VirtualBox.Network.LeaseSeconds) * time.Second)
 	s.mu.Unlock()
 	a.RequestID = "expired"
 	a.Nodes = nil
-	if o := operation(t, s, "network_set", a); o.Error == nil || o.Error.Code != "network_degraded" {
+	if o := operation(t, s, "network_set", a); o.Error == nil || o.Error.Code != "network_lease_expired" {
 		t.Fatal(o)
 	}
 	successful(t, s, "network_recover", TaskChange{Change: Change{"recover-expired"}, TaskID: TaskID{lab.ID}})
@@ -317,5 +369,73 @@ func TestGuestStatusRefreshesWithoutPowerStateChange(t *testing.T) {
 		if saved.Nodes[0].Guest["prepared"] != ready {
 			t.Fatal("guest status was not persisted")
 		}
+	}
+}
+
+type delayedNixStatusBackend struct {
+	*nixExecutionBackend
+	entered, release chan struct{}
+}
+
+func (f *delayedNixStatusBackend) Nix(ctx context.Context, action string, task *Task) (json.RawMessage, error) {
+	if action == "status" {
+		close(f.entered)
+		<-f.release
+	}
+	return f.nixExecutionBackend.Nix(ctx, action, task)
+}
+
+func TestNixTerminalReplyPreservesConcurrentTaskTermination(t *testing.T) {
+	for _, termination := range []string{"cancelled", "timed_out"} {
+		t.Run(termination, func(t *testing.T) {
+			f := &delayedNixStatusBackend{nixExecutionBackend: &nixExecutionBackend{fakeBackend: &fakeBackend{}}, entered: make(chan struct{}), release: make(chan struct{})}
+			s, err := New(testConfig(t), f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			released := false
+			defer func() {
+				if !released {
+					close(f.release)
+				}
+			}()
+			job := newTask("nixos", 60)
+			s.tasks = append(s.tasks, job)
+			if err = s.db.Save(context.Background(), state.Document{Kind: "task", ID: job.ID, Value: job}); err != nil {
+				t.Fatal(err)
+			}
+			s.Start()
+			select {
+			case <-f.entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("status did not start")
+			}
+			if termination == "cancelled" {
+				successful(t, s, "task_cancel", TaskChange{Change: Change{"cancel-inflight-nix-result"}, TaskID: TaskID{job.ID}})
+			} else {
+				s.mu.Lock()
+				expired := time.Now().Add(-time.Second)
+				job.Deadline = &expired
+				s.mu.Unlock()
+				waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return job.State == "timed_out" })
+			}
+			close(f.release)
+			released = true
+			waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return job.Cleanup == "complete" })
+			s.mu.Lock()
+			got := clone(job)
+			s.mu.Unlock()
+			if got.State != termination || got.NixExecution == nil || got.NixExecution.Process == nil || got.NixExecution.Process.ExitCode == nil || *got.NixExecution.Process.ExitCode != 23 || got.Failure == nil || got.Failure.Code != "backend_error" {
+				t.Fatal(got.Public())
+			}
+			if termination == "cancelled" && got.Conclusion != "inconclusive" {
+				t.Fatal(got.Public())
+			}
+			var persisted Task
+			if err := s.db.Load(context.Background(), "task", job.ID, &persisted); err != nil || persisted.State != termination || persisted.NixExecution == nil || persisted.NixExecution.Process.ExitCode == nil || *persisted.NixExecution.Process.ExitCode != 23 {
+				t.Fatal(persisted.Public(), err)
+			}
+		})
 	}
 }

@@ -41,7 +41,7 @@ let
       (nixpkgs + "/nixos/modules/profiles/minimal.nix")
       ({ ... }: {
         system.stateVersion = "26.05";
-        system.nixos.label = "vm-test-router-0.10.0";
+        system.nixos.label = "vm-test-router-${routerHelper.version}";
         networking.hostName = "vm-test-router";
         networking.useDHCP = false;
         networking.useNetworkd = false;
@@ -58,9 +58,13 @@ let
           "e1000"
         ];
         boot.kernelParams = [
-          "console=ttyS0"
+          # The router needs a firmware framebuffer, not a native GPU driver.
+          "nomodeset"
           "console=tty0"
+          # /dev/console carries initrd and service output to the collector.
+          "console=ttyS0,115200n8"
         ];
+        boot.consoleLogLevel = 6;
         boot.kernel.sysctl = {
           "net.ipv4.ip_forward" = 1;
           "net.ipv6.conf.all.forwarding" = 0;
@@ -169,7 +173,7 @@ let
     ];
   };
 in
-pkgs.runCommand "vm-test-router-0.10.0"
+pkgs.runCommand "vm-test-router-${routerHelper.version}"
   {
     nativeBuildInputs = [
       pkgs.python3

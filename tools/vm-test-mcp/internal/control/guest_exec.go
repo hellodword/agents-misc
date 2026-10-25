@@ -66,14 +66,24 @@ func (b *VBoxBackend) guestCommand(ctx context.Context, t *Task, n *Node, argv [
 }
 
 func (b *VBoxBackend) guestCaptured(ctx context.Context, t *Task, n *Node, operation string, args ...string) (hostexec.Result, error) {
+	started := time.Now()
 	value, _ := b.guestSlots.LoadOrStore(n.UUID, make(chan struct{}, 4))
 	slots := value.(chan struct{})
 	select {
 	case slots <- struct{}{}:
 		defer func() { <-slots }()
 	case <-ctx.Done():
-		return hostexec.Result{}, wire.Fail("resource_busy", "Guest Control capacity was occupied for this operation's time budget")
+		err := wire.Fail("resource_busy", "Guest Control capacity was occupied for this operation's time budget")
+		b.recordCall(started, time.Since(started), "guestcontrol", operation, t.ID, n.ID, hostexec.Result{}, err)
+		return hostexec.Result{}, err
 	}
+	if err := b.admitGuestSession(ctx, t, n); err != nil {
+		b.recordCall(started, time.Since(started), "guestcontrol", operation, t.ID, n.ID, hostexec.Result{}, err)
+		return hostexec.Result{}, err
+	}
+	var result hostexec.Result
+	defer func() { b.retireGuestSession(n, operation, result) }()
+	wait := time.Since(started)
 	c := b.guestConfig(t, n)
 	stage, err := os.MkdirTemp(b.runtime(t), "auth-")
 	if err != nil {
@@ -92,7 +102,8 @@ func (b *VBoxBackend) guestCaptured(ctx context.Context, t *Task, n *Node, opera
 	if err != nil {
 		return hostexec.Result{}, err
 	}
-	result, err := hostexec.Capture(ctx, b.Runner, exe, append(argv, args...), nil)
+	result, err = hostexec.Capture(ctx, b.Runner, exe, append(argv, args...), nil)
+	b.recordCall(started, wait, "guestcontrol", operation, t.ID, n.ID, result, err)
 	result.Stderr = []byte(b.redact(string(result.Stderr)))
 	return result, b.executionError("guestcontrol/"+operation, err)
 }

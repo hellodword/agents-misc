@@ -20,7 +20,7 @@ Copy-Item "$Install\vm-test-guest.exe" "$Install\vm-test-service.exe" -Force
 if ($LASTEXITCODE -ne 0) { throw 'Cannot grant guest command access' }
 & icacls.exe $Root /grant "${User}:(OI)(CI)F" | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Cannot grant guest work access' }
-$Command = '"' + $Install + '\vm-test-service.exe" service --root "' + $Root + '"'
+$Command = '"' + $Install + '\vm-test-service.exe" service --root "' + $Root + '" --control-user "' + $Account + '"'
 if ($Existing) {
     & sc.exe config VMTestGuest binPath= $Command start= auto | Out-Null
 } else {

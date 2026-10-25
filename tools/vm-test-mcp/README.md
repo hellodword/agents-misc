@@ -1,4 +1,4 @@
-# VM Test MCP 0.10.0
+# VM Test MCP 0.11.0
 
 Go services for disposable Windows/Linux VirtualBox labs and strict NixOS sandbox
 tests on physical-host KVM. A lab contains independent linked clones and a private
@@ -39,9 +39,12 @@ and source references. From `tools/vm-test-mcp`, the same command is `just build
 
 These outputs target `x86_64-linux`. The service package includes the controller,
 worker, container submission helper, Linux/Windows amd64 guest supervisors and
-native input helper, and the xorriso seed-ISO builder. The router output is a
+native VirtualBox API helper, and the xorriso seed-ISO builder. The router output is a
 diskless NixOS Live ISO, built with ordinary files without mounts or KVM. It reads
 squashfs on demand, uses tmpfs for writable state, and targets **1 vCPU / 256 MiB**.
+The router uses the firmware framebuffer without native GPU modesetting. Its
+primary serial console retains kernel, initrd and service output for diagnostics;
+the framebuffer remains available for screenshots.
 
 Follow [administrator preparation](preparation.md). Both services read the same
 [annotated YAML](config.example.yaml) outside the Nix store. There is no config-file
@@ -83,17 +86,23 @@ Diagnostics go to stderr. Streamable HTTP is at `/mcp`, authenticated with
 `Authorization: Bearer TOKEN`, with optional exact Host/Origin allowlists (empty or omitted allows any). All token
 holders share authority over all tasks.
 
-1. Call `service_get` for templates, backend status and limits.
+1. Prepare scripts and dependencies locally. Call `service_get` for templates,
+   backend status and limits, and `task_list` for compact active/queued summaries.
 2. Call `lab_create` with a fresh `request_id` and a fixed list of named nodes.
-   Reusing a template creates independent clones with separate UUIDs, MACs and disks.
-3. Poll the operation with `operation_get`, then `task_get`. Every mutation returns
+   Select a deadline for one continuous test batch. Reusing a template creates
+   independent clones with separate UUIDs, MACs and disks.
+3. Poll the operation with `operation_get`, then `task_get`. While queued or
+   preparing, upload prepared files through `transfer_create`. Every mutation returns
    a durable receipt. Identical retries reuse the ID; changed parameters conflict.
 4. Use `command_start` with guest argv, `command_read` for output and `command_input`
    for numbered stdin packets/EOF. A nonzero exit finishes only that command.
 5. Upload through `transfer_create`/`guest_file_put`, collect files or guest tar
    archives with `guest_file_get`, and retrieve evidence through `artifact_get`.
 6. Submit `passed`, `failed` or `inconclusive` and a summary through `task_finish`.
-   Wait for `cleanup.state: complete`; evidence remains until `task_purge` by default.
+   Wait for `cleanup.state: complete` before lengthy local edits or reporting;
+   evidence remains until `task_purge` by default. Abandon queued/preparing tasks
+   with `task_cancel`. Later batches use a new execution identity. Extend only for
+   concrete continued work using `task_extend(seconds=…, reason=…)`.
 
 The [API contract](contract.md) describes parameters, errors and transfer routes.
 The distributed [VirtualBox workflow](../../.agents/skills/virtualbox-vm-test/SKILL.md)
@@ -102,6 +111,10 @@ and [NixOS workflow](../../.agents/skills/nixos-vm-test/SKILL.md) describe execu
 ## Networks and evidence
 
 Each lab has its own Internal Network, DHCP reservations and `NAME.lab.test` DNS.
+The router applies reservations and protection before clients boot, so a slow
+peer does not consume another guest's DHCP retry window. `planned_ipv4` is a
+reservation; guest interface/address observations and application connectivity
+assertions establish the actual network boundary separately.
 LAN defaults to `10.77.0.0/24`; callers can select an RFC1918 subnet and disable DHCP.
 Guest Control remains usable independently of networking. Docker/Compose run
 inside Linux nodes, with their privileges scoped to that guest.
@@ -115,8 +128,15 @@ The router enables NAT loopback access for UDP forwarding replies; its nftables
 policy continues to block guest-initiated connections to host addresses.
 
 Policy updates are nftables transactions. Expiring leases require control
-heartbeats. Router, policy or host-address refresh failures degrade networking and
-close host relays. `network_recover` validates and restores declared egress/entries.
+heartbeats. A late heartbeat marks policy observation `suspect` while the last
+confirmed, unchanged lease remains valid. Router identity/policy failures, changed
+host protection and lease expiry degrade networking and close host relays.
+`task_get.network` retains stage, cause, budget, lock/execution time, lease deadline
+and router identity. `network_recover` validates and restores declared egress/entries.
+`service_observe` exposes a bounded recent window of host pressure, controller
+quota/throttling and call wait/execution times. Faults retain a before/after window
+as an artifact without extending VM occupancy. Missing and unsupported metrics
+remain explicit; use concurrent evidence before attributing a fault to CPU load.
 `network_set(internet=false)` retains LAN and published access and revokes public
 connection state. The same tool can change DHCP, upstream DNS and node address
 registrations; adjust guest addresses/routes/firewalls through commands and renew
@@ -142,9 +162,16 @@ artifacts. Automatic evidence bundles include available VM logs, screenshots, in
 ## Faults, diagnostics and cleanup
 
 `task_get` separates `phase` (`queued`, `preparing`, `running`, `ended`), `result`
-and `cleanup`. Use `node_get` for preparation progress, expected power state,
+and `cleanup`. Queue views expose position and blocking task; resource states
+distinguish never allocated from released. `task_list` defaults to active work,
+including blocked cleanup; request `phase=ended` or `all` for compact history.
+Task status omits command payloads. `command_get` reads the spec and input
+progress; `input_from` explicitly pages through retained stdin packets.
+Use `node_get` for preparation progress, expected power state,
 capabilities and the last observation of VirtualBox, Guest Control and command
 service health. Each observation records its time, last success and bounded error.
+Task status also exposes router preparation. Each preparation record has its own
+start, stage start and deadline; peer cancellation retains the initiating cause.
 
 A preparation failure ends the lab after collecting evidence within a shared
 30-second budget. Running faults retain the lab and healthy nodes until the caller

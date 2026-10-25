@@ -26,12 +26,12 @@ func run() int {
 	file := f.String("config", "", "shared YAML configuration file")
 	check := f.Bool("check-config", false, "validate configuration without starting services or creating state")
 	reconcile := f.String("reconcile", "", "retry cleanup for a locally verified task")
-	version := f.Bool("version", false, "print version")
+	version := f.Bool("version", false, "print JSON build and running-binary identity without configuration or state access")
 	if e := f.Parse(os.Args[1:]); e != nil {
 		return 2
 	}
 	if *version {
-		fmt.Println(wire.Version)
+		fmt.Println(string(wire.JSON(wire.Identity())))
 		return 0
 	}
 	if *file == "" || f.NArg() != 0 {

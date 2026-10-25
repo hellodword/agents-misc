@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/config"
+	"github.com/hellodword/agents-misc/vm-test-mcp/internal/state"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
@@ -32,30 +33,76 @@ type LabRequest struct {
 type Node struct {
 	ID string `json:"id"`
 	NodeRequest
-	UUID         string                  `json:"uuid"`
-	MAC          string                  `json:"mac"`
-	State        string                  `json:"state"`
-	Intent       bool                    `json:"intent"`
-	Cleaned      bool                    `json:"cleaned"`
-	Link         bool                    `json:"link"`
-	AutoResize   bool                    `json:"auto_resize"`
-	LastInput    time.Time               `json:"last_input,omitempty"`
-	Guest        map[string]any          `json:"guest,omitempty"`
-	Health       Health                  `json:"health"`
-	Preparation  Preparation             `json:"preparation"`
-	Expected     *ExpectedState          `json:"expected,omitempty"`
-	CleanupSteps map[string]*CleanupStep `json:"cleanup_steps,omitempty"`
+	UUID          string                  `json:"uuid"`
+	MAC           string                  `json:"mac"`
+	State         string                  `json:"state"`
+	Intent        bool                    `json:"intent"`
+	Cleaned       bool                    `json:"cleaned"`
+	Link          bool                    `json:"link"`
+	AutoResize    bool                    `json:"auto_resize"`
+	LastInput     time.Time               `json:"last_input,omitempty"`
+	Guest         map[string]any          `json:"guest,omitempty"`
+	Health        Health                  `json:"health"`
+	Polling       PollSchedule            `json:"polling"`
+	GuestSessions *GuestSessionState      `json:"guest_sessions,omitempty"`
+	Identity      *NodeIdentity           `json:"identity,omitempty"`
+	Preparation   Preparation             `json:"preparation"`
+	Expected      *ExpectedState          `json:"expected,omitempty"`
+	CleanupSteps  map[string]*CleanupStep `json:"cleanup_steps,omitempty"`
 }
 type Command struct {
-	ID     string           `json:"id"`
-	NodeID string           `json:"node_id"`
-	Spec   wire.CommandSpec `json:"spec"`
+	ID     string `json:"id"`
+	NodeID string `json:"node_id"`
 	wire.CommandStatus
-	Observation  Observation  `json:"observation"`
-	Cancellation string       `json:"cancellation,omitempty"`
-	Input        []wire.Input `json:"input"`
-	Created      time.Time    `json:"created"`
+	Observation    Observation      `json:"observation"`
+	Cancellation   string           `json:"cancellation,omitempty"`
+	Release        *CommandRelease  `json:"release,omitempty"`
+	StatusDeadline *time.Time       `json:"status_deadline,omitempty"`
+	Retained       RetainedOutput   `json:"retained_output"`
+	Schedule       PollSchedule     `json:"polling"`
+	IdlePolls      int              `json:"-"`
+	Stdin          state.InputQueue `json:"stdin"`
+	Created        time.Time        `json:"created"`
 }
+type CommandDetails struct {
+	*Command
+	Spec         wire.CommandSpec `json:"spec"`
+	Input        []wire.Input     `json:"input,omitempty"`
+	NextSequence *int             `json:"next_sequence,omitempty"`
+}
+type CommandRelease struct {
+	Source string    `json:"source"`
+	Time   time.Time `json:"time"`
+}
+
+func (c *Command) Observing() bool {
+	return !c.Final && oneOf(c.State, "starting", "running", "uncertain")
+}
+
+func (c *Command) Polling() bool { return c.Release == nil && (c.Observing() || !c.Retained.done()) }
+
+type RetainedOutput struct {
+	Deadline *time.Time     `json:"deadline,omitempty"`
+	Stdout   RetainedStream `json:"stdout"`
+	Stderr   RetainedStream `json:"stderr"`
+}
+type RetainedStream struct {
+	State  string      `json:"state"`
+	Bytes  int64       `json:"bytes"`
+	SHA256 string      `json:"sha256,omitempty"`
+	Error  *wire.Error `json:"error,omitempty"`
+}
+
+func (s RetainedStream) done() bool { return oneOf(s.State, "complete", "incomplete") }
+func (r RetainedOutput) done() bool { return r.Stdout.done() && r.Stderr.done() }
+func (r *RetainedOutput) stop(err error) {
+	for _, stream := range []*RetainedStream{&r.Stdout, &r.Stderr} {
+		if !stream.done() {
+			stream.State, stream.Error = "incomplete", wire.Safe(err)
+		}
+	}
+}
+
 type Endpoint struct {
 	ID           string `json:"id"`
 	NodeID       string `json:"node_id"`
@@ -82,40 +129,139 @@ type Artifact struct {
 	Path    string    `json:"path"`
 }
 type Task struct {
-	ID             string        `json:"id"`
-	Kind           string        `json:"kind"`
-	State          string        `json:"state"`
-	Created        time.Time     `json:"created"`
-	Started        *time.Time    `json:"started,omitempty"`
-	Deadline       *time.Time    `json:"deadline,omitempty"`
-	Ended          *time.Time    `json:"ended,omitempty"`
-	TimeoutSeconds int           `json:"timeout_seconds"`
-	Conclusion     string        `json:"conclusion,omitempty"`
-	Summary        string        `json:"summary,omitempty"`
-	Reason         string        `json:"reason,omitempty"`
-	Cleanup        string        `json:"cleanup"`
-	CleanupErrors  []*wire.Error `json:"cleanup_errors,omitempty"`
-	Failure        *wire.Error   `json:"failure,omitempty"`
-	Purged         bool          `json:"purged"`
-	Nodes          []*Node       `json:"nodes"`
-	Router         *Node         `json:"router,omitempty"`
-	RouterPassword string        `json:"router_password"`
-	RouterISO      string        `json:"router_iso"`
-	RouterBootID   string        `json:"router_boot_id"`
-	NetworkUpdated time.Time     `json:"network_updated"`
-	GUI            *GUIOwnership `json:"gui_ownership,omitempty"`
-	LAN            string        `json:"lan,omitempty"`
-	DHCP           bool          `json:"dhcp"`
-	DNS            []string      `json:"dns"`
-	Internet       bool          `json:"internet"`
-	Network        string        `json:"network"`
-	Commands       []*Command    `json:"commands"`
-	Endpoints      []*Endpoint   `json:"endpoints"`
-	Captures       []*Capture    `json:"captures"`
-	Artifacts      []*Artifact   `json:"artifacts"`
-	CacheID        string        `json:"cache_id,omitempty"`
-	Derivation     string        `json:"derivation,omitempty"`
-	System         string        `json:"system,omitempty"`
+	ID                  string             `json:"id"`
+	Kind                string             `json:"kind"`
+	State               string             `json:"state"`
+	Created             time.Time          `json:"created"`
+	Started             *time.Time         `json:"started,omitempty"`
+	Deadline            *time.Time         `json:"deadline,omitempty"`
+	Ended               *time.Time         `json:"ended,omitempty"`
+	TimeoutSeconds      int                `json:"timeout_seconds"`
+	Conclusion          string             `json:"conclusion,omitempty"`
+	Summary             string             `json:"summary,omitempty"`
+	Reason              string             `json:"reason,omitempty"`
+	Cleanup             string             `json:"cleanup"`
+	CleanupErrors       []*wire.Error      `json:"cleanup_errors,omitempty"`
+	Failure             *wire.Error        `json:"failure,omitempty"`
+	Purged              bool               `json:"purged"`
+	Hold                *Hold              `json:"hold,omitempty"`
+	Nodes               []*Node            `json:"nodes"`
+	Router              *Node              `json:"router,omitempty"`
+	RouterPassword      string             `json:"router_password"`
+	RouterISO           string             `json:"router_iso"`
+	RouterBootID        string             `json:"router_boot_id"`
+	NetworkUpdated      time.Time          `json:"network_updated"`
+	NetworkLeaseExpires time.Time          `json:"network_lease_expires"`
+	NetworkPolicyHash   string             `json:"network_policy_hash"`
+	NetworkObservation  *NetworkAttempt    `json:"network_observation,omitempty"`
+	GUI                 *GUIOwnership      `json:"gui_ownership,omitempty"`
+	LAN                 string             `json:"lan,omitempty"`
+	DHCP                bool               `json:"dhcp"`
+	DNS                 []string           `json:"dns"`
+	Internet            bool               `json:"internet"`
+	Network             string             `json:"network"`
+	Commands            []*Command         `json:"commands"`
+	Endpoints           []*Endpoint        `json:"endpoints"`
+	Captures            []*Capture         `json:"captures"`
+	Artifacts           []*Artifact        `json:"artifacts"`
+	CacheID             string             `json:"cache_id,omitempty"`
+	Derivation          string             `json:"derivation,omitempty"`
+	System              string             `json:"system,omitempty"`
+	NixExecution        *wire.NixExecution `json:"nix_execution,omitempty"`
+}
+
+// Hold explains an explicit extension; it is not an idle-detection lease.
+type Hold struct {
+	Reason  string    `json:"reason"`
+	Updated time.Time `json:"updated"`
+	Until   time.Time `json:"until"`
+}
+
+// Execution adapters need resource identity and status, not artifact history.
+// Command payloads live in SQLite and are only loaded by explicit detail reads.
+func (t *Task) executionSnapshot() *Task {
+	v := *t
+	v.Artifacts = nil
+	v.Commands = make([]*Command, 0, len(t.Commands))
+	for _, c := range t.Commands {
+		cc := *c
+		v.Commands = append(v.Commands, &cc)
+	}
+	return clone(&v)
+}
+
+func (n *Node) resourceState(ended bool) string {
+	if n.Cleaned {
+		return "released"
+	}
+	if !n.Intent {
+		if ended {
+			return "never_allocated"
+		}
+		return "planned"
+	}
+	for _, step := range n.CleanupSteps {
+		if step.State == "failed" {
+			return "release_failed"
+		}
+	}
+	return "allocated"
+}
+
+func (c *Command) publicStatus() any {
+	return struct {
+		ID             string           `json:"id"`
+		NodeID         string           `json:"node_id"`
+		Created        time.Time        `json:"created"`
+		Observation    Observation      `json:"observation"`
+		Cancellation   string           `json:"cancellation,omitempty"`
+		Release        *CommandRelease  `json:"release,omitempty"`
+		StatusDeadline *time.Time       `json:"status_deadline,omitempty"`
+		Retained       RetainedOutput   `json:"retained_output"`
+		Schedule       PollSchedule     `json:"polling"`
+		Stdin          state.InputQueue `json:"stdin"`
+		wire.CommandStatus
+	}{c.ID, c.NodeID, c.Created, c.Observation, c.Cancellation, c.Release, c.StatusDeadline, c.Retained, c.Schedule, c.Stdin, c.CommandStatus}
+}
+
+func (t *Task) activity() map[string]int {
+	v := map[string]int{"commands_active": 0, "endpoints_open": 0, "captures_active": 0}
+	for _, c := range t.Commands {
+		if c.Observing() {
+			v["commands_active"]++
+		}
+	}
+	for _, e := range t.Endpoints {
+		if e.State == "open" {
+			v["endpoints_open"]++
+		}
+	}
+	for _, c := range t.Captures {
+		if c.State == "running" {
+			v["captures_active"]++
+		}
+	}
+	return v
+}
+
+func (t *Task) summaryView() map[string]any {
+	resources := map[string]int{}
+	for _, n := range append(append([]*Node{}, t.Nodes...), t.Router) {
+		if n != nil {
+			resources[n.resourceState(t.Terminal())]++
+		}
+	}
+	v := map[string]any{
+		"id": t.ID, "kind": t.Kind, "phase": t.phase(), "created": t.Created,
+		"started": t.Started, "deadline": t.Deadline, "ended": t.Ended,
+		"cleanup":  map[string]any{"state": t.cleanupState(), "resources": resources},
+		"activity": t.activity(), "purged": t.Purged, "hold": t.Hold,
+		"result": nil,
+	}
+	if t.Terminal() {
+		v["result"] = map[string]any{"termination": t.State, "conclusion": t.Conclusion, "reason": t.Reason}
+	}
+	return v
 }
 
 func (t *Task) Node(id string) (*Node, error) {
@@ -154,12 +300,23 @@ func (t *Task) cleanupState() string {
 	return t.Cleanup
 }
 func (t *Task) Public() any {
-	v := map[string]any{}
-	decodeMap(t, v)
-	for _, key := range []string{"router", "router_password", "router_iso", "router_boot_id", "gui_ownership", "state", "conclusion", "summary", "reason", "cleanup_errors", "failure"} {
-		delete(v, key)
+	// Build the public projection before serialization: history may contain large
+	// stdin packets and secrets in argv/env that status discovery does not need.
+	v := t.summaryView()
+	v["timeout_seconds"] = t.TimeoutSeconds
+	v["lan"], v["dhcp"], v["dns"] = t.LAN, t.DHCP, t.DNS
+	v["internet"] = t.Internet
+	v["network"] = map[string]any{"state": t.Network, "policy_updated": t.NetworkUpdated, "lease_expires": t.NetworkLeaseExpires, "router_identity": routerIdentity(t), "observation": t.NetworkObservation}
+	v["endpoints"], v["captures"] = t.Endpoints, t.Captures
+	v["cache_id"], v["derivation"], v["system"] = t.CacheID, t.Derivation, t.System
+	if t.Kind == "nixos" {
+		v["execution"] = t.NixExecution
 	}
-	v["phase"] = t.phase()
+	commands := []any{}
+	for _, c := range t.Commands {
+		commands = append(commands, c.publicStatus())
+	}
+	v["commands"] = commands
 	v["result"] = t.result()
 	if t.State == "queued" {
 		v["waiting_reason"] = t.Reason
@@ -167,7 +324,7 @@ func (t *Task) Public() any {
 	resources := []any{}
 	for _, n := range append(append([]*Node{}, t.Nodes...), t.Router) {
 		if n != nil {
-			resources = append(resources, map[string]any{"id": n.ID, "name": n.Name, "released": n.Cleaned, "steps": n.CleanupSteps})
+			resources = append(resources, map[string]any{"id": n.ID, "name": n.Name, "state": n.resourceState(t.Terminal()), "steps": n.CleanupSteps})
 		}
 	}
 	v["cleanup"] = map[string]any{"state": t.cleanupState(), "errors": t.CleanupErrors, "resources": resources}
@@ -176,11 +333,17 @@ func (t *Task) Public() any {
 		nodes = append(nodes, n.public())
 	}
 	v["nodes"] = nodes
-	if list, ok := v["artifacts"].([]any); ok {
-		for _, item := range list {
-			delete(item.(map[string]any), "path")
-		}
+	if t.Router != nil {
+		// Router progress is observable, but it is not a public command target.
+		health := t.Router.Health
+		health.normalize()
+		v["router"] = map[string]any{"id": t.Router.ID, "state": t.Router.State, "preparation": t.Router.Preparation, "health": health, "polling": t.Router.Polling}
 	}
+	artifacts := []any{}
+	for _, a := range t.Artifacts {
+		artifacts = append(artifacts, artifactView(a))
+	}
+	v["artifacts"] = artifacts
 	// HTTP encodes after the caller releases s.mu; resource journals must not
 	// retain references to maps that cleanup is still updating.
 	snapshot := map[string]any{}
@@ -208,12 +371,10 @@ type Transfer struct {
 	Kind    string            `json:"kind"`
 	State   string            `json:"state"`
 	Created time.Time         `json:"created"`
-	Objects map[string]Object `json:"objects"`
+	Objects map[string]Object `json:"-"`
+	Bytes   int64             `json:"-"`
 }
-type Object struct {
-	Size   int64  `json:"size"`
-	SHA256 string `json:"sha256"`
-}
+type Object = state.TransferObject
 type Runtime struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
@@ -229,6 +390,8 @@ type NodeAction struct {
 	Local          string            `json:"-"`
 	Spec           *wire.CommandSpec `json:"spec,omitempty"`
 	CommandID      string            `json:"command_id,omitempty"`
+	StdoutOffset   int64             `json:"stdout_offset,omitempty"`
+	StderrOffset   int64             `json:"stderr_offset,omitempty"`
 	Input          *wire.Input       `json:"input,omitempty"`
 	Screen         int               `json:"screen,omitempty"`
 	Width          int               `json:"width,omitempty"`

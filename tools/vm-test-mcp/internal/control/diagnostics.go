@@ -20,10 +20,11 @@ type DiagnosticItem struct {
 	Error      *wire.Error `json:"error,omitempty"`
 }
 type DiagnosticReport struct {
-	Started    time.Time        `json:"started"`
-	Finished   time.Time        `json:"finished"`
-	Items      []DiagnosticItem `json:"items"`
-	ArtifactID string           `json:"artifact_id,omitempty"`
+	Started     time.Time        `json:"started"`
+	Finished    time.Time        `json:"finished"`
+	Items       []DiagnosticItem `json:"items"`
+	ArtifactID  string           `json:"artifact_id,omitempty"`
+	Performance any              `json:"performance"`
 }
 
 func (s *Server) newArtifact(t *Task, name string) (*Artifact, string, error) {
@@ -49,14 +50,25 @@ func (s *Server) retainArtifact(t *Task, a *Artifact) error {
 	return nil
 }
 func (s *Server) jsonArtifact(t *Task, name string, value any) (*Artifact, error) {
+	a, err := s.writeJSONArtifact(t, name, wire.JSON(value))
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t.Artifacts = append(t.Artifacts, a)
+	s.save(t)
+	return a, nil
+}
+func (s *Server) writeJSONArtifact(t *Task, name string, data []byte) (*Artifact, error) {
 	a, _, err := s.newArtifact(t, name)
 	if err != nil {
 		return nil, err
 	}
-	if _, _, err = s.root.Write(a.Path, bytesReader(wire.JSON(value)), s.cfg.Storage.MaxUploadBytes); err != nil {
+	if a.Size, a.SHA256, err = s.root.Write(a.Path, bytesReader(data), s.cfg.Storage.MaxUploadBytes); err != nil {
 		return nil, err
 	}
-	return a, s.retainArtifact(t, a)
+	return a, nil
 }
 func (s *Server) diagnose(parent context.Context, taskID string, ids []string, automatic bool) (any, error) {
 	ctx, cancel := context.WithTimeout(parent, diagnosticBudget)
@@ -157,6 +169,12 @@ func (s *Server) collectDiagnostics(ctx context.Context, t, snapshot *Task, node
 				{"VBox.log", NodeAction{Action: "diagnostics"}},
 				{"screenshot.png", NodeAction{Action: "screenshot"}},
 			}
+			if n == snapshot.Router {
+				actions = append(actions, struct {
+					name   string
+					action NodeAction
+				}{"boot-console.log", NodeAction{Action: "boot_log"}})
+			}
 			if n != snapshot.Router {
 				if s.cfg.VirtualBox.Templates[n.Template].Kind == "linux" {
 					actions = append(actions,
@@ -195,7 +213,7 @@ func (s *Server) collectDiagnostics(ctx context.Context, t, snapshot *Task, node
 				action := entry.action
 				var artifact *Artifact
 				var err error
-				if oneOf(action.Action, "diagnostics", "screenshot") {
+				if oneOf(action.Action, "diagnostics", "screenshot", "boot_log") {
 					artifact, action.Local, err = s.newArtifact(t, n.Name+"-"+entry.name)
 				}
 				budget := 5 * time.Second
@@ -220,6 +238,9 @@ func (s *Server) collectDiagnostics(ctx context.Context, t, snapshot *Task, node
 				if result, ok := item.Result.(map[string]any); ok && result["state"] == "uncertain" {
 					item.State = "partial"
 				}
+				if result, ok := item.Result.(map[string]any); ok && action.Action == "boot_log" && (result["truncated"] != false || result["error"] != nil) {
+					item.State = "partial"
+				}
 				if err != nil {
 					item.State = "unavailable"
 					item.Error = wire.Safe(err)
@@ -239,6 +260,7 @@ func (s *Server) collectDiagnostics(ctx context.Context, t, snapshot *Task, node
 		return report.Items[i].Name < report.Items[j].Name
 	})
 	report.Finished = time.Now().UTC()
+	report.Performance = s.performance.Window(report.Started.Add(-30*time.Second), report.Finished)
 	a, err := s.jsonArtifact(t, "diagnostics.json", report)
 	if err != nil {
 		return report, err

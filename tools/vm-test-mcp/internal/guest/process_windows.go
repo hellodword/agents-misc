@@ -4,13 +4,15 @@ package guest
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"sort"
 	"strings"
-	"sync"
 	"syscall"
+	"time"
 	"unicode/utf16"
 	"unsafe"
 
@@ -20,8 +22,20 @@ import (
 
 type windowsChild struct {
 	process, job windows.Handle
-	wg           sync.WaitGroup
 	stdin        *os.File
+	readers      []*os.File
+	streams      *outputStreams
+	done         chan struct{}
+	stopWait     context.CancelFunc
+	exit         int
+	err          error
+}
+
+// JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, from winnt.h: four LARGE_INTEGERs
+// followed by four DWORDs. ActiveProcesses confirms the whole job is empty.
+type jobAccounting struct {
+	TotalUser, TotalKernel, PeriodUser, PeriodKernel                 int64
+	PageFaults, TotalProcesses, ActiveProcesses, TerminatedProcesses uint32
 }
 
 func launch(ctx context.Context, s wire.CommandSpec, in io.Reader, out, errout io.Writer) (Child, error) {
@@ -58,6 +72,7 @@ func launch(ctx context.Context, s wire.CommandSpec, in io.Reader, out, errout i
 		return nil, e
 	}
 	defer we.Close()
+	p.readers = []*os.File{ro, re}
 	for _, f := range []*os.File{ri, wo, we} {
 		if e = windows.SetHandleInformation(windows.Handle(f.Fd()), windows.HANDLE_FLAG_INHERIT, windows.HANDLE_FLAG_INHERIT); e != nil {
 			ro.Close()
@@ -98,12 +113,6 @@ func launch(ctx context.Context, s wire.CommandSpec, in io.Reader, out, errout i
 		return nil, e
 	}
 	env := map[string]string{}
-	for _, v := range os.Environ() {
-		k, value, ok := strings.Cut(v, "=")
-		if ok && k != "" {
-			env[strings.ToUpper(k)] = value
-		}
-	}
 	for k, v := range s.Env {
 		env[strings.ToUpper(k)] = v
 	}
@@ -127,6 +136,9 @@ func launch(ctx context.Context, s wire.CommandSpec, in io.Reader, out, errout i
 	}
 	pi := windows.ProcessInformation{}
 	flags := uint32(windows.CREATE_SUSPENDED | windows.CREATE_UNICODE_ENVIRONMENT | windows.EXTENDED_STARTUPINFO_PRESENT)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if e = windows.CreateProcess(app, line, nil, nil, true, flags, &block[0], cwd, &si.StartupInfo, &pi); e != nil {
 		ro.Close()
 		re.Close()
@@ -142,6 +154,9 @@ func launch(ctx context.Context, s wire.CommandSpec, in io.Reader, out, errout i
 		re.Close()
 		return nil, e
 	}
+	if e = ctx.Err(); e != nil {
+		return nil, e
+	}
 	if _, e = windows.ResumeThread(pi.Thread); e != nil {
 		windows.TerminateJobObject(job, 1)
 		ro.Close()
@@ -149,33 +164,97 @@ func launch(ctx context.Context, s wire.CommandSpec, in io.Reader, out, errout i
 		return nil, e
 	}
 	go func() { io.Copy(wi, in); wi.Close() }()
-	for _, stream := range []struct {
-		r *os.File
-		w io.Writer
-	}{{ro, out}, {re, errout}} {
-		p.wg.Add(1)
-		go func() { defer p.wg.Done(); defer stream.r.Close(); io.Copy(stream.w, stream.r) }()
-	}
+	p.streams = drainStreams(ro, re, out, errout)
+	p.done = make(chan struct{})
+	waitCtx, stopWait := context.WithCancel(context.Background())
+	p.stopWait = stopWait
+	// This goroutine owns the process handle until its finite wait returns.
+	// Close never closes a handle underneath WaitForSingleObject.
+	go func() {
+		defer close(p.done)
+		defer windows.CloseHandle(p.process)
+		p.exit, p.err = waitProcess(waitCtx, p.process)
+	}()
 	ok = true
 	return p, nil
 }
-func (p *windowsChild) Wait() (int, error) {
-	_, e := windows.WaitForSingleObject(p.process, windows.INFINITE)
-	var code uint32
-	if e == nil {
-		e = windows.GetExitCodeProcess(p.process, &code)
+func waitProcess(ctx context.Context, handle windows.Handle) (int, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return -1, err
+		}
+		result, err := windows.WaitForSingleObject(handle, 50)
+		if err != nil {
+			return -1, err
+		}
+		if result == windows.WAIT_OBJECT_0 {
+			var code uint32
+			if err = windows.GetExitCodeProcess(handle, &code); err != nil {
+				return -1, err
+			}
+			return int(code), nil
+		}
+		if result != uint32(windows.WAIT_TIMEOUT) {
+			return -1, fmt.Errorf("unexpected process wait result: %d", result)
+		}
 	}
-	windows.TerminateJobObject(p.job, 1)
-	p.stdin.Close()
-	p.wg.Wait()
-	return int(code), e
 }
-func (p *windowsChild) Kill() error { return windows.TerminateJobObject(p.job, 1) }
+func (p *windowsChild) Wait(ctx context.Context) (processExit, error) {
+	select {
+	case <-p.done:
+		if p.exit >= 0 {
+			return exitedWithCode(p.exit), p.err
+		}
+		return processExit{}, p.err
+	case <-ctx.Done():
+		return processExit{}, ctx.Err()
+	}
+}
+func (p *windowsChild) Kill(ctx context.Context) error {
+	failure := func(delivered bool, err error) error {
+		details := map[string]any{"request_delivered": delivered, "cause": wire.Safe(err)}
+		var code syscall.Errno
+		if errors.As(err, &code) {
+			details["system_code"] = uint32(code)
+		}
+		return &wire.Error{Code: "termination_unconfirmed", Message: "Windows Job termination could not be confirmed", Details: details}
+	}
+	var job windows.Handle
+	current := windows.CurrentProcess()
+	if err := windows.DuplicateHandle(current, p.job, current, &job, 0, false, windows.DUPLICATE_SAME_ACCESS); err != nil {
+		return failure(false, err)
+	}
+	defer windows.CloseHandle(job)
+	if err := windows.TerminateJobObject(job, 1); err != nil {
+		return failure(false, err)
+	}
+	for {
+		var info jobAccounting
+		if err := windows.QueryInformationJobObject(job, windows.JobObjectBasicAccountingInformation, uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), nil); err != nil {
+			return failure(true, err)
+		}
+		if info.ActiveProcesses == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return failure(true, ctx.Err())
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+}
+func (p *windowsChild) Drain(ctx context.Context) error { return p.streams.Wait(ctx) }
 func (p *windowsChild) Close() error {
+	if p.stopWait != nil {
+		p.stopWait()
+	}
+	for _, r := range p.readers {
+		r.Close()
+	}
 	if p.stdin != nil {
 		p.stdin.Close()
 	}
-	if p.process != 0 {
+	if p.process != 0 && p.stopWait == nil {
 		windows.CloseHandle(p.process)
 	}
 	if p.job != 0 {
