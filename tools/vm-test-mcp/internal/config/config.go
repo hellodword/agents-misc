@@ -107,8 +107,14 @@ type Network struct {
 	LeaseSeconds        int      `yaml:"lease_seconds"`
 }
 type Storage struct {
-	Days           int   `yaml:"retention_days"`
-	MaxUploadBytes int64 `yaml:"max_upload_bytes"`
+	SuccessDays    int      `yaml:"success_days" json:"success_days"`
+	FailureDays    int      `yaml:"failure_days" json:"failure_days"`
+	SummaryDays    int      `yaml:"summary_days" json:"summary_days"`
+	EvidenceBytes  int64    `yaml:"evidence_bytes" json:"evidence_bytes"`
+	LowWaterBytes  int64    `yaml:"low_water_bytes" json:"low_water_bytes"`
+	InputBytes     int64    `yaml:"input_bytes" json:"input_bytes"`
+	UploadIdle     Duration `yaml:"upload_idle" json:"upload_idle"`
+	MaxUploadBytes int64    `yaml:"max_upload_bytes" json:"max_upload_bytes"`
 }
 type Nix = Worker
 type Config struct {
@@ -129,7 +135,7 @@ func Defaults() Config {
 		Tasks:   Tasks{DefaultTimeout: Duration(time.Hour), MaxDuration: Duration(24 * time.Hour), CleanupTimeout: Duration(5 * time.Minute)},
 		VirtualBox: VirtualBox{StartupTimeout: Duration(10 * time.Minute), ShutdownTimeout: Duration(time.Minute), UnavailableAfter: Duration(30 * time.Second),
 			Network: Network{LAN: "10.77.0.0/24", WAN: "10.0.2.0/24", DNS: []string{"1.1.1.1", "9.9.9.9"}, Listen: "127.0.0.1", Sources: []string{"127.0.0.1/32"}, PortMin: 20000, PortMax: 29999, LeaseSeconds: 15}},
-		Nix: Worker{ControllerUID: -1, Nix: "nix"}, Storage: Storage{MaxUploadBytes: 8 << 30},
+		Nix: Worker{ControllerUID: -1, Nix: "nix"}, Storage: Storage{SuccessDays: 1, FailureDays: 7, SummaryDays: 30, EvidenceBytes: 20 << 30, LowWaterBytes: 16 << 30, InputBytes: 16 << 30, UploadIdle: Duration(time.Hour), MaxUploadBytes: 8 << 30},
 	}
 }
 func decode(file string, v any) error {
@@ -192,10 +198,10 @@ func (c *Config) Validate() error {
 			return bad("invalid Origin allowlist")
 		}
 	}
-	if c.Tasks.DefaultTimeout < Duration(time.Second) || c.Tasks.MaxDuration < c.Tasks.DefaultTimeout || c.Tasks.MaxDuration > Duration(30*24*time.Hour) || c.Tasks.CleanupTimeout < Duration(time.Second) || c.Tasks.CleanupTimeout > Duration(time.Hour) {
+	if c.Tasks.DefaultTimeout < Duration(time.Second) || c.Tasks.MaxDuration < c.Tasks.DefaultTimeout || c.Tasks.MaxDuration > Duration(24*time.Hour) || c.Tasks.CleanupTimeout < Duration(time.Second) || c.Tasks.CleanupTimeout > Duration(time.Hour) {
 		return bad("deadline limits")
 	}
-	if c.Storage.Days < 0 || c.Storage.MaxUploadBytes < 1 {
+	if c.Storage.SuccessDays < 1 || c.Storage.FailureDays < c.Storage.SuccessDays || c.Storage.SummaryDays < c.Storage.FailureDays || c.Storage.MaxUploadBytes < 1 || c.Storage.MaxUploadBytes > 8<<30 || c.Storage.InputBytes < c.Storage.MaxUploadBytes || c.Storage.LowWaterBytes < 1 || c.Storage.EvidenceBytes <= c.Storage.LowWaterBytes || c.Storage.UploadIdle < Duration(time.Second) {
 		return bad("retention limits")
 	}
 	for name, t := range c.VirtualBox.Templates {
@@ -333,6 +339,7 @@ func PrivateLAN(p netip.Prefix) bool {
 }
 
 type Worker struct {
+	KeepFailed    bool   `yaml:"keep_failed"`
 	StateDir      string `yaml:"state_dir"`
 	Socket        string `yaml:"socket"`
 	ControllerUID int    `yaml:"controller_uid"`

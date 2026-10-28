@@ -48,7 +48,7 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	if f.NArg() != 0 || *timeout < 0 || *timeout > 30*86400 ||
+	if f.NArg() != 0 || *timeout < 0 || *timeout > 86400 ||
 		(*configFile != "" && (o.CacheID != "" || o.CacheURL != "")) ||
 		(*configFile == "" && (o.Test == "" || o.RequestID == "" || o.CacheID == "" || o.CacheURL == "" || o.WorkDir == "" || *timeout != 0)) {
 		f.Usage()

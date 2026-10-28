@@ -51,6 +51,13 @@ func constrainSchema(t reflect.Type, schema schemaMap) {
 		field("env", schemaMap{"propertyNames": schemaMap{"minLength": 1, "pattern": "^[^=\\x00]*$"}, "additionalProperties": schemaMap{"type": "string", "maxLength": 32768, "x-maxBytes": 32768, "pattern": "^[^\\x00]*$"}, "description": "Per-command overrides, without changing template settings; Windows names are case-insensitive."})
 	}
 	switch t {
+	case reflect.TypeFor[WaitRequest]():
+		field("targets", schemaMap{"minItems": 1, "maxItems": 64})
+	case reflect.TypeFor[WaitTarget]():
+		enum("kind", "lab", "nix_job", "command", "operation", "upload")
+		field("id", schemaMap{"pattern": wire.IDPattern.String()})
+		enum("condition", "ready", "started", "complete", "cleaned", "changed", "output")
+		field("seen_revision", schemaMap{"minimum": 0})
 	case reflect.TypeFor[ListRequest](), reflect.TypeFor[EventsRequest]():
 		field("cursor", schemaMap{"minimum": 0})
 		rangeOf("limit", 0, 200)
@@ -81,6 +88,8 @@ func constrainSchema(t reflect.Type, schema schemaMap) {
 		field("derivation", schemaMap{"pattern": `^/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[A-Za-z0-9+._?=-]+\.drv$`})
 		rangeOf("timeout_seconds", 0, 86400)
 	case reflect.TypeFor[StartRequest]():
+		enum("mode", "finite", "service", "interactive")
+		field("mode", schemaMap{"default": "finite", "description": "finite waits for process-group exit and output; service/interactive waits for confirmed start."})
 		enum("context", "service", "desktop")
 		field("context", schemaMap{"default": "service", "description": "service: Linux root or Windows LocalSystem. desktop: Windows logged-in elevated administrator; rejected if unavailable. See node guest.command_environment."})
 		rangeOf("timeout_seconds", 0, 30*86400)
@@ -102,7 +111,7 @@ func constrainSchema(t reflect.Type, schema schemaMap) {
 		schema["if"] = schemaMap{"properties": schemaMap{"kind": schemaMap{"const": "file"}}}
 		schema["then"] = schemaMap{"required": []string{"task_id"}}
 		schema["else"] = schemaMap{"not": schemaMap{"required": []string{"task_id"}}}
-		field("task_id", schemaMap{"description": "Required for file uploads on queued/preparing/running labs; forbidden for caches prepared before nixos_run."})
+		field("task_id", schemaMap{"description": "Required for file uploads on queued/preparing/running labs; forbidden for caches prepared before nix_job_create."})
 	case reflect.TypeFor[PutRequest](), reflect.TypeFor[GetRequest]():
 		field("path", schemaMap{"maxLength": 32768, "x-maxBytes": 32768, "pattern": "^(?:/|[A-Za-z]:[\\\\/])[^\\x00]*$", "description": "Absolute guest path. For put, create and verify the parent directory first; transfer must be fully uploaded. Get archives a file/directory without host extraction."})
 	case reflect.TypeFor[PowerRequest]():

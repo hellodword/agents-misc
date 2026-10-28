@@ -3,7 +3,9 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,6 +32,8 @@ import (
 )
 
 type Request struct {
+	ManifestDigest string     `json:"manifest_digest,omitempty"`
+	Cursor         int        `json:"cursor,omitempty"`
 	TaskID         string     `json:"task_id"`
 	Derivation     string     `json:"derivation,omitempty"`
 	System         string     `json:"system,omitempty"`
@@ -40,6 +44,7 @@ type Request struct {
 	Deadline       *time.Time `json:"deadline,omitempty"`
 }
 type File struct {
+	SHA256   string `json:"sha256"`
 	ID       string `json:"id"`
 	Name     string `json:"name"`
 	Root     string `json:"root"`
@@ -47,11 +52,14 @@ type File struct {
 	Size     int64  `json:"size"`
 }
 type Job struct {
-	Request Request           `json:"request"`
-	State   string            `json:"state"`
-	Cleanup string            `json:"cleanup"`
-	Outputs map[string]string `json:"outputs"`
-	Files   []File            `json:"files"`
+	CopiesReleased  bool              `json:"copies_released"`
+	HandoffComplete bool              `json:"handoff_complete"`
+	ManifestDigest  string            `json:"manifest_digest,omitempty"`
+	Request         Request           `json:"request"`
+	State           string            `json:"state"`
+	Cleanup         string            `json:"cleanup"`
+	Outputs         map[string]string `json:"outputs"`
+	Files           []File            `json:"files"`
 	// Retain the historical on-disk field; it has no observed-exit provenance.
 	ExitCode  int                `json:"exit_code"`
 	Execution *wire.NixExecution `json:"execution,omitempty"`
@@ -59,14 +67,15 @@ type Job struct {
 	Deadline  time.Time          `json:"deadline"`
 }
 type Worker struct {
-	mu     sync.Mutex
-	cfg    config.Worker
-	root   *safefs.Root
-	db     *state.DB
-	jobs   map[string]*Job
-	cancel map[string]context.CancelFunc
-	wg     sync.WaitGroup
-	active string
+	lastRetention time.Time
+	mu            sync.Mutex
+	cfg           config.Worker
+	root          *safefs.Root
+	db            *state.DB
+	jobs          map[string]*Job
+	cancel        map[string]context.CancelFunc
+	wg            sync.WaitGroup
+	active        string
 }
 
 func New(c config.Worker) (*Worker, error) {
@@ -80,7 +89,7 @@ func New(c config.Worker) (*Worker, error) {
 		return nil, e
 	}
 	w := &Worker{cfg: c, root: root, db: db, jobs: map[string]*Job{}, cancel: map[string]context.CancelFunc{}}
-	rows, e := db.List(context.Background(), "job")
+	rows, e := db.Active(context.Background(), "job")
 	if e != nil {
 		w.Close()
 		return nil, e
@@ -176,6 +185,9 @@ func (w *Worker) Preflight(ctx context.Context) error {
 func (w *Worker) Call(method string, a Request) (any, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if err := w.expireCompleted(time.Now().UTC()); err != nil {
+		return nil, err
+	}
 	allowed := Request{TaskID: a.TaskID}
 	switch method {
 	case "describe":
@@ -188,7 +200,11 @@ func (w *Worker) Call(method string, a Request) (any, error) {
 		allowed.Offset = a.Offset
 	case "file":
 		allowed.Offset, allowed.ArtifactID = a.Offset, a.ArtifactID
-	case "status", "cleanup", "cancel", "purge":
+	case "handoff":
+		allowed.ManifestDigest = a.ManifestDigest
+	case "files":
+		allowed.Cursor = a.Cursor
+	case "status", "cleanup", "cancel", "purge", "forget":
 	default:
 		return nil, wire.Fail("invalid_argument", "Unknown worker operation")
 	}
@@ -202,6 +218,12 @@ func (w *Worker) Call(method string, a Request) (any, error) {
 		return nil, wire.Fail("invalid_argument", "Invalid task ID")
 	}
 	if method == "start" {
+		if w.jobs[a.TaskID] == nil {
+			var old Job
+			if w.db.Load(context.Background(), "job", a.TaskID, &old) == nil {
+				w.jobs[a.TaskID] = &old
+			}
+		}
 		if old := w.jobs[a.TaskID]; old != nil {
 			if string(wire.JSON(old.Request)) != string(wire.JSON(a)) {
 				return nil, wire.Fail("request_conflict", "Worker task parameters differ")
@@ -217,7 +239,7 @@ func (w *Worker) Call(method string, a Request) (any, error) {
 		} else if runtime.GOARCH == "arm64" {
 			system = "aarch64-linux"
 		}
-		if a.System != system || !wire.StorePattern.MatchString(a.Derivation) || !strings.HasSuffix(a.Derivation, ".drv") || a.TimeoutSeconds < 1 || a.TimeoutSeconds > 30*86400 {
+		if a.System != system || !wire.StorePattern.MatchString(a.Derivation) || !strings.HasSuffix(a.Derivation, ".drv") || a.TimeoutSeconds < 1 || a.TimeoutSeconds > 86400 {
 			return nil, wire.Fail("invalid_argument", "Invalid Nix request")
 		}
 		u, e := url.Parse(a.Cache)
@@ -242,14 +264,45 @@ func (w *Worker) Call(method string, a Request) (any, error) {
 	}
 	j := w.jobs[a.TaskID]
 	if j == nil {
+		var stored Job
+		if w.db.Load(context.Background(), "job", a.TaskID, &stored) == nil {
+			j = &stored
+			w.jobs[a.TaskID] = j
+		}
+	}
+	if j == nil {
+		if method == "forget" {
+			return map[string]any{"deleted": true}, nil
+		}
 		if method == "cleanup" {
-			return map[string]any{"cleanup": "complete"}, nil
+			return map[string]any{"cleanup": "complete", "never_accepted": true}, nil
 		}
 		return nil, wire.Fail("not_found", "Worker task not found")
 	}
 	switch method {
+	case "forget":
+		if !j.HandoffComplete {
+			return nil, wire.Fail("protected", "Evidence handoff is not confirmed")
+		}
+		if _, err := w.db.ExecContext(context.Background(), "DELETE FROM worker_jobs WHERE id=?", a.TaskID); err != nil {
+			return nil, err
+		}
+		delete(w.jobs, a.TaskID)
+		return map[string]any{"deleted": true}, w.db.Compact(context.Background())
+	case "files":
+		if a.Cursor < 0 || a.Cursor > len(j.Files) {
+			return nil, wire.Fail("invalid_argument", "Invalid file cursor")
+		}
+		end := min(a.Cursor+100, len(j.Files))
+		files := []any{}
+		for _, f := range j.Files[a.Cursor:end] {
+			files = append(files, map[string]any{"id": f.ID, "name": f.Name, "size": f.Size, "sha256": f.SHA256})
+		}
+		return map[string]any{"items": files, "next_cursor": end, "eof": end == len(j.Files)}, nil
+	case "handoff":
+		return w.handoff(j, a.ManifestDigest)
 	case "extend":
-		if (j.State != "importing" && j.State != "building") || a.Deadline == nil || a.Deadline.Before(j.Deadline) || a.Deadline.After(j.Started.Add(30*24*time.Hour)) {
+		if (j.State != "importing" && j.State != "building") || a.Deadline == nil || a.Deadline.Before(j.Deadline) || a.Deadline.After(j.Started.Add(24*time.Hour)) {
 			return nil, wire.Fail("invalid_state", "Worker deadline cannot be extended")
 		}
 		j.Deadline = a.Deadline.UTC()
@@ -285,11 +338,7 @@ func (w *Worker) Call(method string, a Request) (any, error) {
 	}
 }
 func public(j *Job) map[string]any {
-	files := []any{}
-	for _, f := range j.Files {
-		files = append(files, map[string]any{"id": f.ID, "name": f.Name, "size": f.Size})
-	}
-	v := map[string]any{"state": j.State, "cleanup": j.Cleanup, "artifacts": files}
+	v := map[string]any{"state": j.State, "cleanup": j.Cleanup, "artifact_count": len(j.Files), "handoff_complete": j.HandoffComplete}
 	if j.Execution != nil {
 		// Copy under the worker mutex; JSON encoding happens after Call returns.
 		v["execution"] = *j.Execution
@@ -340,6 +389,37 @@ func (c *capped) Write(b []byte) (int, error) {
 	}
 	return n, nil
 }
+
+// Nix prints the source URL during import. Keep that scoped credential out of
+// retained evidence, including when os/exec splits it across output writes.
+type importLog struct {
+	w               io.Writer
+	secret, pending string
+}
+
+func (l *importLog) Write(p []byte) (int, error) {
+	text := strings.ReplaceAll(l.pending+string(p), l.secret, "[redacted cache]")
+	keep := min(len(text), len(l.secret)-1)
+	for keep > 0 && !strings.HasSuffix(text, l.secret[:keep]) {
+		keep--
+	}
+	end := len(text) - keep
+	if _, err := io.WriteString(l.w, text[:end]); err != nil {
+		return 0, err
+	}
+	l.pending = text[end:]
+	return len(p), nil
+}
+
+func (l *importLog) Flush() error {
+	if l.pending == "" {
+		return nil
+	}
+	l.pending = ""
+	_, err := io.WriteString(l.w, "[redacted cache]")
+	return err
+}
+
 func (w *Worker) run(ctx context.Context, j *Job) {
 	defer w.wg.Done()
 	watchDone := make(chan struct{})
@@ -378,10 +458,15 @@ func (w *Worker) run(ctx context.Context, j *Job) {
 	}
 	defer log.Close()
 	logs := &capped{w: log, max: 64 << 20}
-	copy := w.command(ctx, "copy", "--from", strings.TrimRight(w.cfg.CacheURL, "/")+j.Request.Cache, "--to", "daemon", "--derivation", j.Request.Derivation)
-	copy.Stdout = logs
-	copy.Stderr = logs
+	cacheURL := strings.TrimRight(w.cfg.CacheURL, "/") + j.Request.Cache
+	importLogs := &importLog{w: logs, secret: cacheURL}
+	copy := w.command(ctx, "copy", "--from", cacheURL, "--to", "daemon", "--derivation", j.Request.Derivation)
+	copy.Stdout = importLogs
+	copy.Stderr = importLogs
 	e = copy.Run()
+	if err := importLogs.Flush(); e == nil {
+		e = err
+	}
 	w.processResult(j, "import", copy)
 	if e != nil {
 		w.complete(j, e, false)
@@ -405,7 +490,10 @@ func (w *Worker) run(ctx context.Context, j *Job) {
 		return
 	}
 	out := &strings.Builder{}
-	build := w.command(ctx, "build", "--store", "daemon", "--builders", "", "--option", "sandbox", "true", "--option", "sandbox-fallback", "false", "--out-link", filepath.Join(w.root.Path, task, "result"), "--json", "--keep-failed", "--timeout", strconv.Itoa(30*86400), "-L", j.Request.Derivation+"^*")
+	build := w.command(ctx, "build", "--store", "daemon", "--builders", "", "--option", "sandbox", "true", "--option", "sandbox-fallback", "false", "--out-link", filepath.Join(w.root.Path, task, "result"), "--json", "--timeout", strconv.Itoa(86400), "-L", j.Request.Derivation+"^*")
+	if w.cfg.KeepFailed {
+		build.Args = append(build.Args, "--keep-failed")
+	}
 	build.Stdout = &capped{w: out, max: 4 << 20}
 	build.Stderr = logs
 	e = build.Run()
@@ -441,6 +529,9 @@ func (w *Worker) run(ctx context.Context, j *Job) {
 		j.ExitCode = build.ProcessState.ExitCode()
 	}
 	w.mu.Unlock()
+	if err := log.Sync(); e == nil {
+		e = err
+	}
 	w.complete(j, e, interrupted)
 }
 func (w *Worker) validateDerivation(ctx context.Context, j *Job) error {
@@ -462,6 +553,9 @@ func (w *Worker) stage(j *Job, stage string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	j.Execution.Stage, j.Execution.Process = stage, nil
+	if stage == "validate" {
+		j.Execution.Imported = true
+	}
 	return w.save(j)
 }
 
@@ -577,11 +671,49 @@ func (w *Worker) indexFiles(j *Job) error {
 			return e
 		}
 	}
+	for i := range j.Files {
+		f := &j.Files[i]
+		root, err := os.OpenRoot(f.Root)
+		if err != nil {
+			return err
+		}
+		file, err := root.Open(f.Relative)
+		if err != nil {
+			root.Close()
+			return err
+		}
+		hash := sha256.New()
+		n, err := io.Copy(hash, file)
+		file.Close()
+		root.Close()
+		if err != nil {
+			return err
+		}
+		if n != f.Size {
+			return fmt.Errorf("output changed during indexing")
+		}
+		f.SHA256 = hex.EncodeToString(hash.Sum(nil))
+	}
 	return nil
 }
 func (w *Worker) complete(j *Job, e error, uncertain bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if file, err := w.root.OpenFile(path.Join(j.Request.TaskID, "task.log"), os.O_RDWR, 0600); err == nil {
+		if syncErr := file.Sync(); syncErr != nil && e == nil {
+			e = syncErr
+		}
+		info, statErr := file.Stat()
+		file.Close()
+		if statErr == nil {
+			logJob := &Job{Files: []File{{ID: wire.ID(), Name: "task.log", Root: filepath.Join(w.root.Path, j.Request.TaskID), Relative: "task.log", Size: info.Size()}}}
+			if err = w.indexFiles(logJob); err == nil {
+				j.Files = append(j.Files, logJob.Files...)
+			} else if e == nil {
+				e = err
+			}
+		}
+	}
 	j.State = "succeeded"
 	j.Cleanup = "complete"
 	if j.Execution == nil {
@@ -596,6 +728,10 @@ func (w *Worker) complete(j *Job, e error, uncertain bool) {
 	if uncertain {
 		j.State = "cleanup_required"
 		j.Cleanup = "required"
+	}
+	j.Execution.ResourcesReleased = !uncertain
+	if !uncertain {
+		j.Execution.ResourceConfirmation = "nix_client_returned"
 	}
 	if cancel := w.cancel[j.Request.TaskID]; cancel != nil {
 		cancel()
@@ -623,6 +759,12 @@ func (w *Worker) Reconcile(id string) error {
 	}
 	next := *j
 	next.State, next.Cleanup = "interrupted", "complete"
+	if next.Execution != nil {
+		v := *next.Execution
+		v.ResourcesReleased = true
+		v.ResourceConfirmation = "administrator_verified"
+		next.Execution = &v
+	}
 	if err := w.save(&next); err != nil {
 		return err
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"path"
 	"regexp"
 	"sort"
@@ -27,6 +28,8 @@ func (s *Server) query(ctx context.Context, name string, args any) (result any, 
 	}()
 	defer s.mu.Unlock()
 	switch a := args.(type) {
+	case UploadObjectsRequest:
+		return s.uploadObjects(a)
 	case ObserveRequest:
 		if a.Seconds == 0 {
 			a.Seconds = 30
@@ -48,7 +51,7 @@ func (s *Server) query(ctx context.Context, name string, args any) (result any, 
 			sort.Strings(cameras)
 			v["cameras"] = cameras
 			v["identity"] = map[string]any{"state": "configured", "configured_sha256": configuredTemplateIdentity(template), "observed": "node_get.identity after cloning; guest.build after probe"}
-			v["optional_capabilities"] = map[string]any{"os_sleep": "unverified", "os_hibernation": "unverified", "new_user_secret_service": "unverified", "scope": "No template acceptance is inferred from backend availability or command readiness"}
+			v["optional_capabilities"] = map[string]any{"os_sleep": "unsupported", "os_hibernation": "unsupported", "hypervisor_pause_resume": "supported", "new_user_secret_service": "unverified", "scope": "No template acceptance is inferred from backend availability or command readiness"}
 			templates[name] = v
 		}
 		backends := map[string]any{}
@@ -67,20 +70,30 @@ func (s *Server) query(ctx context.Context, name string, args any) (result any, 
 			backends[kind] = view
 		}
 		s.mu.Lock()
-		return map[string]any{"version": wire.Version, "build": wire.Identity(), "performance": s.performance.Latest(), "templates": templates, "backends": backends, "active_task_id": s.active, "limits": map[string]any{"default_seconds": s.cfg.Tasks.DefaultTimeout.Seconds(), "max_seconds": s.cfg.Tasks.MaxDuration.Seconds(), "max_upload_bytes": s.cfg.Storage.MaxUploadBytes, "max_nodes": 64, "startup_timeout": s.cfg.VirtualBox.StartupTimeout.Value().String(), "shutdown_timeout": s.cfg.VirtualBox.ShutdownTimeout.Value().String(), "cleanup_timeout": s.cfg.Tasks.CleanupTimeout.Value().String(), "probe_interval": probeInterval.String(), "probe_timeout": probeTimeout.String(), "unavailable_after": s.cfg.VirtualBox.UnavailableAfter.Value().String(), "failure_threshold": 3, "recovery_successes": 2, "diagnostic_timeout": diagnosticBudget.String(), "node_exec_default_seconds": 10, "node_exec_max_seconds": 30, "max_retained_endpoints_per_task": 128, "command_protocol": wire.CommandProtocol, "stdin_packet_bytes": wire.InputPacketLimit, "stdin_packets": wire.InputPacketCount, "stdin_bytes": wire.CommandInputLimit, "output_bytes_per_stream": wire.CommandOutputLimit, "guest_read_bytes_per_stream": wire.CommandReadLimit}, "endpoint_address": s.cfg.VirtualBox.Network.Listen}, nil
+		return map[string]any{"version": wire.Version, "build": wire.Identity(), "performance": s.performance.Latest(), "templates": templates, "backends": backends, "active_task_id": s.active, "limits": map[string]any{"minimum_codex_version": "0.163.0", "wait_seconds": 600, "tool_timeout_sec": 660, "heartbeat_seconds": 15, "storage": s.cfg.Storage, "storage_blocked": s.storageBlocked, "default_seconds": s.cfg.Tasks.DefaultTimeout.Seconds(), "max_seconds": s.cfg.Tasks.MaxDuration.Seconds(), "max_upload_bytes": s.cfg.Storage.MaxUploadBytes, "max_nodes": 64, "startup_timeout": s.cfg.VirtualBox.StartupTimeout.Value().String(), "shutdown_timeout": s.cfg.VirtualBox.ShutdownTimeout.Value().String(), "cleanup_timeout": s.cfg.Tasks.CleanupTimeout.Value().String(), "probe_interval": probeInterval.String(), "probe_timeout": probeTimeout.String(), "unavailable_after": s.cfg.VirtualBox.UnavailableAfter.Value().String(), "failure_threshold": 3, "recovery_successes": 2, "diagnostic_timeout": diagnosticBudget.String(), "node_exec_default_seconds": 10, "node_exec_max_seconds": 30, "max_retained_endpoints_per_task": 128, "command_protocol": wire.CommandProtocol, "stdin_packet_bytes": wire.InputPacketLimit, "stdin_packets": wire.InputPacketCount, "stdin_bytes": wire.CommandInputLimit, "output_bytes_per_stream": wire.CommandOutputLimit, "guest_read_bytes_per_stream": wire.CommandReadLimit}, "endpoint_address": s.cfg.VirtualBox.Network.Listen}, nil
 	case TaskListRequest:
-		return s.listTasks(a)
+		return s.listTasksKind(a, name)
 	case TaskID:
 		t, e := s.task(a.TaskID)
 		if e != nil {
 			return nil, e
 		}
+		if name == "nix_job_get" && t.Kind != "nixos" || name == "lab_get" && t.Kind != "lab" {
+			return nil, wire.Fail("not_found", "Execution belongs to another domain")
+		}
 		v := t.Public().(map[string]any)
+		if name != "lab_inspect" {
+			v = t.summaryView()
+			v["revision"] = s.revision(map[bool]string{true: "lab", false: "nix_job"}[t.Kind == "lab"]+"/"+t.ID, taskCondition(t))
+			if t.Kind == "nixos" {
+				v["execution"] = t.NixExecution
+			}
+		}
 		s.queueView(t, v)
 		if until := s.performancePending[t.ID]; !until.IsZero() {
 			v["evidence_pending_until"] = until
 		}
-		return v, nil
+		return *clone(&v), nil
 	case NodeID:
 		t, err := s.task(a.TaskID.TaskID)
 		if err != nil {
@@ -92,11 +105,13 @@ func (s *Server) query(ctx context.Context, name string, args any) (result any, 
 		}
 		return n.public(), nil
 	case OperationRequest:
-		o := s.operations[a.OperationID]
-		if o == nil {
-			return nil, wire.Fail("not_found", "Operation not found")
+		o, err := s.operation(a.OperationID)
+		if err != nil {
+			return nil, err
 		}
-		return clone(o), nil
+		v := clone(o)
+		v.Revision = s.revision("operation/"+o.ID, []any{o.State, o.Error})
+		return v, nil
 	case EventsRequest:
 		if _, e := s.task(a.TaskID.TaskID); e != nil {
 			return nil, e
@@ -114,6 +129,19 @@ func (s *Server) query(ctx context.Context, name string, args any) (result any, 
 			return nil, e
 		}
 		return s.readLog(path.Join("tasks", a.TaskID.TaskID, "task.log"), a.Offset, a.Limit)
+	case CommandRequest:
+		task, err := s.task(a.TaskID.TaskID)
+		if err != nil {
+			return nil, err
+		}
+		c, err := task.Command(a.CommandID)
+		if err != nil {
+			return nil, err
+		}
+		var v map[string]any
+		_ = json.Unmarshal(wire.JSON(c.publicStatus()), &v)
+		v["revision"] = s.revision("command/"+c.ID, commandCondition(c))
+		return v, nil
 	case CommandGetRequest:
 		t, e := s.task(a.TaskID.TaskID)
 		if e != nil {
@@ -122,6 +150,9 @@ func (s *Server) query(ctx context.Context, name string, args any) (result any, 
 		c, e := t.Command(a.CommandID)
 		if e != nil {
 			return nil, e
+		}
+		if name == "command_get" {
+			return c.publicStatus(), nil
 		}
 		if a.InputLimit < 0 || a.InputLimit > 16 || a.InputFrom != nil && *a.InputFrom < 0 || a.InputFrom == nil && a.InputLimit != 0 {
 			return nil, wire.Fail("invalid_argument", "input_from must be nonnegative; input_limit requires input_from and ranges from 1 to 16")
@@ -171,11 +202,15 @@ func (s *Server) query(ctx context.Context, name string, args any) (result any, 
 		result["retained"], result["execution_final"] = retained, c.Final
 		return result, nil
 	case TransferGetRequest:
-		t := s.transfers[a.TransferID]
-		if t == nil || t.State == "purged" {
+		t, err := s.transfer(a.TransferID)
+		if err != nil || t.State == "purged" {
 			return nil, wire.Fail("not_found", "Transfer not found")
 		}
-		return s.transferView(t), nil
+		v := s.transferView(t)
+		delete(v, "url")
+		delete(v, "expires")
+		v["revision"] = s.revision("upload/"+t.ID, []any{t.State, t.Bytes, s.uploading[t.ID] != nil})
+		return v, nil
 	case CaptureGetRequest:
 		t, e := s.task(a.TaskID.TaskID)
 		if e != nil {
@@ -206,9 +241,7 @@ func (s *Server) query(ctx context.Context, name string, args any) (result any, 
 		if e != nil {
 			return nil, e
 		}
-		if t.Purged {
-			return nil, wire.Fail("purged", "Task data was purged")
-		}
+
 		for _, f := range t.Artifacts {
 			if f.ID == a.ArtifactID {
 				v := artifactView(f)
@@ -221,11 +254,37 @@ func (s *Server) query(ctx context.Context, name string, args any) (result any, 
 	return nil, wire.Fail("invalid_argument", "Unsupported query")
 }
 func artifactView(a *Artifact) map[string]any {
-	return map[string]any{"id": a.ID, "name": a.Name, "size": a.Size, "sha256": a.SHA256, "created": a.Created}
+	return map[string]any{"id": a.ID, "name": a.Name, "size": a.Size, "sha256": a.SHA256, "created": a.Created, "pinned": a.Pinned}
 }
 
 func (s *Server) mutate(name string, args any) (any, error) {
+	if strings.HasPrefix(name, "lab_") && name != "lab_create" || strings.HasPrefix(name, "nix_job_") && name != "nix_job_create" {
+		var target TaskID
+		_ = json.Unmarshal(wire.JSON(args), &target)
+		s.mu.Lock()
+		t, err := s.task(target.TaskID)
+		if err == nil && (strings.HasPrefix(name, "lab_") != (t.Kind == "lab")) {
+			err = wire.Fail("not_found", "Execution belongs to another domain")
+		}
+		s.mu.Unlock()
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	switch a := args.(type) {
+	case EvidenceChange:
+		return s.changeEvidence(name, a)
+	case RenewRequest:
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		t, err := s.transfer(a.TransferID)
+		if err != nil {
+			return nil, err
+		}
+		t.Updated = time.Now().UTC()
+		s.persist(state.Document{Kind: "transfer", ID: t.ID, Value: t})
+		return s.transferView(t), nil
 	case DiagnoseRequest:
 		return s.diagnose(s.ctx, a.TaskID.TaskID, a.NodeIDs, false)
 	case ExecRequest:
@@ -256,7 +315,7 @@ func (s *Server) mutate(name string, args any) (any, error) {
 		s.save(t)
 		return t.Public(), nil
 	case TaskChange:
-		if name == "task_cleanup" {
+		if name == "lab_cleanup" || name == "nix_job_cleanup" {
 			return s.cleanupTask(a.TaskID.TaskID)
 		}
 		if name == "network_recover" {
@@ -268,7 +327,7 @@ func (s *Server) mutate(name string, args any) (any, error) {
 		if e != nil {
 			return nil, e
 		}
-		if name == "task_purge" {
+		if name == "execution_delete" {
 			err := s.purge(t)
 			return t.Public(), err
 		}
@@ -420,7 +479,7 @@ func (s *Server) duration(v int) (int, error) {
 	return v, nil
 }
 func newTask(kind string, seconds int) *Task {
-	return &Task{ID: wire.ID(), Kind: kind, State: "queued", Created: time.Now().UTC(), TimeoutSeconds: seconds, Cleanup: "pending", Nodes: []*Node{}, Commands: []*Command{}, Endpoints: []*Endpoint{}, Captures: []*Capture{}, Artifacts: []*Artifact{}}
+	return &Task{ID: wire.ID(), Kind: kind, State: "queued", Created: time.Now().UTC(), TimeoutSeconds: seconds, Cleanup: "pending", Artifacts: []*Artifact{}, LabState: &LabState{Nodes: []*Node{}, Commands: []*Command{}, Endpoints: []*Endpoint{}, Captures: []*Capture{}}, NixJobState: &NixJobState{}}
 }
 func (s *Server) createLab(a LabRequest) (any, error) {
 	duration, e := s.duration(a.TimeoutSeconds)
@@ -441,6 +500,9 @@ func (s *Server) createLab(a LabRequest) (any, error) {
 		return nil, wire.Fail("invalid_argument", "Invalid LAN")
 	}
 	t := newTask("lab", duration)
+	s.mu.Lock()
+	t.ID = s.requests[a.RequestID].TaskID
+	s.mu.Unlock()
 	t.LAN = a.LAN
 	t.DHCP = a.DHCP == nil || *a.DHCP
 	t.DNS = append([]string{}, a.DNS...)
@@ -511,6 +573,7 @@ func (s *Server) createLab(a LabRequest) (any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t.Created = s.requests[a.RequestID].Created
+	t.ID = s.requests[a.RequestID].TaskID
 	if e = s.db.Save(context.Background(), state.Document{Kind: "task", ID: t.ID, Value: t}); e != nil {
 		return nil, e
 	}
@@ -548,6 +611,7 @@ func (s *Server) createNix(a NixRequest) (any, error) {
 	}
 	t := newTask("nixos", seconds)
 	t.Created = s.requests[a.RequestID].Created
+	t.ID = s.requests[a.RequestID].TaskID
 	t.CacheID = a.CacheID
 	t.Derivation = a.Derivation
 	t.System = a.System
@@ -578,7 +642,7 @@ func (s *Server) nodeAccess(id NodeID, action string) (*Task, *Runtime, *Node, e
 		return nil, nil, nil, wire.Fail("invalid_state", "Task execution has ended")
 	}
 	if strings.HasPrefix(action, "command_") && action != "command_cancel" && !n.capabilities()["commands"] {
-		return nil, nil, nil, wire.Fail("guest_not_ready", "Guest command capability is unavailable; inspect node_get or task_diagnose")
+		return nil, nil, nil, wire.Fail("guest_not_ready", "Guest command capability is unavailable; inspect node_get or lab_diagnose")
 	}
 	r := s.runtime[t.ID]
 	if r == nil {
@@ -754,6 +818,14 @@ func (s *Server) commandInput(a InputRequest) (any, error) {
 		return nil, e
 	}
 	if a.Sequence != c.Stdin.NextSequence {
+		if a.Sequence < c.Stdin.NextSequence {
+			packets, err := s.db.Inputs(s.ctx, t.ID, c.ID, a.Sequence, 1)
+			if err == nil && len(packets) == 1 && packets[0].Data == a.Data && packets[0].EOF == a.EOF {
+				v := map[string]any{"accepted": true, "sequence": a.Sequence, "delivered": a.Sequence < c.Stdin.Delivered, "consumed": a.Sequence < c.NextInput}
+				s.mu.Unlock()
+				return v, nil
+			}
+		}
 		s.mu.Unlock()
 		return nil, wire.Fail("input_order", "sequence must equal the next persisted input sequence")
 	}
@@ -785,8 +857,15 @@ func (s *Server) commandInput(a InputRequest) (any, error) {
 	delivery := "submitted"
 	if e != nil {
 		delivery = "pending"
+	} else {
+		s.mu.Lock()
+		if next, err := s.db.DeliveredInput(s.ctx, t.ID, c.ID, packet.Sequence); err == nil {
+			c.Stdin.Delivered = next
+			s.save(t)
+		}
+		s.mu.Unlock()
 	}
-	return map[string]any{"persisted": true, "sequence": packet.Sequence, "delivery": delivery}, nil
+	return map[string]any{"accepted": true, "persisted": true, "sequence": packet.Sequence, "delivery": delivery}, nil
 }
 func (s *Server) changeNetwork(id string, a NetworkRequest, recover bool) (any, error) {
 	s.mu.Lock()
@@ -952,10 +1031,10 @@ func (s *Server) createEndpoint(a EndpointRequest) (any, error) {
 }
 func endpointAdmission(t *Task) error {
 	if t.State != "running" {
-		return &wire.Error{Code: "invalid_state", Message: "Endpoint publication requires a running lab", Details: map[string]any{"phase": t.phase(), "required_phase": "running", "next_action": "Inspect task_get; wait for preparation or create another batch after cleanup"}}
+		return &wire.Error{Code: "invalid_state", Message: "Endpoint publication requires a running lab", Details: map[string]any{"phase": t.phase(), "required_phase": "running", "next_action": "Inspect lab_get; wait for preparation or create another batch after cleanup"}}
 	}
 	if t.Network != "ready" {
-		return &wire.Error{Code: "network_not_ready", Message: "Endpoint publication requires a ready router policy and protection", Details: map[string]any{"network": t.Network, "observation": t.NetworkObservation, "next_action": "Inspect task_get network observation; use network_recover after resolving a degraded network"}}
+		return &wire.Error{Code: "network_not_ready", Message: "Endpoint publication requires a ready router policy and protection", Details: map[string]any{"network": t.Network, "observation": t.NetworkObservation, "next_action": "Inspect lab_get network observation; use network_recover after resolving a degraded network"}}
 	}
 	if len(t.Endpoints) >= 128 {
 		return &wire.Error{Code: "endpoint_limit", Message: "Task reached its retained endpoint limit", Details: map[string]any{"limit": 128, "count": len(t.Endpoints), "scope": "task_history", "next_action": "Finish this batch, confirm cleanup, and create a new task"}}
@@ -1061,68 +1140,120 @@ func (s *Server) media(a MediaRequest) (any, error) {
 }
 func (s *Server) purge(t *Task) error {
 	if !t.Terminal() || t.Cleanup != "complete" {
-		return wire.Fail("invalid_state", "Only a terminal, fully cleaned task can be purged")
+		return wire.Fail("invalid_state", "Execution and resource cleanup must be complete")
 	}
+	delete(s.performancePending, t.ID)
 	for id, x := range s.transfers {
 		if x.TaskID == t.ID && s.uploading[id] != nil {
-			return wire.Fail("conflict", "A task upload is still settling")
+			return wire.Fail("conflict", "An upload is still settling")
 		}
 	}
 	for _, o := range s.operations {
-		if o.TaskID == t.ID && o.State == "pending" && o.Tool != "task_purge" {
-			return wire.Fail("conflict", "A task operation is still settling")
+		if o.TaskID == t.ID && o.State == "pending" && o.Tool != "execution_delete" {
+			return wire.Fail("conflict", "An operation is still settling")
 		}
 	}
-	if t.Kind == "nixos" {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		_, e := s.backend.Nix(ctx, "purge", clone(t))
-		cancel()
-		if e != nil {
-			return e
+	pinned := []*Artifact{}
+	for _, a := range t.Artifacts {
+		if a.Pinned {
+			pinned = append(pinned, a)
+		} else if err := s.root.Remove(a.Path); err != nil && !os.IsNotExist(err) {
+			return err
 		}
 	}
-	if e := s.root.RemoveAll(path.Join("tasks", t.ID)); e != nil {
-		return e
-	}
-	for _, x := range s.transfers {
-		if x.TaskID == t.ID {
-			if e := s.root.RemoveAll(path.Join("transfers", x.ID)); e != nil {
+	dir := path.Join("tasks", t.ID)
+	if len(pinned) == 0 {
+		if err := s.root.RemoveAll(dir); err != nil {
+			return err
+		}
+	} else {
+		f, err := s.root.Open(dir)
+		if err == nil {
+			entries, e := f.ReadDir(-1)
+			f.Close()
+			if e != nil {
 				return e
 			}
-			x.State = "purged"
-			s.transferLocks.Delete(x.ID)
-			s.persist(state.Document{Kind: "transfer", ID: x.ID, Value: x})
+			for _, entry := range entries {
+				if entry.Name() != "artifacts" {
+					if err = s.root.RemoveAll(path.Join(dir, entry.Name())); err != nil {
+						return err
+					}
+				}
+			}
+		} else if !os.IsNotExist(err) {
+			return err
 		}
 	}
-	wasPurged := t.Purged
-	t.Purged = true
-	delete(s.performancePending, t.ID)
-	// Receipts keep their identity/hash/status for idempotency, but old task or
-	// command snapshots must not retain the payload that was explicitly purged.
-	for _, o := range s.operations {
-		if o.TaskID == t.ID && o.State != "pending" {
-			o.Result = map[string]any{"task_id": t.ID, "purged": true}
-			s.persist(state.Document{Kind: "operation", ID: o.ID, Value: o})
+	if len(pinned) > 0 {
+		keep := map[string]bool{}
+		for _, a := range pinned {
+			keep[a.Path] = true
+		}
+		directory := path.Join(dir, "artifacts")
+		f, err := s.root.Open(directory)
+		if err == nil {
+			entries, e := f.ReadDir(-1)
+			f.Close()
+			if e != nil {
+				return e
+			}
+			for _, entry := range entries {
+				p := path.Join(directory, entry.Name())
+				if !keep[p] {
+					if err = s.root.RemoveAll(p); err != nil {
+						return err
+					}
+				}
+			}
+		} else if !os.IsNotExist(err) {
+			return err
 		}
 	}
-	if err := s.db.PurgeCommandData(context.Background(), state.Document{Kind: "task", ID: t.ID, Value: t}); err != nil {
-		t.Purged = wasPurged
+	// Retained input headers are loaded lazily after restart. Discover their
+	// durable references, not just entries still in the active transfer cache.
+	rows, err := s.db.QueryContext(s.ctx, "SELECT id FROM transfers WHERE task_id=?", t.ID)
+	if err != nil {
 		return err
 	}
-	return nil
-}
-func (s *Server) expireRetention() {
-	if s.cfg.Storage.Days == 0 {
-		return
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	cutoff := time.Now().Add(-time.Duration(s.cfg.Storage.Days) * 24 * time.Hour)
-	for _, t := range s.tasks {
-		if !t.Purged && t.Ended != nil && t.Ended.Before(cutoff) && t.Cleanup == "complete" {
-			_ = s.purge(t)
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		input, err := s.transfer(id)
+		if err != nil {
+			return err
+		}
+		if err = s.removeTransfer(input); err != nil {
+			return err
 		}
 	}
+	t.Purged = true
+	t.Artifacts = pinned
+	t.Commands = nil
+	t.Nodes = nil
+	t.Router = nil
+	t.Captures = nil
+	t.Endpoints = nil
+	t.RouterPassword = ""
+	t.RouterISO = ""
+	t.GUI = nil
+	t.NetworkObservation = nil
+	if err := s.db.PruneDetails(s.ctx, t.ID); err != nil {
+		return err
+	}
+	return s.db.Save(s.ctx, state.Document{Kind: "task", ID: t.ID, Value: t})
 }
 
 func (s *Server) collect(id NodeID, name string, a NodeAction) (any, error) {
@@ -1152,6 +1283,9 @@ func (s *Server) collect(id NodeID, name string, a NodeAction) (any, error) {
 	size, hash, e := hashFile(f, s.cfg.Storage.MaxUploadBytes)
 	if e != nil {
 		return nil, e
+	}
+	if err := f.Sync(); err != nil {
+		return nil, err
 	}
 	artifact.Size = size
 	artifact.SHA256 = hash

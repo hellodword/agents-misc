@@ -345,24 +345,25 @@ display/session environment. Its command is
 account supervision. Use `--check-config --config /etc/vm-test/config.yaml` on either program to validate its role without starting it or creating state. Configuration is loaded at startup. Restart after tasks finish
 when changing policy or paths.
 
-Before a controller state-schema upgrade, wait for all task cleanup to complete,
-stop the owning processes and preserve an owner-private backup of their entire
-state directories, including SQLite WAL files when present. The schema migration
-is transactional but older executables cannot read a newer schema. A rollback
-must account for any work accepted after the upgrade; do not overwrite that new
-history with the backup. Configuration and state backups may contain credentials
-and command inputs and stay outside the Nix store and version control.
+This release requires new configuration and empty controller **and worker** state
+with fresh schema-20 databases. The user must stop the old services, confirm all
+old VM/daemon/port resources are released, and clear or retire the old state before
+starting. Preserve any required old evidence in private offline backups first.
+Do not run the new binary against a live old state or attempt an in-place schema
+migration. VirtualBox baselines and host Nix-store contents remain independent.
+Old private backups can contain credentials and command inputs; keep them outside
+version control and the Nix store.
 
 ## Recovery
 
-Inspect `node_get`, `task_events` and `task_diagnose` for node failures. `node_exec`
+Inspect `node_get`, `execution_events` and `lab_diagnose` for node failures. `node_exec`
 provides a short Guest Control command even when first-boot initialization or the
 command service is unavailable. A running lab retains its nodes until the caller
 finishes/cancels or the task deadline expires. Startup failure collects what is
 available within its evidence budget and cleans the lab.
 
 For an ended VirtualBox task with `cleanup.state: blocked`, inspect each resource's
-steps and error, resolve the reported host problem, then call `task_cleanup` with
+steps and error, resolve the reported host problem, then call `lab_cleanup` with
 a new request ID. It retries recorded ownership and verifies deletion before
 releasing the scheduler. If MCP is unavailable, stop the controller before local
 reconciliation; its private-directory lock prevents two owners. Review the SQLite
@@ -388,8 +389,9 @@ vm-test-nix-worker --config /etc/vm-test/config.yaml --reconcile TASK_ID
 
 This is a local administrator attestation, unavailable through the Unix protocol
 or MCP. Restart the worker, reconcile/restart the controller, and check the original
-task's cleanup before submitting another task. Failed build directories remain
-administrator-managed. Successful output GC roots remain until task purge.
+task's cleanup before submitting another task. Default builds omit `--keep-failed`. Any explicitly retained failed build
+directory is administrator-managed. Output GC roots are released after the
+controller confirms durable size/hash-verified evidence handoff.
 
 ## Acceptance
 
@@ -416,10 +418,9 @@ Record these real-host results separately from the default adapter suite:
    specifically for isolation policy; build identities differ from the worker and
    root. Exercise a failing test and cancellation, retaining logs, evidence and
    cleanup state. Interrupt a build and verify the cleanup hold/recovery procedure.
-8. Classify required OS sleep, hibernation and new-user Secret Service behavior as
-   supported, unsupported or unverified for the observed template/kernel/desktop
-   versions. OS transitions require kernel, timing and original-process continuity
-   evidence, with the actual wake source recorded. For a new account, initialize
+8. VirtualBox guest ACPI S3 sleep and S4 hibernation are unsupported. Verify
+   hypervisor pause/resume separately. Classify new-user Secret Service behavior
+   using the observed template/kernel/desktop versions. For a new account, initialize
    its native keyring through the login flow before starting the Secret Service;
    verify collection calls, real item read/write, locking and persistence. An
    advertised alias or a prepared guest alone does not establish that behavior.

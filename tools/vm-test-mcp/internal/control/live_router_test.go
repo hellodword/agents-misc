@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hellodword/agents-misc/vm-test-mcp/internal/nixos"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
@@ -38,7 +39,7 @@ func (idleWorker) Call(context.Context, string, any) (json.RawMessage, error) {
 func TestRouterISOEnablesBackendAndParticipatesInNixExclusion(t *testing.T) {
 	c := testConfig(t)
 	c.VirtualBox.Templates = nil
-	b := &VBoxBackend{Config: c, Runner: availabilityRunner{running: true}, Worker: idleWorker{}}
+	b := &Backends{VBoxBackend: &VBoxBackend{Config: c, Runner: availabilityRunner{running: true}}, NixBackend: &nixos.Backend{Client: idleWorker{}}}
 	if reason, err := b.Available(context.Background(), "lab"); err != nil || reason != "" {
 		t.Fatal("router ISO did not enable VirtualBox", reason, err)
 	}
@@ -80,7 +81,7 @@ func TestRouterOnlyLabLifecycle(t *testing.T) {
 				}
 				off := false
 				successful(t, s, "network_set", NetworkRequest{TaskChange: TaskChange{Change: Change{"router-network"}, TaskID: TaskID{id}}, Internet: &off, DHCP: &off, DNS: []string{"9.9.9.9"}})
-				successful(t, s, "task_finish", FinishRequest{TaskChange: TaskChange{Change: Change{"router-finish"}, TaskID: TaskID{id}}, Conclusion: "passed", Summary: "Router configuration verified"})
+				successful(t, s, "lab_finish", FinishRequest{TaskChange: TaskChange{Change: Change{"router-finish"}, TaskID: TaskID{id}}, Conclusion: "passed", Summary: "Router configuration verified"})
 			}
 			waitFor(t, func() bool {
 				s.mu.Lock()
@@ -237,12 +238,12 @@ func TestDisklessRouterOwnsVMAndSeedButNeverBootISO(t *testing.T) {
 		t.Fatal("router console was not attached to its private collector")
 	}
 	// Readback must reject host devices and other sockets, including for a router.
-	copyTask := *task
+	copyTask := task.executionSnapshot()
 	copyTask.RouterISO = realISO
 	for _, unsafe := range []string{"/dev/ttyS0", "file,/tmp/log", "client,/tmp/other.sock"} {
 		mode := r.info["uartmode1"]
 		r.info["uartmode1"] = unsafe
-		if err := b.verify(&copyTask, task.Router, r.info); wire.Safe(err).Code != "unsafe_device" {
+		if err := b.verify(copyTask, task.Router, r.info); wire.Safe(err).Code != "unsafe_device" {
 			t.Fatal("unowned console accepted", unsafe, err)
 		}
 		r.info["uartmode1"] = mode

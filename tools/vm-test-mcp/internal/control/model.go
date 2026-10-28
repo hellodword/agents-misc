@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/config"
+	"github.com/hellodword/agents-misc/vm-test-mcp/internal/execution"
+	"github.com/hellodword/agents-misc/vm-test-mcp/internal/nixos"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/state"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
@@ -120,54 +122,28 @@ type Capture struct {
 	State      string `json:"state"`
 	ArtifactID string `json:"artifact_id,omitempty"`
 }
-type Artifact struct {
-	ID      string    `json:"id"`
-	Name    string    `json:"name"`
-	Size    int64     `json:"size"`
-	SHA256  string    `json:"sha256"`
-	Created time.Time `json:"created"`
-	Path    string    `json:"path"`
-}
+type Artifact = execution.Artifact
+
 type Task struct {
-	ID                  string             `json:"id"`
-	Kind                string             `json:"kind"`
-	State               string             `json:"state"`
-	Created             time.Time          `json:"created"`
-	Started             *time.Time         `json:"started,omitempty"`
-	Deadline            *time.Time         `json:"deadline,omitempty"`
-	Ended               *time.Time         `json:"ended,omitempty"`
-	TimeoutSeconds      int                `json:"timeout_seconds"`
-	Conclusion          string             `json:"conclusion,omitempty"`
-	Summary             string             `json:"summary,omitempty"`
-	Reason              string             `json:"reason,omitempty"`
-	Cleanup             string             `json:"cleanup"`
-	CleanupErrors       []*wire.Error      `json:"cleanup_errors,omitempty"`
-	Failure             *wire.Error        `json:"failure,omitempty"`
-	Purged              bool               `json:"purged"`
-	Hold                *Hold              `json:"hold,omitempty"`
-	Nodes               []*Node            `json:"nodes"`
-	Router              *Node              `json:"router,omitempty"`
-	RouterPassword      string             `json:"router_password"`
-	RouterISO           string             `json:"router_iso"`
-	RouterBootID        string             `json:"router_boot_id"`
-	NetworkUpdated      time.Time          `json:"network_updated"`
-	NetworkLeaseExpires time.Time          `json:"network_lease_expires"`
-	NetworkPolicyHash   string             `json:"network_policy_hash"`
-	NetworkObservation  *NetworkAttempt    `json:"network_observation,omitempty"`
-	GUI                 *GUIOwnership      `json:"gui_ownership,omitempty"`
-	LAN                 string             `json:"lan,omitempty"`
-	DHCP                bool               `json:"dhcp"`
-	DNS                 []string           `json:"dns"`
-	Internet            bool               `json:"internet"`
-	Network             string             `json:"network"`
-	Commands            []*Command         `json:"commands"`
-	Endpoints           []*Endpoint        `json:"endpoints"`
-	Captures            []*Capture         `json:"captures"`
-	Artifacts           []*Artifact        `json:"artifacts"`
-	CacheID             string             `json:"cache_id,omitempty"`
-	Derivation          string             `json:"derivation,omitempty"`
-	System              string             `json:"system,omitempty"`
-	NixExecution        *wire.NixExecution `json:"nix_execution,omitempty"`
+	*LabState
+	*NixJobState
+	ID             string        `json:"id"`
+	Kind           string        `json:"kind"`
+	State          string        `json:"state"`
+	Created        time.Time     `json:"created"`
+	Started        *time.Time    `json:"started,omitempty"`
+	Deadline       *time.Time    `json:"deadline,omitempty"`
+	Ended          *time.Time    `json:"ended,omitempty"`
+	TimeoutSeconds int           `json:"timeout_seconds"`
+	Conclusion     string        `json:"conclusion,omitempty"`
+	Summary        string        `json:"summary,omitempty"`
+	Reason         string        `json:"reason,omitempty"`
+	Cleanup        string        `json:"cleanup"`
+	CleanupErrors  []*wire.Error `json:"cleanup_errors,omitempty"`
+	Failure        *wire.Error   `json:"failure,omitempty"`
+	Purged         bool          `json:"purged"`
+	Hold           *Hold         `json:"hold,omitempty"`
+	Artifacts      []*Artifact   `json:"artifacts"`
 }
 
 // Hold explains an explicit extension; it is not an idle-detection lease.
@@ -178,9 +154,13 @@ type Hold struct {
 }
 
 // Execution adapters need resource identity and status, not artifact history.
-// Command payloads live in SQLite and are only loaded by explicit detail reads.
+// Command payloads live in immutable files and are loaded by explicit detail reads.
 func (t *Task) executionSnapshot() *Task {
 	v := *t
+	lab := *t.LabState
+	v.LabState = &lab
+	job := *t.NixJobState
+	v.NixJobState = &job
 	v.Artifacts = nil
 	v.Commands = make([]*Command, 0, len(t.Commands))
 	for _, c := range t.Commands {
@@ -355,6 +335,7 @@ func (t *Task) Terminal() bool {
 }
 
 type Operation struct {
+	Revision  int64       `json:"revision,omitempty"`
 	ID        string      `json:"id"`
 	RequestID string      `json:"request_id"`
 	Tool      string      `json:"tool"`
@@ -366,6 +347,7 @@ type Operation struct {
 	Error     *wire.Error `json:"error,omitempty"`
 }
 type Transfer struct {
+	Updated time.Time         `json:"updated"`
 	ID      string            `json:"id"`
 	TaskID  string            `json:"task_id,omitempty"`
 	Kind    string            `json:"kind"`
@@ -426,4 +408,17 @@ type Backend interface {
 	Network(context.Context, *Task, []string, bool) (string, error)
 	Endpoint(context.Context, *Task, *Endpoint, bool) error
 	Nix(context.Context, string, *Task) (json.RawMessage, error)
+}
+
+// Task is the shared scheduler record; backend execution state has separate owners.
+type NixJobState = nixos.JobState
+
+func (t *Task) UnmarshalJSON(b []byte) error {
+	type record Task
+	v := record{LabState: &LabState{}, NixJobState: &NixJobState{}}
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	*t = Task(v)
+	return nil
 }

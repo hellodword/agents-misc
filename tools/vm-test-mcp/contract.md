@@ -1,4 +1,4 @@
-# VM Test MCP 0.11 contract
+# VM Test MCP 0.12 contract
 
 ## Transport and identity
 
@@ -30,10 +30,10 @@ Template metadata carries a configured fingerprint. Each cloned node records
 including firmware and graphics settings when reported. Fingerprints omit source
 names, UUIDs, private paths and credentials; they identify the selected snapshot
 and configuration, not a full disk-content digest. Actual guest builds are
-observed separately. Optional OS sleep, hibernation and new-user Secret Service
-capabilities remain `unverified` without scoped execution evidence. Hypervisor
-pause, available backends, input delivery and visible frames do not attest these
-capabilities or application behavior.
+observed separately. VirtualBox guest ACPI S3 sleep and S4 hibernation are
+unsupported (known backend limitation). Hypervisor pause/resume is supported and
+is a separate operation. New-user Secret Service behavior remains unverified
+without scoped execution evidence; input delivery alone is not application success.
 
 Service-generated task/node/command/transfer/artifact/operation IDs are 32 lowercase
 hex digits. Caller `request_id` is 1–128 ASCII identifier characters
@@ -41,7 +41,9 @@ hex digits. Caller `request_id` is 1–128 ASCII identifier characters
 The same ID and decoded parameters return the original receipt; changed parameters
 return `request_conflict`. Receipts have `pending`, `succeeded`, `failed` or
 `uncertain` state, plus `id`, `request_id`, `tool`, `created`, `result` or `error`.
-Poll `operation_get`; reconnecting does not create another execution. A pending
+The response contains `operation` and `wait`; `operation_get` reads the same receipt.
+Request digest, target ID, receipt and dispatch intent commit together before dispatch.
+Reconnecting does not create another execution. A pending
 receipt found on controller restart becomes uncertain and is never blindly replayed.
 
 Errors are MCP tool errors with structured `{"error":{"code":"…","message":"…"}}`
@@ -74,55 +76,100 @@ Nix worker rejections retain their original structured code and details, with
 execution observation failure requiring reconciliation of the existing task;
 it is not evidence that the worker rejected or never accepted the request.
 
+## Business waits and observation
+
+Codex CLI **0.163.0 or newer** is required; configure `tool_timeout_sec = 660`.
+Tools return structured JSON in SSE. Every 15 seconds the transport sends an SSE
+comment, not an MCP notification, model-visible progress item or SQLite event.
+Binary content uses the separate HTTP routes below.
+
+Every mutating call returns `{operation, wait}`. `operation.state` describes the
+dispatch; `wait.targets` describes the business outcome. Creation waits for lab
+readiness or for Nix execution, evidence handoff and cleanup. `command_start`
+defaults to `mode="finite"`, waiting for exit, process-group termination and
+output retention. Explicit `service` or `interactive` mode waits for a confirmed
+start. Finish/cancel/cleanup waits for resource release or a new actionable fault.
+Other mutations wait for their durable receipt to resolve.
+
+Each call observes for at most **600 seconds**, including dispatch time. Early
+completion returns immediately. Expiry returns `wait.reason="timeout"` and current
+summaries; it is not execution failure. Pass the returned `continue` array to
+`wait({targets: …})`. A 15-minute job normally needs the initial ten-minute call
+and one five-minute continuation. Waiting and ordinary controls do not extend
+execution deadlines.
+
+A target is `{kind,id,condition,seen_revision}`. Kinds are `lab`, `nix_job`,
+`command`, `operation`, `upload`; conditions are `ready` (execution), `started`
+(command), `complete`, `cleaned` (execution), `changed`, or `output` (execution
+or command). Inapplicable conditions are rejected. Up to 64 targets can be
+observed together. Return when any target satisfies its condition or reports a
+new failure/intervention state; include every target's summary, revision,
+`satisfied` and `attention`. Reusing `continue` acknowledges the observed failure.
+Ordinary revisions ignore transport heartbeats, healthy sampling and byte growth;
+explicit `output` waits use a separate output revision.
+
+HTTP disconnect, tool timeout and MCP cancellation stop only that observation.
+Accepted dispatch and execution belong to the service. Use `command_cancel`,
+`nix_job_cancel`, `lab_cancel` or `lab_finish` to stop business execution. Native
+input with an unconfirmed dispatch becomes `uncertain` and is never replayed
+automatically. Retrying the identical `request_id` retrieves its receipt.
+
 ## Tools
 
 `tools/list` supplies exact JSON schemas. Fields below are in addition to
 `request_id` for mutations. A node or command ID must belong to the specified task.
 No public tool accepts a host executable, directory, VM UUID or raw backend option.
 
-| Tool                          | Parameters and result                                                                                                                                                          |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `service_get`                 | No parameters; version, templates/policy, backend availability, active task and limits                                                                                         |
-| `service_observe`             | Optional `seconds` (1..240, default 30); bounded host and controller samples/call timings                                                                                      |
-| `lab_create`                  | `nodes`, optional `lan`, `dhcp`, `dns`, `internet`, `timeout_seconds`; creates queued lab                                                                                      |
-| `nixos_run`                   | `cache_id`, `derivation`, `system`, optional `timeout_seconds`; seals cache and queues job                                                                                     |
-| `task_list`                   | Optional task-ID `cursor`, `limit`, `phase` (default `active`, or `all`, `queued`, `preparing`, `running`, `ended`); compact submission-order summaries and next cursor        |
-| `task_get`                    | `task_id`; task, nodes, command statuses, entries, captures, artifacts and cleanup; command inputs require explicit `command_get`                                              |
-| `node_get`                    | `task_id`, `node_id`; power, expected state, preparation, health and capabilities                                                                                              |
-| `task_diagnose`               | `task_id`, optional `node_ids`; bounded evidence manifest and artifact IDs                                                                                                     |
-| `node_exec`                   | `task_id`, `node_id`, absolute guest `argv`, optional `cwd`, `env`, `timeout_seconds` (default 10, maximum 30); direct Guest Control result and artifact                       |
-| `task_cleanup`                | `task_id`; retry resource cleanup of an ended VirtualBox task                                                                                                                  |
-| `task_events`                 | `task_id`, optional `cursor`, `limit`; ordered events after cursor                                                                                                             |
-| `task_log`                    | `task_id`, optional byte `offset`, `limit`; base64 `data`, `next_offset`, `eof`                                                                                                |
-| `operation_get`               | `operation_id`; durable receipt                                                                                                                                                |
-| `task_finish`                 | `task_id`, `conclusion`, `summary`; caller conclusion for a running lab                                                                                                        |
-| `task_cancel`                 | `task_id`; cancel queued or executing task                                                                                                                                     |
-| `task_extend`                 | `task_id`, positive `seconds`, `reason` (1..1024 bytes); record concrete continued work and extend within configured total duration                                            |
-| `task_purge`                  | `task_id`; remove data only after terminal state and complete cleanup                                                                                                          |
-| `command_start`               | `task_id`, `node_id`, `argv`, optional `context` (`service` default, Windows `desktop`), absolute `cwd`, `env`, `timeout_seconds`                                              |
-| `command_get`                 | `task_id`, `command_id`, optional `input_from`/`input_limit`; independent state, spec, exit code and stdin progress; explicitly paged input                                    |
-| `command_read`                | `task_id`, `command_id`, `stream` (`stdout`/`stderr`), optional `offset`, `limit`                                                                                              |
-| `command_input`               | `task_id`, `command_id`, `sequence`, optional UTF-8 `data`, `eof`                                                                                                              |
-| `command_cancel`              | `task_id`, `command_id`; cancel its supervised process group                                                                                                                   |
-| `transfer_create`             | `kind` (`file`/`cache`), `task_id` required for files; scoped upload URL                                                                                                       |
-| `transfer_get`                | `transfer_id`; object lengths/checksums, state and renewed capability                                                                                                          |
-| `guest_file_put`              | `task_id`, `node_id`, `transfer_id`, absolute guest `path`; seals file input                                                                                                   |
-| `guest_file_get`              | `task_id`, `node_id`, absolute guest `path`; guest-created tar artifact                                                                                                        |
-| `node_control`                | `task_id`, `node_id`, `action`: start, shutdown, reboot, poweroff, pause, resume, reset                                                                                        |
-| `network_set`                 | `task_id`, optional `internet`, `dhcp`, `dns` (1..8 public IPv4s), `nodes: [{node_id, ipv4}]`; returns `task` and `guest_network_refresh_required`                             |
-| `node_network_link`           | `task_id`, `node_id`, `enabled`; connect/disconnect the lab NIC                                                                                                                |
-| `lab_gui_set`                 | `task_id`, `max_guest_resolution` (`any`/`auto`); journal global policy until cleanup                                                                                          |
-| `network_recover`             | `task_id`; explicitly check router/protection/ports and restore networking                                                                                                     |
-| `endpoint_open`               | `task_id`, `node_id`, `protocol` (`tcp`/`udp`), `port`; allocated endpoint ID/host port                                                                                        |
-| `endpoint_close`              | `task_id`, `endpoint_id`; revoke an entry                                                                                                                                      |
-| `node_screenshot`             | `task_id`, `node_id`, optional `screen`; PNG artifact                                                                                                                          |
-| `node_display`                | `task_id`, `node_id`, optional `width`, `height`, `screen`, `auto_resize`; provide a size pair or auto_resize                                                                  |
-| `node_input`                  | `task_id`, `node_id`, `action`: move/click/drag/scroll/release/scancodes; optional screen, x/y/end_x/end_y, button (0/1/2/4), dz/dw, relative, scancodes (two hex digits each) |
-| `node_media`                  | `task_id`, `node_id`, `device` (camera/audio_input/audio_output), `enabled`, camera alias when applicable                                                                      |
-| `capture_start`               | `task_id`, `node_id`, `kind` (`video`/`nic`/`metrics`)                                                                                                                         |
-| `capture_get`, `capture_stop` | `task_id`, `capture_id`; status or stop and collect                                                                                                                            |
-| `artifact_list`               | `task_id`, optional `cursor`, `limit`; evidence metadata                                                                                                                       |
-| `artifact_get`                | `task_id`, `artifact_id`; read-only scoped download URL                                                                                                                        |
+| Tool                             | Parameters and result                                                                                                                                                                  |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `service_get`                    | No parameters; version, templates/policy, backend availability, active task and limits                                                                                                 |
+| `service_observe`                | Optional `seconds` (1..240, default 30); bounded host and controller samples/call timings                                                                                              |
+| `lab_create`                     | `nodes`, optional `lan`, `dhcp`, `dns`, `internet`, `timeout_seconds`; creates queued lab                                                                                              |
+| `nix_job_create`                 | `cache_id`, `derivation`, `system`, optional `timeout_seconds`; seals cache and queues job                                                                                             |
+| `lab_list`, `nix_job_list`       | Optional task-ID `cursor`, `limit`, `phase` (default `active`, or `all`, `queued`, `preparing`, `running`, `ended`); compact submission-order summaries and next cursor                |
+| `lab_get`, `nix_job_get`         | `task_id`; compact domain summary and revision; Nix also reports worker execution/resource release                                                                                     |
+| `node_get`                       | `task_id`, `node_id`; power, expected state, preparation, health and capabilities                                                                                                      |
+| `lab_diagnose`                   | `task_id`, optional `node_ids`; bounded evidence manifest and artifact IDs                                                                                                             |
+| `node_exec`                      | `task_id`, `node_id`, absolute guest `argv`, optional `cwd`, `env`, `timeout_seconds` (default 10, maximum 30); direct Guest Control result and artifact                               |
+| `lab_cleanup`, `nix_job_cleanup` | `task_id`; retry domain cleanup, including Nix worker handoff                                                                                                                          |
+| `execution_events`               | `task_id`, optional `cursor`, `limit`; ordered events after cursor                                                                                                                     |
+| `execution_log`                  | `task_id`, optional byte `offset`, `limit`; base64 `data`, `next_offset`, `eof`                                                                                                        |
+| `operation_get`                  | `operation_id`; durable receipt                                                                                                                                                        |
+| `lab_finish`                     | `task_id`, `conclusion`, `summary`; caller conclusion for a running lab                                                                                                                |
+| `lab_cancel`, `nix_job_cancel`   | `task_id`; cancel queued or executing domain task                                                                                                                                      |
+| `lab_extend`                     | `task_id`, positive `seconds`, `reason` (1..1024 bytes); record concrete continued work and extend within configured total duration                                                    |
+| `execution_delete`               | `task_id`; remove data only after terminal state and complete cleanup                                                                                                                  |
+| `command_start`                  | `task_id`, `node_id`, `argv`, optional `mode` (`finite` default, `service`, `interactive`), `context` (`service` default, Windows `desktop`), absolute `cwd`, `env`, `timeout_seconds` |
+| `command_get`                    | `task_id`, `command_id`; compact state, exit, stdin progress and revision                                                                                                              |
+| `command_read`                   | `task_id`, `command_id`, `stream` (`stdout`/`stderr`), optional `offset`, `limit`                                                                                                      |
+| `command_input`                  | `task_id`, `command_id`, `sequence`, optional UTF-8 `data`, `eof`                                                                                                                      |
+| `command_cancel`                 | `task_id`, `command_id`; cancel its supervised process group                                                                                                                           |
+| `upload_create`                  | `kind` (`file`/`cache`), `task_id` required for files; scoped upload URL                                                                                                               |
+| `upload_get`                     | `transfer_id`; compact state, ownership and revision                                                                                                                                   |
+| `guest_file_put`                 | `task_id`, `node_id`, `transfer_id`, absolute guest `path`; seals file input                                                                                                           |
+| `guest_file_get`                 | `task_id`, `node_id`, absolute guest `path`; guest-created tar artifact                                                                                                                |
+| `node_control`                   | `task_id`, `node_id`, `action`: start, shutdown, reboot, poweroff, pause, resume, reset                                                                                                |
+| `network_set`                    | `task_id`, optional `internet`, `dhcp`, `dns` (1..8 public IPv4s), `nodes: [{node_id, ipv4}]`; returns `task` and `guest_network_refresh_required`                                     |
+| `node_network_link`              | `task_id`, `node_id`, `enabled`; connect/disconnect the lab NIC                                                                                                                        |
+| `lab_gui_set`                    | `task_id`, `max_guest_resolution` (`any`/`auto`); journal global policy until cleanup                                                                                                  |
+| `network_recover`                | `task_id`; explicitly check router/protection/ports and restore networking                                                                                                             |
+| `endpoint_open`                  | `task_id`, `node_id`, `protocol` (`tcp`/`udp`), `port`; allocated endpoint ID/host port                                                                                                |
+| `endpoint_close`                 | `task_id`, `endpoint_id`; revoke an entry                                                                                                                                              |
+| `node_screenshot`                | `task_id`, `node_id`, optional `screen`; PNG artifact                                                                                                                                  |
+| `node_display`                   | `task_id`, `node_id`, optional `width`, `height`, `screen`, `auto_resize`; provide a size pair or auto_resize                                                                          |
+| `node_input`                     | `task_id`, `node_id`, `action`: move/click/drag/scroll/release/scancodes; optional screen, x/y/end_x/end_y, button (0/1/2/4), dz/dw, relative, scancodes (two hex digits each)         |
+| `node_media`                     | `task_id`, `node_id`, `device` (camera/audio_input/audio_output), `enabled`, camera alias when applicable                                                                              |
+| `capture_start`                  | `task_id`, `node_id`, `kind` (`video`/`nic`/`metrics`)                                                                                                                                 |
+| `capture_get`, `capture_stop`    | `task_id`, `capture_id`; status or stop and collect                                                                                                                                    |
+| `evidence_list`                  | `task_id`, optional `cursor`, `limit`; evidence metadata                                                                                                                               |
+| `evidence_get`                   | `task_id`, `artifact_id`; read-only scoped download URL                                                                                                                                |
+
+| `wait` | `targets`; business observation described above |
+| `lab_inspect` | `task_id`; node inventory, network, resource ledger and diagnostics |
+| `command_details` | `task_id`, `command_id`, optional `input_from`/`input_limit`; argv, environment and paged stdin history |
+| `upload_renew` | `transfer_id`; renew one-hour capability (mutation) |
+| `upload_objects` | `transfer_id`, optional `cursor`/`limit`; object sizes and hashes |
+| `evidence_pin`, `evidence_unpin`, `evidence_delete` | `task_id`, `artifact_id`; change retention; deletion requires unpinned evidence and confirmed cleanup |
 
 A node has `name`, `template`, optional `ipv4`, `cpus`, `memory_mib`, `gui` and
 `media` booleans (`camera`, `audio_input`, `audio_output`, `accelerate_3d`). Names
@@ -144,11 +191,13 @@ Each UTF-8 packet is at most 64 KiB, with at most 4096 packets and 64 MiB per
 command (including the EOF packet). Larger inputs use file uploads. `stdin`
 records the controller's accepted sequence, byte count and EOF; `next_input` and
 `input_closed` independently record guest consumption. Command specs and input
-packets are separate SQLite records, committed atomically with acceptance state.
+packets are immutable files; SQLite stores their references, lengths, checksums,
+sequence, EOF and delivery/consumption metadata, committed with acceptance state.
 Status updates do not rewrite payloads or load historical input into memory.
-Each schema migration preserves existing task records, command data and events
-in a transaction; an interrupted or invalid step leaves the last completed schema.
-Its receipt reports `persisted` and `delivery` (`submitted` or `pending`). Pending
+This is a fresh-state contract with no legacy schema migration. `stdin` separates
+`next_sequence` (accepted), `delivered_sequence` and `consumed_sequence`. Consumed
+means written to the guest process stdin pipe, not application-level acknowledgement.
+Its receipt reports acceptance and delivery. Pending
 delivery is retried from the durable outbox; guest `next_input` confirms consumption.
 The guest accepts identical retransmissions of each sequence, including after exit.
 Command logs cap at 64 MiB per stream; the process continues after that limit.
@@ -157,18 +206,18 @@ samples. Video caps at 1 GiB. Guest archives remain opaque on the host.
 
 ## Lifecycle and recovery
 
-`task_list` defaults to tasks that are executing, queued or still require cleanup.
+`lab_list` defaults to tasks that are executing, queued or still require cleanup.
 It projects identity, timing, phase, result classification, resource counts,
 activity counts and extension reason/deadline, without command inputs, artifacts,
-logs or conclusion text. `task_get` includes command statuses; `command_get`
-explicitly retrieves a command's spec. Supply `input_from` (starting at 0) to
+logs or conclusion text. `lab_get` is also compact; `lab_inspect` exposes the
+resource ledger and `command_details` explicitly retrieves a command's spec. Supply `input_from` (starting at 0) to
 read retained stdin packets with `input_limit` (default/maximum 16); continue
 from `next_sequence`. List cursors identify
-the last scanned task in submission order and remain valid after task purge;
-advance even across filtered entries. Empty items mean no further matching tasks
+the last scanned task in submission order and remain valid while the 30-day summary exists;
+start a new scan after an expired cursor returns `invalid_argument`. Empty items mean no further matching tasks
 at observation time. Start a fresh scan to observe changing phases.
 
-`task_get` and list items expose three independent fields:
+`lab_get` and list items expose three independent fields:
 
 - `phase`: `queued`, `preparing`, `running`, `ended`. Queued tasks include
   `waiting_reason` and `queue` with position and blocking task ID. Reasons include
@@ -177,7 +226,7 @@ at observation time. Start a fresh scan to observe changing phases.
   reflect current state; mutation receipts remain historical snapshots.
 - `result`: null until execution ends, then `termination` (`finished`, `failed`,
   `cancelled`, `timed_out`, `interrupted`), `conclusion`, `summary`, `reason`, `error`.
-  Lab conclusions come from `task_finish`; Nix conclusions come from the build.
+  Lab conclusions come from `lab_finish`; Nix conclusions come from the build.
 - `cleanup`: `state` (`pending`, `running`, `complete`, `blocked`), `errors` and
   resource records containing `id`, `name`, `state`, `steps`. Resource state is
   `planned`, `allocated` (creation intent may still be in progress),
@@ -188,19 +237,19 @@ at observation time. Start a fresh scan to observe changing phases.
 One continuous test batch occupies the scheduler until resource cleanup is
 confirmed. Prepare inputs locally, collect bounded evidence, finish/cancel and
 wait for complete cleanup before lengthy local work. Queued abandonment uses
-`task_cancel`; no VM deletion is needed for `never_allocated` resources. Activity
+`lab_cancel`; no VM deletion is needed for `never_allocated` resources. Activity
 counts cover supervised commands, open endpoints and captures; detached guest
 services are not inferred from these counts. Empty counts and HTTP disconnects
-do not trigger task destruction. `task_extend` records the continued-work reason
+do not trigger task destruction. `lab_extend` records the continued-work reason
 and new deadline in `hold`; independent node startup budgets remain unchanged.
 
 An offline
-worker rejects new `nixos_run` calls before allocating a receipt; the request can
+worker rejects new `nix_job_create` calls before allocating a receipt; the request can
 be retried after startup. A queued Nix job which has not been submitted fails with
 complete cleanup if the worker disappears. Once build submission may have occurred,
 daemon cleanup must be confirmed locally.
 
-Nix `task_get.execution` records `stage` (`import`, `validate`, `build`, `collect`
+Nix `lab_get.execution` records `stage` (`import`, `validate`, `build`, `collect`
 or `unknown`), a structured `error`, and the worker's completion time when known.
 Its `process` identifies the observed stage, `source: nix_client_wait` (or
 `unconfirmed` when no wait result exists), whether
@@ -225,7 +274,7 @@ that resource's retry. Each step exposes start time, deadline, attempts and erro
 After power-off, deletion waits for the SDK's distinct `session_unlock` boundary,
 then rechecks VM ownership and power state before detaching media and unregistering.
 It does not kill the GUI session owner to force release. Unknown or stalled unlock
-retains a blocked cleanup with the last observed session state. Partial progress is persisted; `task_cleanup` can retry the
+retains a blocked cleanup with the last observed session state. Partial progress is persisted; `lab_cleanup` can retry the
 remaining VirtualBox resources with a new request ID. Cleanup failure keeps the
 scheduler occupied. Restart interrupts active tasks and resumes registered cleanup;
 a result already recorded remains unchanged.
@@ -408,7 +457,7 @@ Host-call read bytes count captured stdout/stderr, not guest file-transfer volum
 Preparation, network, capability and cleanup faults retain 30 seconds before and
 up to 30 seconds after the trigger in a `performance.json` artifact. Nearby faults
 coalesce per task. Collection does not retain VMs or the scheduler; the pending
-deadline is exposed as `task_get.evidence_pending_until`. Service shutdown shortens
+deadline is exposed as `lab_get.evidence_pending_until`. Service shutdown shortens
 the after-window; explicit task purge discards pending evidence. Diagnostics also
 include the available window around collection. These are observations for causal
 analysis, not automatic CPU diagnoses. Sampling semantics follow Linux's
@@ -416,7 +465,7 @@ analysis, not automatic CPU diagnoses. Sampling semantics follow Linux's
 [cgroup v2](https://docs.kernel.org/admin-guide/cgroup-v2.html) and
 [/proc](https://docs.kernel.org/filesystems/proc.html) interfaces.
 
-`task_diagnose` uses a shared 30-second budget. Windows PowerShell collectors
+`lab_diagnose` uses a shared 30-second budget. Windows PowerShell collectors
 receive up to 10 seconds per call to accommodate process startup; other items
 receive up to 5 seconds. Every call also respects the remaining shared budget. Its
 manifest lists each node's observation, selected VM metadata, available VBox log,
@@ -502,12 +551,14 @@ publish capability URLs as public evidence.
 File transfers attach to a queued, preparing or running lab. Prepare the payload
 locally, upload while queued/preparing, then deliver it with `guest_file_put` when
 the node is available. A premature delivery does not seal the upload. Cache
-transfers omit `task_id`; `nixos_run` seals and attaches the prepared cache.
-`transfer_get` exposes `can_upload`, `uploading`, task ownership and content hashes.
+transfers omit `task_id`; `nix_job_create` seals and attaches the prepared cache.
+`upload_get` exposes `can_upload`, `uploading`, task ownership and revision.
+`upload_objects` pages content hashes; `upload_renew` renews scoped URLs.
 Ending a task changes open transfers to read-only `retained` state. Pending writes
 are interrupted and temporary files removed; a cancelled replacement preserves
 the last complete publication. Cleanup confirms pending writes have settled before
-reporting complete. Inputs remain readable until explicit purge.
+reporting complete. A sealed VirtualBox upload can be reused by multiple nodes without retaining
+a host copy per delivery. After lab cleanup it follows the evidence TTL.
 
 File objects are named `blob`. Cache objects are `nix-cache-info`, 32-character
 Nix store hash `.narinfo` files and relative `nar/*.nar[.xz|.bz2|.zst]` files. The
@@ -524,12 +575,50 @@ the replacement's size difference. A transfer holds at most 100000 objects and
 defaults to an 8 GiB byte limit. File access uses
 directory handles and rejects symlinks; host archive extraction is not provided.
 
-Controller state schema 11 migrates schema 9/10 records without moving historical
-input files. Transfer headers, object metadata and command inputs retain their
-separate records, including metadata retained after payload purge. Older executables
-must not open the upgraded database; follow administrator recovery for rollback.
+Controller and worker use fresh **schema 20** databases. Older schemas are rejected
+without conversion. Before startup the user stops both old services, confirms
+all old resources are released and supplies empty state directories/new databases
+and the new configuration. Baselines and the host Nix store are independently
+retained. See [administrator preparation](preparation.md#service-supervision).
 
-Artifacts include length and SHA-256. Inputs/evidence are retained until explicit
-purge unless `storage.retention_days` is positive. Purge retains task summary, conclusions,
-receipt identity/hash/status, events and cleanup records. Old receipt payloads are replaced by a purged marker. The worker drops GC roots only
-on purge. Failed build directories remain administrator-managed.
+One Go module separates VirtualBox lab state/backends from Nix job state/worker
+adaptation, sharing authentication, MCP/HTTP, FIFO admission, SQLite and files.
+SQLite uses indexed execution, lab, Nix job, node, command, operation/dispatch,
+upload/object and evidence entities. Bodies, stdin and logs are files. A state
+transition updates changed entity rows; startup loads active/recovery objects,
+with historical queries loaded on demand. Healthy probes and telemetry remain
+bounded in memory; durable fault evidence follows the same retention policy.
+
+| Data                                                        | Default retention           |
+| ----------------------------------------------------------- | --------------------------- |
+| Active execution, unresolved cleanup, recovery dependencies | Until confirmed release     |
+| Successful evidence and diagnostic detail                   | 1 day after terminal time   |
+| Failed/cancelled/timed-out/interrupted evidence and detail  | 7 days after terminal time  |
+| Compact terminal summary and idempotency receipt            | 30 days after terminal time |
+| Pinned evidence and reading metadata                        | Until unpin                 |
+| Unbound inactive upload                                     | 1 idle hour                 |
+
+Pinning does not retain VMs or the shared slot. Evidence has a **20 GiB budget**
+and **16 GiB reclamation low watermark**, counting pinned/protected evidence.
+Pressure reclaims oldest successful evidence before oldest failed evidence.
+If protected content prevents meeting the budget, new labs, Nix jobs and uploads
+pause; existing execution, control, diagnostics and cleanup continue. Admission
+reopens after space recovery. Input staging has a **16 GiB total** and **8 GiB
+per-transfer maximum**; active dependencies are protected.
+
+Nix upload caches are released after reliable import when recovery no longer
+needs them. Worker evidence inventory is paged; the controller verifies each
+size/SHA-256 and commits durable files/references before acknowledging the complete
+manifest digest. Acknowledgement releases worker copies and GC roots. Interrupted
+handoff retries finish file and index cleanup. Host Nix-store GC is independent.
+VM clone disks and runtime work directories are removed at resource cleanup.
+Nix does not use `--keep-failed` by default; `nix.keep_failed: true` is an explicit administrator diagnostic option.
+An administrator retaining build directories takes responsibility for their separate cleanup.
+
+TTL collection physically deletes eligible file bodies and entity rows in batches,
+including old events and receipt intents. It checkpoints WAL and uses incremental
+vacuum; it does not keep permanent tombstones. Immutable publication commits its
+index only after file durability. Failed uploads, unreferenced body versions and
+handoff remnants have restart/sweep recovery paths. Cleanup dependencies and pins
+are protected from reclamation. `execution_delete` explicitly removes eligible
+detail early, retaining pins and the bounded summary/idempotency lifetime.

@@ -65,7 +65,7 @@ let
   };
   goBase = {
     pname = "vm-test-mcp";
-    version = "0.11.0";
+    version = "0.12.0";
     src = source;
     vendorHash = "sha256-utwEeEeOIhFTZl66lwO+ErGwa1gl+rkJL0qMAlUOx8k=";
     tags = [ "sqlite_omit_load_extension" ];

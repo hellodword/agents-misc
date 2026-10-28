@@ -17,17 +17,20 @@ import (
 	"time"
 )
 
-const Version = "0.11.0"
+const Version = "0.12.0"
 const MaxJSON = 1 << 20
 
 // NixExecution reports worker execution independently of scheduler and daemon
 // cleanup. Process results describe the local Nix client, not a QEMU exit.
 type NixExecution struct {
-	Stage            string            `json:"stage"`
-	Process          *NixProcessResult `json:"process,omitempty"`
-	Error            *Error            `json:"error,omitempty"`
-	PersistenceError *Error            `json:"persistence_error,omitempty"`
-	Finished         *time.Time        `json:"finished,omitempty"`
+	Imported             bool              `json:"imported"`
+	ResourcesReleased    bool              `json:"resources_released"`
+	ResourceConfirmation string            `json:"resource_confirmation,omitempty"`
+	Stage                string            `json:"stage"`
+	Process              *NixProcessResult `json:"process,omitempty"`
+	Error                *Error            `json:"error,omitempty"`
+	PersistenceError     *Error            `json:"persistence_error,omitempty"`
+	Finished             *time.Time        `json:"finished,omitempty"`
 }
 type NixProcessResult struct {
 	Stage      string `json:"stage"`

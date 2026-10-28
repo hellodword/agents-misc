@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hellodword/agents-misc/vm-test-mcp/internal/state"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
@@ -248,6 +249,7 @@ func (s *Server) cleanupNix(ctx context.Context, t, snapshot *Task) []error {
 		return []error{err}
 	}
 	var result struct {
+		NeverAccepted bool               `json:"never_accepted"`
 		Cleanup       string             `json:"cleanup"`
 		Artifacts     []*Artifact        `json:"artifacts"`
 		EvidenceError bool               `json:"evidence_error"`
@@ -269,24 +271,56 @@ func (s *Server) cleanupNix(ctx context.Context, t, snapshot *Task) []error {
 		return []error{wire.Fail("cleanup_required", "Nix daemon cleanup is not confirmed")}
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if result.EvidenceError {
 		s.event(t, "evidence_error", "Some Nix evidence could not be collected; daemon cleanup was confirmed")
 	}
 	for _, a := range result.Artifacts {
 		if wire.IDPattern.MatchString(a.ID) {
-			t.Artifacts = append(t.Artifacts, a)
+			found := false
+			for _, old := range t.Artifacts {
+				if old.ID == a.ID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Artifacts = append(t.Artifacts, a)
+			}
 		}
 	}
-	s.save(t)
+	err = s.db.Save(ctx, state.Document{Kind: "task", ID: t.ID, Value: t})
+	snapshot = clone(t)
+	s.mu.Unlock()
+	if err != nil {
+		return []error{err}
+	}
+	if !snapshot.HandoffComplete {
+		if !result.NeverAccepted {
+			if _, err = s.backend.Nix(ctx, "handoff", snapshot); err != nil {
+				return []error{err}
+			}
+		}
+		s.mu.Lock()
+		t.HandoffComplete = true
+		s.save(t)
+		s.mu.Unlock()
+	}
+	s.mu.Lock()
+	if input, loadErr := s.transfer(t.CacheID); loadErr == nil {
+		err = s.removeTransfer(input)
+	}
+	s.mu.Unlock()
+	if err != nil {
+		return []error{err}
+	}
 	return nil
 }
 
 func (s *Server) cleanupTask(id string) (any, error) {
 	s.mu.Lock()
 	t, err := s.task(id)
-	if err == nil && (!t.Terminal() || t.Kind != "lab") {
-		err = wire.Fail("invalid_state", "An ended VirtualBox task is required")
+	if err == nil && !t.Terminal() {
+		err = wire.Fail("invalid_state", "An ended execution is required")
 	}
 	s.mu.Unlock()
 	if err != nil {

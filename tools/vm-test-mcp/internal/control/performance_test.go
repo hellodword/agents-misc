@@ -28,7 +28,7 @@ func (delayedRunner) Run(ctx context.Context, _ string, _ []string, _ io.Reader)
 func TestGuestCallSeparatesCapacityWaitFromExecution(t *testing.T) {
 	cfg := testConfig(t)
 	b := &VBoxBackend{Config: cfg, Runner: delayedRunner{}, Performance: telemetry.New()}
-	s, task, _ := fixtureLab(t, b, time.Second)
+	s, task, _ := fixtureLab(t, &Backends{VBoxBackend: b}, time.Second)
 	b.Runner = delayedRunner{}
 	if err := os.MkdirAll(b.runtime(task), 0700); err != nil {
 		t.Fatal(err)

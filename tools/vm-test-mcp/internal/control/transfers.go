@@ -32,8 +32,9 @@ type capability struct {
 const uploadBudget = 5 * time.Minute
 
 type Upload struct {
-	cancel context.CancelFunc
-	done   chan struct{}
+	reserved int64
+	cancel   context.CancelFunc
+	done     chan struct{}
 }
 type uploadReader struct {
 	ctx context.Context
@@ -134,22 +135,14 @@ func (s *Server) transferView(t *Transfer) map[string]any {
 	if t.Kind == "file" {
 		u += "/blob"
 	}
-	type metadata struct {
-		Size   int64  `json:"size"`
-		SHA256 string `json:"sha256"`
-	}
-	objects := make(map[string]metadata, len(t.Objects))
-	for name, object := range t.Objects {
-		objects[name] = metadata{object.Size, object.SHA256}
-	}
-	return map[string]any{"id": t.ID, "task_id": t.TaskID, "kind": t.Kind, "state": t.State, "can_upload": canUpload, "uploading": s.uploading[t.ID] != nil, "objects": objects, "url": u, "expires": expires}
+	return map[string]any{"id": t.ID, "task_id": t.TaskID, "kind": t.Kind, "state": t.State, "can_upload": canUpload, "uploading": s.uploading[t.ID] != nil, "bytes": t.Bytes, "object_count": len(t.Objects), "url": u, "expires": expires}
 }
 func (s *Server) createTransfer(a TransferRequest) (any, error) {
 	if a.Kind != "file" && a.Kind != "cache" {
 		return nil, wire.Fail("invalid_argument", "Transfer kind must be file or cache")
 	}
 	if a.Kind == "cache" && a.TaskID != "" {
-		return nil, wire.Fail("invalid_argument", "Cache uploads are prepared before nixos_run and must omit task_id")
+		return nil, wire.Fail("invalid_argument", "Cache uploads are prepared before nix_job_create and must omit task_id")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -167,7 +160,13 @@ func (s *Server) createTransfer(a TransferRequest) (any, error) {
 	} else if a.Kind == "file" {
 		return nil, wire.Fail("invalid_argument", "File uploads require a task_id")
 	}
-	t := &Transfer{ID: wire.ID(), TaskID: a.TaskID, Kind: a.Kind, State: "open", Created: time.Now().UTC(), Objects: map[string]Object{}}
+	if err := s.admission(); err != nil {
+		return nil, err
+	}
+	if s.inputUsage() >= s.cfg.Storage.InputBytes {
+		return nil, wire.Fail("quota_exceeded", "Input staging budget is full")
+	}
+	t := &Transfer{ID: wire.ID(), TaskID: a.TaskID, Kind: a.Kind, State: "open", Created: time.Now().UTC(), Updated: time.Now().UTC(), Objects: map[string]Object{}}
 	if e := s.root.MkdirAll(path.Join("transfers", t.ID), 0700); e != nil {
 		return nil, e
 	}
@@ -374,7 +373,7 @@ func (s *Server) Files(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		t, e := s.task(ids[0])
 		var file string
-		if e == nil && !t.Purged {
+		if e == nil {
 			for _, a := range t.Artifacts {
 				if a.ID == ids[1] {
 					file = a.Path
@@ -405,8 +404,8 @@ func (s *Server) Files(w http.ResponseWriter, r *http.Request) {
 	}
 	defer lock.Unlock()
 	s.mu.Lock()
-	t := s.transfers[cap.ID]
-	if t == nil || t.State == "purged" || !objectName(t.Kind, name) {
+	t, loadErr := s.transfer(cap.ID)
+	if loadErr != nil || t.State == "purged" || !objectName(t.Kind, name) {
 		s.mu.Unlock()
 		httpError(w, 404, wire.Fail("not_found", "Object not found"))
 		return
@@ -437,11 +436,24 @@ func (s *Server) Files(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 413, wire.Fail("quota_exceeded", "Transfer object count exceeds 100000"))
 		return
 	}
-	quota := s.cfg.Storage.MaxUploadBytes - t.Bytes + previous.Size
+	quota := min(s.cfg.Storage.MaxUploadBytes-t.Bytes+previous.Size, s.cfg.Storage.InputBytes-s.inputUsage())
+	if err := s.admission(); err != nil {
+		s.mu.Unlock()
+		httpError(w, 507, err)
+		return
+	}
+	if r.ContentLength > quota || quota < 0 {
+		s.mu.Unlock()
+		httpError(w, 413, wire.Fail("quota_exceeded", "Input staging budget exceeded"))
+		return
+	}
+	if r.ContentLength >= 0 {
+		quota = min(quota, r.ContentLength)
+	}
 	if strings.HasSuffix(name, ".narinfo") || name == "nix-cache-info" {
 		quota = min(quota, 65536)
 	}
-	upload := &Upload{cancel: cancel, done: make(chan struct{})}
+	upload := &Upload{reserved: quota, cancel: cancel, done: make(chan struct{})}
 	s.uploading[t.ID] = upload
 	s.wg.Add(1)
 	s.mu.Unlock()
@@ -509,6 +521,8 @@ func (s *Server) publishTransferObject(ctx context.Context, t *Transfer, name st
 	old := t.Objects[name]
 	t.Bytes += object.Size - old.Size
 	t.Objects[name] = object
+	t.Updated = time.Now().UTC()
+	s.persist(state.Document{Kind: "transfer", ID: t.ID, Value: t})
 	if old.File != "" {
 		if err := s.root.Remove(path.Join("transfers", t.ID, old.File)); err != nil && !os.IsNotExist(err) {
 			slog.Warn("superseded input file retained until restart", "transfer_id", t.ID, "error", err)

@@ -16,6 +16,7 @@ import (
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/config"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/control"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/hostexec"
+	"github.com/hellodword/agents-misc/vm-test-mcp/internal/nixos"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/worker"
 )
@@ -46,9 +47,9 @@ func run() int {
 		fmt.Println("{\"valid\":true}")
 		return 0
 	}
-	b := &control.VBoxBackend{Config: cfg, Runner: hostexec.Exec{}}
+	b := &control.Backends{VBoxBackend: &control.VBoxBackend{Config: cfg, Runner: hostexec.Exec{}}, NixBackend: &nixos.Backend{StateDir: cfg.Service.StateDir, MaxEvidenceBytes: cfg.Storage.MaxUploadBytes}}
 	if cfg.Nix.Socket != "" {
-		b.Worker = worker.NewClient(cfg.Nix.Socket)
+		b.NixBackend.Client = worker.NewClient(cfg.Nix.Socket)
 	}
 	s, e := control.New(cfg, b)
 	if e != nil {
@@ -56,7 +57,7 @@ func run() int {
 		return 1
 	}
 	defer s.Close()
-	b.CacheURL = func(id string) string { u, _ := url.Parse(s.WorkerCacheURL(id)); return u.Path }
+	b.NixBackend.CacheURL = func(id string) string { u, _ := url.Parse(s.WorkerCacheURL(id)); return u.Path }
 	if *reconcile != "" {
 		if e = s.Reconcile(*reconcile); e != nil {
 			slog.Error("cleanup remains unresolved", "error", e)

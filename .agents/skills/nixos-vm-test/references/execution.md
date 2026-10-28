@@ -1,14 +1,14 @@
 # Executing NixOS VM tests
 
 Evaluate in the development container using the tested project's locked nixpkgs.
-The prepared VM Test MCP 0.11 worker submits the derivation to the physical host's
+The prepared VM Test MCP 0.12 worker submits the derivation to the physical host's
 Nix daemon; QEMU nodes run directly on host KVM inside its strict sandbox.
 
 ## Submission
 
-Use `service_get` and `task_list`, then allocate a cache with
-`transfer_create(request_id=…, kind="cache")`. Poll `operation_get` for its transfer
-ID and upload URL. Locate the prepared `vm-test-submit` executable first and run
+Use `service_get` and `nix_job_list`, then allocate a cache with
+`upload_create(request_id=…, kind="cache")`. Read the transfer ID and upload URL
+from `operation.result`; continue a timed-out observation with its `wait.continue`. Locate the prepared `vm-test-submit` executable first and run
 `vm-test-submit --version`; this reads no configuration and performs no upload.
 Compare its source/build identity with `service_get.build` and the worker identity
 under `service_get.backends.nixos.identity.build`. A missing helper is a consumer
@@ -33,7 +33,7 @@ their cache identities. New executions need new request IDs and workspaces.
 
 It copies the derivation closure into a standard local binary cache, then uploads
 cache objects over bounded HTTP. Submit its JSON (`request_id`, `cache_id`,
-`derivation`, `system`) through `nixos_run`. Submission validates/seals the cache
+`derivation`, `system`) through `nix_job_create`. Submission validates/seals the cache
 and queues work. `worker_unavailable` before acceptance does not reserve the
 request ID; retain the uploaded cache and retry the same request after the worker
 starts. Do not submit duplicate jobs to work around an uncertain accepted execution. If the project's wrapper hides standard test metadata/override
@@ -45,30 +45,43 @@ the worker a trusted Nix user to work around a cache failure.
 
 ## Observation and cleanup
 
-Follow the operation, then `task_get`, `task_events` and byte-offset `task_log`.
-`task_get` separates `phase`, `result` and `cleanup.state`; completion is
+The initial `nix_job_create` waits for execution, evidence and cleanup, for at most
+600 seconds. Use Codex CLI 0.163.0+ and `tool_timeout_sec=660`. If the window expires,
+call `wait` with the returned `continue` targets; expiry is not execution failure.
+For example, a 15-minute execution uses ten minutes plus one five-minute continuation.
+SSE sends invisible transport heartbeats every 15 seconds. HTTP disconnect, tool
+timeout and MCP cancellation stop observation only. Use `nix_job_get`,
+`execution_events` and byte-offset `execution_log` for explicit diagnosis.
+`nix_job_get` separates `phase`, `result` and `cleanup.state`; completion is
 `phase: ended`, with the build conclusion under `result`. Logs are base64 bytes
 with `next_offset`. The FIFO queue is shared with VirtualBox
 labs. The daemon owns build parallelism; test definitions own node CPUs/RAM.
 
-List completed output files with `artifact_list` and retrieve scoped URLs with
-`artifact_get`. The worker reads only registered store output roots, rejects
-symlink boundaries, and retains GC roots until purge. Paths printed by test code
+List completed output files with `evidence_list` and retrieve scoped URLs with
+`evidence_get`. The worker reads only registered store output roots, rejects
+symlink boundaries, and releases worker copies/GC roots after the controller
+verifies sizes and hashes and commits durable evidence references. Imported upload
+caches are released when recovery no longer needs them; host Nix GC is independent. Paths printed by test code
 do not authorize host file reads. Failed-build directories belong to administrator
 diagnosis; task stderr/logs remain available.
 
 Prepare and evaluate inputs before submitting a batch to the shared executor.
-`task_list` defaults to compact active tasks; use `phase=ended` or `all` for
+`nix_job_list` defaults to compact active tasks; use `phase=ended` or `all` for
 history and its task-ID cursor for paging. Queue details identify occupied or
 blocked cleanup without exposing another task's command inputs.
 
-`task_cancel` requests cancellation, including abandonment while queued.
+`nix_job_cancel` requests cancellation, including abandonment while queued.
 Wait for `cleanup.state: complete` before lengthy local edits or reporting;
 the next execution rejoins the queue. An interrupted daemon build can have
 `cleanup.state: blocked`; this continues to occupy the scheduler until the administrator
 verifies teardown and performs local reconciliation. Reconnect to the original
-task after HTTP loss. `task_purge` is accepted only after terminal state and
-complete cleanup. Evidence is retained by default.
+task after HTTP loss. `execution_delete` is accepted only after terminal state and
+complete cleanup. Defaults retain successful evidence for 1 day, other evidence
+for 7 days, and compact summaries/receipts for 30 days. Use `evidence_pin`/`evidence_unpin`
+for longer retention. Pins do not retain the executor. Evidence budgets are 20 GiB
+with reclamation to 16 GiB; protected data can block new admission. Input staging
+is 16 GiB total and at most 8 GiB per transfer; inactive unbound uploads expire
+after one hour. Renew capabilities explicitly with `upload_renew`.
 
 ## Acceptance and diagnosis
 

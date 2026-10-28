@@ -47,17 +47,17 @@ func (f *runFixture) tool(_ context.Context, r *mcp.CallToolRequest) (*mcp.CallT
 	switch r.Params.Name {
 	case "service_get":
 		value = map[string]any{"backends": map[string]any{"nixos": map[string]any{"available": f.available, "waiting_reason": f.waitingReason}}}
-	case "transfer_create":
+	case "upload_create":
 		f.creates++
 		value = receipt{ID: strings.Repeat("a", 32), State: "pending"}
 	case "operation_get":
 		value = receipt{ID: strings.Repeat("a", 32), State: "succeeded", Result: wire.JSON(transfer)}
-	case "transfer_get":
+	case "upload_renew":
 		if f.submits != 0 {
 			transfer["state"] = "sealed"
 		}
-		value = transfer
-	case "nixos_run":
+		value = receipt{ID: strings.Repeat("f", 32), State: "succeeded", Result: wire.JSON(transfer)}
+	case "nix_job_create":
 		f.submits++
 		request := string(wire.JSON(args))
 		if f.firstRequest != "" && f.firstRequest != request {
@@ -68,7 +68,11 @@ func (f *runFixture) tool(_ context.Context, r *mcp.CallToolRequest) (*mcp.CallT
 			return nil, fmt.Errorf("simulated lost submission reply")
 		}
 		value = receipt{ID: strings.Repeat("d", 32), State: "succeeded", Result: wire.JSON(map[string]any{"id": strings.Repeat("b", 32)})}
-	case "task_get":
+	case "nix_job_get", "wait":
+		if r.Params.Name == "wait" && args["targets"].([]any)[0].(map[string]any)["kind"] == "operation" {
+			value = map[string]any{"reason": "satisfied", "targets": []any{map[string]any{"summary": receipt{ID: strings.Repeat("a", 32), State: "succeeded", Result: wire.JSON(transfer)}}}}
+			break
+		}
 		f.polls++
 		state, cleanup := "finished", f.cleanup
 		if f.polls == 1 {
@@ -77,7 +81,7 @@ func (f *runFixture) tool(_ context.Context, r *mcp.CallToolRequest) (*mcp.CallT
 			cleanup = "running"
 		}
 		value = map[string]any{"id": strings.Repeat("b", 32), "phase": map[bool]string{true: "queued", false: "ended"}[state == "queued"], "result": map[string]any{"termination": state, "conclusion": "passed"}, "cleanup": map[string]any{"state": cleanup}, "artifacts": []any{map[string]any{"id": strings.Repeat("e", 32), "name": "test.log"}}}
-	case "task_log":
+	case "execution_log":
 		if f.polls == 1 {
 			value, failed = map[string]any{"error": wire.Fail("not_found", "Log not created")}, true
 			break
@@ -91,6 +95,14 @@ func (f *runFixture) tool(_ context.Context, r *mcp.CallToolRequest) (*mcp.CallT
 	default:
 		return nil, fmt.Errorf("unexpected tool %s", r.Params.Name)
 	}
+	if op, ok := value.(receipt); ok && r.Params.Name != "operation_get" {
+		value = map[string]any{"operation": op, "wait": map[string]any{"reason": "satisfied"}}
+	}
+	if r.Params.Name == "wait" {
+		if task, ok := value.(map[string]any); ok && task["phase"] != nil {
+			value = map[string]any{"reason": "satisfied", "targets": []any{map[string]any{"summary": task}}, "continue": args["targets"]}
+		}
+	}
 	return &mcp.CallToolResult{IsError: failed, StructuredContent: value, Content: []mcp.Content{&mcp.TextContent{Text: string(wire.JSON(value))}}}, nil
 }
 
@@ -98,7 +110,7 @@ func newRunFixture(t *testing.T) (*runFixture, RunOptions, string) {
 	t.Helper()
 	f := &runFixture{available: true, cleanup: "complete", log: append(bytes.Repeat([]byte("log line\n"), 9000), []byte("assertions passed\n")...)}
 	server := mcp.NewServer(&mcp.Implementation{Name: "synthetic", Version: "1"}, nil)
-	for _, name := range []string{"service_get", "transfer_create", "transfer_get", "operation_get", "nixos_run", "task_get", "task_log"} {
+	for _, name := range []string{"service_get", "upload_create", "upload_renew", "operation_get", "nix_job_create", "nix_job_get", "wait", "execution_log"} {
 		server.AddTool(&mcp.Tool{Name: name, InputSchema: map[string]any{"type": "object"}}, f.tool)
 	}
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true, DisableLocalhostProtection: true})
@@ -140,7 +152,7 @@ func newRunFixture(t *testing.T) (*runFixture, RunOptions, string) {
 	if err := os.WriteFile(filepath.Join(work, "cache", "nar", "fixture.nar.xz"), []byte("synthetic"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	return f, RunOptions{Options: Options{Nix: exe, Test: ".#checks.x86_64-linux.smoke", WorkDir: work}, Endpoint: f.url + "/mcp", Token: "unit-token", pollInterval: time.Millisecond}, trace
+	return f, RunOptions{Options: Options{Nix: exe, Test: ".#checks.x86_64-linux.smoke", WorkDir: work}, Endpoint: f.url + "/mcp", Token: "unit-token"}, trace
 }
 
 func TestAutomaticRunWaitsForCleanupAndResumesLostReply(t *testing.T) {

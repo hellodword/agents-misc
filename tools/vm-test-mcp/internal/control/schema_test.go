@@ -113,7 +113,7 @@ func TestSchemaRejectsBytesWithoutEchoingContentOrAllocatingReceipt(t *testing.T
 		{"request_id": "invalid-argument", "task_id": wire.ID(), "node_id": wire.ID(), "argv": []string{strings.Repeat(marker, 2000)}},
 		{"request_id": "byte-limit", "task_id": wire.ID(), "node_id": wire.ID(), "argv": []string{strings.Repeat("界", 12000)}},
 	} {
-		_, err = s.Call(context.Background(), "command_start", wire.JSON(args))
+		_, err = s.accept(context.Background(), "command_start", wire.JSON(args))
 		if err == nil || wire.Safe(err).Code != "invalid_argument" || wire.Safe(err).Category != "validation" || strings.Contains(string(wire.JSON(wire.Safe(err))), marker) {
 			t.Fatal(err)
 		}

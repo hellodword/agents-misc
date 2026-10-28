@@ -33,7 +33,7 @@ func TestMaliciousNarinfoAndCacheSeal(t *testing.T) {
 		}
 	}
 	s, _ := testServer(t)
-	v := successful(t, s, "transfer_create", TransferRequest{Change: Change{"cache"}, Kind: "cache"}).Result.(map[string]any)
+	v := successful(t, s, "upload_create", TransferRequest{Change: Change{"cache"}, Kind: "cache"}).Result.(map[string]any)
 	id := v["id"].(string)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -238,7 +238,7 @@ func TestDeadlineExtensionNetworkAndPurge(t *testing.T) {
 	task, _ := s.task(lab.ID)
 	old := *task.Deadline
 	s.mu.Unlock()
-	successful(t, s, "task_extend", ExtendRequest{TaskChange: TaskChange{Change: Change{"extend"}, TaskID: TaskID{lab.ID}}, Seconds: 10, Reason: "Complete network recovery assertions"})
+	successful(t, s, "lab_extend", ExtendRequest{TaskChange: TaskChange{Change: Change{"extend"}, TaskID: TaskID{lab.ID}}, Seconds: 10, Reason: "Complete network recovery assertions"})
 	s.mu.Lock()
 	if !task.Deadline.Equal(old.Add(10*time.Second)) || task.Hold == nil || !task.Hold.Until.Equal(*task.Deadline) || task.Hold.Reason != "Complete network recovery assertions" {
 		t.Fatal("wrong extended deadline")
@@ -273,7 +273,7 @@ func TestDeadlineExtensionNetworkAndPurge(t *testing.T) {
 		defer s.mu.Unlock()
 		return task.State == "timed_out" && task.Cleanup == "complete"
 	})
-	successful(t, s, "task_purge", TaskChange{Change: Change{"purge"}, TaskID: TaskID{lab.ID}})
+	successful(t, s, "execution_delete", TaskChange{Change: Change{"purge"}, TaskID: TaskID{lab.ID}})
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !task.Purged || task.State != "timed_out" {
@@ -297,7 +297,7 @@ func TestRestartRetainsOperationReceipt(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer s.Close()
-	value, e := s.Call(context.Background(), "operation_get", wire.JSON(OperationRequest{op.ID}))
+	value, e := s.accept(context.Background(), "operation_get", wire.JSON(OperationRequest{op.ID}))
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -309,6 +309,31 @@ func TestRestartRetainsOperationReceipt(t *testing.T) {
 type recordingRunner struct {
 	mu    sync.Mutex
 	calls [][]string
+}
+
+func TestVideoCaptureCollectsVBox72ScreenFile(t *testing.T) {
+	b := &VBoxBackend{Config: testConfig(t), Runner: &recordingRunner{}}
+	task := newTask("lab", 60)
+	capture := &Capture{ID: wire.ID(), Kind: "video"}
+	if err := os.MkdirAll(b.runtime(task), 0700); err != nil {
+		t.Fatal(err)
+	}
+	// This is the path reported by the real VirtualBox recording log, distinct
+	// from the base filename passed to `controlvm recording filename`.
+	for screen, content := range []string{"first screen video", "second screen video"} {
+		name := filepath.Join(b.runtime(task), fmt.Sprintf("capture-%s-screen%d.webm", capture.ID, screen))
+		if err := os.WriteFile(name, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dest := filepath.Join(b.Config.Service.StateDir, "tasks", task.ID, "artifacts", wire.ID())
+	if err := b.capture(context.Background(), task, &Node{UUID: wire.UUID()}, NodeAction{Action: "capture_stop", Capture: capture, Local: dest}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(dest)
+	if err != nil || string(got) != "first screen video" {
+		t.Fatal(string(got), err)
+	}
 }
 
 type downloadRunner struct {
@@ -480,9 +505,9 @@ func TestPurgeRemovesPayloadFromReceipts(t *testing.T) {
 	marker := "synthetic-private-command-input"
 	a := StartRequest{NodeChange: NodeChange{Change: Change{"payload-command"}, NodeID: NodeID{TaskID: TaskID{lab.ID}, NodeID: lab.Nodes[0].ID}}, Argv: []string{"app", marker}, Env: map[string]string{"SYNTHETIC": marker}}
 	successful(t, s, "command_start", a)
-	successful(t, s, "task_finish", FinishRequest{TaskChange: TaskChange{Change: Change{"payload-finish"}, TaskID: TaskID{lab.ID}}, Conclusion: "inconclusive", Summary: "synthetic retention check"})
+	successful(t, s, "lab_finish", FinishRequest{TaskChange: TaskChange{Change: Change{"payload-finish"}, TaskID: TaskID{lab.ID}}, Conclusion: "inconclusive", Summary: "synthetic retention check"})
 	waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); v, _ := s.task(lab.ID); return v.Cleanup == "complete" })
-	successful(t, s, "task_purge", TaskChange{Change: Change{"payload-purge"}, TaskID: TaskID{lab.ID}})
+	successful(t, s, "execution_delete", TaskChange{Change: Change{"payload-purge"}, TaskID: TaskID{lab.ID}})
 	for _, kind := range []string{"task", "operation"} {
 		rows, e := s.db.List(context.Background(), kind)
 		if e != nil {

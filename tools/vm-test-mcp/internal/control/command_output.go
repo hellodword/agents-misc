@@ -228,6 +228,12 @@ func (s *Server) readCommand(ctx context.Context, t *Task, id string, sendInput 
 	s.mu.Lock()
 	changed := previous.State != status.State || previous.Stage != status.Stage || previous.Final != status.Final || previous.NextInput != status.NextInput || previous.InputClosed != status.InputClosed || c.Retained.Stdout.Bytes != retained.Stdout.Bytes || c.Retained.Stderr.Bytes != retained.Stderr.Bytes
 	c.CommandStatus, c.Retained = status, retained
+	c.Stdin.Consumed = status.NextInput
+	c.Stdin.Delivered = max(c.Stdin.Delivered, status.NextInput)
+	if err := s.db.InputProgress(ctx, t.ID, id, c.Stdin.Delivered, c.Stdin.Consumed); err != nil {
+		s.mu.Unlock()
+		return false
+	}
 	c.successfulPoll(now, changed)
 	// A valid record is direct evidence, including a terminal record whose next
 	// poll is unnecessary. The node's recovery hysteresis is independent.
@@ -256,6 +262,12 @@ func (s *Server) readCommand(ctx context.Context, t *Task, id string, sendInput 
 		if _, err := s.backend.Action(ctx, tc, nc, NodeAction{Action: "command_input", CommandID: id, Input: &packet}); err != nil {
 			break
 		}
+		s.mu.Lock()
+		if next, err := s.db.DeliveredInput(ctx, t.ID, id, packet.Sequence); err == nil {
+			c.Stdin.Delivered = next
+			s.save(t)
+		}
+		s.mu.Unlock()
 	}
 	return moreOut || moreErr
 }

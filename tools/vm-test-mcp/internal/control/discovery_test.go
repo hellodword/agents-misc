@@ -12,7 +12,7 @@ import (
 
 func taskView(t *testing.T, s *Server, id string) map[string]any {
 	t.Helper()
-	v, err := s.Call(context.Background(), "task_get", wire.JSON(TaskID{id}))
+	v, err := s.accept(context.Background(), "lab_inspect", wire.JSON(TaskID{id}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,7 +27,7 @@ func TestBatchReleaseQueueAndReconnect(t *testing.T) {
 	next := op.Result.(map[string]any)["id"].(string)
 	queued := taskView(t, s, next)
 	q := queued["queue"].(map[string]any)
-	if queued["phase"] != "queued" || q["position"] != 1 || q["reason"] != "executor_occupied" || q["blocking_task_id"] != lab.ID {
+	if queued["phase"] != "queued" || q["position"] != float64(1) || q["reason"] != "executor_occupied" || q["blocking_task_id"] != lab.ID {
 		t.Fatal(queued)
 	}
 	// No command or HTTP connection is necessary to keep a service fixture alive.
@@ -38,7 +38,7 @@ func TestBatchReleaseQueueAndReconnect(t *testing.T) {
 	if retry.ID != op.ID || taskView(t, s, next)["phase"] != "queued" {
 		t.Fatal("reconnect duplicated or started a blocked batch")
 	}
-	successful(t, s, "task_finish", FinishRequest{TaskChange: TaskChange{Change: Change{"release-one"}, TaskID: TaskID{lab.ID}}, Conclusion: "inconclusive", Summary: "Evidence retained; release before local changes"})
+	successful(t, s, "lab_finish", FinishRequest{TaskChange: TaskChange{Change: Change{"release-one"}, TaskID: TaskID{lab.ID}}, Conclusion: "inconclusive", Summary: "Evidence retained; release before local changes"})
 	waitFor(t, func() bool { return taskView(t, s, next)["phase"] == "running" })
 	old := taskView(t, s, lab.ID)
 	cleanup := old["cleanup"].(map[string]any)
@@ -50,7 +50,7 @@ func TestBatchReleaseQueueAndReconnect(t *testing.T) {
 			t.Fatal(cleanup)
 		}
 	}
-	successful(t, s, "task_cancel", TaskChange{Change: Change{"release-two"}, TaskID: TaskID{next}})
+	successful(t, s, "lab_cancel", TaskChange{Change: Change{"release-two"}, TaskID: TaskID{next}})
 	waitFor(t, func() bool { return taskView(t, s, next)["cleanup"].(map[string]any)["state"] == "complete" })
 }
 
@@ -59,7 +59,7 @@ func TestQueuedCancellationHasNoAllocatedResources(t *testing.T) {
 	lab := createLab(t, s, "blocker")
 	op := successful(t, s, "lab_create", LabRequest{RequestID: "abandoned", Nodes: []NodeRequest{{Name: "one", Template: "windows"}}})
 	id := op.Result.(map[string]any)["id"].(string)
-	successful(t, s, "task_cancel", TaskChange{Change: Change{"abandon"}, TaskID: TaskID{id}})
+	successful(t, s, "lab_cancel", TaskChange{Change: Change{"abandon"}, TaskID: TaskID{id}})
 	view := taskView(t, s, id)
 	cleanup := view["cleanup"].(map[string]any)
 	if view["phase"] != "ended" || cleanup["state"] != "complete" || view["started"] != nil {
@@ -98,9 +98,10 @@ func TestDiscoveryProjectsHistoryAndKeepsStableCursor(t *testing.T) {
 	}
 	next := newTask("lab", 60)
 	s.tasks = []*Task{history, next}
+	s.save(next)
 	list := func(request TaskListRequest) map[string]any {
 		t.Helper()
-		v, err := s.Call(context.Background(), "task_list", wire.JSON(request))
+		v, err := s.accept(context.Background(), "lab_list", wire.JSON(request))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -121,6 +122,7 @@ func TestDiscoveryProjectsHistoryAndKeepsStableCursor(t *testing.T) {
 	// Newer submissions do not shift a cursor anchored to a retained task ID.
 	newer := newTask("lab", 60)
 	s.tasks = append(s.tasks, newer)
+	s.save(newer)
 	page := list(TaskListRequest{Phase: "all", Limit: 1, Cursor: first["next_cursor"].(string)})
 	if page["items"].([]any)[0].(map[string]any)["id"] != next.ID {
 		t.Fatal(page)
@@ -130,12 +132,12 @@ func TestDiscoveryProjectsHistoryAndKeepsStableCursor(t *testing.T) {
 	if command["state"] != "exited" || command["spec"] != nil || command["input"] != nil {
 		t.Fatal("task status did not project command status")
 	}
-	full, err := s.Call(context.Background(), "command_get", wire.JSON(CommandRequest{TaskID: TaskID{history.ID}, CommandID: history.Commands[0].ID}))
+	full, err := s.accept(context.Background(), "command_details", wire.JSON(CommandRequest{TaskID: TaskID{history.ID}, CommandID: history.Commands[0].ID}))
 	if err != nil || full.(*CommandDetails).Spec.Env["FIXTURE"] != marker || full.(*CommandDetails).Stdin.NextSequence != 1 {
 		t.Fatal("explicit command detail lost spec or input progress", err)
 	}
 	from := 0
-	full, err = s.Call(context.Background(), "command_get", wire.JSON(CommandGetRequest{CommandRequest: CommandRequest{TaskID: TaskID{history.ID}, CommandID: history.Commands[0].ID}, InputFrom: &from}))
+	full, err = s.accept(context.Background(), "command_details", wire.JSON(CommandGetRequest{CommandRequest: CommandRequest{TaskID: TaskID{history.ID}, CommandID: history.Commands[0].ID}, InputFrom: &from}))
 	if err != nil || full.(*CommandDetails).Input[0].Data != marker || *full.(*CommandDetails).NextSequence != 1 {
 		t.Fatal("explicit command detail lost retained inputs", err)
 	}
@@ -154,7 +156,7 @@ func TestExtensionRequiresBoundedReasonAndPreservesDeadlineOnRejection(t *testin
 	s, _ := testServer(t)
 	lab := createLab(t, s, "hold")
 	before := taskView(t, s, lab.ID)["deadline"]
-	_, bad := s.Call(context.Background(), "task_extend", wire.JSON(ExtendRequest{TaskChange: TaskChange{Change: Change{"empty-hold"}, TaskID: TaskID{lab.ID}}, Seconds: 5}))
+	_, bad := s.accept(context.Background(), "lab_extend", wire.JSON(ExtendRequest{TaskChange: TaskChange{Change: Change{"empty-hold"}, TaskID: TaskID{lab.ID}}, Seconds: 5}))
 	if bad == nil || wire.Safe(bad).Code != "invalid_argument" || taskView(t, s, lab.ID)["deadline"] != before {
 		t.Fatal("invalid hold changed execution deadline", bad)
 	}
@@ -164,7 +166,7 @@ func TestExtensionRequiresBoundedReasonAndPreservesDeadlineOnRejection(t *testin
 	if rejectedReceipt != nil {
 		t.Fatal("schema rejection allocated receipt")
 	}
-	successful(t, s, "task_extend", ExtendRequest{TaskChange: TaskChange{Change: Change{"valid-hold"}, TaskID: TaskID{lab.ID}}, Seconds: 5, Reason: "Collect pending service response before release"})
+	successful(t, s, "lab_extend", ExtendRequest{TaskChange: TaskChange{Change: Change{"valid-hold"}, TaskID: TaskID{lab.ID}}, Seconds: 5, Reason: "Collect pending service response before release"})
 	view := taskView(t, s, lab.ID)
 	hold := view["hold"].(map[string]any)
 	if hold["until"] != view["deadline"] || hold["reason"] != "Collect pending service response before release" {

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"time"
 )
 
 type TransferObject struct {
@@ -24,7 +23,7 @@ func (d *DB) CreateTransfer(ctx context.Context, doc Document, objects map[strin
 		if err != nil {
 			return err
 		}
-		if _, err = putDocument(ctx, tx, doc.Kind, doc.ID, body); err != nil {
+		if err = d.putEntity(ctx, tx, doc.Kind, doc.ID, body); err != nil {
 			return err
 		}
 		for name, object := range objects {
@@ -84,82 +83,4 @@ func (d *DB) TransferObjects(ctx context.Context, id string) (map[string]Transfe
 		total += value.Size
 	}
 	return objects, total, rows.Err()
-}
-
-func (d *DB) migrateTransfers(version int) error {
-	if version == 11 {
-		return nil
-	}
-	ctx, stop := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer stop()
-	tx, err := d.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `CREATE TABLE transfer_objects (
- transfer_id TEXT NOT NULL, name TEXT NOT NULL, body BLOB NOT NULL,
- document_kind TEXT NOT NULL DEFAULT 'transfer' CHECK(document_kind='transfer'),
- PRIMARY KEY(transfer_id,name),
- FOREIGN KEY(document_kind,transfer_id) REFERENCES documents(kind,id));`); err != nil {
-		return err
-	}
-	var after int64
-	for {
-		var id string
-		var body []byte
-		err = tx.QueryRowContext(ctx, "SELECT sequence,id,body FROM documents WHERE kind='transfer' AND sequence>? ORDER BY sequence LIMIT 1", after).Scan(&after, &id, &body)
-		if err == sql.ErrNoRows {
-			break
-		}
-		if err != nil {
-			return err
-		}
-		var header map[string]json.RawMessage
-		if err = json.Unmarshal(body, &header); err != nil {
-			return err
-		}
-		var objects map[string]json.RawMessage
-		if raw := header["objects"]; len(raw) != 0 {
-			if err = json.Unmarshal(raw, &objects); err != nil {
-				return fmt.Errorf("migrate transfer %s: %w", id, err)
-			}
-		}
-		var total int64
-		for name, raw := range objects {
-			var value TransferObject
-			if err = json.Unmarshal(raw, &value); err != nil {
-				return fmt.Errorf("migrate transfer %s: %w", id, err)
-			}
-			if value.Size < 0 || value.Size > math.MaxInt64-total {
-				return fmt.Errorf("migrate transfer %s: invalid object size", id)
-			}
-			total += value.Size
-			var fields map[string]json.RawMessage
-			if err = json.Unmarshal(raw, &fields); err != nil || fields == nil {
-				return fmt.Errorf("migrate transfer %s: invalid object metadata", id)
-			}
-			fields["file"], _ = json.Marshal(name)
-			raw, err = json.Marshal(fields)
-			if err != nil {
-				return err
-			}
-			if err = putTransferObject(ctx, tx, id, name, raw); err != nil {
-				return err
-			}
-		}
-		// Preserve unknown header and object fields in their original JSON.
-		delete(header, "objects")
-		body, err = json.Marshal(header)
-		if err != nil {
-			return err
-		}
-		if _, err = putDocument(ctx, tx, "transfer", id, body); err != nil {
-			return err
-		}
-	}
-	if _, err = tx.ExecContext(ctx, "PRAGMA user_version=11"); err != nil {
-		return err
-	}
-	return tx.Commit()
 }

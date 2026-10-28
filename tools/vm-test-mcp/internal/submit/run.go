@@ -22,7 +22,6 @@ type RunOptions struct {
 	Endpoint, Token string
 	TimeoutSeconds  int
 	Progress        io.Writer
-	pollInterval    time.Duration
 }
 
 // run.json contains retry identities and receipts, never bearer/capability tokens.
@@ -52,19 +51,8 @@ func (t bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return http.DefaultTransport.RoundTrip(r)
 }
 
-func wait(ctx context.Context, interval time.Duration) error {
-	t := time.NewTimer(interval)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
-}
-
 func call(ctx context.Context, session *mcp.ClientSession, name string, args any, result any) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 660*time.Second)
 	defer cancel()
 	r, err := session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
 	if err != nil {
@@ -89,19 +77,42 @@ func call(ctx context.Context, session *mcp.ClientSession, name string, args any
 	return json.Unmarshal(raw, result)
 }
 
-func mutate(ctx context.Context, session *mcp.ClientSession, name string, args any, interval time.Duration, result any) error {
-	var operation receipt
-	if err := call(ctx, session, name, args, &operation); err != nil {
+type waitReference struct {
+	Kind         string `json:"kind"`
+	ID           string `json:"id"`
+	Condition    string `json:"condition"`
+	SeenRevision int64  `json:"seen_revision,omitempty"`
+}
+type waitResponse struct {
+	Reason  string `json:"reason"`
+	Targets []struct {
+		Summary  json.RawMessage `json:"summary"`
+		Revision int64           `json:"revision"`
+	} `json:"targets"`
+	Continue []waitReference `json:"continue"`
+}
+
+func mutate(ctx context.Context, session *mcp.ClientSession, name string, args any, result any) error {
+	var reply struct {
+		Operation receipt      `json:"operation"`
+		Wait      waitResponse `json:"wait"`
+	}
+	if err := call(ctx, session, name, args, &reply); err != nil {
 		return err
 	}
+	operation := reply.Operation
+	if !wire.IDPattern.MatchString(operation.ID) {
+		return fmt.Errorf("invalid operation ID")
+	}
 	for operation.State == "pending" {
-		if !wire.IDPattern.MatchString(operation.ID) {
-			return fmt.Errorf("invalid operation ID")
-		}
-		if err := wait(ctx, interval); err != nil {
+		var response waitResponse
+		if err := call(ctx, session, "wait", map[string]any{"targets": []waitReference{{Kind: "operation", ID: operation.ID, Condition: "complete"}}}, &response); err != nil {
 			return err
 		}
-		if err := call(ctx, session, "operation_get", map[string]any{"operation_id": operation.ID}, &operation); err != nil {
+		if len(response.Targets) != 1 {
+			return fmt.Errorf("invalid operation wait response")
+		}
+		if err := json.Unmarshal(response.Targets[0].Summary, &operation); err != nil {
 			return err
 		}
 	}
@@ -120,11 +131,8 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 	if o.Progress == nil {
 		o.Progress = io.Discard
 	}
-	if o.pollInterval == 0 {
-		o.pollInterval = 2 * time.Second
-	}
-	if o.TimeoutSeconds < 0 || o.TimeoutSeconds > 30*86400 {
-		return nil, fmt.Errorf("timeout-seconds must be between 0 and 2592000")
+	if o.TimeoutSeconds < 0 || o.TimeoutSeconds > 86400 {
+		return nil, fmt.Errorf("timeout-seconds must be between 0 and 86400")
 	}
 	if o.WorkDir == "" {
 		if o.RequestID == "" {
@@ -175,7 +183,7 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 	}
 	fmt.Fprintf(o.Progress, "Request: %s\nWorkspace: %s\n", j.RequestID, o.WorkDir)
 	client := mcp.NewClient(&mcp.Implementation{Name: "vm-test-submit", Version: wire.Version}, nil)
-	httpClient := &http.Client{Transport: bearerTransport{o.Token}, Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+	httpClient := &http.Client{Transport: bearerTransport{o.Token}, Timeout: 660 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
 		return fmt.Errorf("MCP redirects are not allowed")
 	}}
 	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: o.Endpoint, HTTPClient: httpClient, DisableStandaloneSSE: true, MaxRetries: -1}, nil)
@@ -205,7 +213,7 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 				State string `json:"state"`
 			}
 			if j.CacheID == "" {
-				if err := mutate(ctx, session, "transfer_create", map[string]any{"request_id": j.RequestID + "-cache", "kind": "cache"}, o.pollInterval, &transfer); err != nil {
+				if err := mutate(ctx, session, "upload_create", map[string]any{"request_id": j.RequestID + "-cache", "kind": "cache"}, &transfer); err != nil {
 					return nil, err
 				}
 				if !wire.IDPattern.MatchString(transfer.ID) {
@@ -216,8 +224,8 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 					return nil, err
 				}
 			}
-			// Always renew the URL; transfer_create receipts may contain expired URLs.
-			if err := call(ctx, session, "transfer_get", map[string]any{"transfer_id": j.CacheID}, &transfer); err != nil {
+			// Always renew the URL; upload_create receipts may contain expired URLs.
+			if err := mutate(ctx, session, "upload_renew", map[string]any{"request_id": "renew-" + wire.ID(), "transfer_id": j.CacheID}, &transfer); err != nil {
 				return nil, err
 			}
 			if transfer.State != "open" {
@@ -241,7 +249,7 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 		var task struct {
 			ID string `json:"id"`
 		}
-		if err := mutate(ctx, session, "nixos_run", j.Submission, o.pollInterval, &task); err != nil {
+		if err := mutate(ctx, session, "nix_job_create", j.Submission, &task); err != nil {
 			return nil, err
 		}
 		if !wire.IDPattern.MatchString(task.ID) {
@@ -268,11 +276,12 @@ func observe(ctx context.Context, session *mcp.ClientSession, root *safefs.Root,
 	}
 	offset := st.Size()
 	previous := ""
+	var raw json.RawMessage
+	if err := call(ctx, session, "nix_job_get", map[string]any{"task_id": id}, &raw); err != nil {
+		return nil, err
+	}
+	refs := []waitReference{{Kind: "nix_job", ID: id, Condition: "complete"}}
 	for {
-		var raw json.RawMessage
-		if err := call(ctx, session, "task_get", map[string]any{"task_id": id}, &raw); err != nil {
-			return nil, err
-		}
 		var task struct {
 			Phase   string
 			Result  struct{ Termination, Conclusion string }
@@ -291,7 +300,7 @@ func observe(ctx context.Context, session *mcp.ClientSession, root *safefs.Root,
 				NextOffset int64  `json:"next_offset"`
 				EOF        bool   `json:"eof"`
 			}
-			if err := call(ctx, session, "task_log", map[string]any{"task_id": id, "offset": offset}, &chunk); err != nil {
+			if err := call(ctx, session, "execution_log", map[string]any{"task_id": id, "offset": offset}, &chunk); err != nil {
 				if failure, ok := err.(*wire.Error); ok && failure.Code == "not_found" {
 					break // Queued tasks may not have a log yet.
 				}
@@ -323,8 +332,14 @@ func observe(ctx context.Context, session *mcp.ClientSession, root *safefs.Root,
 			}
 			return raw, nil
 		}
-		if err := wait(ctx, o.pollInterval); err != nil {
-			return nil, fmt.Errorf("task %s remains on the server; resume with --work-dir %q: %w", id, o.WorkDir, err)
+		var response waitResponse
+		if err := call(ctx, session, "wait", map[string]any{"targets": refs}, &response); err != nil {
+			return nil, fmt.Errorf("job %s remains on the server; resume with --work-dir %q: %w", id, o.WorkDir, err)
 		}
+		if len(response.Targets) != 1 {
+			return nil, fmt.Errorf("invalid job wait response")
+		}
+		raw = response.Targets[0].Summary
+		refs = response.Continue
 	}
 }

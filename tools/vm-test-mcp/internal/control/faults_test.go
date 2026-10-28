@@ -202,7 +202,7 @@ func TestCleanupBudgetPartialProgressAndExplicitRetry(t *testing.T) {
 	f.failNode = ""
 	f.hangDiagnostics = false
 	f.faultMu.Unlock()
-	op := successful(t, s, "task_cleanup", TaskChange{Change: Change{"retry-cleanup"}, TaskID: TaskID{task.ID}})
+	op := successful(t, s, "lab_cleanup", TaskChange{Change: Change{"retry-cleanup"}, TaskID: TaskID{task.ID}})
 	if op.Result.(map[string]any)["cleanup"].(map[string]any)["state"] != "complete" {
 		t.Fatal(op)
 	}
@@ -232,13 +232,28 @@ func TestDiagnosticsAndDirectExecDuringPreparation(t *testing.T) {
 		t.Fatal(op)
 	}
 	result := op.Result.(map[string]any)
-	if result["termination_confirmed"] != false || result["stdout"] != base64.StdEncoding.EncodeToString([]byte("partial")) || result["artifact_id"] == nil {
+	if result["termination_confirmed"] != false || result["stdout"] != nil || result["artifact_id"] == nil {
 		t.Fatal(result)
+	}
+	var output map[string]any
+	for _, a := range task.Artifacts {
+		if a.ID == result["artifact_id"] {
+			raw, err := s.root.Read(a.Path, wire.MaxJSON)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = json.Unmarshal(raw, &output); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if output["stdout"] != base64.StdEncoding.EncodeToString([]byte("partial")) {
+		t.Fatal(output)
 	}
 	if repeated := operation(t, s, "node_exec", ExecRequest{NodeChange: NodeChange{Change: Change{"direct"}, NodeID: id}, Argv: []string{`C:\Windows\System32\cmd.exe`, "/d", "/c", "ver"}, TimeoutSeconds: 1}); repeated.ID != op.ID {
 		t.Fatal("direct command was replayed")
 	}
-	diag := successful(t, s, "task_diagnose", DiagnoseRequest{TaskChange: TaskChange{Change: Change{"diagnose"}, TaskID: TaskID{task.ID}}})
+	diag := successful(t, s, "lab_diagnose", DiagnoseRequest{TaskChange: TaskChange{Change: Change{"diagnose"}, TaskID: TaskID{task.ID}}})
 	data := wire.JSON(diag.Result)
 	if !strings.Contains(string(data), task.Router.ID) || !strings.Contains(string(data), "partial") {
 		t.Fatal(string(data))
@@ -467,7 +482,7 @@ func TestCleanupLockWaitIsBoundedAndQueriesRemainResponsive(t *testing.T) {
 	waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return task.Cleanup == "running" })
 	ctx, stop := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer stop()
-	if _, err := s.Call(ctx, "task_get", wire.JSON(TaskID{task.ID})); err != nil {
+	if _, err := s.accept(ctx, "lab_get", wire.JSON(TaskID{task.ID})); err != nil {
 		t.Fatal(err)
 	}
 	select {

@@ -17,9 +17,32 @@ import (
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
+func TestLargeUploadRenewalRetainsCapabilityWithoutEmbeddingInventory(t *testing.T) {
+	s, _ := testServer(t)
+	created := successful(t, s, "upload_create", TransferRequest{Change: Change{"large-cache"}, Kind: "cache"})
+	id := created.Result.(map[string]any)["id"].(string)
+	s.mu.Lock()
+	for i := range 12000 {
+		s.transfers[id].Objects[fmt.Sprintf("%032x.narinfo", i)] = state.TransferObject{Size: 42, SHA256: strings.Repeat("a", 64)}
+	}
+	s.mu.Unlock()
+	renewed := successful(t, s, "upload_renew", RenewRequest{Change: Change{"renew-large-cache"}, TransferGetRequest: TransferGetRequest{TransferID: id}})
+	value := renewed.Result.(map[string]any)
+	if value["url"] == "" || value["url"] == nil || value["objects"] != nil || len(wire.JSON(value)) > 4096 {
+		t.Fatal("renewal receipt lost its capability or embedded inventory")
+	}
+	page, err := s.Call(context.Background(), "upload_objects", wire.JSON(UploadObjectsRequest{TransferGetRequest: TransferGetRequest{TransferID: id}, ListRequest: ListRequest{Limit: 2}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.(map[string]any)["items"].([]any)) != 2 {
+		t.Fatal("inventory did not respect its explicit page boundary")
+	}
+}
+
 func TestCacheUploadPublishesNestedObjectsAndSeals(t *testing.T) {
 	s, _ := testServer(t)
-	v := successful(t, s, "transfer_create", TransferRequest{Change: Change{"nested-cache"}, Kind: "cache"}).Result.(map[string]any)
+	v := successful(t, s, "upload_create", TransferRequest{Change: Change{"nested-cache"}, Kind: "cache"}).Result.(map[string]any)
 	id, url := v["id"].(string), v["url"].(string)
 	nar := "opaque NAR bytes; the Nix daemon validates archive structure"
 	digest := sha256.Sum256([]byte(nar))
@@ -42,9 +65,9 @@ func TestCacheUploadPublishesNestedObjectsAndSeals(t *testing.T) {
 	// task must leave the sealed input available to a subsequent submission.
 	requestID := "cache-attachment-write-failure"
 	s.mu.Lock()
-	s.requests[requestID] = &Operation{Created: time.Now().UTC()}
+	s.requests[requestID] = &Operation{Created: time.Now().UTC(), TaskID: wire.ID()}
 	s.mu.Unlock()
-	if _, err := s.db.Exec(`CREATE TRIGGER reject_task BEFORE INSERT ON documents WHEN new.kind='task' BEGIN SELECT RAISE(ABORT,'synthetic task write failure'); END;`); err != nil {
+	if _, err := s.db.Exec(`CREATE TRIGGER reject_task BEFORE INSERT ON executions BEGIN SELECT RAISE(ABORT,'synthetic task write failure'); END;`); err != nil {
 		t.Fatal(err)
 	}
 	_, err := s.createNix(NixRequest{Change: Change{requestID}, CacheID: id, Derivation: "/nix/store/" + strings.Repeat("0", 32) + "-fixture.drv", System: "x86_64-linux"})
@@ -86,8 +109,8 @@ func queuedUpload(t *testing.T, s *Server) (string, string, string, string) {
 	op := successful(t, s, "lab_create", LabRequest{RequestID: "upload-queued", Nodes: []NodeRequest{{Name: "queued", Template: "windows"}}})
 	v := op.Result.(map[string]any)
 	id := v["id"].(string)
-	node := v["nodes"].([]any)[0].(map[string]any)["id"].(string)
-	op = successful(t, s, "transfer_create", TransferRequest{Change: Change{"prepare-upload"}, Kind: "file", TaskID: id})
+	node := taskView(t, s, id)["nodes"].([]any)[0].(map[string]any)["id"].(string)
+	op = successful(t, s, "upload_create", TransferRequest{Change: Change{"prepare-upload"}, Kind: "file", TaskID: id})
 	v = op.Result.(map[string]any)
 	return id, node, v["id"].(string), v["url"].(string)
 }
@@ -111,11 +134,11 @@ func TestQueuedFilePreparationAndRetainedInputs(t *testing.T) {
 	}
 	hash := s.transfers[transfer].Objects["blob"].SHA256
 	s.mu.Unlock()
-	successful(t, s, "task_cancel", TaskChange{Change: Change{"cancel-upload-queue"}, TaskID: TaskID{id}})
+	successful(t, s, "lab_cancel", TaskChange{Change: Change{"cancel-upload-queue"}, TaskID: TaskID{id}})
 	if taskView(t, s, id)["cleanup"].(map[string]any)["state"] != "complete" {
 		t.Fatal("queued cancellation failed")
 	}
-	metadata, e := s.Call(context.Background(), "transfer_get", wire.JSON(TransferGetRequest{TransferID: transfer}))
+	metadata, e := s.accept(context.Background(), "upload_get", wire.JSON(TransferGetRequest{TransferID: transfer}))
 	if e != nil || metadata.(map[string]any)["can_upload"] != false || metadata.(map[string]any)["state"] != "retained" {
 		t.Fatal(metadata, e)
 	}
@@ -125,7 +148,8 @@ func TestQueuedFilePreparationAndRetainedInputs(t *testing.T) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	w = httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, httptest.NewRequest("GET", metadata.(map[string]any)["url"].(string), nil))
+	renewed := successful(t, s, "upload_renew", RenewRequest{Change: Change{"renew-retained"}, TransferGetRequest: TransferGetRequest{TransferID: transfer}})
+	s.Handler().ServeHTTP(w, httptest.NewRequest("GET", renewed.Result.(map[string]any)["url"].(string), nil))
 	if w.Code != 200 || w.Body.String() != "prepared input" {
 		t.Fatal(w.Code, w.Body.String())
 	}
@@ -140,7 +164,7 @@ func TestQueuedFilePreparationAndRetainedInputs(t *testing.T) {
 	if created != 3 || deleted != 0 || taskView(t, s, active.ID)["phase"] != "running" {
 		t.Fatal("upload/cancel touched occupied executor", created, deleted)
 	}
-	successful(t, s, "task_purge", TaskChange{Change: Change{"purge-upload-queue"}, TaskID: TaskID{id}})
+	successful(t, s, "execution_delete", TaskChange{Change: Change{"purge-upload-queue"}, TaskID: TaskID{id}})
 	w = httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, httptest.NewRequest("GET", url, nil))
 	if w.Code != 404 {
@@ -167,7 +191,7 @@ func TestQueuedCancellationInterruptsUploadAndKeepsPreviousPublication(t *testin
 		t.Fatal(err)
 	}
 	started := time.Now()
-	successful(t, s, "task_cancel", TaskChange{Change: Change{"interrupt-upload"}, TaskID: TaskID{id}})
+	successful(t, s, "lab_cancel", TaskChange{Change: Change{"interrupt-upload"}, TaskID: TaskID{id}})
 	select {
 	case <-done:
 	case <-time.After(time.Second):
@@ -191,7 +215,7 @@ func TestQueuedCancellationInterruptsUploadAndKeepsPreviousPublication(t *testin
 	if err != nil || len(files) != 1 || files[0].Name() != object.File {
 		t.Fatal("unfinished upload files retained", files, err)
 	}
-	successful(t, s, "task_purge", TaskChange{Change: Change{"purge-interrupted-upload"}, TaskID: TaskID{id}})
+	successful(t, s, "execution_delete", TaskChange{Change: Change{"purge-interrupted-upload"}, TaskID: TaskID{id}})
 }
 
 func TestUploadLockWaitHonorsRequestCancellation(t *testing.T) {
@@ -377,7 +401,7 @@ func TestTransferReplacementQuotaAndSealPersistence(t *testing.T) {
 	if err := s.db.CreateTransfer(context.Background(), state.Document{Kind: "transfer", ID: file.ID, Value: file}, file.Objects); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`CREATE TRIGGER reject_seal BEFORE UPDATE ON documents WHEN new.kind='transfer' BEGIN SELECT RAISE(ABORT,'synthetic seal failure'); END;`); err != nil {
+	if _, err := s.db.Exec(`CREATE TRIGGER reject_seal BEFORE UPDATE ON transfers BEGIN SELECT RAISE(ABORT,'synthetic seal failure'); END;`); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.seal(file); err == nil || file.State != "open" {

@@ -12,12 +12,16 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-type DB struct{ *sql.DB }
+type DB struct {
+	*sql.DB
+	dir string
+}
 
 func Open(dir string) (*DB, error) {
 	u := url.URL{Scheme: "file", Path: filepath.Join(dir, "state.sqlite")}
 	q := u.Query()
 	q.Set("_foreign_keys", "on")
+	q.Set("_auto_vacuum", "incremental")
 	q.Set("_journal_mode", "WAL")
 	q.Set("_synchronous", "FULL")
 	q.Set("_busy_timeout", "5000")
@@ -35,29 +39,23 @@ func Open(dir string) (*DB, error) {
 		return nil, fmt.Errorf("build with -tags sqlite_omit_load_extension")
 	}
 	var version int
-	if e = db.QueryRow("PRAGMA user_version").Scan(&version); e != nil || (version != 0 && version != 9 && version != 10 && version != 11) {
+	if e = db.QueryRow("PRAGMA user_version").Scan(&version); e != nil || (version != 0 && version != SchemaVersion) {
 		db.Close()
-		return nil, fmt.Errorf("unsupported state schema version: %d", version)
+		return nil, fmt.Errorf("state schema %d is incompatible: stop old services, confirm resource release, and use a new empty state directory", version)
 	}
-	_, e = db.Exec(`CREATE TABLE IF NOT EXISTS documents (
- kind TEXT NOT NULL, id TEXT NOT NULL, sequence INTEGER PRIMARY KEY AUTOINCREMENT,
- body BLOB NOT NULL, UNIQUE(kind,id));
- CREATE TABLE IF NOT EXISTS events (
- sequence INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, body BLOB NOT NULL);
- `)
-	if e != nil {
-		db.Close()
-		return nil, e
+	d := &DB{DB: db, dir: dir}
+	if version == 0 {
+		var tables int
+		if e = db.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").Scan(&tables); e != nil || tables != 0 {
+			db.Close()
+			return nil, fmt.Errorf("new state requires an empty database")
+		}
+		if _, e = db.Exec(schema); e != nil {
+			db.Close()
+			return nil, e
+		}
 	}
-	d := &DB{db}
-	if e = d.migrateCommands(version); e != nil {
-		db.Close()
-		return nil, e
-	}
-	if e = d.migrateTransfers(version); e != nil {
-		db.Close()
-		return nil, e
-	}
+
 	return d, nil
 }
 
@@ -88,39 +86,13 @@ func (d *DB) transaction(ctx context.Context, docs []Document, change func(conte
 		if e != nil {
 			return e
 		}
-		if _, e = putDocument(ctx, tx, doc.Kind, doc.ID, b); e != nil {
+		if e = d.putEntity(ctx, tx, doc.Kind, doc.ID, b); e != nil {
 			return e
 		}
 	}
 	return tx.Commit()
 }
 
-func putDocument(ctx context.Context, tx *sql.Tx, kind, id string, body []byte) (sql.Result, error) {
-	return tx.ExecContext(ctx, `INSERT INTO documents(kind,id,body) VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body`, kind, id, body)
-}
-func (d *DB) Load(ctx context.Context, kind, id string, v any) error {
-	var b []byte
-	if e := d.QueryRowContext(ctx, "SELECT body FROM documents WHERE kind=? AND id=?", kind, id).Scan(&b); e != nil {
-		return e
-	}
-	return json.Unmarshal(b, v)
-}
-func (d *DB) List(ctx context.Context, kind string) ([][]byte, error) {
-	rows, e := d.QueryContext(ctx, "SELECT body FROM documents WHERE kind=? ORDER BY sequence", kind)
-	if e != nil {
-		return nil, e
-	}
-	defer rows.Close()
-	out := [][]byte{}
-	for rows.Next() {
-		var b []byte
-		if e = rows.Scan(&b); e != nil {
-			return nil, e
-		}
-		out = append(out, b)
-	}
-	return out, rows.Err()
-}
 func (d *DB) Event(ctx context.Context, task string, v any) error {
 	b, e := json.Marshal(v)
 	if e != nil {

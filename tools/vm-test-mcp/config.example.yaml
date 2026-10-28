@@ -1,4 +1,6 @@
-# VM Test MCP：控制服务和 Nix worker 共用此文件。
+# VM Test MCP 0.12：控制服务和 Nix worker 共用此文件。
+# 新契约只接受空 state / 新数据库；旧服务与资源必须先由用户停止、清理。
+# Codex CLI >=0.163.0，MCP tool_timeout_sec=660；服务等待窗口 600s，SSE 心跳 15s。
 # 两个程序均使用 --config /绝对路径/config.yaml；配置文件不要求特定权限。
 # config.yaml 被 Git 忽略；本示例只使用合成值。两个进程可共用账户，状态目录必须不同。
 # YAML 拒绝未知字段、重复字段及多个文档。不展开 ~、环境变量或命令替换。
@@ -28,7 +30,7 @@ service:
 # tasks:
 #   # 默认 1h，最短 1s，不超过 max_duration。从进入执行阶段起计时。
 #   default_timeout: 1h
-#   # 默认 24h，范围 default_timeout..720h（30 天），包含显式延长的时间。
+#   # 默认 24h，范围 default_timeout..24h，包含显式延长的时间。
 #   max_duration: 24h
 #   # 默认 5m，范围 1s..1h。单次任务清理的总预算，包含等待锁、取证和有限重试。
 #   cleanup_timeout: 5m
@@ -145,6 +147,8 @@ service:
 
 # 可选。控制服务和 worker 从同一文件读取此块；worker 不在线不影响其它 MCP 工具。
 # nix:
+#   # 默认 false；管理员诊断选项，启用后自行负责失败构建目录的清理。
+#   keep_failed: false
 #   # 控制服务可省略或设 "" 来关闭 Nix 后端；启动 worker 时必填绝对路径。
 #   # 同账户运行时可放在 worker 状态目录内；分账户时使用共享组目录，参见 preparation.md。
 #   socket: /home/vm-owner/.local/state/vm-test-nix/worker.sock
@@ -160,10 +164,13 @@ service:
 #   # cache_url: http://127.0.0.1:8765
 #   # worker 必须是 Nix trusted-users 之外的普通账户；daemon 隔离/KVM 由管理员配置。
 
-# 可选，任务数据保留和传输大小限制。
+# 可选；清理确认前的数据和 pin 证据受保护。
 # storage:
-#   # 默认 0，保留到显式 task_purge；正整数表示自动保留天数。
-#   # 仅清理完成的终态任务可删除数据，摘要/结论/清理记录保留。
-#   retention_days: 0
-#   # 默认 8589934592（8 GiB），正整数字节，用于传输和导出产物限额。
-#   max_upload_bytes: 8589934592
+#   success_days: 1
+#   failure_days: 7
+#   summary_days: 30
+#   evidence_bytes: 21474836480 # 20 GiB，包括 pin 和活跃证据。
+#   low_water_bytes: 17179869184 # 压力回收到 16 GiB。
+#   input_bytes: 17179869184 # 上传暂存总预算 16 GiB。
+#   upload_idle: 1h
+#   max_upload_bytes: 8589934592 # 单 transfer 8 GiB。

@@ -22,12 +22,16 @@ import (
 
 type Server struct {
 	mu                 sync.Mutex
+	revisions          map[string]revisionState
+	lastRetention      time.Time
+	storageBlocked     bool
 	wg                 sync.WaitGroup
 	cfg                config.Config
 	root               *safefs.Root
 	db                 *state.DB
 	backend            Backend
 	tasks              []*Task
+	recovering         []*Task
 	operations         map[string]*Operation
 	requests           map[string]*Operation
 	transfers          map[string]*Transfer
@@ -58,10 +62,11 @@ func New(cfg config.Config, b Backend) (*Server, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{cfg: cfg, root: root, db: db, backend: b, ctx: ctx, cancel: cancel, operations: map[string]*Operation{}, requests: map[string]*Operation{}, transfers: map[string]*Transfer{}, runtime: map[string]*Runtime{}, uploading: map[string]*Upload{}}
+	s.revisions = map[string]revisionState{}
 	s.performance = telemetry.New()
 	s.performancePending = map[string]time.Time{}
-	if vbox, ok := b.(*VBoxBackend); ok {
-		vbox.Performance = s.performance
+	if backends, ok := b.(*Backends); ok {
+		backends.Performance = s.performance
 	}
 	fail := func(e error) (*Server, error) { db.Close(); root.Close(); cancel(); return nil, e }
 	if s.secret, e = root.Read("capability-key", 128); os.IsNotExist(e) {
@@ -72,7 +77,7 @@ func New(cfg config.Config, b Backend) (*Server, error) {
 		return fail(e)
 	}
 	for _, kind := range []string{"task", "operation", "transfer"} {
-		rows, e := db.List(ctx, kind)
+		rows, e := db.Active(ctx, kind)
 		if e != nil {
 			return fail(e)
 		}
@@ -113,6 +118,7 @@ func New(cfg config.Config, b Backend) (*Server, error) {
 			}
 		}
 	}
+	s.recovering = append([]*Task(nil), s.tasks...)
 	sort.SliceStable(s.tasks, func(i, j int) bool { return s.tasks[i].Created.Before(s.tasks[j].Created) })
 	return s, nil
 }
@@ -135,7 +141,21 @@ func (s *Server) persist(docs ...state.Document) {
 		s.closed = true
 	}
 }
-func (s *Server) save(t *Task) { s.persist(state.Document{Kind: "task", ID: t.ID, Value: t}) }
+func (s *Server) save(t *Task) {
+	s.persist(state.Document{Kind: "task", ID: t.ID, Value: t})
+	if s.closed {
+		return
+	}
+	kind := "lab"
+	if t.Kind == "nixos" {
+		kind = "nix_job"
+	}
+	s.revision(kind+"/"+t.ID, taskCondition(t))
+	for _, c := range t.Commands {
+		s.revision("command/"+c.ID, commandCondition(c))
+		s.revision("command/"+c.ID+"/output", []any{c.Retained.Stdout, c.Retained.Stderr})
+	}
+}
 func (s *Server) event(t *Task, code, msg string) {
 	s.eventDetails(t, code, msg, nil)
 }
@@ -155,7 +175,11 @@ func (s *Server) task(id string) (*Task, error) {
 			return t, nil
 		}
 	}
-	return nil, wire.Fail("not_found", "Task not found")
+	var t Task
+	if err := s.db.Load(s.ctx, "task", id, &t); err != nil {
+		return nil, wire.Fail("not_found", "Execution not found")
+	}
+	return &t, nil
 }
 func (s *Server) running(id string) (*Task, *Runtime, error) {
 	t, e := s.task(id)
@@ -193,12 +217,8 @@ func (s *Server) schedule() {
 	defer s.wg.Done()
 	// Recovery completes before admitting the first queued task.
 	s.mu.Lock()
-	recovery := []*Task{}
-	for _, t := range s.tasks {
-		if t.State != "queued" && t.Cleanup != "complete" {
-			recovery = append(recovery, t)
-		}
-	}
+	recovery := s.recovering
+	s.recovering = nil
 	s.mu.Unlock()
 	blocked := ""
 	for _, t := range recovery {
@@ -229,8 +249,9 @@ func (s *Server) schedule() {
 		case <-s.ctx.Done():
 			return
 		case <-tick.C:
+			s.expireRetention()
 			s.mu.Lock()
-			if s.active != "" || s.closed {
+			if s.active != "" || s.closed || s.storageBlocked {
 				s.mu.Unlock()
 				continue
 			}
@@ -248,7 +269,7 @@ func (s *Server) schedule() {
 			}
 			earlier := false
 			for _, op := range s.operations {
-				if op.State == "pending" && (op.Tool == "lab_create" || op.Tool == "nixos_run") && op.Created.Before(next.Created) {
+				if op.State == "pending" && (op.Tool == "lab_create" || op.Tool == "nix_job_create") && op.Created.Before(next.Created) {
 					earlier = true
 					break
 				}
@@ -543,6 +564,13 @@ func (s *Server) observe(t *Task, r *Runtime) {
 						t.Failure = v.Execution.PersistenceError
 					}
 					s.save(t)
+				}
+				if v.Execution != nil && v.Execution.Imported {
+					if input := s.transfers[t.CacheID]; input != nil {
+						if err := s.removeTransfer(input); err != nil {
+							s.event(t, "input_release_failed", "Imported upload removal will be retried")
+						}
+					}
 				}
 				s.mu.Unlock()
 				if v.State == "succeeded" || v.State == "failed" || v.State == "cleanup_required" || v.State == "interrupted" {

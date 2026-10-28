@@ -45,7 +45,7 @@ func Prepare(ctx context.Context, o Options) (map[string]any, error) {
 	}
 	u, e := url.Parse(o.CacheURL)
 	if e != nil || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.Host == "" || !strings.HasPrefix(u.Path, "/files/") || u.RawQuery != "" || u.Fragment != "" {
-		return nil, fmt.Errorf("use the cache URL from transfer_create")
+		return nil, fmt.Errorf("use the cache URL from upload_create")
 	}
 	if !filepath.IsAbs(o.WorkDir) {
 		return nil, fmt.Errorf("work-dir must be an absolute task-owned directory")

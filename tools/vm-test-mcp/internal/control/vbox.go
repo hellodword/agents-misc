@@ -23,14 +23,9 @@ import (
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
-type WorkerClient interface {
-	Call(context.Context, string, any) (json.RawMessage, error)
-}
 type VBoxBackend struct {
 	Config            config.Config
 	Runner            hostexec.Runner
-	Worker            WorkerClient
-	CacheURL          func(string) string
 	Performance       *telemetry.Monitor
 	cloneLocks        sync.Map
 	guestSlots        sync.Map
@@ -150,41 +145,7 @@ func (b *VBoxBackend) info(ctx context.Context, uuid string) (map[string]string,
 	return info, e
 }
 func (b *VBoxBackend) Available(ctx context.Context, kind string) (string, error) {
-	if kind == "nixos" {
-		b.backendIdentities.Store(kind, backendIdentity{State: "unobserved", Observed: time.Now().UTC()})
-		if b.Worker == nil {
-			return "nix_disabled", nil
-		}
-		raw, e := b.Worker.Call(ctx, "describe", struct{}{})
-		if e != nil {
-			return "worker_unavailable", e
-		}
-		var v struct {
-			Busy  bool                `json:"busy"`
-			Build *wire.BuildIdentity `json:"build"`
-		}
-		if e = json.Unmarshal(raw, &v); e != nil {
-			return "worker_unavailable", e
-		}
-		identity := backendIdentity{State: "observed", Observed: time.Now().UTC(), Build: v.Build}
-		if v.Build == nil {
-			identity.State = "build_unavailable"
-		}
-		b.backendIdentities.Store(kind, identity)
-		if v.Busy {
-			return "worker_busy", nil
-		}
-		if b.Config.VirtualBoxEnabled() {
-			raw, e = b.run(ctx, "list", "runningvms")
-			if e != nil {
-				return "virtualbox_unavailable", e
-			}
-			if strings.TrimSpace(string(raw)) != "" {
-				return "virtualbox_running", nil
-			}
-		}
-		return "", nil
-	}
+
 	if !b.Config.VirtualBoxEnabled() {
 		return "virtualbox_disabled", nil
 	}
@@ -238,9 +199,9 @@ func (b *VBoxBackend) Prepare(ctx context.Context, t *Task, n *Node) error {
 		if err != nil {
 			return wire.Fail("router_unavailable", "Configured router Live ISO could not be resolved")
 		}
-		copyTask := *t
+		copyTask := t.executionSnapshot()
 		copyTask.RouterISO = real
-		t = &copyTask
+		t = copyTask
 		st, err := os.Stat(t.RouterISO)
 		if err != nil || !st.Mode().IsRegular() {
 			return wire.Fail("router_unavailable", "Configured router Live ISO is not a regular file")
@@ -1042,7 +1003,9 @@ func (b *VBoxBackend) capture(ctx context.Context, t *Task, n *Node, a NodeActio
 		if e := run("recording", "stop"); e != nil {
 			return e
 		}
-		file += ".webm"
+		// VirtualBox publishes one file per selected screen. The configured
+		// filename is the base; screen zero receives this suffix on disk.
+		file += "-screen0.webm"
 	case "metrics":
 		if start {
 			_, e := b.run(ctx, "metrics", "setup", "--period", "1", "--samples", "3600", n.UUID, "CPU/*,RAM/*,Net/*,Disk/*,Guest/*")
@@ -1063,63 +1026,6 @@ func (b *VBoxBackend) capture(ctx context.Context, t *Task, n *Node, a NodeActio
 	}
 	defer f.Close()
 	return b.publish(a.Local, f)
-}
-func (b *VBoxBackend) Nix(ctx context.Context, action string, t *Task) (json.RawMessage, error) {
-	if b.Worker == nil {
-		return nil, wire.Fail("worker_unavailable", "Configure and start the Nix worker to use this operation")
-	}
-	req := map[string]any{"task_id": t.ID}
-	if action == "extend" {
-		req["deadline"] = t.Deadline
-	}
-	if action == "start" {
-		req["derivation"] = t.Derivation
-		req["system"] = t.System
-		req["timeout_seconds"] = t.TimeoutSeconds
-		req["cache"] = b.CacheURL(t.CacheID)
-	}
-	raw, err := b.Worker.Call(ctx, action, req)
-	if err != nil {
-		return nil, err
-	}
-	if action == "status" {
-		return b.workerEvidence(ctx, t, raw, false)
-	}
-	if action == "cleanup" {
-		for {
-			var status struct {
-				Cleanup string `json:"cleanup"`
-			}
-			if err = json.Unmarshal(raw, &status); err != nil {
-				return nil, err
-			}
-			if status.Cleanup != "pending" {
-				break
-			}
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(100 * time.Millisecond):
-			}
-			raw, err = b.Worker.Call(ctx, "status", req)
-			if err != nil {
-				return nil, err
-			}
-		}
-		collected, e := b.workerEvidence(ctx, t, raw, true)
-		if e == nil {
-			return collected, nil
-		}
-		var status struct {
-			Cleanup   string             `json:"cleanup"`
-			Execution *wire.NixExecution `json:"execution"`
-		}
-		if json.Unmarshal(raw, &status) == nil && status.Cleanup == "complete" {
-			return wire.JSON(map[string]any{"cleanup": "complete", "evidence_error": true, "execution": status.Execution}), nil
-		}
-		return nil, e
-	}
-	return raw, nil
 }
 
 func taskPolicy(t *Task, wan string, seconds int, protected []string) network.Policy {

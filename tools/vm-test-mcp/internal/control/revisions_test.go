@@ -66,7 +66,7 @@ func TestOfflineWorkerDoesNotReserveRequestOrBlockLab(t *testing.T) {
 	s.Start()
 	defer s.Close()
 	a := NixRequest{Change: Change{"retry-after-worker-start"}, CacheID: wire.ID(), Derivation: "/nix/store/" + strings.Repeat("0", 32) + "-test.drv", System: "x86_64-linux"}
-	_, err = s.Call(context.Background(), "nixos_run", wire.JSON(a))
+	_, err = s.accept(context.Background(), "nix_job_create", wire.JSON(a))
 	if wire.Safe(err).Code != "worker_unavailable" {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestOfflineWorkerDoesNotReserveRequestOrBlockLab(t *testing.T) {
 	f.mu.Lock()
 	f.offline = false
 	f.mu.Unlock()
-	if _, err = s.Call(context.Background(), "nixos_run", wire.JSON(a)); err != nil {
+	if _, err = s.accept(context.Background(), "nix_job_create", wire.JSON(a)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -138,7 +138,7 @@ func TestNixTaskRetainsExecutionThroughCompletionAndCancellationCleanup(t *testi
 			s.Start()
 			if cancelled {
 				waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return job.State == "running" })
-				successful(t, s, "task_cancel", TaskChange{Change: Change{"cancel-nix-result"}, TaskID: TaskID{job.ID}})
+				successful(t, s, "nix_job_cancel", TaskChange{Change: Change{"cancel-nix-result"}, TaskID: TaskID{job.ID}})
 			}
 			waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return job.Cleanup == "complete" })
 			s.mu.Lock()
@@ -177,7 +177,7 @@ func TestGUIOwnershipRestoreAndExternalConflict(t *testing.T) {
 				f.gui = "1024,768"
 				f.mu.Unlock()
 			}
-			successful(t, s, "task_finish", FinishRequest{TaskChange: TaskChange{Change: Change{"finish"}, TaskID: TaskID{lab.ID}}, Conclusion: "passed", Summary: "fixture"})
+			successful(t, s, "lab_finish", FinishRequest{TaskChange: TaskChange{Change: Change{"finish"}, TaskID: TaskID{lab.ID}}, Conclusion: "passed", Summary: "fixture"})
 			want := "complete"
 			if conflict {
 				want = "required"
@@ -412,7 +412,7 @@ func TestNixTerminalReplyPreservesConcurrentTaskTermination(t *testing.T) {
 				t.Fatal("status did not start")
 			}
 			if termination == "cancelled" {
-				successful(t, s, "task_cancel", TaskChange{Change: Change{"cancel-inflight-nix-result"}, TaskID: TaskID{job.ID}})
+				successful(t, s, "nix_job_cancel", TaskChange{Change: Change{"cancel-inflight-nix-result"}, TaskID: TaskID{job.ID}})
 			} else {
 				s.mu.Lock()
 				expired := time.Now().Add(-time.Second)

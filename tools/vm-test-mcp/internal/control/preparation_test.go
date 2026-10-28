@@ -65,7 +65,7 @@ func TestPreparationPublishesRetryScheduleAndClearsItAtReadiness(t *testing.T) {
 	if polling["next"] != nil || polling["interval_ms"] != float64(0) || router["preparation"].(map[string]any)["deadline"] != preparation["deadline"] {
 		t.Fatal("readiness retained an obsolete retry or changed the startup deadline", router)
 	}
-	successful(t, s, "task_cancel", TaskChange{Change: Change{"release-startup-schedule"}, TaskID: TaskID{id}})
+	successful(t, s, "lab_cancel", TaskChange{Change: Change{"release-startup-schedule"}, TaskID: TaskID{id}})
 	waitFor(t, func() bool { return taskView(t, s, id)["cleanup"].(map[string]any)["state"] == "complete" })
 }
 
@@ -145,7 +145,7 @@ func TestNetworkPolicyPrecedesClientsAndDoesNotWaitForSlowPeer(t *testing.T) {
 			}
 			close(f.peerReady)
 			waitFor(t, func() bool { return taskView(t, s, id)["phase"] == "running" })
-			successful(t, s, "task_cancel", TaskChange{Change: Change{"release-network"}, TaskID: TaskID{id}})
+			successful(t, s, "lab_cancel", TaskChange{Change: Change{"release-network"}, TaskID: TaskID{id}})
 			waitFor(t, func() bool { return taskView(t, s, id)["cleanup"].(map[string]any)["state"] == "complete" })
 		})
 	}

@@ -98,7 +98,7 @@ func TestSignalExitSurvivesCollectionAndRepeatedReads(t *testing.T) {
 		t.Fatal(c)
 	}
 	for range 2 {
-		value, err := s.Call(context.Background(), "command_get", wire.JSON(CommandRequest{TaskID: TaskID{task.ID}, CommandID: c.ID}))
+		value, err := s.accept(context.Background(), "command_get", wire.JSON(CommandRequest{TaskID: TaskID{task.ID}, CommandID: c.ID}))
 		var observed Command
 		if err != nil || json.Unmarshal(wire.JSON(value), &observed) != nil || observed.ExitCode != nil || observed.ExitSignal != "SIGKILL" || !observed.Final || !observed.Termination.GroupStopped {
 			t.Fatal(value, err)
@@ -143,7 +143,7 @@ func TestFinalExecutionAndIncrementalBinaryOutputAreIndependent(t *testing.T) {
 			t.Fatalf("%s bytes differ: %v", name, err)
 		}
 	}
-	result, err := s.Call(context.Background(), "command_read", wire.JSON(ReadRequest{CommandRequest: CommandRequest{TaskID: TaskID{task.ID}, CommandID: c.ID}, Stream: "stdout", Offset: int64(len(out)) - 1, Limit: 1}))
+	result, err := s.accept(context.Background(), "command_read", wire.JSON(ReadRequest{CommandRequest: CommandRequest{TaskID: TaskID{task.ID}, CommandID: c.ID}, Stream: "stdout", Offset: int64(len(out)) - 1, Limit: 1}))
 	if err != nil || result.(map[string]any)["eof"] != true || result.(map[string]any)["encoding"] != "base64" {
 		t.Fatal(result, err)
 	}
@@ -252,7 +252,7 @@ func TestTerminalCommandPollIncludesFinalOutput(t *testing.T) {
 	s, task, c := commandFixture(t, &fakeBackend{})
 	runner := &completingCommandRunner{}
 	b := &VBoxBackend{Config: s.cfg, Runner: runner}
-	s.backend = b
+	s.backend = &Backends{VBoxBackend: b}
 	if err := os.MkdirAll(b.runtime(task), 0700); err != nil {
 		t.Fatal(err)
 	}

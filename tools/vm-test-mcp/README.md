@@ -1,6 +1,7 @@
-# VM Test MCP 0.11.0
+# VM Test MCP 0.12.0
 
-Go services for disposable Windows/Linux VirtualBox labs and strict NixOS sandbox
+One Go module, one public MCP service, with separate VirtualBox and Nix domains
+for disposable Windows/Linux VirtualBox labs and strict NixOS sandbox
 tests on physical-host KVM. A lab contains independent linked clones and a private
 router. Labs and Nix jobs share one persistent FIFO scheduler; commands within a
 lab run concurrently. HTTP disconnects do not cancel tasks.
@@ -79,34 +80,56 @@ vm-test-nix-worker --config /etc/vm-test/config.yaml
 vm-test-mcp --config /etc/vm-test/config.yaml
 ```
 
-Start each process as its configured account. An offline worker affects only Nix tools; `nixos_run` returns `worker_unavailable` before reserving the request ID or queue slot. For `gui: true`, start the controller
+Start each process as its configured account. An offline worker affects only Nix tools; `nix_job_create` returns `worker_unavailable` before reserving the request ID or queue slot. For `gui: true`, start the controller
 in the VM owner's graphical session. Headless is the node default. Executables
 accept `--help`; startup errors exit 1, usage errors exit 2, success exits 0.
 Diagnostics go to stderr. Streamable HTTP is at `/mcp`, authenticated with
 `Authorization: Bearer TOKEN`, with optional exact Host/Origin allowlists (empty or omitted allows any). All token
 holders share authority over all tasks.
 
+Use Codex CLI **0.163.0+** with a 660-second tool timeout:
+
+```toml
+[mcp_servers.vm_test]
+url = "http://127.0.0.1:8765/mcp"
+bearer_token_env_var = "VM_TEST_TOKEN"
+tool_timeout_sec = 660
+```
+
+The [Codex MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)
+defines this timeout setting. SSE carries structured results and 15-second
+transport heartbeats. Disconnects, timeout and MCP cancellation end observation;
+explicit business cancellation ends execution. Use empty controller/worker state
+for this release; old schemas/configuration are intentionally incompatible.
+
 1. Prepare scripts and dependencies locally. Call `service_get` for templates,
-   backend status and limits, and `task_list` for compact active/queued summaries.
+   backend status and limits, and `lab_list` for compact active/queued summaries.
 2. Call `lab_create` with a fresh `request_id` and a fixed list of named nodes.
    Select a deadline for one continuous test batch. Reusing a template creates
    independent clones with separate UUIDs, MACs and disks.
-3. Poll the operation with `operation_get`, then `task_get`. While queued or
-   preparing, upload prepared files through `transfer_create`. Every mutation returns
-   a durable receipt. Identical retries reuse the ID; changed parameters conflict.
-4. Use `command_start` with guest argv, `command_read` for output and `command_input`
+3. Creation waits for readiness and returns `{operation, wait}`. If the 600-second
+   window expires, call `wait` with its `continue` targets. Read `lab_inspect` for
+   node IDs. Identical retries reuse the receipt; changed parameters conflict.
+4. Use `command_start` with guest argv (finite mode waits for completion; explicit
+   service/interactive mode waits for start), `command_read` for output and `command_input`
    for numbered stdin packets/EOF. A nonzero exit finishes only that command.
-5. Upload through `transfer_create`/`guest_file_put`, collect files or guest tar
-   archives with `guest_file_get`, and retrieve evidence through `artifact_get`.
-6. Submit `passed`, `failed` or `inconclusive` and a summary through `task_finish`.
+5. Upload through `upload_create`/`guest_file_put`, collect files or guest tar
+   archives with `guest_file_get`, and retrieve evidence through `evidence_get`.
+6. Submit `passed`, `failed` or `inconclusive` and a summary through `lab_finish`.
    Wait for `cleanup.state: complete` before lengthy local edits or reporting;
-   evidence remains until `task_purge` by default. Abandon queued/preparing tasks
-   with `task_cancel`. Later batches use a new execution identity. Extend only for
-   concrete continued work using `task_extend(seconds=…, reason=…)`.
+   evidence defaults to 1 day for success or 7 days otherwise; pin needed evidence. Abandon queued/preparing tasks
+   with `lab_cancel`. Later batches use a new execution identity. Extend only for
+   concrete continued work using `lab_extend(seconds=…, reason=…)`.
 
 The [API contract](contract.md) describes parameters, errors and transfer routes.
 The distributed [VirtualBox workflow](../../.agents/skills/virtualbox-vm-test/SKILL.md)
 and [NixOS workflow](../../.agents/skills/nixos-vm-test/SKILL.md) describe execution.
+
+Evidence budgets are 20 GiB with reclamation to 16 GiB; input staging is 16 GiB,
+with 8 GiB per upload. Protected data can pause admissions while cleanup remains
+available. Summary/receipt retention is 30 days; pins survive until unpin.
+VirtualBox guest S3 sleep/S4 hibernation are unsupported; hypervisor pause/resume
+remains supported.
 
 ## Networks and evidence
 
@@ -131,7 +154,7 @@ Policy updates are nftables transactions. Expiring leases require control
 heartbeats. A late heartbeat marks policy observation `suspect` while the last
 confirmed, unchanged lease remains valid. Router identity/policy failures, changed
 host protection and lease expiry degrade networking and close host relays.
-`task_get.network` retains stage, cause, budget, lock/execution time, lease deadline
+`lab_inspect.network` retains stage, cause, budget, lock/execution time, lease deadline
 and router identity. `network_recover` validates and restores declared egress/entries.
 `service_observe` exposes a bounded recent window of host pressure, controller
 quota/throttling and call wait/execution times. Faults retain a before/after window
@@ -161,9 +184,9 @@ artifacts. Automatic evidence bundles include available VM logs, screenshots, in
 
 ## Faults, diagnostics and cleanup
 
-`task_get` separates `phase` (`queued`, `preparing`, `running`, `ended`), `result`
+`lab_get` separates `phase` (`queued`, `preparing`, `running`, `ended`), `result`
 and `cleanup`. Queue views expose position and blocking task; resource states
-distinguish never allocated from released. `task_list` defaults to active work,
+distinguish never allocated from released. `lab_list` defaults to active work,
 including blocked cleanup; request `phase=ended` or `all` for compact history.
 Task status omits command payloads. `command_get` reads the spec and input
 progress; `input_from` explicitly pages through retained stdin packets.
@@ -179,7 +202,7 @@ finishes/cancels or the task deadline expires. A node's unavailable capability
 recovers after two successful observations. Power actions record their expected
 transition, so an intentional pause or shutdown does not become a lost-node alarm.
 
-Use `task_diagnose(task_id, node_ids?)` during preparation or execution. Omitting
+Use `lab_diagnose(task_id, node_ids?)` during preparation or execution. Omitting
 node IDs collects the whole lab, including its router. Available evidence is kept
 even if other collectors time out. `node_exec` executes a short absolute guest
 argv directly through Guest Control, independently of command-service readiness;
@@ -188,7 +211,7 @@ bounded stdout/stderr and an artifact. An unconfirmed result stays `uncertain`.
 Use `command_start` for ordinary workloads and process-group supervision.
 
 Cleanup closes published entries immediately, limits evidence collection and
-records resource steps and retry counts. `task_cleanup` retries remaining
+records resource steps and retry counts. `lab_cleanup` retries remaining
 resources of an ended VirtualBox task. A `blocked` cleanup keeps the FIFO occupied;
 inspect its resource errors before a new retry. Nix daemon teardown still uses the
 administrator's local verification procedure. Task results and evidence remain
@@ -232,7 +255,7 @@ just --justfile tools/vm-test-mcp/justfile nixos-test --timeout-seconds 3600 --s
 ```
 
 Ctrl-C stops the submitting/observing client; an accepted remote task keeps its
-deadline. Resume using the same workspace, or use `task_cancel` through MCP. A new
+deadline. Resume using the same workspace, or use `lab_cancel` through MCP. A new
 invocation without a workspace or request ID creates a new execution. `--project`
 selects the locked project for the bundled smoke module; `--config` selects the
 shared config. No bearer token or transfer capability is written to `run.json`.
@@ -240,7 +263,7 @@ shared config. No bearer token or transfer capability is written to `run.json`.
 The packaged equivalent is `vm-test-submit --config /absolute/config.yaml`.
 Without `--config`, the helper retains its upload-only interface for MCP clients:
 
-Allocate a cache with `transfer_create(kind="cache")`, then run inside the
+Allocate a cache with `upload_create(kind="cache")`, then run inside the
 development container with the project's locked Nix environment:
 
 ```sh
@@ -251,10 +274,11 @@ vm-test-submit --test '.#checks.x86_64-linux.integration' \
 
 The helper checks QEMU nodes and `qemu.forceAccel`, creates a unique top-level
 derivation, retains it for retries, copies the closure to a standard local binary
-cache and uploads it. Submit stdout JSON to `nixos_run`. Optional
+cache and uploads it. Submit stdout JSON to `nix_job_create`. Optional
 `--signing-key /absolute/private/key` signs content under the administrator's trust
 policy; signature checking stays enabled. Build outputs have worker-owned GC roots
-and are exported only as ordinary files under registered output roots.
+and are exported only as ordinary files under registered output roots. Verified durable handoff releases worker copies
+and roots; the host Nix store has its own GC policy.
 
 An interrupted daemon build keeps scheduler occupancy until local administrator
 [recovery](preparation.md#recovery). Nix daemon cleanup attestation is a local administrator operation.

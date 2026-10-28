@@ -135,13 +135,13 @@ func waitFor(t *testing.T, fn func() bool) {
 }
 func operation(t *testing.T, s *Server, tool string, args any) *Operation {
 	t.Helper()
-	value, e := s.Call(context.Background(), tool, wire.JSON(args))
+	value, e := s.accept(context.Background(), tool, wire.JSON(args))
 	if e != nil {
 		t.Fatal(e)
 	}
 	op := value.(*Operation)
 	waitFor(t, func() bool {
-		v, e := s.Call(context.Background(), "operation_get", wire.JSON(OperationRequest{OperationID: op.ID}))
+		v, e := s.accept(context.Background(), "operation_get", wire.JSON(OperationRequest{OperationID: op.ID}))
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -186,7 +186,7 @@ func TestIdempotencyLifecycleAndCommandIsolation(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			v, e := s.Call(context.Background(), "lab_create", wire.JSON(LabRequest{RequestID: "same-baseline", Nodes: []NodeRequest{{Name: "one", Template: "windows"}, {Name: "two", Template: "windows"}}}))
+			v, e := s.accept(context.Background(), "lab_create", wire.JSON(LabRequest{RequestID: "same-baseline", Nodes: []NodeRequest{{Name: "one", Template: "windows"}, {Name: "two", Template: "windows"}}}))
 			if e != nil {
 				t.Error(e)
 				return
@@ -203,7 +203,7 @@ func TestIdempotencyLifecycleAndCommandIsolation(t *testing.T) {
 		}
 		first = id
 	}
-	if _, e := s.Call(context.Background(), "lab_create", []byte(`{"request_id":"same-baseline","nodes":[]}`)); wire.Safe(e).Code != "request_conflict" {
+	if _, e := s.accept(context.Background(), "lab_create", []byte(`{"request_id":"same-baseline","nodes":[]}`)); wire.Safe(e).Code != "request_conflict" {
 		t.Fatal(e)
 	}
 	a := StartRequest{NodeChange: NodeChange{Change: Change{"cmd-a"}, NodeID: NodeID{TaskID: TaskID{lab.ID}, NodeID: lab.Nodes[0].ID}}, Argv: []string{"cmd.exe", "/c", "echo", "safe & literal"}}
@@ -226,7 +226,7 @@ func TestIdempotencyLifecycleAndCommandIsolation(t *testing.T) {
 	if bad.State != "uncertain" {
 		t.Fatal(bad)
 	}
-	successful(t, s, "task_finish", FinishRequest{TaskChange: TaskChange{Change: Change{"finish"}, TaskID: TaskID{lab.ID}}, Conclusion: "passed", Summary: "caller assertion"})
+	successful(t, s, "lab_finish", FinishRequest{TaskChange: TaskChange{Change: Change{"finish"}, TaskID: TaskID{lab.ID}}, Conclusion: "passed", Summary: "caller assertion"})
 	waitFor(t, func() bool {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -251,7 +251,7 @@ func TestQueueCancelFailureAndRecovery(t *testing.T) {
 	waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); v, _ := s.task(lab.ID); return v.Cleanup == "required" })
 	op := successful(t, s, "lab_create", LabRequest{RequestID: "queued", Nodes: []NodeRequest{{Name: "q", Template: "windows"}}})
 	queued := op.Result.(map[string]any)["id"].(string)
-	successful(t, s, "task_cancel", TaskChange{Change: Change{"cancel-queued"}, TaskID: TaskID{queued}})
+	successful(t, s, "lab_cancel", TaskChange{Change: Change{"cancel-queued"}, TaskID: TaskID{queued}})
 	s.Close()
 	f.mu.Lock()
 	f.failCreate = false
@@ -292,7 +292,7 @@ func TestHTTPAuthenticationAndStrictTransport(t *testing.T) {
 			t.Fatalf("got %d expected %d", w.Code, c.status)
 		}
 	}
-	if _, e := s.Call(context.Background(), "lab_create", []byte(`{"request_id":"strict","nodes":[],"host_executable":"sh"}`)); e == nil {
+	if _, e := s.accept(context.Background(), "lab_create", []byte(`{"request_id":"strict","nodes":[],"host_executable":"sh"}`)); e == nil {
 		t.Fatal("host option accepted")
 	}
 	server := httptest.NewServer(h)
@@ -314,7 +314,7 @@ func TestHTTPAuthenticationAndStrictTransport(t *testing.T) {
 func TestTransferSealArtifactsAndCrossTaskIDs(t *testing.T) {
 	s, _ := testServer(t)
 	lab := createLab(t, s, "artifacts")
-	op := successful(t, s, "transfer_create", TransferRequest{Change: Change{"upload"}, TaskID: lab.ID, Kind: "file"})
+	op := successful(t, s, "upload_create", TransferRequest{Change: Change{"upload"}, TaskID: lab.ID, Kind: "file"})
 	v := op.Result.(map[string]any)
 	u, _ := url.Parse(v["url"].(string))
 	request := httptest.NewRequest("PUT", u.String(), strings.NewReader("payload"))
@@ -334,7 +334,7 @@ func TestTransferSealArtifactsAndCrossTaskIDs(t *testing.T) {
 	bad := put
 	bad.RequestID = "forged"
 	bad.NodeID.NodeID = "../../host"
-	if _, err := s.Call(context.Background(), "guest_file_put", wire.JSON(bad)); err == nil || wire.Safe(err).Code != "invalid_argument" {
+	if _, err := s.accept(context.Background(), "guest_file_put", wire.JSON(bad)); err == nil || wire.Safe(err).Code != "invalid_argument" {
 		t.Fatal("accepted forged node", err)
 	}
 	s.mu.Lock()
@@ -352,7 +352,7 @@ func TestTransferSealArtifactsAndCrossTaskIDs(t *testing.T) {
 	if a["sha256"] == "" || a["size"].(float64) == 0 {
 		t.Fatal("missing checksum")
 	}
-	artifact, e := s.Call(context.Background(), "artifact_get", wire.JSON(ArtifactGetRequest{TaskID: TaskID{lab.ID}, ArtifactID: a["id"].(string)}))
+	artifact, e := s.accept(context.Background(), "evidence_get", wire.JSON(ArtifactGetRequest{TaskID: TaskID{lab.ID}, ArtifactID: a["id"].(string)}))
 	if e != nil {
 		t.Fatal(e)
 	}
