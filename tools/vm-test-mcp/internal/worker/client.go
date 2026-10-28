@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"time"
 
@@ -18,11 +19,13 @@ type Client struct{ http *http.Client }
 var errorCode = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
 func NewClient(socket string) *Client {
-	return &Client{http: &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+	return &Client{http: &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
 	}}}}
 }
 func (c *Client) Call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	r, e := http.NewRequestWithContext(ctx, "POST", "http://worker/call", bytes.NewReader(wire.JSON(map[string]any{"method": method, "params": params})))
 	if e != nil {
 		return nil, e
@@ -62,4 +65,21 @@ func (c *Client) Call(ctx context.Context, method string, params any) (json.RawM
 
 func workerError(code, message, method string, status int) *wire.Error {
 	return wire.Safe(&wire.Error{Code: code, Message: message, Details: map[string]any{"boundary": "nix_worker", "method": method, "http_status": status}})
+}
+
+func (c *Client) OpenArtifact(ctx context.Context, instance, job, id string) (io.ReadCloser, error) {
+	query := url.Values{"instance_id": {instance}, "job_id": {job}}
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://worker/files/"+url.PathEscape(id)+"?"+query.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	response, err := c.http.Do(req)
+	if err != nil {
+		return nil, workerError("worker_unavailable", "Worker file transfer could not start", "file", 0)
+	}
+	if response.StatusCode != http.StatusOK {
+		response.Body.Close()
+		return nil, workerError("worker_transfer_failed", "Worker file transfer was rejected", "file", response.StatusCode)
+	}
+	return response.Body, nil
 }

@@ -1,12 +1,17 @@
-# VM Test MCP 0.12：控制服务和 Nix worker 共用此文件。
+# VM Test MCP 0.13：控制服务和 Nix worker 共用此文件。
 # 新契约只接受空 state / 新数据库；旧服务与资源必须先由用户停止、清理。
 # Codex CLI >=0.163.0，MCP tool_timeout_sec=660；服务等待窗口 600s，SSE 心跳 15s。
 # 两个程序均使用 --config /绝对路径/config.yaml；配置文件不要求特定权限。
-# config.yaml 被 Git 忽略；本示例只使用合成值。两个进程可共用账户，状态目录必须不同。
+# config.yaml 被 Git 忽略；本示例只使用合成值。两个进程可共用账户和 state 根目录。
 # YAML 拒绝未知字段、重复字段及多个文档。不展开 ~、环境变量或命令替换。
 # 宿主路径使用规范化绝对路径；Windows guest 路径可用单引号保留反斜杠。
 # 可选配置均列为注释，按需取消注释。未配置模板/worker socket 时对应后端关闭。
 # 超时使用带单位的时长，例如 30s、10m、1h。探测、诊断和资源清理各有独立预算。
+
+# 必填，状态根目录；控制端管理其 controller/，worker 默认管理其 nix-worker/。
+# 各角色子目录由运行账户拥有且权限为 0700，不允许符号链接。
+# 分账户共用根目录时，由管理员预先准备父目录和两个角色目录的权限。
+state_dir: /home/vm-owner/.local/state/vm-test-mcp
 
 service:
   # 必填，生成传输和产物 URL 使用的 HTTP origin，不包含 /mcp 或查询参数。
@@ -14,9 +19,6 @@ service:
   public_url: http://127.0.0.1:8765
   # 必填，非空字符串，不能含换行；客户端发送 Authorization: Bearer <token>。
   token: REPLACE_WITH_RANDOM_TOKEN
-  # 必填，控制服务账户拥有的 0700 状态目录；不得与 nix.state_dir 相同。
-  # 不允许路径组件为符号链接。目录保存 SQLite、任务日志、传输和产物。
-  state_dir: /home/vm-owner/.local/state/vm-test-controller
   # 可选，默认 127.0.0.1:8765。IPv4 字面地址:端口，端口 1..65535。
   # 供开发容器连接时可用宿主桥接地址，例如 172.17.0.1:8765。
   # listen: 127.0.0.1:8765
@@ -145,16 +147,16 @@ service:
 #     # 默认 15，5..60 秒。心跳约每三分之一周期续租；过期须 network_recover。
 #     lease_seconds: 15
 
-# 可选。控制服务和 worker 从同一文件读取此块；worker 不在线不影响其它 MCP 工具。
+# 可选。控制服务和 worker 从同一文件读取此块；worker 不在线时存储占用未知，暂停新提交和排队启动；现有控制、诊断和清理继续可用。
 # nix:
 #   # 默认 false；管理员诊断选项，启用后自行负责失败构建目录的清理。
 #   keep_failed: false
 #   # 控制服务可省略或设 "" 来关闭 Nix 后端；启动 worker 时必填绝对路径。
 #   # 同账户运行时可放在 worker 状态目录内；分账户时使用共享组目录，参见 preparation.md。
-#   socket: /home/vm-owner/.local/state/vm-test-nix/worker.sock
-#   # 启动 worker 时必填，worker 账户拥有的 0700 状态目录，不含符号链接。
-#   # 不得与 service.state_dir 相同。
-#   state_dir: /home/vm-owner/.local/state/vm-test-nix
+#   socket: /home/vm-owner/.local/state/vm-test-mcp/nix-worker/worker.sock
+#   # 可选，worker 的状态根目录，默认使用顶层 state_dir；始终追加 nix-worker/。
+#   # 可以与顶层根目录相同；最终两个角色目录不得相等、嵌套或重叠。
+#   # state_dir: /home/vm-owner/.local/state/vm-test-mcp
 #   # 启动 worker 时必填，允许连接 socket 的控制服务 Unix UID，整数 >= 0。
 #   # 可与 worker 自身 UID 相同；例如 id -u vm-owner 输出的值。
 #   controller_uid: 1000
@@ -169,8 +171,8 @@ service:
 #   success_days: 1
 #   failure_days: 7
 #   summary_days: 30
-#   evidence_bytes: 21474836480 # 20 GiB，包括 pin 和活跃证据。
-#   low_water_bytes: 17179869184 # 压力回收到 16 GiB。
+#   evidence_bytes: 42949672960 # 40 GiB，计入两端、pin、活跃证据和移交中的物理副本。
+#   low_water_bytes: 34359738368 # 压力回收到 32 GiB。
 #   input_bytes: 17179869184 # 上传暂存总预算 16 GiB。
 #   upload_idle: 1h
-#   max_upload_bytes: 8589934592 # 单 transfer 8 GiB。
+#   max_upload_bytes: 8589934592 # 单 upload 8 GiB，按清单先预留。

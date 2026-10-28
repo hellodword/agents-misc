@@ -10,7 +10,7 @@ import (
 
 // Bodies are immutable and fsynced before a transaction publishes their index.
 // A failed transaction leaves an unreferenced object for SweepBodies.
-func (d *DB) publishBody(body []byte) (string, int64, string, error) {
+func (d *DB) PublishBody(body []byte) (string, int64, string, error) {
 	h := sha256.Sum256(body)
 	hash := hex.EncodeToString(h[:])
 	name := filepath.Join("bodies", hash)
@@ -49,7 +49,7 @@ func (d *DB) publishBody(body []byte) (string, int64, string, error) {
 	}
 	return name, int64(len(body)), hash, err
 }
-func (d *DB) readBody(name string, size int64, hash string) ([]byte, error) {
+func (d *DB) ReadBody(name string, size int64, hash string) ([]byte, error) {
 	if name != filepath.Join("bodies", hash) || len(hash) != 64 {
 		return nil, fmt.Errorf("invalid body reference")
 	}

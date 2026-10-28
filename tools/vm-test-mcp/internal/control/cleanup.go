@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hellodword/agents-misc/vm-test-mcp/internal/state"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
@@ -59,8 +58,10 @@ func (s *Server) cleanup(t *Task) {
 		now := time.Now().UTC()
 		t.Ended = &now
 	}
-	for _, e := range t.Endpoints {
-		e.State = "closed"
+	if t.Kind == "lab" {
+		for _, e := range t.lab().Endpoints {
+			e.State = "closing"
+		}
 	}
 	s.save(t)
 	uploads := s.retainTransfers(t.ID)
@@ -96,7 +97,7 @@ func (s *Server) cleanup(t *Task) {
 			s.cleanupEvidence(evidence, t, r, snapshot)
 			stop()
 			errs = append(errs, s.cleanupNodes(ctx, t, snapshot)...)
-			if snapshot.GUI != nil && !snapshot.GUI.Restored {
+			if snapshot.lab().GUI != nil && !snapshot.lab().GUI.Restored {
 				if err := s.setGUI(ctx, t, "", true); err != nil {
 					errs = append(errs, err)
 				}
@@ -118,18 +119,29 @@ func (s *Server) cleanup(t *Task) {
 		t.Cleanup = "required"
 		s.event(t, "cleanup_blocked", "Resource cleanup is incomplete; scheduling remains occupied")
 	} else {
-		for _, c := range t.Commands {
-			c.Release = &CommandRelease{Source: "vm_deleted", Time: time.Now().UTC()}
-			c.Retained.stop(wire.Fail("vm_released", "VM was released before all command output was retained"))
-			if c.Observing() {
-				c.State, c.Stage, c.Final = "uncertain", "finished", true
-				if c.Error == "" {
-					c.Error = "Guest execution result was not observed before VM release"
+		if t.Kind == "lab" {
+			for _, e := range t.lab().Endpoints {
+				e.State = "closed"
+			}
+			for _, c := range t.lab().Captures {
+				if c.State != "stopped" {
+					c.State = "released"
 				}
-				now := time.Now().UTC()
-				c.Finished = &now
+			}
+			for _, c := range t.lab().Commands {
+				c.Release = &CommandRelease{Source: "vm_deleted", Time: time.Now().UTC()}
+				c.Retained.stop(wire.Fail("vm_released", "VM was released before all command output was retained"))
+				if c.Observing() {
+					c.State, c.Stage, c.Final = "uncertain", "finished", true
+					if c.Error == "" {
+						c.Error = "Guest execution result was not observed before VM release"
+					}
+					now := time.Now().UTC()
+					c.Finished = &now
+				}
 			}
 		}
+		s.completeTransfers(t.ID)
 		s.event(t, "cleanup_complete", "Task resources were released")
 	}
 	s.save(t)
@@ -138,14 +150,14 @@ func (s *Server) cleanup(t *Task) {
 func deadline(ctx context.Context) time.Time { d, _ := ctx.Deadline(); return d }
 
 func (s *Server) cleanupEvidence(ctx context.Context, t *Task, r *Runtime, snapshot *Task) {
-	for _, c := range snapshot.Captures {
-		if c.State == "running" && ctx.Err() == nil {
+	for _, c := range snapshot.lab().Captures {
+		if c.State != "stopped" && ctx.Err() == nil {
 			cctx, stop := context.WithTimeout(ctx, 3*time.Second)
 			_ = s.stopCapture(cctx, t, r, c.ID, true)
 			stop()
 		}
 	}
-	for _, c := range snapshot.Commands {
+	for _, c := range snapshot.lab().Commands {
 		if !c.Polling() || ctx.Err() != nil {
 			continue
 		}
@@ -159,7 +171,7 @@ func (s *Server) cleanupEvidence(ctx context.Context, t *Task, r *Runtime, snaps
 		s.pollCommandContext(cctx, t, c.ID, false)
 		stop()
 	}
-	_, _ = s.collectDiagnostics(ctx, t, snapshot, append(append([]*Node{}, snapshot.Nodes...), snapshot.Router))
+	_, _ = s.collectDiagnostics(ctx, t, snapshot, append(append([]*Node{}, snapshot.lab().Nodes...), snapshot.lab().Router))
 }
 
 func (s *Server) cleanupNodes(ctx context.Context, t, snapshot *Task) []error {
@@ -167,7 +179,7 @@ func (s *Server) cleanupNodes(ctx context.Context, t, snapshot *Task) []error {
 	var mu sync.Mutex
 	var errs []error
 	slots := make(chan struct{}, 4)
-	for _, n := range append(append([]*Node{}, snapshot.Nodes...), snapshot.Router) {
+	for _, n := range append(append([]*Node{}, snapshot.lab().Nodes...), snapshot.lab().Router) {
 		if n == nil || !n.Intent || n.Cleaned {
 			continue
 		}
@@ -183,8 +195,8 @@ func (s *Server) cleanupNodes(ctx context.Context, t, snapshot *Task) []error {
 			progress := cleanupProgress(func(stage, state string, err error) {
 				s.mu.Lock()
 				defer s.mu.Unlock()
-				real := t.Router
-				if snapshot.Router == nil || n.ID != snapshot.Router.ID {
+				real := t.lab().Router
+				if snapshot.lab().Router == nil || n.ID != snapshot.lab().Router.ID {
 					real, _ = t.Node(n.ID)
 				}
 				if real.CleanupSteps == nil {
@@ -223,8 +235,8 @@ func (s *Server) cleanupNodes(ctx context.Context, t, snapshot *Task) []error {
 				}
 			}
 			s.mu.Lock()
-			real := t.Router
-			if snapshot.Router == nil || n.ID != snapshot.Router.ID {
+			real := t.lab().Router
+			if snapshot.lab().Router == nil || n.ID != snapshot.lab().Router.ID {
 				real, _ = t.Node(n.ID)
 			}
 			if err == nil {
@@ -249,18 +261,19 @@ func (s *Server) cleanupNix(ctx context.Context, t, snapshot *Task) []error {
 		return []error{err}
 	}
 	var result struct {
-		NeverAccepted bool               `json:"never_accepted"`
-		Cleanup       string             `json:"cleanup"`
-		Artifacts     []*Artifact        `json:"artifacts"`
-		EvidenceError bool               `json:"evidence_error"`
-		Execution     *wire.NixExecution `json:"execution"`
+		NeverAccepted  bool               `json:"never_accepted"`
+		ManifestDigest string             `json:"manifest_digest"`
+		Cleanup        string             `json:"cleanup"`
+		Artifacts      []*Artifact        `json:"artifacts"`
+		EvidenceError  bool               `json:"evidence_error"`
+		Execution      *wire.NixExecution `json:"execution"`
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return []error{err}
 	}
 	s.mu.Lock()
 	if result.Execution != nil {
-		t.NixExecution, t.Failure = result.Execution, result.Execution.Error
+		t.nix().NixExecution, t.Failure = result.Execution, result.Execution.Error
 		if t.Failure == nil {
 			t.Failure = result.Execution.PersistenceError
 		}
@@ -288,25 +301,28 @@ func (s *Server) cleanupNix(ctx context.Context, t, snapshot *Task) []error {
 			}
 		}
 	}
-	err = s.db.Save(ctx, state.Document{Kind: "task", ID: t.ID, Value: t})
+	if result.ManifestDigest != "" {
+		t.nix().ManifestDigest = result.ManifestDigest
+	}
+	err = s.db.Save(ctx, t)
 	snapshot = clone(t)
 	s.mu.Unlock()
 	if err != nil {
 		return []error{err}
 	}
-	if !snapshot.HandoffComplete {
+	if !snapshot.nix().HandoffComplete {
 		if !result.NeverAccepted {
 			if _, err = s.backend.Nix(ctx, "handoff", snapshot); err != nil {
 				return []error{err}
 			}
 		}
 		s.mu.Lock()
-		t.HandoffComplete = true
+		t.nix().HandoffComplete = true
 		s.save(t)
 		s.mu.Unlock()
 	}
 	s.mu.Lock()
-	if input, loadErr := s.transfer(t.CacheID); loadErr == nil {
+	if input, loadErr := s.transfer(t.nix().CacheID); loadErr == nil {
 		err = s.removeTransfer(input)
 	}
 	s.mu.Unlock()

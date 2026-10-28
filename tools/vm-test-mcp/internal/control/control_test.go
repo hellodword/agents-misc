@@ -16,6 +16,7 @@ import (
 
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/config"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
+	"github.com/hellodword/agents-misc/vm-test-mcp/internal/worker"
 )
 
 type fakeBackend struct {
@@ -76,7 +77,7 @@ func (f *fakeBackend) Action(_ context.Context, t *Task, n *Node, a NodeAction) 
 	case "node_status":
 		return wire.JSON(NodeStatus{State: "running", Guest: map[string]any{"prepared": true, "privileged": true}}), nil
 	case "command_start":
-		f.commandState[a.Spec.ID] = wire.CommandStatus{State: "running"}
+		f.commandState[a.Spec.ID] = wire.CommandStatus{State: "running", Started: new(time.Now().UTC())}
 	case "command_poll":
 		status, ok := f.commandState[a.CommandID]
 		if !ok {
@@ -103,8 +104,8 @@ func testConfig(t *testing.T) config.Config {
 	c.Service.PublicURL = "http://localhost"
 	c.Service.Hosts = []string{"localhost"}
 	c.Service.Origins = []string{"http://localhost"}
-	c.Service.StateDir = t.TempDir()
-	os.Chmod(c.Service.StateDir, 0700)
+	c.StateDir = t.TempDir()
+	os.Chmod(c.StateDir, 0700)
 	c.Tasks.DefaultTimeout = config.Duration(60 * time.Second)
 	c.Tasks.MaxDuration = config.Duration(600 * time.Second)
 	c.VirtualBox = config.VirtualBox{StartupTimeout: c.VirtualBox.StartupTimeout, ShutdownTimeout: c.VirtualBox.ShutdownTimeout, UnavailableAfter: c.VirtualBox.UnavailableAfter, Network: c.VirtualBox.Network, Executable: "/fake/VBoxManage", LibraryDir: "/fake/lib", APIHelper: "/fake/input", ISOBuilder: "/fake/xorriso", Templates: map[string]config.Template{"windows": {Kind: "windows", VM: "11111111-1111-4111-8111-111111111111", Snapshot: "22222222-2222-4222-8222-222222222222", Username: "synthetic", Password: "synthetic", Supervisor: "C:\\guest.exe", WorkDir: "C:\\work", CPUs: 1, MemoryMiB: 512, MaxCPUs: 4, MaxMemoryMiB: 4096}}}
@@ -145,7 +146,9 @@ func operation(t *testing.T, s *Server, tool string, args any) *Operation {
 		if e != nil {
 			t.Fatal(e)
 		}
-		op = v.(*Operation)
+		if err := json.Unmarshal(wire.JSON(v), op); err != nil {
+			t.Fatal(err)
+		}
 		return op.State != "pending"
 	})
 	return op
@@ -177,7 +180,7 @@ func createLab(t *testing.T, s *Server, id string) *Task {
 func TestIdempotencyLifecycleAndCommandIsolation(t *testing.T) {
 	s, f := testServer(t)
 	lab := createLab(t, s, "same-baseline")
-	if lab.Nodes[0].UUID == lab.Nodes[1].UUID || lab.Nodes[0].MAC == lab.Nodes[1].MAC {
+	if lab.lab().Nodes[0].UUID == lab.lab().Nodes[1].UUID || lab.lab().Nodes[0].MAC == lab.lab().Nodes[1].MAC {
 		t.Fatal("clones share identity")
 	}
 	ids := make(chan string, 20)
@@ -206,10 +209,14 @@ func TestIdempotencyLifecycleAndCommandIsolation(t *testing.T) {
 	if _, e := s.accept(context.Background(), "lab_create", []byte(`{"request_id":"same-baseline","nodes":[]}`)); wire.Safe(e).Code != "request_conflict" {
 		t.Fatal(e)
 	}
-	a := StartRequest{NodeChange: NodeChange{Change: Change{"cmd-a"}, NodeID: NodeID{TaskID: TaskID{lab.ID}, NodeID: lab.Nodes[0].ID}}, Argv: []string{"cmd.exe", "/c", "echo", "safe & literal"}}
+	a := StartRequest{NodeChange: NodeChange{Change: Change{"cmd-a"}, NodeID: NodeID{TaskID: TaskID{lab.ID}, NodeID: lab.lab().Nodes[0].ID}}, Argv: []string{"cmd.exe", "/c", "echo", "safe & literal"}}
 	one := successful(t, s, "command_start", a).Result.(map[string]any)["id"].(string)
+	a.Context, a.Mode = "service", "finite"
+	if repeated := successful(t, s, "command_start", a).Result.(map[string]any)["id"]; repeated != one {
+		t.Fatal("explicit fixed defaults changed idempotency", repeated, one)
+	}
 	a.RequestID = "cmd-b"
-	a.NodeID.NodeID = lab.Nodes[1].ID
+	a.NodeID.NodeID = lab.lab().Nodes[1].ID
 	two := successful(t, s, "command_start", a).Result.(map[string]any)["id"].(string)
 	successful(t, s, "command_input", InputRequest{Change: Change{"stdin-0"}, CommandRequest: CommandRequest{TaskID: TaskID{lab.ID}, CommandID: one}, Sequence: 0, Data: "hello"})
 	o := operation(t, s, "command_input", InputRequest{Change: Change{"bad-seq"}, CommandRequest: CommandRequest{TaskID: TaskID{lab.ID}, CommandID: one}, Sequence: 2})
@@ -222,7 +229,7 @@ func TestIdempotencyLifecycleAndCommandIsolation(t *testing.T) {
 		t.Fatal("cancelled another command")
 	}
 	f.mu.Unlock()
-	bad := operation(t, s, "node_input", InputNodeRequest{NodeChange: NodeChange{Change: Change{"uncertain-click"}, NodeID: NodeID{TaskID: TaskID{lab.ID}, NodeID: lab.Nodes[0].ID}}, Action: "click"})
+	bad := operation(t, s, "node_input", InputNodeRequest{NodeChange: NodeChange{Change: Change{"uncertain-click"}, NodeID: NodeID{TaskID: TaskID{lab.ID}, NodeID: lab.lab().Nodes[0].ID}}, Action: "click"})
 	if bad.State != "uncertain" {
 		t.Fatal(bad)
 	}
@@ -311,12 +318,13 @@ func TestHTTPAuthenticationAndStrictTransport(t *testing.T) {
 		t.Fatal(response.Status)
 	}
 }
-func TestTransferSealArtifactsAndCrossTaskIDs(t *testing.T) {
+func TestUploadReuseEvidenceAndResourceIdentities(t *testing.T) {
 	s, _ := testServer(t)
 	lab := createLab(t, s, "artifacts")
-	op := successful(t, s, "upload_create", TransferRequest{Change: Change{"upload"}, TaskID: lab.ID, Kind: "file"})
+	op := successful(t, s, "upload_create", TransferRequest{Change: Change{"upload"}, Kind: "file"})
 	v := op.Result.(map[string]any)
-	u, _ := url.Parse(v["url"].(string))
+	declareUpload(t, s, v["id"].(string), v["url"].(string), "", map[string]string{"blob": "payload"})
+	u, _ := url.Parse(v["url"].(string) + "/blob")
 	request := httptest.NewRequest("PUT", u.String(), strings.NewReader("payload"))
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, request)
@@ -324,7 +332,7 @@ func TestTransferSealArtifactsAndCrossTaskIDs(t *testing.T) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	id := v["id"].(string)
-	put := PutRequest{NodeChange: NodeChange{Change: Change{"put"}, NodeID: NodeID{TaskID: TaskID{lab.ID}, NodeID: lab.Nodes[0].ID}}, TransferID: id, Path: "C:\\input"}
+	put := PutRequest{NodeChange: NodeChange{Change: Change{"put"}, NodeID: NodeID{TaskID: TaskID{lab.ID}, NodeID: lab.lab().Nodes[0].ID}}, TransferID: id, Path: "C:\\input"}
 	successful(t, s, "guest_file_put", put)
 	w = httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, httptest.NewRequest("PUT", u.String(), strings.NewReader("changed")))
@@ -344,7 +352,7 @@ func TestTransferSealArtifactsAndCrossTaskIDs(t *testing.T) {
 		t.Fatal("forged path allocated a receipt", forged)
 	}
 	bad.RequestID, bad.NodeID.NodeID = "unowned-node", wire.ID()
-	if operation(t, s, "guest_file_put", bad).Error.Code != "not_found" {
+	if _, err := s.accept(context.Background(), "guest_file_put", wire.JSON(bad)); wire.Safe(err).Code != "not_found" {
 		t.Fatal("accepted unowned node identity")
 	}
 	o := successful(t, s, "node_screenshot", ScreenshotRequest{NodeChange: NodeChange{Change: Change{"screen"}, NodeID: put.NodeID}})
@@ -380,4 +388,47 @@ func (f *fakeBackend) GUI(_ context.Context, value *string) (string, error) {
 		f.gui = *value
 	}
 	return f.gui, nil
+}
+
+func evidenceForTest(t *testing.T, s *Server, id string) []*Artifact {
+	t.Helper()
+	var values []*Artifact
+	if err := loadChildren(context.Background(), s.db, "evidence", id, &values); err != nil {
+		t.Fatal(err)
+	}
+	return values
+}
+
+func TestControllerAndWorkerShareStateRoot(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Nix.StateDir = cfg.StateDir
+	controller, err := New(cfg, &fakeBackend{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controller.Close()
+	w, err := worker.New(config.Worker{StateDir: cfg.StateDir, Socket: filepath.Join(cfg.WorkerDir(), "worker.sock"), ControllerUID: os.Getuid()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	described, err := w.Call("describe", worker.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if described.(map[string]any)["instance_id"] == controller.db.InstanceID {
+		t.Fatal("roles share a database identity")
+	}
+	for _, dir := range []string{cfg.ControllerDir(), cfg.WorkerDir()} {
+		if _, err = os.Stat(filepath.Join(dir, "state.sqlite")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err = controller.accept(context.Background(), "lab_create", wire.JSON(LabRequest{RequestID: "shared-root", Nodes: []NodeRequest{}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = w.Call("describe", worker.Request{}); err != nil {
+		t.Fatal("controller write affected worker", err)
+	}
 }

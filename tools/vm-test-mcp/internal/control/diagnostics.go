@@ -16,14 +16,14 @@ type DiagnosticItem struct {
 	Name       string      `json:"name"`
 	State      string      `json:"state"`
 	Result     any         `json:"result,omitempty"`
-	ArtifactID string      `json:"artifact_id,omitempty"`
+	ArtifactID string      `json:"evidence_id,omitempty"`
 	Error      *wire.Error `json:"error,omitempty"`
 }
 type DiagnosticReport struct {
 	Started     time.Time        `json:"started"`
 	Finished    time.Time        `json:"finished"`
 	Items       []DiagnosticItem `json:"items"`
-	ArtifactID  string           `json:"artifact_id,omitempty"`
+	ArtifactID  string           `json:"evidence_id,omitempty"`
 	Performance any              `json:"performance"`
 }
 
@@ -97,9 +97,9 @@ func (s *Server) diagnose(parent context.Context, taskID string, ids []string, a
 	}
 	nodes := []*Node{}
 	if len(ids) == 0 {
-		nodes = append(nodes, snapshot.Nodes...)
-		if snapshot.Router != nil {
-			nodes = append(nodes, snapshot.Router)
+		nodes = append(nodes, snapshot.lab().Nodes...)
+		if snapshot.lab().Router != nil {
+			nodes = append(nodes, snapshot.lab().Router)
 		}
 	} else {
 		seen := map[string]bool{}
@@ -169,13 +169,13 @@ func (s *Server) collectDiagnostics(ctx context.Context, t, snapshot *Task, node
 				{"VBox.log", NodeAction{Action: "diagnostics"}},
 				{"screenshot.png", NodeAction{Action: "screenshot"}},
 			}
-			if n == snapshot.Router {
+			if n == snapshot.lab().Router {
 				actions = append(actions, struct {
 					name   string
 					action NodeAction
 				}{"boot-console.log", NodeAction{Action: "boot_log"}})
 			}
-			if n != snapshot.Router {
+			if n != snapshot.lab().Router {
 				if s.cfg.VirtualBox.Templates[n.Template].Kind == "linux" {
 					actions = append(actions,
 						struct {
@@ -268,6 +268,7 @@ func (s *Server) collectDiagnostics(ctx context.Context, t, snapshot *Task, node
 	report.ArtifactID = a.ID
 	s.mu.Lock()
 	s.event(t, "diagnostics_collected", "Evidence bundle "+a.ID)
+	s.save(t)
 	s.mu.Unlock()
 	return report, nil
 }
@@ -294,7 +295,7 @@ func (s *Server) execNode(a ExecRequest) (any, error) {
 		return nil, err
 	}
 	if result, ok := value.(map[string]any); ok {
-		result["artifact_id"] = artifact.ID
+		result["evidence_id"] = artifact.ID
 	}
 	return value, nil
 }

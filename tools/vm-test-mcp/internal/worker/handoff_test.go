@@ -53,7 +53,7 @@ func TestHandoffIntegrityAndRecovery(t *testing.T) {
 	if err := w.save(j); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.Call("handoff", Request{TaskID: id, ManifestDigest: "incorrect"}); wire.Safe(err).Code != "evidence_integrity" {
+	if _, err := w.Call("handoff", Request{InstanceID: w.db.InstanceID, TaskID: id, ManifestDigest: "incorrect"}); wire.Safe(err).Code != "evidence_integrity" {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(w.root.Path, id, "task.log")); err != nil {
@@ -72,7 +72,7 @@ func TestHandoffIntegrityAndRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer w.Close()
-	if _, err = w.Call("handoff", Request{TaskID: id, ManifestDigest: digest}); err != nil {
+	if _, err = w.Call("handoff", Request{InstanceID: w.db.InstanceID, TaskID: id, ManifestDigest: digest}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = os.Stat(filepath.Join(w.root.Path, id)); !os.IsNotExist(err) {
@@ -83,16 +83,18 @@ func TestHandoffIntegrityAndRecovery(t *testing.T) {
 	if n != 0 {
 		t.Fatal("worker file index remains")
 	}
-	if _, err = w.Call("handoff", Request{TaskID: id, ManifestDigest: digest}); err != nil {
+	if _, err = w.Call("handoff", Request{InstanceID: w.db.InstanceID, TaskID: id, ManifestDigest: digest}); err != nil {
 		t.Fatal("handoff retry failed", err)
 	}
-	if _, err = w.Call("forget", Request{TaskID: id}); err != nil {
+	w.lastRetention = time.Time{}
+	if err = w.expireCompleted(time.Now().Add(31 * 24 * time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	w.db.QueryRowContext(context.Background(), "SELECT count(*) FROM worker_jobs").Scan(&n)
 	if n != 0 {
 		t.Fatal("worker summary retained")
 	}
+
 }
 
 func TestWorkerRetentionProtectsUnfinishedHandoff(t *testing.T) {
@@ -100,8 +102,17 @@ func TestWorkerRetentionProtectsUnfinishedHandoff(t *testing.T) {
 	defer w.Close()
 	now := time.Now().UTC()
 	old := now.Add(-31 * 24 * time.Hour)
+	orphan := wire.ID()
+	for _, id := range []string{orphan, "administrator-directory"} {
+		if err := w.root.MkdirAll(id, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(filepath.Join(w.root.Path, id), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, released := range []bool{false, true} {
-		j := &Job{Request: Request{TaskID: wire.ID()}, Started: old, State: "succeeded", Cleanup: "complete", HandoffComplete: true, CopiesReleased: released}
+		j := &Job{Request: Request{TaskID: wire.ID()}, Started: old, State: "succeeded", Cleanup: "complete", HandoffComplete: true, CopiesReleased: released, HandoffFinished: &old}
 		if err := w.save(j); err != nil {
 			t.Fatal(err)
 		}
@@ -115,8 +126,14 @@ func TestWorkerRetentionProtectsUnfinishedHandoff(t *testing.T) {
 		t.Fatal("worker TTL did not preserve unfinished handoff", count)
 	}
 	var released bool
-	w.db.QueryRow("SELECT json_extract(body,'$.copies_released') FROM worker_jobs").Scan(&released)
+	w.db.QueryRow("SELECT copies_released FROM worker_jobs").Scan(&released)
 	if released {
 		t.Fatal("wrong worker record retained")
+	}
+	if _, err := os.Stat(filepath.Join(w.root.Path, orphan)); !os.IsNotExist(err) {
+		t.Fatal("unindexed worker directory remained", err)
+	}
+	if _, err := os.Stat(filepath.Join(w.root.Path, "administrator-directory")); err != nil {
+		t.Fatal("unowned directory was removed", err)
 	}
 }

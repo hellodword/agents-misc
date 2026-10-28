@@ -17,11 +17,10 @@ import (
 
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/config"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/hostexec"
-	"github.com/hellodword/agents-misc/vm-test-mcp/internal/state"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
-func TestMaliciousNarinfoAndCacheSeal(t *testing.T) {
+func TestCacheValidationBeforeReadiness(t *testing.T) {
 	name := strings.Repeat("0", 32) + ".narinfo"
 	nar := []byte("synthetic NAR bytes; daemon validates NAR structure")
 	h := sha256.Sum256(nar)
@@ -33,19 +32,16 @@ func TestMaliciousNarinfoAndCacheSeal(t *testing.T) {
 		}
 	}
 	s, _ := testServer(t)
-	v := successful(t, s, "upload_create", TransferRequest{Change: Change{"cache"}, Kind: "cache"}).Result.(map[string]any)
-	id := v["id"].(string)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	cache := s.transfers[id]
-	_, _, e := s.root.Write(filepath.Join("transfers", id, name), strings.NewReader(valid), 65536)
-	if e != nil {
-		t.Fatal(e)
+	id, url := newUpload(t, s, "cache")
+	drv, objects := cacheObjects()
+	delete(objects, "nar/fixture.nar")
+	declareUpload(t, s, id, url, drv, objects)
+	transferHTTP(t, s, "PUT", url+"/nix-cache-info", objects["nix-cache-info"], 200)
+	failure := transferHTTP(t, s, "PUT", url+"/"+name, objects[name], 409)
+	if !strings.Contains(failure, "invalid_cache") || readUpload(t, s, id)["state"] != "open" {
+		t.Fatal(failure)
 	}
-	cache.Objects[name] = Object{Size: int64(len(valid)), File: name}
-	if e = s.seal(cache); e == nil {
-		t.Fatal("missing referenced NAR accepted")
-	}
+
 }
 
 type blockedPrepare struct{ fakeBackend }
@@ -165,14 +161,14 @@ func TestRouterRestartRequiresExplicitRecoveryAndOwnership(t *testing.T) {
 		t.Run(power, func(t *testing.T) {
 			b := &VBoxBackend{Config: testConfig(t)}
 			task := newTask("lab", 60)
-			task.LAN = b.Config.VirtualBox.Network.LAN
-			task.DNS = b.Config.VirtualBox.Network.DNS
-			task.Router = &Node{ID: wire.ID(), UUID: wire.UUID(), MAC: "08:00:27:12:34:56"}
-			task.RouterPassword = wire.ID() + wire.ID()
+			task.lab().LAN = b.Config.VirtualBox.Network.LAN
+			task.lab().DNS = b.Config.VirtualBox.Network.DNS
+			task.lab().Router = &Node{ID: wire.ID(), UUID: wire.UUID(), MAC: "08:00:27:12:34:56"}
+			task.lab().RouterPassword = wire.ID() + wire.ID()
 			if e := os.MkdirAll(b.runtime(task), 0700); e != nil {
 				t.Fatal(e)
 			}
-			r := &routerRecoveryRunner{uuid: task.Router.UUID, configPath: filepath.Join(b.vmDir(task, task.Router), "router.vbox"), state: power}
+			r := &routerRecoveryRunner{uuid: task.lab().Router.UUID, configPath: filepath.Join(b.vmDir(task, task.lab().Router), "router.vbox"), state: power}
 			b.Runner = r
 			if _, e := b.Network(context.Background(), task, nil, false); e == nil || r.state != power {
 				t.Fatal("heartbeat restarted router", e, r.calls)
@@ -218,7 +214,7 @@ func TestPersistedInputRetriesAfterDeliveryFailure(t *testing.T) {
 	s.Start()
 	defer s.Close()
 	lab := createLab(t, s, "stdin-outbox")
-	a := StartRequest{NodeChange: NodeChange{Change: Change{"start-input"}, NodeID: NodeID{TaskID: TaskID{lab.ID}, NodeID: lab.Nodes[0].ID}}, Argv: []string{"reader"}}
+	a := StartRequest{NodeChange: NodeChange{Change: Change{"start-input"}, NodeID: NodeID{TaskID: TaskID{lab.ID}, NodeID: lab.lab().Nodes[0].ID}}, Argv: []string{"reader"}}
 	id := successful(t, s, "command_start", a).Result.(map[string]any)["id"].(string)
 	op := successful(t, s, "command_input", InputRequest{Change: Change{"persist-input"}, CommandRequest: CommandRequest{TaskID: TaskID{lab.ID}, CommandID: id}, Sequence: 0, Data: "ordered", EOF: true})
 	if op.Result.(map[string]any)["delivery"] != "pending" {
@@ -252,8 +248,8 @@ func TestDeadlineExtensionNetworkAndPurge(t *testing.T) {
 		t.Fatal(o)
 	}
 	s.mu.Lock()
-	if task.Network != "degraded" {
-		t.Fatal(task.Network)
+	if task.lab().Network != "degraded" {
+		t.Fatal(task.lab().Network)
 	}
 	s.mu.Unlock()
 	f.mu.Lock()
@@ -273,7 +269,7 @@ func TestDeadlineExtensionNetworkAndPurge(t *testing.T) {
 		defer s.mu.Unlock()
 		return task.State == "timed_out" && task.Cleanup == "complete"
 	})
-	successful(t, s, "execution_delete", TaskChange{Change: Change{"purge"}, TaskID: TaskID{lab.ID}})
+	successful(t, s, "execution_delete", ExecutionChange{Change: Change{"purge"}, ExecutionID: lab.ID})
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !task.Purged || task.State != "timed_out" {
@@ -288,8 +284,11 @@ func TestRestartRetainsOperationReceipt(t *testing.T) {
 		t.Fatal(e)
 	}
 	op := &Operation{ID: wire.ID(), RequestID: "uncertain", Tool: "node_input", State: "pending", Created: time.Now().UTC()}
-	if e = s.db.Save(context.Background(), state.Document{Kind: "operation", ID: op.ID, Value: op}); e != nil {
+	if e = s.db.Admit(context.Background(), op, wire.JSON(map[string]any{"request_id": op.RequestID, "node_id": wire.ID(), "action": "release"})); e != nil {
 		t.Fatal(e)
+	}
+	if err := s.db.MarkDispatched(context.Background(), op.ID); err != nil {
+		t.Fatal(err)
 	}
 	s.Close()
 	s, e = New(c, f)
@@ -301,7 +300,7 @@ func TestRestartRetainsOperationReceipt(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if value.(*Operation).State != "uncertain" {
+	if value.(map[string]any)["state"] != "uncertain" {
 		t.Fatal(value)
 	}
 }
@@ -326,7 +325,7 @@ func TestVideoCaptureCollectsVBox72ScreenFile(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	dest := filepath.Join(b.Config.Service.StateDir, "tasks", task.ID, "artifacts", wire.ID())
+	dest := filepath.Join(b.Config.ControllerDir(), "tasks", task.ID, "artifacts", wire.ID())
 	if err := b.capture(context.Background(), task, &Node{UUID: wire.UUID()}, NodeAction{Action: "capture_stop", Capture: capture, Local: dest}); err != nil {
 		t.Fatal(err)
 	}
@@ -378,7 +377,7 @@ func TestGuestDownloadUsesExplicitFileAndRejectsSymlinks(t *testing.T) {
 				if err := os.MkdirAll(b.runtime(task), 0700); err != nil {
 					t.Fatal(err)
 				}
-				local := filepath.Join(b.Config.Service.StateDir, "status.json")
+				local := filepath.Join(b.Config.ControllerDir(), "status.json")
 				err := b.copyFrom(context.Background(), task, node, source, local)
 				if symlink {
 					if err == nil {
@@ -431,9 +430,9 @@ func TestVBoxArgumentsAreStructuredAndRouterIsPrivate(t *testing.T) {
 	r := &recordingRunner{}
 	b := &VBoxBackend{Config: c, Runner: r}
 	task := newTask("lab", 60)
-	task.Router = &Node{ID: wire.ID()}
+	task.lab().Router = &Node{ID: wire.ID()}
 	n := &Node{ID: wire.ID(), UUID: wire.UUID(), NodeRequest: NodeRequest{Template: "windows"}}
-	task.Nodes = []*Node{n}
+	task.lab().Nodes = []*Node{n}
 	os.MkdirAll(b.runtime(task), 0700)
 	payload := `C:\guest\--target-directory=$(touch /host-owned);.txt`
 	_, e := b.Action(context.Background(), task, n, NodeAction{Action: "file_put", Path: payload, Local: "/safe/service-file"})
@@ -452,7 +451,7 @@ func TestVBoxArgumentsAreStructuredAndRouterIsPrivate(t *testing.T) {
 	if !found {
 		t.Fatal("guest path was split or interpreted")
 	}
-	if _, e = b.Action(context.Background(), task, task.Router, NodeAction{Action: "reset"}); e == nil {
+	if _, e = b.Action(context.Background(), task, task.lab().Router, NodeAction{Action: "reset"}); e == nil {
 		t.Fatal("router exposed as test node")
 	}
 	bad := map[string]string{"CfgFile": "/real-user-vm/machine.vbox"}
@@ -466,7 +465,7 @@ func TestGuestSubmissionArgvAndTransportBudget(t *testing.T) {
 	r := &recordingRunner{}
 	b := &VBoxBackend{Config: c, Runner: r}
 	task := newTask("lab", 60)
-	task.Router = &Node{ID: wire.ID()}
+	task.lab().Router = &Node{ID: wire.ID()}
 	n := &Node{ID: wire.ID(), UUID: wire.UUID(), NodeRequest: NodeRequest{Template: "windows"}}
 	if e := os.MkdirAll(b.runtime(task), 0700); e != nil {
 		t.Fatal(e)
@@ -492,7 +491,7 @@ func TestPublicTaskHidesHostIdentifiers(t *testing.T) {
 	s, _ := testServer(t)
 	lab := createLab(t, s, "public")
 	data, _ := json.Marshal(lab.Public())
-	for _, secret := range []string{lab.RouterPassword, lab.Router.UUID, lab.Nodes[0].UUID} {
+	for _, secret := range []string{lab.lab().RouterPassword, lab.lab().Router.UUID, lab.lab().Nodes[0].UUID} {
 		if strings.Contains(string(data), secret) {
 			t.Fatal("host identifier leaked")
 		}
@@ -503,11 +502,11 @@ func TestPurgeRemovesPayloadFromReceipts(t *testing.T) {
 	s, _ := testServer(t)
 	lab := createLab(t, s, "purge-payload")
 	marker := "synthetic-private-command-input"
-	a := StartRequest{NodeChange: NodeChange{Change: Change{"payload-command"}, NodeID: NodeID{TaskID: TaskID{lab.ID}, NodeID: lab.Nodes[0].ID}}, Argv: []string{"app", marker}, Env: map[string]string{"SYNTHETIC": marker}}
+	a := StartRequest{NodeChange: NodeChange{Change: Change{"payload-command"}, NodeID: NodeID{TaskID: TaskID{lab.ID}, NodeID: lab.lab().Nodes[0].ID}}, Argv: []string{"app", marker}, Env: map[string]string{"SYNTHETIC": marker}}
 	successful(t, s, "command_start", a)
 	successful(t, s, "lab_finish", FinishRequest{TaskChange: TaskChange{Change: Change{"payload-finish"}, TaskID: TaskID{lab.ID}}, Conclusion: "inconclusive", Summary: "synthetic retention check"})
 	waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); v, _ := s.task(lab.ID); return v.Cleanup == "complete" })
-	successful(t, s, "execution_delete", TaskChange{Change: Change{"payload-purge"}, TaskID: TaskID{lab.ID}})
+	successful(t, s, "execution_delete", ExecutionChange{Change: Change{"payload-purge"}, ExecutionID: lab.ID})
 	for _, kind := range []string{"task", "operation"} {
 		rows, e := s.db.List(context.Background(), kind)
 		if e != nil {

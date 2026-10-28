@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"encoding/base64"
 	"strings"
 	"testing"
 	"time"
@@ -27,7 +28,7 @@ func TestBatchReleaseQueueAndReconnect(t *testing.T) {
 	next := op.Result.(map[string]any)["id"].(string)
 	queued := taskView(t, s, next)
 	q := queued["queue"].(map[string]any)
-	if queued["phase"] != "queued" || q["position"] != float64(1) || q["reason"] != "executor_occupied" || q["blocking_task_id"] != lab.ID {
+	if queued["phase"] != "queued" || q["position"] != float64(1) || q["reason"] != "executor_occupied" || q["blocking_execution_id"] != lab.ID {
 		t.Fatal(queued)
 	}
 	// No command or HTTP connection is necessary to keep a service fixture alive.
@@ -84,16 +85,16 @@ func TestDiscoveryProjectsHistoryAndKeepsStableCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	marker := strings.Repeat("synthetic-input-", 8192)
+	marker := strings.Repeat("synthetic-input-", 2048)
 	history := newTask("lab", 60)
 	history.State, history.Cleanup = "finished", "complete"
 	history.Summary = marker
-	history.Commands = []*Command{{ID: wire.ID(), Stdin: state.InputQueue{NextSequence: 1, Bytes: int64(len(marker))}, CommandStatus: wire.CommandStatus{State: "exited"}}}
-	doc := state.Document{Kind: "task", ID: history.ID, Value: history}
-	if err = s.db.CreateCommand(context.Background(), doc, history.Commands[0].ID, wire.CommandSpec{Argv: []string{"example", marker}, Env: map[string]string{"FIXTURE": marker}}); err != nil {
+	history.lab().Commands = []*Command{{ID: wire.ID(), Stdin: state.InputQueue{NextSequence: 1, Bytes: int64(len(marker))}, CommandStatus: wire.CommandStatus{State: "exited", Final: true}, Release: &CommandRelease{Source: "test"}}}
+	doc := history
+	if err = s.db.CreateCommand(context.Background(), doc, history.lab().Commands[0].ID, wire.CommandSpec{Argv: []string{"example", marker}, Env: map[string]string{"FIXTURE": marker}}); err != nil {
 		t.Fatal(err)
 	}
-	if err = s.db.AppendInput(context.Background(), doc, history.Commands[0].ID, wire.Input{Data: marker}); err != nil {
+	if err = s.db.AppendInput(context.Background(), doc, history.lab().Commands[0].ID, wire.Input{Data: marker}); err != nil {
 		t.Fatal(err)
 	}
 	next := newTask("lab", 60)
@@ -112,7 +113,7 @@ func TestDiscoveryProjectsHistoryAndKeepsStableCursor(t *testing.T) {
 		t.Fatal(active)
 	}
 	first := list(TaskListRequest{Phase: "all", Limit: 1})
-	if first["next_cursor"] != history.ID || len(wire.JSON(first)) > 2048 {
+	if first["next_cursor"] != "1" || len(wire.JSON(first)) > 2048 {
 		t.Fatal("history payload was not bounded", len(wire.JSON(first)))
 	}
 	item := first["items"].([]any)[0].(map[string]any)
@@ -128,23 +129,32 @@ func TestDiscoveryProjectsHistoryAndKeepsStableCursor(t *testing.T) {
 		t.Fatal(page)
 	}
 	view := taskView(t, s, history.ID)
-	command := view["commands"].([]any)[0].(map[string]any)
-	if command["state"] != "exited" || command["spec"] != nil || command["input"] != nil {
-		t.Fatal("task status did not project command status")
+	if view["commands"] != nil || view["artifacts"] != nil {
+		t.Fatal("inspect included growing history")
 	}
-	full, err := s.accept(context.Background(), "command_details", wire.JSON(CommandRequest{TaskID: TaskID{history.ID}, CommandID: history.Commands[0].ID}))
-	if err != nil || full.(*CommandDetails).Spec.Env["FIXTURE"] != marker || full.(*CommandDetails).Stdin.NextSequence != 1 {
+	commands, err := s.collection("command_list", CollectionRequest{LabID: history.ID, Limit: 1})
+	if err != nil || len(commands.(map[string]any)["items"].([]any)) != 1 {
+		t.Fatal(commands, err)
+	}
+	full, err := s.accept(context.Background(), "command_details", wire.JSON(CommandRequest{TaskID: TaskID{history.ID}, CommandID: history.lab().Commands[0].ID}))
+	if err != nil || full.(map[string]any)["spec"].(wire.CommandSpec).Env["FIXTURE"] != marker {
 		t.Fatal("explicit command detail lost spec or input progress", err)
 	}
-	from := 0
-	full, err = s.accept(context.Background(), "command_details", wire.JSON(CommandGetRequest{CommandRequest: CommandRequest{TaskID: TaskID{history.ID}, CommandID: history.Commands[0].ID}, InputFrom: &from}))
-	if err != nil || full.(*CommandDetails).Input[0].Data != marker || *full.(*CommandDetails).NextSequence != 1 {
-		t.Fatal("explicit command detail lost retained inputs", err)
+	full, err = s.accept(context.Background(), "command_input_read", wire.JSON(CommandInputReadRequest{CommandRequest: CommandRequest{CommandID: history.lab().Commands[0].ID}}))
+	if err != nil || full.(map[string]any)["items"].([]any)[0].(map[string]any)["data"] != base64.StdEncoding.EncodeToString([]byte(marker)) || full.(map[string]any)["next_sequence"] != 1 {
+		t.Fatal("retained input reader lost data", err)
+	}
+	if err = s.db.DeleteExecution(context.Background(), history.ID); err != nil {
+		t.Fatal(err)
+	}
+	resumed := list(TaskListRequest{Phase: "all", Limit: 1, Cursor: first["next_cursor"].(string)})
+	if resumed["items"].([]any)[0].(map[string]any)["id"] != next.ID {
+		t.Fatal("deleting the cursor row shifted pagination")
 	}
 	next.State, next.Cleanup = "cancelled", "required"
 	s.active = next.ID
 	q := taskView(t, s, newer.ID)["queue"].(map[string]any)
-	if q["reason"] != "cleanup_blocked" || q["blocking_task_id"] != next.ID {
+	if q["reason"] != "cleanup_blocked" || q["blocking_execution_id"] != next.ID {
 		t.Fatal(q)
 	}
 	if len(list(TaskListRequest{})["items"].([]any)) != 2 {

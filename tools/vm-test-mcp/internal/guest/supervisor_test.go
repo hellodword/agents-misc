@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,6 +21,64 @@ type fakeChild struct {
 	once    sync.Once
 	in      io.Reader
 	out     io.Writer
+}
+
+func TestLaunchAndPipeDeliveryHaveSeparateConfirmation(t *testing.T) {
+	root, id := t.TempDir(), wire.ID()
+	request := filepath.Join(root, "request.json")
+	if err := os.WriteFile(request, wire.JSON(wire.CommandSpec{ID: id, Argv: []string{"synthetic"}}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	launchEntered, allowLaunch, allowRead := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- run(context.Background(), root, request, func(ctx context.Context, spec wire.CommandSpec, in *os.File, out, errout io.Writer) (Child, error) {
+			close(launchEntered)
+			<-allowLaunch
+			child := &fakeChild{done: make(chan struct{}), drained: make(chan struct{})}
+			go func() { defer close(child.drained); <-allowRead; _, _ = io.Copy(out, in); _ = child.Kill(ctx) }()
+			return child, nil
+		})
+	}()
+	<-launchEntered
+	var status wire.CommandStatus
+	statusFile := filepath.Join(root, id, "status.json")
+	if err := readJSON(statusFile, &status); err != nil || status.Started != nil {
+		t.Fatal("launch not yet confirmed", status, err)
+	}
+	close(allowLaunch)
+	input := filepath.Join(root, "input.json")
+	// Multiple maximum-sized packets exceed the OS pipe capacity on both guests.
+	for i := range 32 {
+		if err := os.WriteFile(input, wire.JSON(wire.Input{Sequence: i, Data: strings.Repeat("x", wire.InputPacketLimit), EOF: i == 31}), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := Input(root, id, input); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if readJSON(statusFile, &status) == nil && status.Started != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if status.Started == nil || status.WrittenInput >= 32 || status.InputClosed {
+		t.Fatal("durable packets were confused with pipe writes", status)
+	}
+	close(allowRead)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stdin did not drain")
+	}
+	if err := readJSON(statusFile, &status); err != nil || status.WrittenInput != 32 || !status.InputClosed {
+		t.Fatal(status, err)
+	}
 }
 
 func TestCommandPATHOverride(t *testing.T) {
@@ -55,7 +114,7 @@ func (p *fakeChild) Drain(ctx context.Context) error {
 	}
 }
 func (p *fakeChild) Close() error { return p.Kill(context.Background()) }
-func fakeLaunch(_ context.Context, _ wire.CommandSpec, in io.Reader, out, errout io.Writer) (Child, error) {
+func fakeLaunch(_ context.Context, _ wire.CommandSpec, in *os.File, out, errout io.Writer) (Child, error) {
 	p := &fakeChild{done: make(chan struct{}), drained: make(chan struct{}), in: in, out: out}
 	go func() { defer close(p.drained); io.Copy(out, in); p.Kill(context.Background()) }()
 	return p, nil
@@ -109,7 +168,7 @@ func TestOrderedInputEOFAndIndependentCancellation(t *testing.T) {
 	}
 	var final wire.CommandStatus
 	hash := sha256.Sum256(out)
-	if e = readJSON(filepath.Join(root, ids[0], "status.json"), &final); e != nil || final.Output.State != "complete" || final.Output.StdoutSHA256 != hex.EncodeToString(hash[:]) || !final.InputClosed || final.NextInput != 2 {
+	if e = readJSON(filepath.Join(root, ids[0], "status.json"), &final); e != nil || final.Output.State != "complete" || final.Output.StdoutSHA256 != hex.EncodeToString(hash[:]) || !final.InputClosed || final.WrittenInput != 2 {
 		t.Fatal("EOF or retained output identity was lost", final, e)
 	}
 	wait(ids[1], "running")

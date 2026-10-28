@@ -1,4 +1,4 @@
-package state
+package control
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 
 func TestHealthyObservationsDoNotGrowDatabase(t *testing.T) {
 	dir := t.TempDir()
-	db, err := Open(dir)
+	db, err := openRepository(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,18 +23,21 @@ func TestHealthyObservationsDoNotGrowDatabase(t *testing.T) {
 		t.Fatal("incremental vacuum not active", vacuum, err)
 	}
 	id, node := wire.ID(), wire.ID()
-	task := map[string]any{"id": id, "kind": "lab", "state": "running", "cleanup": "pending", "created": time.Now().UTC(), "nodes": []any{map[string]any{"id": node, "state": "running", "health": map[string]any{"checked": "first", "last_success": "first", "successes": 1, "state": "available"}}}}
-	doc := Document{Kind: "task", ID: id, Value: task}
+	task := newTask("lab", 60)
+	task.ID = id
+	task.State = "running"
+	task.lab().Nodes = []*Node{{ID: node, State: "running", Health: Health{Commands: Observation{State: "available"}}}}
+	doc := task
 	if err = db.Save(context.Background(), doc); err != nil {
 		t.Fatal(err)
 	}
 	var before, after int64
 	db.QueryRow("SELECT total_changes()").Scan(&before)
-	health := task["nodes"].([]any)[0].(map[string]any)["health"].(map[string]any)
+	health := &task.lab().Nodes[0].Health.Commands
 	for i := 0; i < 1000; i++ {
-		health["checked"] = time.Now()
-		health["last_success"] = time.Now()
-		health["successes"] = i + 2
+		health.Checked = new(time.Now())
+		health.LastSuccess = new(time.Now())
+		health.Successes = i + 2
 		if err = db.Save(context.Background(), doc); err != nil {
 			t.Fatal(err)
 		}
@@ -43,19 +46,19 @@ func TestHealthyObservationsDoNotGrowDatabase(t *testing.T) {
 	if after != before {
 		t.Fatalf("healthy probes wrote %d rows", after-before)
 	}
-	health["state"] = "unavailable"
-	health["error"] = map[string]any{"code": "fault"}
+	health.State = "unavailable"
+	health.Error = wire.Safe(wire.Fail("fault", "synthetic fault"))
 	if err = db.Save(context.Background(), doc); err != nil {
 		t.Fatal(err)
 	}
 	db.QueryRow("SELECT total_changes()").Scan(&after)
-	if after != before+1 {
-		t.Fatal("fault transition must update only its node", before, after)
+	if after != before+2 {
+		t.Fatal("fault transition must update its node and execution revision", before, after)
 	}
 }
 func TestBodySweepAndProtectedPhysicalDeletion(t *testing.T) {
 	dir := t.TempDir()
-	db, err := Open(dir)
+	db, err := openRepository(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,8 +66,9 @@ func TestBodySweepAndProtectedPhysicalDeletion(t *testing.T) {
 	ctx := context.Background()
 	id, command := wire.ID(), wire.ID()
 	body := strings.Repeat("synthetic secret body ", 4000)
-	task := map[string]any{"id": id, "kind": "lab", "state": "finished", "cleanup": "complete", "created": time.Now().UTC(), "artifacts": []any{map[string]any{"id": wire.ID(), "size": 0, "pinned": true}}}
-	doc := Document{Kind: "task", ID: id, Value: task}
+	task := storedCommandFixture(id, command)
+	task.Artifacts = []*Artifact{{ID: wire.ID(), Size: 0, Pinned: true}}
+	doc := task
 	if err = db.CreateCommand(ctx, doc, command, wire.CommandSpec{Argv: []string{"example", body}}); err != nil {
 		t.Fatal(err)
 	}
@@ -72,13 +76,13 @@ func TestBodySweepAndProtectedPhysicalDeletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err = db.DeleteExecution(ctx, id); err == nil {
-		t.Fatal("pin did not prevent deletion")
+		t.Fatal("active execution was deleted")
 	}
 	if _, err = db.CommandSpec(ctx, id, command); err != nil {
 		t.Fatal("protected deletion removed dependent data", err)
 	}
 	// Orphan and referenced files are equally old, but only the orphan is collectible.
-	orphan, _, _, err := db.publishBody([]byte("uncommitted data"))
+	orphan, _, _, err := db.PublishBody([]byte("uncommitted data"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +102,8 @@ func TestBodySweepAndProtectedPhysicalDeletion(t *testing.T) {
 	if _, err = db.CommandSpec(ctx, id, command); err != nil {
 		t.Fatal("referenced body lost", err)
 	}
-	if _, err = db.Exec("UPDATE evidence SET pinned=0"); err != nil {
+	task.State, task.Cleanup = "finished", "complete"
+	if err = db.Save(ctx, task); err != nil {
 		t.Fatal(err)
 	}
 	if err = db.DeleteExecution(ctx, id); err != nil {
@@ -112,7 +117,9 @@ func TestBodySweepAndProtectedPhysicalDeletion(t *testing.T) {
 		t.Fatal("expired bodies remain", len(entries))
 	}
 	var count int
-	db.QueryRow("SELECT count(*) FROM command_specs").Scan(&count)
+	if err = db.QueryRow("SELECT count(*) FROM commands").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
 	if count != 0 {
 		t.Fatal("spec indexes remain")
 	}

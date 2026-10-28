@@ -77,7 +77,7 @@ func supervisionFixture(t *testing.T, ctx context.Context, p *faultChild, write 
 		t.Fatal(err)
 	}
 	start := time.Now()
-	err := supervise(ctx, root, request, func(context.Context, wire.CommandSpec, io.Reader, io.Writer, io.Writer) (Child, error) { return p, nil }, supervisionLimits{time.Second, 50 * time.Millisecond, 50 * time.Millisecond, 50 * time.Millisecond}, write)
+	err := supervise(ctx, root, request, func(context.Context, wire.CommandSpec, *os.File, io.Writer, io.Writer) (Child, error) { return p, nil }, supervisionLimits{time.Second, 50 * time.Millisecond, 50 * time.Millisecond, 50 * time.Millisecond}, write)
 	elapsed := time.Since(start)
 	var status wire.CommandStatus
 	if e := readJSON(filepath.Join(root, id, "status.json"), &status); e != nil {
@@ -187,7 +187,7 @@ func TestTerminalWriteFailureCanBeReconciledWithoutInventingExit(t *testing.T) {
 	}
 	p := &faultChild{exit: make(chan struct{}), code: 29}
 	p.once.Do(func() { close(p.exit) })
-	err := supervise(context.Background(), root, request, func(context.Context, wire.CommandSpec, io.Reader, io.Writer, io.Writer) (Child, error) { return p, nil }, commandLimits, func(file string, value any) error {
+	err := supervise(context.Background(), root, request, func(context.Context, wire.CommandSpec, *os.File, io.Writer, io.Writer) (Child, error) { return p, nil }, commandLimits, func(file string, value any) error {
 		if value.(wire.CommandStatus).Final {
 			return os.ErrPermission
 		}
@@ -222,7 +222,7 @@ func TestLateStartupIsBoundedAndCannotLeaveAnUnownedChild(t *testing.T) {
 	release := make(chan struct{})
 	p := &faultChild{exit: make(chan struct{}), code: 0}
 	start := time.Now()
-	err := supervise(context.Background(), root, request, func(context.Context, wire.CommandSpec, io.Reader, io.Writer, io.Writer) (Child, error) {
+	err := supervise(context.Background(), root, request, func(context.Context, wire.CommandSpec, *os.File, io.Writer, io.Writer) (Child, error) {
 		<-release
 		return p, nil
 	}, supervisionLimits{30 * time.Millisecond, 50 * time.Millisecond, 50 * time.Millisecond, 50 * time.Millisecond}, atomic)

@@ -110,7 +110,7 @@ func TestRetryReusesEvaluationAndUploadsStandardCache(t *testing.T) {
 	o := Options{Nix: exe, Test: ".#checks.x86_64-linux.test", RequestID: "same-run", CacheID: wire.ID(), CacheURL: server.URL + "/files/synthetic-token", WorkDir: dir}
 	for range 2 {
 		result, e := Prepare(context.Background(), o)
-		if e != nil || result["derivation"] != drv {
+		if e != nil || result["upload_id"] != o.CacheID {
 			t.Fatal(result, e)
 		}
 	}
@@ -120,7 +120,7 @@ func TestRetryReusesEvaluationAndUploadsStandardCache(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(uploads) != 2 {
+	if len(uploads) != 4 {
 		t.Fatal(uploads)
 	}
 	for _, count := range uploads {

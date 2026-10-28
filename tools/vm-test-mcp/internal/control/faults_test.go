@@ -83,7 +83,7 @@ func TestStartupDistinguishesInitializationFromUnresponsiveService(t *testing.T)
 		}
 	}
 	if err := h.startupFailure(now.Add(155*time.Second), status, nil, 30*time.Second); wire.Safe(err).Code != "node_unavailable" {
-		t.Fatal("unresponsive service consumed the full startup deadline", err)
+		t.Fatal("unresponsive service written the full startup deadline", err)
 	}
 }
 
@@ -168,9 +168,9 @@ func fixtureLab(t *testing.T, backend Backend, timeout time.Duration) (*Server, 
 	task := newTask("lab", 60)
 	task.State = "running"
 	for _, name := range []string{"one", "two"} {
-		task.Nodes = append(task.Nodes, &Node{ID: wire.ID(), UUID: wire.UUID(), Intent: true, State: "running", NodeRequest: NodeRequest{Name: name, Template: "windows"}, Preparation: Preparation{Stage: "ready"}})
+		task.lab().Nodes = append(task.lab().Nodes, &Node{ID: wire.ID(), UUID: wire.UUID(), Intent: true, State: "running", NodeRequest: NodeRequest{Name: name, Template: "windows"}, Preparation: Preparation{Stage: "ready"}})
 	}
-	task.Router = &Node{ID: wire.ID(), UUID: wire.UUID(), Intent: true, NodeRequest: NodeRequest{Name: "router"}}
+	task.lab().Router = &Node{ID: wire.ID(), UUID: wire.UUID(), Intent: true, NodeRequest: NodeRequest{Name: "router"}}
 	ctx, cancel := context.WithCancel(s.ctx)
 	r := &Runtime{ctx: ctx, cancel: cancel, relays: map[string]*Relay{}}
 	s.tasks = append(s.tasks, task)
@@ -183,7 +183,7 @@ func fixtureLab(t *testing.T, backend Backend, timeout time.Duration) (*Server, 
 func TestCleanupBudgetPartialProgressAndExplicitRetry(t *testing.T) {
 	f := &faultBackend{hangDiagnostics: true}
 	s, task, _ := fixtureLab(t, f, 2*time.Second)
-	f.failNode = task.Nodes[0].ID
+	f.failNode = task.lab().Nodes[0].ID
 	task.State = "failed"
 	task.Failure = &wire.Error{Code: "initialization_failed", Message: "first boot failed"}
 	started := time.Now()
@@ -191,10 +191,10 @@ func TestCleanupBudgetPartialProgressAndExplicitRetry(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 3*time.Second {
 		t.Fatal("cleanup exceeded total budget", elapsed)
 	}
-	if task.Cleanup != "required" || !task.Nodes[1].Cleaned || !task.Router.Cleaned || task.Nodes[0].Cleaned || s.active != task.ID {
+	if task.Cleanup != "required" || !task.lab().Nodes[1].Cleaned || !task.lab().Router.Cleaned || task.lab().Nodes[0].Cleaned || s.active != task.ID {
 		t.Fatal(task.Public())
 	}
-	if len(task.Artifacts) == 0 || task.Nodes[0].CleanupSteps["delete"].Attempts != 3 {
+	if len(evidenceForTest(t, s, task.ID)) == 0 || task.lab().Nodes[0].CleanupSteps["delete"].Attempts != 3 {
 		t.Fatal("missing partial evidence or retry journal", task.Public())
 	}
 	ended := *task.Ended
@@ -203,15 +203,15 @@ func TestCleanupBudgetPartialProgressAndExplicitRetry(t *testing.T) {
 	f.hangDiagnostics = false
 	f.faultMu.Unlock()
 	op := successful(t, s, "lab_cleanup", TaskChange{Change: Change{"retry-cleanup"}, TaskID: TaskID{task.ID}})
-	if op.Result.(map[string]any)["cleanup"].(map[string]any)["state"] != "complete" {
+	if taskView(t, s, task.ID)["cleanup"].(map[string]any)["state"] != "complete" {
 		t.Fatal(op)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.active != "" || task.State != "failed" || !task.Ended.Equal(ended) || task.Nodes[0].CleanupSteps["delete"].Attempts != 4 {
+	if s.active != "" || task.State != "failed" || !task.Ended.Equal(ended) || task.lab().Nodes[0].CleanupSteps["delete"].Attempts != 4 {
 		t.Fatal("retry changed result or did not release scheduler", task.Public())
 	}
-	if f.deletionAttempts[task.Nodes[1].ID] != 1 {
+	if f.deletionAttempts[task.lab().Nodes[1].ID] != 1 {
 		t.Fatal("retried an already released resource")
 	}
 }
@@ -220,9 +220,9 @@ func TestDiagnosticsAndDirectExecDuringPreparation(t *testing.T) {
 	f := &faultBackend{uncertainExec: true}
 	s, task, r := fixtureLab(t, f, 2*time.Second)
 	task.State = "preparing"
-	task.Nodes[0].Preparation.Stage = "initializing"
-	task.Nodes[0].Health.Commands.State = "unavailable"
-	id := NodeID{TaskID: TaskID{task.ID}, NodeID: task.Nodes[0].ID}
+	task.lab().Nodes[0].Preparation.Stage = "initializing"
+	task.lab().Nodes[0].Health.Commands.State = "unavailable"
+	id := NodeID{TaskID: TaskID{task.ID}, NodeID: task.lab().Nodes[0].ID}
 	// An in-flight mutation cannot monopolize the diagnostic path.
 	lock := s.nodeLock(r, id.NodeID)
 	lock.Lock()
@@ -232,12 +232,12 @@ func TestDiagnosticsAndDirectExecDuringPreparation(t *testing.T) {
 		t.Fatal(op)
 	}
 	result := op.Result.(map[string]any)
-	if result["termination_confirmed"] != false || result["stdout"] != nil || result["artifact_id"] == nil {
+	if result["termination_confirmed"] != false || result["stdout"] != nil || result["evidence_id"] == nil {
 		t.Fatal(result)
 	}
 	var output map[string]any
-	for _, a := range task.Artifacts {
-		if a.ID == result["artifact_id"] {
+	for _, a := range evidenceForTest(t, s, task.ID) {
+		if a.ID == result["evidence_id"] {
 			raw, err := s.root.Read(a.Path, wire.MaxJSON)
 			if err != nil {
 				t.Fatal(err)
@@ -254,8 +254,15 @@ func TestDiagnosticsAndDirectExecDuringPreparation(t *testing.T) {
 		t.Fatal("direct command was replayed")
 	}
 	diag := successful(t, s, "lab_diagnose", DiagnoseRequest{TaskChange: TaskChange{Change: Change{"diagnose"}, TaskID: TaskID{task.ID}}})
-	data := wire.JSON(diag.Result)
-	if !strings.Contains(string(data), task.Router.ID) || !strings.Contains(string(data), "partial") {
+	artifact, err := s.db.evidence(context.Background(), diag.Result.(map[string]any)["evidence_id"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := s.root.Read(artifact.Path, wire.MaxManifestBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), task.lab().Router.ID) || !strings.Contains(string(data), "partial") {
 		t.Fatal(string(data))
 	}
 	successful(t, s, "node_screenshot", ScreenshotRequest{NodeChange: NodeChange{Change: Change{"early-screen"}, NodeID: id}})
@@ -264,17 +271,17 @@ func TestDiagnosticsAndDirectExecDuringPreparation(t *testing.T) {
 func TestRunningFaultPreservesLabAndHealthyPeer(t *testing.T) {
 	f := &faultBackend{status: &NodeStatus{State: "aborted"}}
 	s, task, r := fixtureLab(t, f, 2*time.Second)
-	s.pollNode(task, r, task.Nodes[0].ID)
-	waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return len(task.Artifacts) > 0 })
+	s.pollNode(task, r, task.lab().Nodes[0].ID)
+	waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return len(evidenceForTest(t, s, task.ID)) > 0 })
 	s.mu.Lock()
-	if task.State != "running" || task.Cleanup != "pending" || !task.Nodes[0].Health.unavailable() || len(task.Artifacts) == 0 {
+	if task.State != "running" || task.Cleanup != "pending" || !task.lab().Nodes[0].Health.unavailable() || len(evidenceForTest(t, s, task.ID)) == 0 {
 		t.Fatal(task.Public())
 	}
 	s.mu.Unlock()
 	if len(f.created) != 0 || len(f.deleted) != 0 {
 		t.Fatal("a running fault recreated or deleted a node")
 	}
-	op := successful(t, s, "command_start", StartRequest{NodeChange: NodeChange{Change: Change{"peer-command"}, NodeID: NodeID{TaskID: TaskID{task.ID}, NodeID: task.Nodes[1].ID}}, Argv: []string{"cmd", "/c", "echo", "ok"}})
+	op := successful(t, s, "command_start", StartRequest{NodeChange: NodeChange{Change: Change{"peer-command"}, NodeID: NodeID{TaskID: TaskID{task.ID}, NodeID: task.lab().Nodes[1].ID}}, Argv: []string{"cmd", "/c", "echo", "ok"}})
 	if op.Result.(map[string]any)["state"] != "starting" {
 		t.Fatal(op)
 	}
@@ -332,7 +339,7 @@ func TestGuestReadinessUsesCapabilitiesAndExplicitInitializationFailure(t *testi
 	r := &probeRunner{}
 	b := &VBoxBackend{Config: c, Runner: r}
 	task := newTask("lab", 60)
-	task.Router = &Node{ID: wire.ID()}
+	task.lab().Router = &Node{ID: wire.ID()}
 	n := &Node{ID: wire.ID(), UUID: wire.UUID(), NodeRequest: NodeRequest{Template: "linux"}}
 	if err := os.MkdirAll(b.runtime(task), 0700); err != nil {
 		t.Fatal(err)
@@ -363,10 +370,10 @@ func TestGuestReadinessUsesCapabilitiesAndExplicitInitializationFailure(t *testi
 func TestBackendErrorsRetainUsefulRedactedDetails(t *testing.T) {
 	c := testConfig(t)
 	b := &VBoxBackend{Config: c}
-	failure := &hostexec.Failure{Result: hostexec.Result{ExitCode: 1, Stderr: []byte("VBOX_E_INVALID_VM_STATE " + c.Service.StateDir + " " + c.Service.Token + " " + c.VirtualBox.Templates["windows"].Password)}, Cause: fmt.Errorf("failed")}
+	failure := &hostexec.Failure{Result: hostexec.Result{ExitCode: 1, Stderr: []byte("VBOX_E_INVALID_VM_STATE " + c.ControllerDir() + " " + c.Service.Token + " " + c.VirtualBox.Templates["windows"].Password)}, Cause: fmt.Errorf("failed")}
 	err := wire.Safe(b.executionError("unregistervm", failure))
 	data := string(wire.JSON(err))
-	if !strings.Contains(data, "VBOX_E_INVALID_VM_STATE") || !strings.Contains(data, "unregistervm") || strings.Contains(data, c.Service.Token) || strings.Contains(data, c.Service.StateDir) {
+	if !strings.Contains(data, "VBOX_E_INVALID_VM_STATE") || !strings.Contains(data, "unregistervm") || strings.Contains(data, c.Service.Token) || strings.Contains(data, c.ControllerDir()) {
 		t.Fatal(data)
 	}
 }
@@ -430,9 +437,9 @@ func TestPreparingLabSupportsReadyPeerAndEndsAfterInitializationFailure(t *testi
 	var task *Task
 	s.mu.Lock()
 	task, _ = s.task(id)
-	first := task.Nodes[0].ID
+	first := task.lab().Nodes[0].ID
 	s.mu.Unlock()
-	waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return task.Nodes[0].Preparation.Stage == "ready" })
+	waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return task.lab().Nodes[0].Preparation.Stage == "ready" })
 	command := successful(t, s, "command_start", StartRequest{NodeChange: NodeChange{Change: Change{"during-init"}, NodeID: NodeID{TaskID: TaskID{id}, NodeID: first}}, Argv: []string{"cmd", "/c", "echo", "ready"}})
 	cid := command.Result.(map[string]any)["id"].(string)
 	for sequence, packet := range []wire.Input{{Data: "ready-peer-input"}, {EOF: true}} {
@@ -462,7 +469,7 @@ func TestPreparingLabSupportsReadyPeerAndEndsAfterInitializationFailure(t *testi
 	close(f.fail)
 	waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return task.Cleanup == "complete" && s.active == "" })
 	s.mu.Lock()
-	if task.State != "failed" || task.Failure.Code != "initialization_failed" || len(task.Artifacts) == 0 {
+	if task.State != "failed" || task.Failure.Code != "initialization_failed" || len(evidenceForTest(t, s, task.ID)) == 0 {
 		t.Fatal(task.Public())
 	}
 	s.mu.Unlock()

@@ -3,7 +3,6 @@ package control
 import (
 	"context"
 	"encoding/json"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -26,7 +25,10 @@ func TestDefaultBusinessWaitAndDisconnect(t *testing.T) {
 		t.Fatal(err)
 	}
 	reply := result.(map[string]any)
-	op := reply["operation"].(*Operation)
+	var op Operation
+	if err := json.Unmarshal(wire.JSON(reply["operation"]), &op); err != nil {
+		t.Fatal(err)
+	}
 	if reply["wait"].(WaitResult).Targets[0].Summary.(map[string]any)["phase"] != "running" {
 		t.Fatal(reply)
 	}
@@ -55,7 +57,7 @@ func TestDefaultBusinessWaitAndDisconnect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if again.(map[string]any)["operation"].(*Operation).ID != pending.ID {
+	if again.(map[string]any)["operation"].(map[string]any)["id"] != pending.ID {
 		t.Fatal("observation retried the effect")
 	}
 	_, err = s.Call(ctx, "lab_cancel", wire.JSON(TaskChange{Change: Change{"release-disconnected"}, TaskID: TaskID{pending.TaskID}}))
@@ -81,8 +83,8 @@ func TestWaitRevisionsMultiTargetAndOutput(t *testing.T) {
 	}
 	revision := result.Continue[0].SeenRevision
 	s.mu.Lock()
-	first.NetworkUpdated = time.Now()
-	first.NetworkLeaseExpires = time.Now().Add(time.Hour)
+	first.lab().NetworkUpdated = time.Now()
+	first.lab().NetworkLeaseExpires = time.Now().Add(time.Hour)
 	s.save(first)
 	s.mu.Unlock()
 	result, err = s.wait(context.Background(), WaitRequest{Targets: result.Continue}, 5*time.Millisecond)
@@ -123,6 +125,38 @@ func TestWaitRevisionsMultiTargetAndOutput(t *testing.T) {
 	}
 }
 
+func TestDeletedTargetPreservesReceiptAndOtherWaitTargets(t *testing.T) {
+	s, _ := testServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	created, err := s.Call(ctx, "lab_create", wire.JSON(LabRequest{RequestID: "deleted-target", Nodes: []NodeRequest{}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := created.(map[string]any)["wait"].(WaitResult).Targets[0].ID
+	stop := TaskChange{Change: Change{"deleted-stop"}, TaskID: TaskID{id}}
+	ended, err := s.Call(ctx, "lab_cancel", wire.JSON(stop))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Call(ctx, "execution_delete", wire.JSON(ExecutionChange{Change: Change{"delete-summary"}, ExecutionID: id})); err != nil {
+		t.Fatal(err)
+	}
+	again, err := s.Call(ctx, "lab_cancel", wire.JSON(stop))
+	if err != nil || string(wire.JSON(again.(map[string]any)["operation"])) != string(wire.JSON(ended.(map[string]any)["operation"])) {
+		t.Fatal("deleted target lost its idempotency receipt", again, err)
+	}
+	s.mu.Lock()
+	pending := newTask("lab", 60)
+	s.tasks = append(s.tasks, pending)
+	s.save(pending)
+	s.mu.Unlock()
+	result, err := s.wait(ctx, WaitRequest{Targets: []WaitTarget{{Kind: "lab", ID: id, Condition: "complete"}, {Kind: "lab", ID: pending.ID, Condition: "complete"}}}, time.Second)
+	if err != nil || result.Reason != "unavailable" || result.Targets[0].Unavailable == nil || len(result.Continue) != 1 || result.Continue[0].ID != pending.ID {
+		t.Fatal(result, err)
+	}
+}
+
 func TestReadinessWaitAllowsGuestBootButReportsRuntimeFailure(t *testing.T) {
 	s, err := New(testConfig(t), &fakeBackend{})
 	if err != nil {
@@ -135,7 +169,7 @@ func TestReadinessWaitAllowsGuestBootButReportsRuntimeFailure(t *testing.T) {
 	node.Preparation.Stage = "guest_control"
 	node.Health.Commands.State = "unavailable"
 	node.Health.GuestControl.State = "unavailable"
-	lab.Nodes = []*Node{node}
+	lab.lab().Nodes = []*Node{node}
 	s.tasks = []*Task{lab}
 	s.save(lab)
 	result, err := s.wait(context.Background(), WaitRequest{Targets: []WaitTarget{{Kind: "lab", ID: lab.ID, Condition: "ready"}}}, 5*time.Millisecond, true)
@@ -224,11 +258,9 @@ func TestCodexTransportFixture(t *testing.T) {
 	}
 	defer s.Close()
 	s.Start()
-	var cancellations atomic.Int64
-	handler := s.Handler()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { handler.ServeHTTP(w, r) }))
+	srv := httptest.NewServer(s.Handler())
 	defer srv.Close()
-	info := map[string]any{"url": srv.URL + "/mcp", "token": cfg.Service.Token, "state": cfg.Service.StateDir, "delay": delay, "cancellations": cancellations.Load()}
+	info := map[string]any{"url": srv.URL + "/mcp", "token": cfg.Service.Token, "state": cfg.ControllerDir(), "delay": delay}
 	raw, _ := json.Marshal(info)
 	if err = os.WriteFile(file, raw, 0600); err != nil {
 		t.Fatal(err)
@@ -252,7 +284,7 @@ func TestCodexTransportFixture(t *testing.T) {
 func TestFiniteCommandsWaitForGroupAndRetainedOutput(t *testing.T) {
 	s, f := testServer(t)
 	lab := createLab(t, s, "finite-lab")
-	args := StartRequest{NodeChange: NodeChange{Change: Change{"finite-work"}, NodeID: NodeID{TaskID: TaskID{lab.ID}, NodeID: lab.Nodes[0].ID}}, Argv: []string{"example"}}
+	args := StartRequest{NodeChange: NodeChange{Change: Change{"finite-work"}, NodeID: NodeID{TaskID: TaskID{lab.ID}, NodeID: lab.lab().Nodes[0].ID}}, Argv: []string{"example"}}
 	result := make(chan any, 1)
 	failure := make(chan error, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
@@ -270,8 +302,8 @@ func TestFiniteCommandsWaitForGroupAndRetainedOutput(t *testing.T) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		for _, task := range s.tasks {
-			if task.ID == lab.ID && len(task.Commands) > 0 {
-				id = task.Commands[0].ID
+			if task.ID == lab.ID && len(task.lab().Commands) > 0 {
+				id = task.lab().Commands[0].ID
 				return true
 			}
 		}

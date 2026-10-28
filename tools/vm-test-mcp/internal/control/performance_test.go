@@ -33,7 +33,7 @@ func TestGuestCallSeparatesCapacityWaitFromExecution(t *testing.T) {
 	if err := os.MkdirAll(b.runtime(task), 0700); err != nil {
 		t.Fatal(err)
 	}
-	n := task.Nodes[0]
+	n := task.lab().Nodes[0]
 	slots := make(chan struct{}, 4)
 	for range 4 {
 		slots <- struct{}{}
@@ -94,7 +94,7 @@ func TestFaultWindowSurvivesReleaseAndDoesNotResurrectPurgedEvidence(t *testing.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	found := false
-	for _, a := range task.Artifacts {
+	for _, a := range evidenceForTest(t, s, task.ID) {
 		if a.Name == "performance.json" {
 			found = true
 			raw, e := os.ReadFile(filepath.Join(s.root.Path, a.Path))

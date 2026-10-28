@@ -1,7 +1,10 @@
 package submit
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,11 +29,11 @@ type Metadata struct {
 	Containers []string `json:"containers"`
 }
 
-var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$`)
+var requestIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
 
 func Expression(id string) string {
-	quoted, _ := json.Marshal("-" + id)
-	return `t: let fresh = t.overrideTestDerivation (old: { name = old.name + ` + string(quoted) + `; requiredSystemFeatures = builtins.attrNames (builtins.listToAttrs (map (name: { inherit name; value = true; }) ((old.requiredSystemFeatures or []) ++ [ "kvm" "nixos-test" ]))); }); in { derivation = fresh.drvPath; system = t.system; force_accel = t.config.qemu.forceAccel or false; nodes = builtins.attrNames (t.config.nodes or {}); containers = builtins.attrNames (t.config.containers or {}); }`
+	quoted, _ := json.Marshal(id)
+	return `t: let fresh = t.overrideTestDerivation (old: { name = old.name + "-" + ` + string(quoted) + `; vmTestUploadID = ` + string(quoted) + `; allowSubstitutes = false; requiredSystemFeatures = builtins.attrNames (builtins.listToAttrs (map (name: { inherit name; value = true; }) ((old.requiredSystemFeatures or []) ++ [ "kvm" "nixos-test" ]))); }); in { derivation = fresh.drvPath; system = t.system; force_accel = t.config.qemu.forceAccel or false; nodes = builtins.attrNames (t.config.nodes or {}); containers = builtins.attrNames (t.config.containers or {}); }`
 }
 func Prepare(ctx context.Context, o Options) (map[string]any, error) {
 	if !requestIDPattern.MatchString(o.RequestID) || !wire.IDPattern.MatchString(o.CacheID) || (o.Test == "") == (o.SmokeProject == "") || strings.HasPrefix(o.Test, "-") {
@@ -59,13 +62,14 @@ func Prepare(ctx context.Context, o Options) (map[string]any, error) {
 	if old, e := os.ReadFile(metaFile); e == nil {
 		var saved struct {
 			RequestID string   `json:"request_id"`
+			UploadID  string   `json:"upload_id"`
 			Test      string   `json:"test"`
 			Metadata  Metadata `json:"metadata"`
 		}
 		if e = wire.Decode(old, &saved); e != nil {
 			return nil, e
 		}
-		if saved.RequestID != o.RequestID || saved.Test != identity {
+		if saved.RequestID != o.RequestID || saved.Test != identity || saved.UploadID != o.CacheID {
 			return nil, fmt.Errorf("work directory belongs to a different submission")
 		}
 		meta = saved.Metadata
@@ -90,10 +94,10 @@ func Prepare(ctx context.Context, o Options) (map[string]any, error) {
 			// new flake output is needed for the packaged acceptance module.
 			project, _ := json.Marshal(source.URL)
 			module, _ := json.Marshal(o.SmokeFile)
-			expression := `let project = builtins.getFlake ` + strings.ReplaceAll(string(project), "${", `\${`) + `; pkgs = import project.inputs.nixpkgs { system = builtins.currentSystem; }; test = pkgs.testers.runNixOSTest (import (builtins.toPath ` + strings.ReplaceAll(string(module), "${", `\${`) + `)); in (` + Expression(o.RequestID) + `) test`
+			expression := `let project = builtins.getFlake ` + strings.ReplaceAll(string(project), "${", `\${`) + `; pkgs = import project.inputs.nixpkgs { system = builtins.currentSystem; }; test = pkgs.testers.runNixOSTest (import (builtins.toPath ` + strings.ReplaceAll(string(module), "${", `\${`) + `)); in (` + Expression(o.CacheID) + `) test`
 			args = append(args, "--impure", "--expr", expression)
 		} else {
-			args = append(args, "--apply", Expression(o.RequestID), o.Test)
+			args = append(args, "--apply", Expression(o.CacheID), o.Test)
 		}
 		cmd := exec.CommandContext(ctx, o.Nix, args...)
 		cmd.Stderr = os.Stderr
@@ -107,7 +111,7 @@ func Prepare(ctx context.Context, o Options) (map[string]any, error) {
 		if !meta.ForceAccel || len(meta.Nodes) == 0 || len(meta.Containers) != 0 || !wire.StorePattern.MatchString(meta.Derivation) {
 			return nil, fmt.Errorf("select a QEMU test with nodes, qemu.forceAccel=true and no nspawn containers")
 		}
-		data := wire.JSON(map[string]any{"request_id": o.RequestID, "test": identity, "metadata": meta})
+		data := wire.JSON(map[string]any{"request_id": o.RequestID, "upload_id": o.CacheID, "test": identity, "metadata": meta})
 		temporary := metaFile + "." + wire.ID() + ".partial"
 		defer os.Remove(temporary)
 		f, e := os.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
@@ -148,7 +152,13 @@ func Prepare(ctx context.Context, o Options) (map[string]any, error) {
 	if e = cmd.Run(); e != nil {
 		return nil, e
 	}
+
 	client := &http.Client{Timeout: 5 * time.Minute, CheckRedirect: func(*http.Request, []*http.Request) error { return fmt.Errorf("upload redirects are not allowed") }}
+	// The cache description is part of the same immutable manifest as its closure.
+	if err := os.WriteFile(filepath.Join(cache, "nix-cache-info"), []byte("StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 30\n"), 0600); err != nil {
+		return nil, err
+	}
+	manifest := wire.UploadManifest{UploadID: o.CacheID, Derivation: meta.Derivation, System: meta.System}
 	e = filepath.WalkDir(cache, func(p string, d os.DirEntry, e error) error {
 		if e != nil {
 			return e
@@ -156,22 +166,48 @@ func Prepare(ctx context.Context, o Options) (map[string]any, error) {
 		if d.IsDir() {
 			return nil
 		}
-		if d.Type()&os.ModeSymlink != 0 {
-			return fmt.Errorf("cache contains a symlink")
+		if !d.Type().IsRegular() {
+			return fmt.Errorf("cache contains a nonregular object")
 		}
 		name, e := filepath.Rel(cache, p)
 		if e != nil {
 			return e
 		}
-		if name == "nix-cache-info" {
-			return nil
+		f, e := os.Open(p)
+		if e != nil {
+			return e
 		}
-		return uploadCacheObject(ctx, client, o.CacheURL, filepath.ToSlash(name), p)
+		hash := sha256.New()
+		size, e := io.Copy(hash, f)
+		f.Close()
+		if e != nil {
+			return e
+		}
+		manifest.Objects = append(manifest.Objects, wire.UploadObject{Name: filepath.ToSlash(name), Size: size, SHA256: hex.EncodeToString(hash.Sum(nil))})
+		return nil
 	})
 	if e != nil {
 		return nil, e
 	}
-	return map[string]any{"request_id": o.RequestID, "cache_id": o.CacheID, "derivation": meta.Derivation, "system": meta.System}, nil
+	request, e := http.NewRequestWithContext(ctx, "PUT", strings.TrimRight(o.CacheURL, "/")+"/manifest", bytes.NewReader(wire.JSON(manifest)))
+	if e != nil {
+		return nil, e
+	}
+	response, e := client.Do(request)
+	if e != nil {
+		return nil, fmt.Errorf("upload manifest: %w", wire.Safe(e))
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("upload manifest returned HTTP %d", response.StatusCode)
+	}
+	for _, object := range manifest.Objects {
+		if e = uploadCacheObject(ctx, client, o.CacheURL, object.Name, filepath.Join(cache, object.Name)); e != nil {
+			return nil, e
+		}
+	}
+	return map[string]any{"request_id": o.RequestID, "upload_id": o.CacheID}, nil
+
 }
 
 // Keep the object and server rejection in errors without disclosing the scoped

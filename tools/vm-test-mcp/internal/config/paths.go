@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // Program resolves only administrator configuration, the installed package's
@@ -72,4 +73,30 @@ func GuestBinary(kind string) (string, error) {
 		return "", fmt.Errorf("guest supervisor is not a regular file")
 	}
 	return filepath.Clean(p), nil
+}
+
+// StateDir is an administrator-owned root. Each process owns only its role directory.
+func (c Config) ControllerDir() string { return filepath.Join(c.StateDir, "controller") }
+func (c Config) WorkerDir() string {
+	root := c.Nix.StateDir
+	if root == "" {
+		root = c.StateDir
+	}
+	return filepath.Join(root, "nix-worker")
+}
+func (c Worker) Directory() string { return filepath.Join(c.StateDir, "nix-worker") }
+
+func (c Config) validateStateDirs() error {
+	if !absolute(c.StateDir) || (c.Nix.StateDir != "" && !absolute(c.Nix.StateDir)) {
+		return fmt.Errorf("state_dir and optional nix.state_dir must be canonical absolute roots")
+	}
+	a, b := c.ControllerDir(), c.WorkerDir()
+	contains := func(parent, child string) bool {
+		rel, err := filepath.Rel(parent, child)
+		return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	}
+	if contains(a, b) || contains(b, a) {
+		return fmt.Errorf("controller and nix-worker private directories must not overlap")
+	}
+	return nil
 }

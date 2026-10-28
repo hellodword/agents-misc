@@ -126,7 +126,7 @@ func validateSnapshot(id string, v wire.CommandSnapshot) error {
 	if v.Status.Final && oneOf(v.Status.State, "starting", "running") || !v.Status.Final && oneOf(v.Status.State, "exited", "cancelled", "timed_out", "failed") {
 		return wire.Fail("guest_protocol_error", "Guest command finality conflicts with its execution state")
 	}
-	if v.Status.NextInput < 0 {
+	if v.Status.WrittenInput < 0 {
 		return wire.Fail("guest_protocol_error", "Guest input acknowledgement has a negative sequence")
 	}
 	return nil
@@ -226,14 +226,10 @@ func (s *Server) readCommand(ctx context.Context, t *Task, id string, sendInput 
 	moreOut := s.retainStream(path.Join(base, "stdout"), &retained.Stdout, v.Stdout, status, out.StdoutBytes, out.StdoutSHA256)
 	moreErr := s.retainStream(path.Join(base, "stderr"), &retained.Stderr, v.Stderr, status, out.StderrBytes, out.StderrSHA256)
 	s.mu.Lock()
-	changed := previous.State != status.State || previous.Stage != status.Stage || previous.Final != status.Final || previous.NextInput != status.NextInput || previous.InputClosed != status.InputClosed || c.Retained.Stdout.Bytes != retained.Stdout.Bytes || c.Retained.Stderr.Bytes != retained.Stderr.Bytes
+	changed := previous.State != status.State || previous.Stage != status.Stage || previous.Final != status.Final || previous.WrittenInput != status.WrittenInput || previous.InputClosed != status.InputClosed || c.Retained.Stdout.Bytes != retained.Stdout.Bytes || c.Retained.Stderr.Bytes != retained.Stderr.Bytes
 	c.CommandStatus, c.Retained = status, retained
-	c.Stdin.Consumed = status.NextInput
-	c.Stdin.Delivered = max(c.Stdin.Delivered, status.NextInput)
-	if err := s.db.InputProgress(ctx, t.ID, id, c.Stdin.Delivered, c.Stdin.Consumed); err != nil {
-		s.mu.Unlock()
-		return false
-	}
+	c.Stdin.Written = status.WrittenInput
+	c.Stdin.Delivered = max(c.Stdin.Delivered, status.WrittenInput)
 	c.successfulPoll(now, changed)
 	// A valid record is direct evidence, including a terminal record whose next
 	// poll is unnecessary. The node's recovery hysteresis is independent.
@@ -246,9 +242,9 @@ func (s *Server) readCommand(ctx context.Context, t *Task, id string, sendInput 
 	}
 	var packets []wire.Input
 	cancel := sendInput && c.Observing() && c.Cancellation == "requested"
-	if sendInput && c.Observing() && status.NextInput >= 0 && status.NextInput < c.Stdin.NextSequence {
+	if sendInput && c.Observing() && status.WrittenInput >= 0 && status.WrittenInput < c.Stdin.NextSequence {
 		var err error
-		packets, err = s.db.Inputs(ctx, t.ID, id, status.NextInput, 16)
+		packets, err = s.db.Inputs(ctx, t.ID, id, status.WrittenInput, 16)
 		if err != nil {
 			c.Observation.State, c.Observation.Error = "suspect", &wire.Error{Code: "input_read", Message: "Cannot read persisted stdin packets", Details: map[string]any{"cause": wire.Safe(err)}}
 		}
@@ -263,7 +259,7 @@ func (s *Server) readCommand(ctx context.Context, t *Task, id string, sendInput 
 			break
 		}
 		s.mu.Lock()
-		if next, err := s.db.DeliveredInput(ctx, t.ID, id, packet.Sequence); err == nil {
+		if next, err := s.db.DeliveredInput(ctx, t, c, packet.Sequence); err == nil {
 			c.Stdin.Delivered = next
 			s.save(t)
 		}

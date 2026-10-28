@@ -22,7 +22,6 @@ import (
 
 type windowsChild struct {
 	process, job windows.Handle
-	stdin        *os.File
 	readers      []*os.File
 	streams      *outputStreams
 	done         chan struct{}
@@ -38,7 +37,7 @@ type jobAccounting struct {
 	PageFaults, TotalProcesses, ActiveProcesses, TerminatedProcesses uint32
 }
 
-func launch(ctx context.Context, s wire.CommandSpec, in io.Reader, out, errout io.Writer) (Child, error) {
+func launch(ctx context.Context, s wire.CommandSpec, in *os.File, out, errout io.Writer) (Child, error) {
 	job, e := windows.CreateJobObject(nil, nil)
 	if e != nil {
 		return nil, e
@@ -55,12 +54,8 @@ func launch(ctx context.Context, s wire.CommandSpec, in io.Reader, out, errout i
 	if _, e = windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&limits)), uint32(unsafe.Sizeof(limits))); e != nil {
 		return nil, e
 	}
-	ri, wi, e := os.Pipe()
-	if e != nil {
-		return nil, e
-	}
-	defer ri.Close()
-	p.stdin = wi
+	ri := in
+	defer windows.SetHandleInformation(windows.Handle(ri.Fd()), windows.HANDLE_FLAG_INHERIT, 0)
 	ro, wo, e := os.Pipe()
 	if e != nil {
 		return nil, e
@@ -163,7 +158,6 @@ func launch(ctx context.Context, s wire.CommandSpec, in io.Reader, out, errout i
 		re.Close()
 		return nil, e
 	}
-	go func() { io.Copy(wi, in); wi.Close() }()
 	p.streams = drainStreams(ro, re, out, errout)
 	p.done = make(chan struct{})
 	waitCtx, stopWait := context.WithCancel(context.Background())
@@ -250,9 +244,6 @@ func (p *windowsChild) Close() error {
 	}
 	for _, r := range p.readers {
 		r.Close()
-	}
-	if p.stdin != nil {
-		p.stdin.Close()
 	}
 	if p.process != 0 && p.stopWait == nil {
 		windows.CloseHandle(p.process)

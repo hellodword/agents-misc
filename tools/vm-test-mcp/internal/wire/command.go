@@ -2,7 +2,7 @@ package wire
 
 import "time"
 
-const CommandProtocol = 1
+const CommandProtocol = 2
 
 // Two base64 streams plus status fit within MaxJSON and the host capture limit.
 const CommandReadLimit = 256 << 10

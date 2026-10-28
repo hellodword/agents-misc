@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/network"
-	"github.com/hellodword/agents-misc/vm-test-mcp/internal/state"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/telemetry"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
@@ -28,6 +27,12 @@ func (s *Server) query(ctx context.Context, name string, args any) (result any, 
 	}()
 	defer s.mu.Unlock()
 	switch a := args.(type) {
+	case LabCollectionRequest:
+		return s.collection(name, CollectionRequest(a))
+	case CollectionRequest:
+		return s.collection(name, a)
+	case CommandInputReadRequest:
+		return s.inputHistory(a)
 	case UploadObjectsRequest:
 		return s.uploadObjects(a)
 	case ObserveRequest:
@@ -70,7 +75,7 @@ func (s *Server) query(ctx context.Context, name string, args any) (result any, 
 			backends[kind] = view
 		}
 		s.mu.Lock()
-		return map[string]any{"version": wire.Version, "build": wire.Identity(), "performance": s.performance.Latest(), "templates": templates, "backends": backends, "active_task_id": s.active, "limits": map[string]any{"minimum_codex_version": "0.163.0", "wait_seconds": 600, "tool_timeout_sec": 660, "heartbeat_seconds": 15, "storage": s.cfg.Storage, "storage_blocked": s.storageBlocked, "default_seconds": s.cfg.Tasks.DefaultTimeout.Seconds(), "max_seconds": s.cfg.Tasks.MaxDuration.Seconds(), "max_upload_bytes": s.cfg.Storage.MaxUploadBytes, "max_nodes": 64, "startup_timeout": s.cfg.VirtualBox.StartupTimeout.Value().String(), "shutdown_timeout": s.cfg.VirtualBox.ShutdownTimeout.Value().String(), "cleanup_timeout": s.cfg.Tasks.CleanupTimeout.Value().String(), "probe_interval": probeInterval.String(), "probe_timeout": probeTimeout.String(), "unavailable_after": s.cfg.VirtualBox.UnavailableAfter.Value().String(), "failure_threshold": 3, "recovery_successes": 2, "diagnostic_timeout": diagnosticBudget.String(), "node_exec_default_seconds": 10, "node_exec_max_seconds": 30, "max_retained_endpoints_per_task": 128, "command_protocol": wire.CommandProtocol, "stdin_packet_bytes": wire.InputPacketLimit, "stdin_packets": wire.InputPacketCount, "stdin_bytes": wire.CommandInputLimit, "output_bytes_per_stream": wire.CommandOutputLimit, "guest_read_bytes_per_stream": wire.CommandReadLimit}, "endpoint_address": s.cfg.VirtualBox.Network.Listen}, nil
+		return map[string]any{"version": wire.Version, "build": wire.Identity(), "performance": s.performance.Latest(), "templates": templates, "backends": backends, "active_execution_id": s.active, "limits": map[string]any{"minimum_codex_version": "0.163.0", "wait_seconds": 600, "tool_timeout_sec": 660, "heartbeat_seconds": 15, "storage": s.cfg.Storage, "storage_blocked": s.storageBlocked, "default_seconds": s.cfg.Tasks.DefaultTimeout.Seconds(), "max_seconds": s.cfg.Tasks.MaxDuration.Seconds(), "max_upload_bytes": s.cfg.Storage.MaxUploadBytes, "max_nodes": 64, "startup_timeout": s.cfg.VirtualBox.StartupTimeout.Value().String(), "shutdown_timeout": s.cfg.VirtualBox.ShutdownTimeout.Value().String(), "cleanup_timeout": s.cfg.Tasks.CleanupTimeout.Value().String(), "probe_interval": probeInterval.String(), "probe_timeout": probeTimeout.String(), "unavailable_after": s.cfg.VirtualBox.UnavailableAfter.Value().String(), "failure_threshold": 3, "recovery_successes": 2, "diagnostic_timeout": diagnosticBudget.String(), "node_exec_default_seconds": 10, "node_exec_max_seconds": 30, "max_active_endpoints_per_lab": 128, "command_protocol": wire.CommandProtocol, "stdin_packet_bytes": wire.InputPacketLimit, "stdin_packets": wire.InputPacketCount, "stdin_bytes": wire.CommandInputLimit, "output_bytes_per_stream": wire.CommandOutputLimit, "guest_read_bytes_per_stream": wire.CommandReadLimit}, "endpoint_address": s.cfg.VirtualBox.Network.Listen}, nil
 	case TaskListRequest:
 		return s.listTasksKind(a, name)
 	case TaskID:
@@ -86,7 +91,7 @@ func (s *Server) query(ctx context.Context, name string, args any) (result any, 
 			v = t.summaryView()
 			v["revision"] = s.revision(map[bool]string{true: "lab", false: "nix_job"}[t.Kind == "lab"]+"/"+t.ID, taskCondition(t))
 			if t.Kind == "nixos" {
-				v["execution"] = t.NixExecution
+				v["execution"] = t.nix().NixExecution
 			}
 		}
 		s.queueView(t, v)
@@ -109,9 +114,7 @@ func (s *Server) query(ctx context.Context, name string, args any) (result any, 
 		if err != nil {
 			return nil, err
 		}
-		v := clone(o)
-		v.Revision = s.revision("operation/"+o.ID, []any{o.State, o.Error})
-		return v, nil
+		return s.operationView(o), nil
 	case EventsRequest:
 		if _, e := s.task(a.TaskID.TaskID); e != nil {
 			return nil, e
@@ -154,26 +157,11 @@ func (s *Server) query(ctx context.Context, name string, args any) (result any, 
 		if name == "command_get" {
 			return c.publicStatus(), nil
 		}
-		if a.InputLimit < 0 || a.InputLimit > 16 || a.InputFrom != nil && *a.InputFrom < 0 || a.InputFrom == nil && a.InputLimit != 0 {
-			return nil, wire.Fail("invalid_argument", "input_from must be nonnegative; input_limit requires input_from and ranges from 1 to 16")
+		spec, err := s.db.CommandSpec(ctx, t.ID, c.ID)
+		if err != nil {
+			return nil, err
 		}
-		detail := &CommandDetails{Command: clone(c), Spec: wire.CommandSpec{ID: c.ID}}
-		if !t.Purged {
-			if detail.Spec, e = s.db.CommandSpec(ctx, t.ID, c.ID); e != nil {
-				return nil, e
-			}
-		}
-		if a.InputFrom != nil {
-			limit := a.InputLimit
-			if limit == 0 {
-				limit = 16
-			}
-			if detail.Input, e = s.db.Inputs(ctx, t.ID, c.ID, *a.InputFrom, limit); e != nil {
-				return nil, e
-			}
-			next := *a.InputFrom + len(detail.Input)
-			detail.NextSequence = &next
-		}
+		detail := map[string]any{"command_id": c.ID, "lab_id": t.ID, "spec": spec}
 		return detail, nil
 	case ReadRequest:
 		t, e := s.task(a.TaskID.TaskID)
@@ -203,61 +191,36 @@ func (s *Server) query(ctx context.Context, name string, args any) (result any, 
 		return result, nil
 	case TransferGetRequest:
 		t, err := s.transfer(a.TransferID)
-		if err != nil || t.State == "purged" {
+		if err != nil {
 			return nil, wire.Fail("not_found", "Transfer not found")
 		}
 		v := s.transferView(t)
-		delete(v, "url")
-		delete(v, "expires")
 		v["revision"] = s.revision("upload/"+t.ID, []any{t.State, t.Bytes, s.uploading[t.ID] != nil})
 		return v, nil
 	case CaptureGetRequest:
-		t, e := s.task(a.TaskID.TaskID)
-		if e != nil {
-			return nil, e
+		var c Capture
+		if err := s.db.child(s.ctx, "captures", a.CaptureID, &c); err != nil {
+			return nil, err
 		}
-		for _, c := range t.Captures {
-			if c.ID == a.CaptureID {
-				return clone(c), nil
-			}
-		}
-		return nil, wire.Fail("not_found", "Capture does not belong to task")
+		return &c, nil
 	case ArtifactListRequest:
-		t, e := s.task(a.TaskID.TaskID)
-		if e != nil {
-			return nil, e
-		}
-		start, end, e := page(a.Cursor, a.Limit, len(t.Artifacts))
-		if e != nil {
-			return nil, e
-		}
-		items := []any{}
-		for _, f := range t.Artifacts[start:end] {
-			items = append(items, artifactView(f))
-		}
-		return map[string]any{"items": items, "next_cursor": end, "purged": t.Purged}, nil
+		return s.evidenceList(a)
 	case ArtifactGetRequest:
-		t, e := s.task(a.TaskID.TaskID)
-		if e != nil {
-			return nil, e
+		artifact, err := s.db.evidence(ctx, a.ArtifactID)
+		if err != nil {
+			return nil, err
 		}
-
-		for _, f := range t.Artifacts {
-			if f.ID == a.ArtifactID {
-				v := artifactView(f)
-				v["url"], v["expires"] = s.capURL("artifact", t.ID+"/"+f.ID, "read")
-				return v, nil
-			}
-		}
-		return nil, wire.Fail("not_found", "Artifact does not belong to task")
+		v := artifactView(artifact)
+		v["url"], v["expires"] = s.capURL("artifact", artifact.ID, "read")
+		return v, nil
 	}
 	return nil, wire.Fail("invalid_argument", "Unsupported query")
 }
 func artifactView(a *Artifact) map[string]any {
-	return map[string]any{"id": a.ID, "name": a.Name, "size": a.Size, "sha256": a.SHA256, "created": a.Created, "pinned": a.Pinned}
+	return map[string]any{"id": a.ID, "name": a.Name, "size": a.Size, "sha256": a.SHA256, "created": a.Created, "pinned": a.Pinned, "execution_id": a.ExecutionID, "execution_kind": a.ExecutionKind}
 }
 
-func (s *Server) mutate(name string, args any) (any, error) {
+func (s *Server) mutate(name string, args any, op *Operation) (any, error) {
 	if strings.HasPrefix(name, "lab_") && name != "lab_create" || strings.HasPrefix(name, "nix_job_") && name != "nix_job_create" {
 		var target TaskID
 		_ = json.Unmarshal(wire.JSON(args), &target)
@@ -273,28 +236,16 @@ func (s *Server) mutate(name string, args any) (any, error) {
 	}
 
 	switch a := args.(type) {
+	case UploadDeleteRequest:
+		return s.deleteUpload(a.TransferID)
 	case EvidenceChange:
 		return s.changeEvidence(name, a)
-	case RenewRequest:
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		t, err := s.transfer(a.TransferID)
-		if err != nil {
-			return nil, err
-		}
-		t.Updated = time.Now().UTC()
-		s.persist(state.Document{Kind: "transfer", ID: t.ID, Value: t})
-		return s.transferView(t), nil
 	case DiagnoseRequest:
 		return s.diagnose(s.ctx, a.TaskID.TaskID, a.NodeIDs, false)
 	case ExecRequest:
 		return s.execNode(a)
-	case LabRequest:
-		return s.createLab(a)
-	case NixRequest:
-		return s.createNix(a)
 	case TransferRequest:
-		return s.createTransfer(a)
+		return s.createTransfer(a, op.TargetID)
 	case FinishRequest:
 		if a.Conclusion != "passed" && a.Conclusion != "failed" && a.Conclusion != "inconclusive" {
 			return nil, wire.Fail("invalid_argument", "Invalid conclusion")
@@ -328,8 +279,15 @@ func (s *Server) mutate(name string, args any) (any, error) {
 			return nil, e
 		}
 		if name == "execution_delete" {
-			err := s.purge(t)
-			return t.Public(), err
+			delete(s.performancePending, t.ID)
+			if err := s.purge(t); err != nil {
+				return nil, err
+			}
+			if err := s.db.DeleteExecution(s.ctx, t.ID); err != nil {
+				return nil, err
+			}
+			s.forget(t.ID)
+			return map[string]any{"id": t.ID, "deleted": true}, nil
 		}
 		if t.Terminal() {
 			return t.Public(), nil
@@ -342,6 +300,7 @@ func (s *Server) mutate(name string, args any) (any, error) {
 			t.Ended = &now
 			if uploads := s.retainTransfers(t.ID); len(uploads) == 0 {
 				t.Cleanup = "complete"
+				s.completeTransfers(t.ID)
 			} else {
 				s.wg.Add(1)
 				go func() { defer s.wg.Done(); s.cleanup(t) }()
@@ -360,9 +319,9 @@ func (s *Server) mutate(name string, args any) (any, error) {
 	case LinkRequest:
 		return s.action(a.NodeID, NodeAction{Action: "network_link", Enabled: a.Enabled})
 	case StartRequest:
-		return s.startCommand(a)
+		return s.startCommand(a, op)
 	case InputRequest:
-		return s.commandInput(a)
+		return s.commandInput(a, op.Payload)
 	case CancelCommandRequest:
 		s.mu.Lock()
 		t, e := s.task(a.TaskID.TaskID)
@@ -391,21 +350,21 @@ func (s *Server) mutate(name string, args any) (any, error) {
 		if !guestPath(a.Path) {
 			return nil, wire.Fail("invalid_argument", "Invalid guest path")
 		}
-		return s.collect(a.NodeID, "guest-archive.tar", NodeAction{Action: "file_get", Path: a.Path})
+		return s.collect(a.NodeID, "guest-archive.tar", NodeAction{Action: "file_get", Path: a.Path}, op.TargetID)
 	case PowerRequest:
 		if !oneOf(a.Action, "start", "shutdown", "reboot", "poweroff", "pause", "resume", "reset") {
 			return nil, wire.Fail("invalid_argument", "Invalid power action")
 		}
-		return s.action(a.NodeID, NodeAction{Action: a.Action})
+		return s.power(a)
 	case EndpointRequest:
-		return s.createEndpoint(a)
+		return s.createEndpoint(a, op.TargetID)
 	case CloseEndpointRequest:
 		return s.closeEndpoint(a)
 	case ScreenshotRequest:
 		if a.Screen < 0 || a.Screen > 63 {
 			return nil, wire.Fail("invalid_argument", "Invalid display index")
 		}
-		return s.collect(a.NodeID, "screenshot.png", NodeAction{Action: "screenshot", Screen: a.Screen})
+		return s.collect(a.NodeID, "screenshot.png", NodeAction{Action: "screenshot", Screen: a.Screen}, op.TargetID)
 	case DisplayRequest:
 		size := a.Width != 0 || a.Height != 0
 		if a.Screen < 0 || a.Screen > 63 || (size && (a.Width < 320 || a.Width > 16384 || a.Height < 200 || a.Height > 16384)) || (!size && a.AutoResize == nil) {
@@ -428,7 +387,7 @@ func (s *Server) mutate(name string, args any) (any, error) {
 	case MediaRequest:
 		return s.media(a)
 	case CaptureRequest:
-		return s.startCapture(a)
+		return s.startCapture(a, op.TargetID)
 	case CaptureStopRequest:
 		s.mu.Lock()
 		t, r, e := s.running(a.TaskID.TaskID)
@@ -479,9 +438,16 @@ func (s *Server) duration(v int) (int, error) {
 	return v, nil
 }
 func newTask(kind string, seconds int) *Task {
-	return &Task{ID: wire.ID(), Kind: kind, State: "queued", Created: time.Now().UTC(), TimeoutSeconds: seconds, Cleanup: "pending", Artifacts: []*Artifact{}, LabState: &LabState{Nodes: []*Node{}, Commands: []*Command{}, Endpoints: []*Endpoint{}, Captures: []*Capture{}}, NixJobState: &NixJobState{}}
+	t := &Task{executionRecord: executionRecord{ID: wire.ID(), Kind: kind, State: "queued", Created: time.Now().UTC(), TimeoutSeconds: seconds, Cleanup: "pending"}, Artifacts: []*Artifact{}}
+	if kind == "lab" {
+		t.domain = &LabState{Nodes: []*Node{}, Commands: []*Command{}, Endpoints: []*Endpoint{}, Captures: []*Capture{}}
+	} else {
+		t.domain = &NixJobState{}
+	}
+	return t
 }
-func (s *Server) createLab(a LabRequest) (any, error) {
+
+func (s *Server) buildLab(a LabRequest, op *Operation) (*Task, error) {
 	duration, e := s.duration(a.TimeoutSeconds)
 	if e != nil {
 		return nil, e
@@ -500,20 +466,18 @@ func (s *Server) createLab(a LabRequest) (any, error) {
 		return nil, wire.Fail("invalid_argument", "Invalid LAN")
 	}
 	t := newTask("lab", duration)
-	s.mu.Lock()
-	t.ID = s.requests[a.RequestID].TaskID
-	s.mu.Unlock()
-	t.LAN = a.LAN
-	t.DHCP = a.DHCP == nil || *a.DHCP
-	t.DNS = append([]string{}, a.DNS...)
+	t.ID = op.TaskID
+	t.lab().LAN = a.LAN
+	t.lab().DHCP = a.DHCP == nil || *a.DHCP
+	t.lab().DNS = append([]string{}, a.DNS...)
 	if a.DNS == nil {
-		t.DNS = append([]string{}, s.cfg.VirtualBox.Network.DNS...)
+		t.lab().DNS = append([]string{}, s.cfg.VirtualBox.Network.DNS...)
 	}
-	t.RouterISO = s.cfg.VirtualBox.Router.ISO
-	t.Internet = a.Internet == nil || *a.Internet
-	t.Network = "pending"
-	t.RouterPassword = wire.ID() + wire.ID()
-	policy := network.Policy{LAN: a.LAN, WAN: s.cfg.VirtualBox.Network.WAN, DHCP: t.DHCP, Internet: t.Internet, DNS: t.DNS, LeaseSeconds: s.cfg.VirtualBox.Network.LeaseSeconds}
+	t.lab().RouterISO = s.cfg.VirtualBox.Router.ISO
+	t.lab().Internet = a.Internet == nil || *a.Internet
+	t.lab().Network = "pending"
+	t.lab().RouterPassword = wire.ID() + wire.ID()
+	policy := network.Policy{LAN: a.LAN, WAN: s.cfg.VirtualBox.Network.WAN, DHCP: t.lab().DHCP, Internet: t.lab().Internet, DNS: t.lab().DNS, LeaseSeconds: s.cfg.VirtualBox.Network.LeaseSeconds}
 	used := map[string]bool{}
 	for _, n := range a.Nodes {
 		if n.IPv4 != "" {
@@ -563,68 +527,40 @@ func (s *Server) createLab(a LabRequest) (any, error) {
 		}
 		macs[mac] = true
 		n := &Node{ID: wire.ID(), NodeRequest: v, UUID: wire.UUID(), MAC: mac, State: "pending", Link: true}
-		t.Nodes = append(t.Nodes, n)
+		t.lab().Nodes = append(t.lab().Nodes, n)
 		policy.Nodes = append(policy.Nodes, network.Lease{Name: v.Name, MAC: mac, IPv4: v.IPv4})
 	}
 	if e = policy.Validate(); e != nil {
 		return nil, e
 	}
-	t.Router = &Node{ID: wire.ID(), UUID: wire.UUID(), NodeRequest: NodeRequest{Name: "router", CPUs: 1, MemoryMiB: 256}, MAC: routerMAC, State: "pending"}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	t.Created = s.requests[a.RequestID].Created
-	t.ID = s.requests[a.RequestID].TaskID
-	if e = s.db.Save(context.Background(), state.Document{Kind: "task", ID: t.ID, Value: t}); e != nil {
-		return nil, e
-	}
-	s.tasks = append(s.tasks, t)
-	sort.SliceStable(s.tasks, func(i, j int) bool { return s.tasks[i].Created.Before(s.tasks[j].Created) })
-	return t.Public(), nil
+	t.lab().Router = &Node{ID: wire.ID(), UUID: wire.UUID(), NodeRequest: NodeRequest{Name: "router", CPUs: 1, MemoryMiB: 256}, MAC: routerMAC, State: "pending"}
+
+	t.Created = op.Created
+	return t, nil
 }
-func (s *Server) createNix(a NixRequest) (any, error) {
-	seconds, e := s.duration(a.TimeoutSeconds)
-	if e != nil {
-		return nil, e
+func (s *Server) buildNix(a NixRequest, op *Operation) (*Task, *Transfer, error) {
+	seconds, err := s.duration(a.TimeoutSeconds)
+	if err != nil {
+		return nil, nil, err
 	}
-	if !wire.StorePattern.MatchString(a.Derivation) || !strings.HasSuffix(a.Derivation, ".drv") || !oneOf(a.System, "x86_64-linux", "aarch64-linux") {
-		return nil, wire.Fail("invalid_argument", "Invalid derivation or system")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	cache := s.transfers[a.CacheID]
-	if cache == nil || cache.Kind != "cache" || cache.State == "purged" {
-		return nil, wire.Fail("not_found", "Cache transfer not found")
+	cache, err := s.transfer(a.CacheID)
+	if err != nil || cache.Kind != "cache" {
+		return nil, nil, wire.Fail("not_found", "Nix input not found")
 	}
 	if cache.TaskID != "" {
-		return nil, wire.Fail("conflict", "Cache is already attached to a task")
+		return nil, nil, wire.Fail("conflict", "Nix input already belongs to a job")
 	}
-	for _, prior := range s.tasks {
-		if prior.Derivation == a.Derivation {
-			return nil, wire.Fail("conflict", "A fresh execution requires a fresh derivation identity")
-		}
-	}
-	if _, ok := cache.Objects[strings.SplitN(path.Base(a.Derivation), "-", 2)[0]+".narinfo"]; !ok {
-		return nil, wire.Fail("invalid_cache", "Cache does not contain the requested derivation")
-	}
-	if e = s.seal(cache); e != nil {
-		return nil, e
+	if cache.State != "ready" {
+		return nil, nil, wire.Fail("input_not_ready", "Nix input must be fully uploaded and verified")
 	}
 	t := newTask("nixos", seconds)
-	t.Created = s.requests[a.RequestID].Created
-	t.ID = s.requests[a.RequestID].TaskID
-	t.CacheID = a.CacheID
-	t.Derivation = a.Derivation
-	t.System = a.System
+	t.Created, t.ID, t.nix().WorkerInstance = op.Created, op.TaskID, op.WorkerInstance
+	t.nix().CacheID, t.nix().Derivation, t.nix().System = a.CacheID, cache.Derivation, cache.System
 	attached := *cache
 	attached.TaskID = t.ID
-	if e = s.db.Save(context.Background(), state.Document{Kind: "task", ID: t.ID, Value: t}, state.Document{Kind: "transfer", ID: cache.ID, Value: &attached}); e != nil {
-		return nil, e
-	}
-	cache.TaskID = attached.TaskID
-	s.tasks = append(s.tasks, t)
-	sort.SliceStable(s.tasks, func(i, j int) bool { return s.tasks[i].Created.Before(s.tasks[j].Created) })
-	return t.Public(), nil
+	return t, &attached, nil
 }
+
 func (s *Server) nodeAccess(id NodeID, action string) (*Task, *Runtime, *Node, error) {
 	t, err := s.task(id.TaskID.TaskID)
 	if err != nil {
@@ -703,8 +639,14 @@ func (s *Server) action(id NodeID, a NodeAction) (any, error) {
 		if a.Action == "pause" {
 			power = "paused"
 		}
-		until := time.Now().UTC().Add(s.cfg.VirtualBox.StartupTimeout.Value())
-		n.Expected = &ExpectedState{Action: a.Action, Power: power, Requested: time.Now().UTC(), Until: &until}
+		deadline := s.cfg.VirtualBox.StartupTimeout.Value()
+		if a.Action == "shutdown" {
+			deadline = s.cfg.VirtualBox.ShutdownTimeout.Value()
+		}
+		until := time.Now().UTC().Add(deadline)
+		n.Expected = &ExpectedState{RequestID: a.RequestID, BeforeBoot: bootOf(n.Guest), Action: a.Action, Power: power, Requested: time.Now().UTC(), Until: &until}
+		n.Health.GuestControl = Observation{State: "expected"}
+		n.Health.Commands = Observation{State: "expected"}
 		s.save(t)
 	}
 	tc, nc := t.executionSnapshot(), clone(n)
@@ -737,6 +679,10 @@ func (s *Server) action(id NodeID, a NodeAction) (any, error) {
 		}
 	}
 	s.mu.Lock()
+	if n.Expected != nil && n.Expected.RequestID == a.RequestID && a.RequestID != "" {
+		now := time.Now().UTC()
+		n.Expected.Dispatched = &now
+	}
 	if a.Action == "network_link" {
 		n.Link = a.Enabled
 	}
@@ -748,8 +694,8 @@ func (s *Server) action(id NodeID, a NodeAction) (any, error) {
 	return value, nil
 }
 
-func (s *Server) startCommand(a StartRequest) (any, error) {
-	id := wire.ID()
+func (s *Server) startCommand(a StartRequest, op *Operation) (any, error) {
+	id := op.TargetID
 	spec := wire.CommandSpec{ID: id, Argv: a.Argv, Context: a.Context, Cwd: a.Cwd, Env: a.Env, TimeoutSeconds: a.TimeoutSeconds}
 	if e := spec.Validate(); e != nil {
 		return nil, e
@@ -772,10 +718,10 @@ func (s *Server) startCommand(a StartRequest) (any, error) {
 	now := time.Now().UTC()
 	statusDeadline := now.Add(120*time.Second + commandStatusGrace)
 	c := &Command{ID: id, NodeID: a.NodeID.NodeID, CommandStatus: wire.CommandStatus{State: "starting", Stage: "submitting"}, StatusDeadline: &statusDeadline, Retained: RetainedOutput{Stdout: RetainedStream{State: "pending"}, Stderr: RetainedStream{State: "pending"}}, Created: now}
-	t.Commands = append(t.Commands, c)
-	e = s.db.CreateCommand(context.Background(), state.Document{Kind: "task", ID: t.ID, Value: t}, id, spec)
+	t.lab().Commands = append(t.lab().Commands, c)
+	e = s.db.CreateCommandReference(context.Background(), t, id, op.Intent)
 	if e != nil {
-		t.Commands = t.Commands[:len(t.Commands)-1]
+		t.lab().Commands = t.lab().Commands[:len(t.lab().Commands)-1]
 	}
 	s.mu.Unlock()
 	if e != nil {
@@ -798,7 +744,7 @@ func (s *Server) startCommand(a StartRequest) (any, error) {
 	s.save(t)
 	return clone(c), e
 }
-func (s *Server) commandInput(a InputRequest) (any, error) {
+func (s *Server) commandInput(a InputRequest, payload BodyRef) (any, error) {
 	if a.Sequence < 0 || len(a.Data) > wire.InputPacketLimit {
 		return nil, wire.Fail("invalid_argument", "Invalid input packet")
 	}
@@ -821,7 +767,7 @@ func (s *Server) commandInput(a InputRequest) (any, error) {
 		if a.Sequence < c.Stdin.NextSequence {
 			packets, err := s.db.Inputs(s.ctx, t.ID, c.ID, a.Sequence, 1)
 			if err == nil && len(packets) == 1 && packets[0].Data == a.Data && packets[0].EOF == a.EOF {
-				v := map[string]any{"accepted": true, "sequence": a.Sequence, "delivered": a.Sequence < c.Stdin.Delivered, "consumed": a.Sequence < c.NextInput}
+				v := map[string]any{"accepted": true, "sequence": a.Sequence, "delivered": a.Sequence < c.Stdin.Delivered, "written": a.Sequence < c.WrittenInput}
 				s.mu.Unlock()
 				return v, nil
 			}
@@ -844,7 +790,7 @@ func (s *Server) commandInput(a InputRequest) (any, error) {
 	packet := wire.Input{Sequence: a.Sequence, Data: a.Data, EOF: a.EOF}
 	previous := c.Stdin
 	c.Stdin.Accept(packet)
-	e = s.db.AppendInput(context.Background(), state.Document{Kind: "task", ID: t.ID, Value: t}, c.ID, packet)
+	e = s.db.AppendInputReference(context.Background(), t, c.ID, packet, payload)
 	if e != nil {
 		c.Stdin = previous
 	}
@@ -859,7 +805,7 @@ func (s *Server) commandInput(a InputRequest) (any, error) {
 		delivery = "pending"
 	} else {
 		s.mu.Lock()
-		if next, err := s.db.DeliveredInput(s.ctx, t.ID, c.ID, packet.Sequence); err == nil {
+		if next, err := s.db.DeliveredInput(s.ctx, t, c, packet.Sequence); err == nil {
 			c.Stdin.Delivered = next
 			s.save(t)
 		}
@@ -870,7 +816,7 @@ func (s *Server) commandInput(a InputRequest) (any, error) {
 func (s *Server) changeNetwork(id string, a NetworkRequest, recover bool) (any, error) {
 	s.mu.Lock()
 	t, r, e := s.running(id)
-	if e == nil && !recover && t.Network != "ready" {
+	if e == nil && !recover && t.lab().Network != "ready" {
 		e = wire.Fail("network_degraded", "Explicit network_recover is required")
 	}
 	s.mu.Unlock()
@@ -889,19 +835,19 @@ func (s *Server) changeNetwork(id string, a NetworkRequest, recover bool) (any, 
 	}
 	defer lock.Unlock()
 	s.mu.Lock()
-	if t.State != "running" || (!recover && t.Network != "ready") {
+	if t.State != "running" || (!recover && t.lab().Network != "ready") {
 		s.mu.Unlock()
 		return nil, wire.Fail("invalid_state", "Lab or network state changed")
 	}
 	proposal := clone(t)
 	if a.Internet != nil {
-		proposal.Internet = *a.Internet
+		proposal.lab().Internet = *a.Internet
 	}
 	if a.DHCP != nil {
-		proposal.DHCP = *a.DHCP
+		proposal.lab().DHCP = *a.DHCP
 	}
 	if a.DNS != nil {
-		proposal.DNS = append([]string{}, a.DNS...)
+		proposal.lab().DNS = append([]string{}, a.DNS...)
 	}
 	seen := map[string]bool{}
 	for _, addr := range a.Nodes {
@@ -918,9 +864,9 @@ func (s *Server) changeNetwork(id string, a NetworkRequest, recover bool) (any, 
 		s.mu.Unlock()
 		return nil, err
 	}
-	t.Internet, t.DHCP, t.DNS = proposal.Internet, proposal.DHCP, proposal.DNS
-	for i, n := range proposal.Nodes {
-		t.Nodes[i].IPv4 = n.IPv4
+	t.lab().Internet, t.lab().DHCP, t.lab().DNS = proposal.lab().Internet, proposal.lab().DHCP, proposal.lab().DNS
+	for i, n := range proposal.lab().Nodes {
+		t.lab().Nodes[i].IPv4 = n.IPv4
 	}
 	s.save(t)
 	s.mu.Unlock()
@@ -935,7 +881,7 @@ func (s *Server) changeNetwork(id string, a NetworkRequest, recover bool) (any, 
 	defer s.mu.Unlock()
 	return map[string]any{"task": t.Public(), "guest_network_refresh_required": a.DHCP != nil || a.DNS != nil || len(a.Nodes) > 0}, nil
 }
-func (s *Server) createEndpoint(a EndpointRequest) (any, error) {
+func (s *Server) createEndpoint(a EndpointRequest, id string) (any, error) {
 	if !oneOf(a.Protocol, "tcp", "udp") || a.Port < 1 || a.Port > 65535 {
 		return nil, wire.Fail("invalid_argument", "Invalid endpoint")
 	}
@@ -971,7 +917,7 @@ func (s *Server) createEndpoint(a EndpointRequest) (any, error) {
 		return nil, e
 	}
 	used := map[int]bool{}
-	for _, v := range t.Endpoints {
+	for _, v := range t.lab().Endpoints {
 		if v.State != "closed" {
 			used[v.HostPort] = true
 			used[v.LoopbackPort] = true
@@ -1005,9 +951,9 @@ func (s *Server) createEndpoint(a EndpointRequest) (any, error) {
 		s.mu.Unlock()
 		return nil, wire.Fail("resource_busy", "No free endpoint ports")
 	}
-	entry := &Endpoint{ID: wire.ID(), NodeID: a.NodeID.NodeID, Protocol: a.Protocol, GuestPort: a.Port, HostPort: ports[0], LoopbackPort: ports[1], RouterPort: ports[1], State: "opening"}
-	t.Endpoints = append(t.Endpoints, entry)
-	e = s.db.Save(context.Background(), state.Document{Kind: "task", ID: t.ID, Value: t})
+	entry := &Endpoint{ID: id, NodeID: a.NodeID.NodeID, Protocol: a.Protocol, GuestPort: a.Port, HostPort: ports[0], LoopbackPort: ports[1], RouterPort: ports[1], State: "opening"}
+	t.lab().Endpoints = append(t.lab().Endpoints, entry)
+	e = s.db.Save(context.Background(), t)
 	s.mu.Unlock()
 	if e != nil {
 		return nil, e
@@ -1033,11 +979,17 @@ func endpointAdmission(t *Task) error {
 	if t.State != "running" {
 		return &wire.Error{Code: "invalid_state", Message: "Endpoint publication requires a running lab", Details: map[string]any{"phase": t.phase(), "required_phase": "running", "next_action": "Inspect lab_get; wait for preparation or create another batch after cleanup"}}
 	}
-	if t.Network != "ready" {
-		return &wire.Error{Code: "network_not_ready", Message: "Endpoint publication requires a ready router policy and protection", Details: map[string]any{"network": t.Network, "observation": t.NetworkObservation, "next_action": "Inspect lab_get network observation; use network_recover after resolving a degraded network"}}
+	if t.lab().Network != "ready" {
+		return &wire.Error{Code: "network_not_ready", Message: "Endpoint publication requires a ready router policy and protection", Details: map[string]any{"network": t.lab().Network, "observation": t.lab().NetworkObservation, "next_action": "Inspect lab_get network observation; use network_recover after resolving a degraded network"}}
 	}
-	if len(t.Endpoints) >= 128 {
-		return &wire.Error{Code: "endpoint_limit", Message: "Task reached its retained endpoint limit", Details: map[string]any{"limit": 128, "count": len(t.Endpoints), "scope": "task_history", "next_action": "Finish this batch, confirm cleanup, and create a new task"}}
+	active := 0
+	for _, e := range t.lab().Endpoints {
+		if e.State != "closed" {
+			active++
+		}
+	}
+	if active >= 128 {
+		return &wire.Error{Code: "endpoint_limit", Message: "Lab has reached its active endpoint limit", Details: map[string]any{"limit": 128, "active": active}}
 	}
 	return nil
 }
@@ -1065,16 +1017,18 @@ func (s *Server) closeEndpoint(a CloseEndpointRequest) (any, error) {
 		return nil, wire.Fail("invalid_state", "Lab state changed")
 	}
 	var entry *Endpoint
-	for _, v := range t.Endpoints {
+	for _, v := range t.lab().Endpoints {
 		if v.ID == a.EndpointID {
 			entry = v
 		}
 	}
 	if entry == nil {
+		var old Endpoint
+		err := s.db.child(s.ctx, "endpoints", a.EndpointID, &old)
 		s.mu.Unlock()
-		return nil, wire.Fail("not_found", "Endpoint does not belong to task")
+		return &old, err
 	}
-	entry.State = "closed"
+	entry.State = "closing"
 	relay := r.relays[entry.ID]
 	delete(r.relays, entry.ID)
 	s.save(t)
@@ -1083,12 +1037,20 @@ func (s *Server) closeEndpoint(a CloseEndpointRequest) (any, error) {
 	if relay != nil {
 		relay.Close()
 	}
-	if e = s.backend.Endpoint(ctx, tc, ec, false); e == nil && tc.Network == "ready" {
+	if e = s.backend.Endpoint(ctx, tc, ec, false); e == nil && tc.lab().Network == "ready" {
 		e = s.refreshNetworkContext(ctx, t, r, false)
 	}
+	s.mu.Lock()
+	entry.State = "closed"
+	if e != nil {
+		entry.State = "release_failed"
+	}
+	s.save(t)
+	s.mu.Unlock()
 	if e != nil {
 		s.degrade(t, r, e)
 	}
+	ec.State = entry.State
 	return ec, e
 }
 func (s *Server) media(a MediaRequest) (any, error) {
@@ -1153,6 +1115,20 @@ func (s *Server) purge(t *Task) error {
 			return wire.Fail("conflict", "An operation is still settling")
 		}
 	}
+	s.mu.Unlock()
+	s.evidenceMu.Lock()
+	defer s.evidenceMu.Unlock()
+	s.mu.Lock()
+	if err := loadChildren(s.ctx, s.db, "evidence", t.ID, &t.Artifacts); err != nil {
+		return err
+	}
+	s.mu.Unlock()
+	locked := false
+	defer func() {
+		if !locked {
+			s.mu.Lock()
+		}
+	}()
 	pinned := []*Artifact{}
 	for _, a := range t.Artifacts {
 		if a.Pinned {
@@ -1230,6 +1206,8 @@ func (s *Server) purge(t *Task) error {
 	if err != nil {
 		return err
 	}
+	s.mu.Lock()
+	locked = true
 	for _, id := range ids {
 		input, err := s.transfer(id)
 		if err != nil {
@@ -1241,22 +1219,24 @@ func (s *Server) purge(t *Task) error {
 	}
 	t.Purged = true
 	t.Artifacts = pinned
-	t.Commands = nil
-	t.Nodes = nil
-	t.Router = nil
-	t.Captures = nil
-	t.Endpoints = nil
-	t.RouterPassword = ""
-	t.RouterISO = ""
-	t.GUI = nil
-	t.NetworkObservation = nil
+	if t.Kind == "lab" {
+		t.lab().Commands = nil
+		t.lab().Nodes = nil
+		t.lab().Router = nil
+		t.lab().Captures = nil
+		t.lab().Endpoints = nil
+		t.lab().RouterPassword = ""
+		t.lab().RouterISO = ""
+		t.lab().GUI = nil
+		t.lab().NetworkObservation = nil
+	}
 	if err := s.db.PruneDetails(s.ctx, t.ID); err != nil {
 		return err
 	}
-	return s.db.Save(s.ctx, state.Document{Kind: "task", ID: t.ID, Value: t})
+	return s.db.Save(s.ctx, t)
 }
 
-func (s *Server) collect(id NodeID, name string, a NodeAction) (any, error) {
+func (s *Server) collect(id NodeID, name string, a NodeAction, artifactID string) (any, error) {
 	s.mu.Lock()
 	t, _, _, err := s.nodeAccess(id, a.Action)
 	if err == nil {
@@ -1266,7 +1246,7 @@ func (s *Server) collect(id NodeID, name string, a NodeAction) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	artifact := &Artifact{ID: wire.ID(), Name: name, Created: time.Now().UTC()}
+	artifact := &Artifact{ID: artifactID, Name: name, Created: time.Now().UTC()}
 	artifact.Path = path.Join("tasks", id.TaskID.TaskID, "artifacts", artifact.ID)
 	if e := s.root.MkdirAll(path.Dir(artifact.Path), 0700); e != nil {
 		return nil, e
@@ -1299,7 +1279,7 @@ func (s *Server) collect(id NodeID, name string, a NodeAction) (any, error) {
 	s.save(t)
 	return artifactView(artifact), nil
 }
-func (s *Server) startCapture(a CaptureRequest) (any, error) {
+func (s *Server) startCapture(a CaptureRequest, id string) (any, error) {
 	if !oneOf(a.Kind, "video", "nic", "metrics") {
 		return nil, wire.Fail("invalid_argument", "Invalid capture kind")
 	}
@@ -1313,15 +1293,15 @@ func (s *Server) startCapture(a CaptureRequest) (any, error) {
 		s.mu.Unlock()
 		return nil, e
 	}
-	for _, x := range t.Captures {
-		if x.NodeID == a.NodeID.NodeID && x.Kind == a.Kind && x.State == "running" {
+	for _, x := range t.lab().Captures {
+		if x.NodeID == a.NodeID.NodeID && x.Kind == a.Kind && x.State != "stopped" {
 			s.mu.Unlock()
 			return nil, wire.Fail("conflict", "Capture already running")
 		}
 	}
-	c := &Capture{ID: wire.ID(), NodeID: a.NodeID.NodeID, Kind: a.Kind, State: "running"}
-	t.Captures = append(t.Captures, c)
-	e = s.db.Save(context.Background(), state.Document{Kind: "task", ID: t.ID, Value: t})
+	c := &Capture{ID: id, NodeID: a.NodeID.NodeID, Kind: a.Kind, State: "running"}
+	t.lab().Captures = append(t.lab().Captures, c)
+	e = s.db.Save(context.Background(), t)
 	s.mu.Unlock()
 	if e != nil {
 		return nil, e
@@ -1330,7 +1310,7 @@ func (s *Server) startCapture(a CaptureRequest) (any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if e != nil {
-		c.State = "failed"
+		c.State = "start_uncertain"
 	}
 	s.save(t)
 	return clone(c), e
@@ -1338,16 +1318,18 @@ func (s *Server) startCapture(a CaptureRequest) (any, error) {
 func (s *Server) stopCapture(ctx context.Context, t *Task, r *Runtime, id string, cleaning bool) error {
 	s.mu.Lock()
 	var c *Capture
-	for _, x := range t.Captures {
+	for _, x := range t.lab().Captures {
 		if x.ID == id {
 			c = x
 		}
 	}
 	if c == nil {
+		var old Capture
+		err := s.db.child(s.ctx, "captures", id, &old)
 		s.mu.Unlock()
-		return wire.Fail("not_found", "Capture does not belong to task")
+		return err
 	}
-	if c.State != "running" {
+	if c.State == "stopped" {
 		s.mu.Unlock()
 		return nil
 	}
@@ -1378,7 +1360,7 @@ func (s *Server) stopCapture(ctx context.Context, t *Task, r *Runtime, id string
 		c.ArtifactID = a.ID
 		t.Artifacts = append(t.Artifacts, a)
 	} else {
-		c.State = "failed"
+		c.State = "stop_failed"
 	}
 	s.save(t)
 	return e

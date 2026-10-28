@@ -26,6 +26,7 @@ type runFixture struct {
 	url              string
 	available        bool
 	waitingReason    string
+	expireInput      bool
 	loseReply        bool
 	cleanup          string
 	submits, uploads int
@@ -52,11 +53,17 @@ func (f *runFixture) tool(_ context.Context, r *mcp.CallToolRequest) (*mcp.CallT
 		value = receipt{ID: strings.Repeat("a", 32), State: "pending"}
 	case "operation_get":
 		value = receipt{ID: strings.Repeat("a", 32), State: "succeeded", Result: wire.JSON(transfer)}
-	case "upload_renew":
-		if f.submits != 0 {
-			transfer["state"] = "sealed"
+	case "upload_get":
+		if f.expireInput {
+			f.expireInput = false
+			value = map[string]any{"error": wire.Fail("not_found", "Expired unbound input")}
+			failed = true
+			break
 		}
-		value = receipt{ID: strings.Repeat("f", 32), State: "succeeded", Result: wire.JSON(transfer)}
+		if f.submits != 0 {
+			transfer["state"] = "ready"
+		}
+		value = transfer
 	case "nix_job_create":
 		f.submits++
 		request := string(wire.JSON(args))
@@ -110,7 +117,7 @@ func newRunFixture(t *testing.T) (*runFixture, RunOptions, string) {
 	t.Helper()
 	f := &runFixture{available: true, cleanup: "complete", log: append(bytes.Repeat([]byte("log line\n"), 9000), []byte("assertions passed\n")...)}
 	server := mcp.NewServer(&mcp.Implementation{Name: "synthetic", Version: "1"}, nil)
-	for _, name := range []string{"service_get", "upload_create", "upload_renew", "operation_get", "nix_job_create", "nix_job_get", "wait", "execution_log"} {
+	for _, name := range []string{"service_get", "upload_create", "upload_get", "operation_get", "nix_job_create", "nix_job_get", "wait", "execution_log"} {
 		server.AddTool(&mcp.Tool{Name: name, InputSchema: map[string]any{"type": "object"}}, f.tool)
 	}
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true, DisableLocalhostProtection: true})
@@ -146,10 +153,10 @@ func newRunFixture(t *testing.T) (*runFixture, RunOptions, string) {
 		t.Fatal(err)
 	}
 	work := filepath.Join(dir, "work")
-	if err := os.MkdirAll(filepath.Join(work, "cache", "nar"), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Join(work, "inputs", strings.Repeat("c", 32), "cache", "nar"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(work, "cache", "nar", "fixture.nar.xz"), []byte("synthetic"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(work, "inputs", strings.Repeat("c", 32), "cache", "nar", "fixture.nar.xz"), []byte("synthetic"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	return f, RunOptions{Options: Options{Nix: exe, Test: ".#checks.x86_64-linux.smoke", WorkDir: work}, Endpoint: f.url + "/mcp", Token: "unit-token"}, trace
@@ -168,7 +175,7 @@ func TestAutomaticRunWaitsForCleanupAndResumesLostReply(t *testing.T) {
 		t.Fatal(string(result), err)
 	}
 	f.mu.Lock()
-	if f.creates != 1 || f.uploads != 1 || f.submits != 2 || f.polls < 3 {
+	if f.creates != 1 || f.uploads != 3 || f.submits != 2 || f.polls < 3 {
 		t.Fatalf("creates=%d uploads=%d submits=%d polls=%d", f.creates, f.uploads, f.submits, f.polls)
 	}
 	f.mu.Unlock()
@@ -235,7 +242,7 @@ func TestAutomaticRunQueuesWhileBackendBusy(t *testing.T) {
 			}
 			f.mu.Lock()
 			defer f.mu.Unlock()
-			if f.creates != 1 || f.uploads != 1 || f.submits != 1 || f.polls < 3 {
+			if f.creates != 1 || f.uploads != 3 || f.submits != 1 || f.polls < 3 {
 				t.Fatalf("busy backend did not queue and finish: creates=%d uploads=%d submits=%d polls=%d", f.creates, f.uploads, f.submits, f.polls)
 			}
 		})
@@ -252,5 +259,20 @@ func TestSmokeUsesNixProjectResolution(t *testing.T) {
 	}
 	if data, err := os.ReadFile(trace); err != nil || string(data) != "flake\neval\ncopy\n" {
 		t.Fatal(string(data), err)
+	}
+}
+
+func TestExpiredUnsubmittedInputGetsFreshReservation(t *testing.T) {
+	f, options, trace := newRunFixture(t)
+	f.expireInput = true
+	if _, err := Run(context.Background(), options); err != nil {
+		t.Fatal(err)
+	}
+	if f.creates != 2 || f.submits != 1 {
+		t.Fatal("expired reservation was submitted", f.creates, f.submits)
+	}
+	data, err := os.ReadFile(trace)
+	if err != nil || string(data) != "eval\ncopy\n" {
+		t.Fatal("evaluated before a usable input was reserved", string(data), err)
 	}
 }

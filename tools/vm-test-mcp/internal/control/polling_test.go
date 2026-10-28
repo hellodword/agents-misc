@@ -56,14 +56,14 @@ func TestUnavailableNodeOwnsRecoveryForAllCommands(t *testing.T) {
 		return snapshotFixture(a.CommandID, wire.CommandStatus{State: "running"}, nil, nil, 0, 0, 1024), nil
 	}}
 	s, task, c := commandFixture(t, b)
-	n := task.Nodes[0]
+	n := task.lab().Nodes[0]
 	n.Health.GuestControl = Observation{State: "unavailable", Failures: 5}
 	n.nextProbe(time.Now().UTC())
 	for range 25 {
-		task.Commands = append(task.Commands, &Command{ID: wire.ID(), NodeID: n.ID, CommandStatus: wire.CommandStatus{State: "running"}})
+		task.lab().Commands = append(task.lab().Commands, &Command{ID: wire.ID(), NodeID: n.ID, CommandStatus: wire.CommandStatus{State: "running"}})
 	}
 	for range 3 {
-		for _, command := range task.Commands {
+		for _, command := range task.lab().Commands {
 			s.pollCommand(task, s.runtime[task.ID], command.ID)
 		}
 	}
@@ -120,7 +120,7 @@ func TestRetryAndIdleSchedulingAreBoundedAndVisible(t *testing.T) {
 func TestOutputDeadlineConvergesWhileNodeRemainsUnavailable(t *testing.T) {
 	b := &readBackend{}
 	s, task, c := commandFixture(t, b)
-	task.Nodes[0].Health.GuestControl.State = "unavailable"
+	task.lab().Nodes[0].Health.GuestControl.State = "unavailable"
 	end, code := time.Now().Add(-time.Second), 19
 	c.CommandStatus = wire.CommandStatus{State: "exited", Final: true, ExitCode: &code}
 	c.Retained.Deadline = &end

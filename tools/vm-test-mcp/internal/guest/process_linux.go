@@ -22,14 +22,13 @@ import (
 type linuxChild struct {
 	group   *os.Root
 	parent  *os.Root
-	stdin   *os.File
 	done    chan struct{}
 	exit    processExit
 	err     error
 	streams *outputStreams
 }
 
-func launch(ctx context.Context, s wire.CommandSpec, in io.Reader, out, errout io.Writer) (Child, error) {
+func launch(ctx context.Context, s wire.CommandSpec, in *os.File, out, errout io.Writer) (Child, error) {
 	privileged, _ := readiness("")
 	if !privileged {
 		return nil, fmt.Errorf("command execution requires root, systemd and cgroup v2")
@@ -67,41 +66,31 @@ func launch(ctx context.Context, s wire.CommandSpec, in io.Reader, out, errout i
 	// clone3 places the child in its cgroup before it can execute or fork. The
 	// supervisor stays in the sibling subgroup managed by DelegateSubgroup=.
 	c.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: int(fd.Fd())}
-	r, w, e := os.Pipe()
-	if e != nil {
-		return nil, e
-	}
-	defer r.Close()
-	c.Stdin = r
+	c.Stdin = in
 	ro, wo, e := os.Pipe()
 	if e != nil {
-		w.Close()
 		return nil, e
 	}
 	defer wo.Close()
 	re, we, e := os.Pipe()
 	if e != nil {
-		w.Close()
 		ro.Close()
 		return nil, e
 	}
 	defer we.Close()
 	c.Stdout, c.Stderr = wo, we
 	if err := ctx.Err(); err != nil {
-		w.Close()
 		ro.Close()
 		re.Close()
 		return nil, err
 	}
 	if e := c.Start(); e != nil {
-		w.Close()
 		ro.Close()
 		re.Close()
 		return nil, e
 	}
-	p := &linuxChild{parent: parent, group: group, stdin: w, done: make(chan struct{})}
+	p := &linuxChild{parent: parent, group: group, done: make(chan struct{})}
 	p.streams = drainStreams(ro, re, out, errout)
-	go func() { io.Copy(w, in); w.Close() }()
 	go func() {
 		p.err = c.Wait()
 		if c.ProcessState != nil {
@@ -116,7 +105,6 @@ func launch(ctx context.Context, s wire.CommandSpec, in io.Reader, out, errout i
 				p.exit, p.err = processExit{signal: name, coreDumped: status.CoreDump()}, nil
 			}
 		}
-		w.Close()
 		close(p.done)
 	}()
 	started = true
@@ -163,7 +151,6 @@ func (p *linuxChild) Drain(ctx context.Context) error { return p.streams.Wait(ct
 func (p *linuxChild) Close() error {
 	_ = writeCgroupKill(p.group)
 	p.streams.Close()
-	_ = p.stdin.Close()
 	p.group.Close()
 	// systemd owns the parent unit and removes any empty nested cgroups on
 	// supervisor exit. Do not recursively walk directories created by commands.

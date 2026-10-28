@@ -20,17 +20,17 @@ func (b *unavailableCommands) Action(ctx context.Context, t *Task, n *Node, a No
 func TestVMReleasePreservesExitEvidenceAndUncertainty(t *testing.T) {
 	s, task, r := fixtureLab(t, &unavailableCommands{}, time.Second)
 	code := 37
-	known := &Command{ID: wire.ID(), NodeID: task.Nodes[0].ID, CommandStatus: wire.CommandStatus{State: "exited", Final: true, ExitCode: &code}}
-	unknown := &Command{ID: wire.ID(), NodeID: task.Nodes[0].ID, Cancellation: "requested", CommandStatus: wire.CommandStatus{State: "running"}}
-	failed := &Command{ID: wire.ID(), NodeID: task.Nodes[1].ID, CommandStatus: wire.CommandStatus{State: "uncertain", Final: true, ExitCode: &code, Termination: &wire.Termination{Source: "guest_supervisor", ProcessExited: true, Error: &wire.Error{Code: "supervision_failed", Message: "Group stop was refused"}}}}
-	task.Commands = []*Command{known, unknown, failed}
+	known := &Command{ID: wire.ID(), NodeID: task.lab().Nodes[0].ID, CommandStatus: wire.CommandStatus{State: "exited", Final: true, ExitCode: &code}}
+	unknown := &Command{ID: wire.ID(), NodeID: task.lab().Nodes[0].ID, Cancellation: "requested", CommandStatus: wire.CommandStatus{State: "running"}}
+	failed := &Command{ID: wire.ID(), NodeID: task.lab().Nodes[1].ID, CommandStatus: wire.CommandStatus{State: "uncertain", Final: true, ExitCode: &code, Termination: &wire.Termination{Source: "guest_supervisor", ProcessExited: true, Error: &wire.Error{Code: "supervision_failed", Message: "Group stop was refused"}}}}
+	task.lab().Commands = []*Command{known, unknown, failed}
 	task.State = "cancelled"
 	r.cancel()
 	s.cleanup(task)
 	if task.Cleanup != "complete" {
 		t.Fatal(task.Public())
 	}
-	for _, c := range task.Commands {
+	for _, c := range task.lab().Commands {
 		if c.Release == nil || c.Release.Source != "vm_deleted" {
 			t.Fatal("missing release evidence", c)
 		}

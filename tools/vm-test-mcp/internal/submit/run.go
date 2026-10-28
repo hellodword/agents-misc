@@ -3,6 +3,7 @@ package submit
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -31,9 +32,10 @@ type runRecord struct {
 	Test           string         `json:"test"`
 	SmokeProject   string         `json:"smoke_project"`
 	TimeoutSeconds int            `json:"timeout_seconds"`
-	CacheID        string         `json:"cache_id,omitempty"`
+	CacheAttempt   int            `json:"cache_attempt"`
+	CacheID        string         `json:"upload_id,omitempty"`
 	Submission     map[string]any `json:"submission,omitempty"`
-	TaskID         string         `json:"task_id,omitempty"`
+	TaskID         string         `json:"job_id,omitempty"`
 }
 
 type receipt struct {
@@ -191,7 +193,7 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 		return nil, fmt.Errorf("connect to MCP: %w", err)
 	}
 	defer session.Close()
-	if j.TaskID == "" {
+	for j.TaskID == "" {
 		if j.Submission == nil {
 			var description struct {
 				Backends map[string]struct {
@@ -213,7 +215,7 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 				State string `json:"state"`
 			}
 			if j.CacheID == "" {
-				if err := mutate(ctx, session, "upload_create", map[string]any{"request_id": j.RequestID + "-cache", "kind": "cache"}, &transfer); err != nil {
+				if err := mutate(ctx, session, "upload_create", map[string]any{"request_id": fmt.Sprintf("input-%x", sha256.Sum256(wire.JSON([]any{j.RequestID, j.CacheAttempt}))), "kind": "cache"}, &transfer); err != nil {
 					return nil, err
 				}
 				if !wire.IDPattern.MatchString(transfer.ID) {
@@ -224,16 +226,28 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 					return nil, err
 				}
 			}
-			// Always renew the URL; upload_create receipts may contain expired URLs.
-			if err := mutate(ctx, session, "upload_renew", map[string]any{"request_id": "renew-" + wire.ID(), "transfer_id": j.CacheID}, &transfer); err != nil {
+			// Capability credentials are minted by reads and never replayed from receipts.
+			if err := call(ctx, session, "upload_get", map[string]any{"upload_id": j.CacheID}, &transfer); err != nil {
+				if failure, ok := err.(*wire.Error); ok && failure.Code == "not_found" {
+					// No submission was journaled, so this input was never sent
+					// to nix_job_create. Reserve a fresh input and evaluation.
+					j.CacheID = ""
+					j.CacheAttempt++
+					if err = save(); err != nil {
+						return nil, err
+					}
+					continue
+				}
 				return nil, err
 			}
-			if transfer.State != "open" {
-				return nil, fmt.Errorf("input transfer is already sealed; inspect its task")
+			if transfer.State != "open" && transfer.State != "ready" {
+				return nil, fmt.Errorf("input upload is unavailable; inspect its retained execution")
 			}
 			o.CacheID, o.CacheURL = j.CacheID, transfer.URL
 			fmt.Fprintln(o.Progress, "Evaluating and uploading the test closure…")
-			j.Submission, err = Prepare(ctx, o.Options)
+			inputOptions := o.Options
+			inputOptions.WorkDir = filepath.Join(o.WorkDir, "inputs", j.CacheID)
+			j.Submission, err = Prepare(ctx, inputOptions)
 			if err != nil {
 				return nil, err
 			}
@@ -241,7 +255,7 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 				j.Submission["timeout_seconds"] = o.TimeoutSeconds
 			}
 			// Persist the exact request before sending it. A lost reply must not
-			// allocate another cache, upload to a sealed cache or start a new run.
+			// allocate another input or start a new execution.
 			if err := save(); err != nil {
 				return nil, err
 			}
@@ -250,6 +264,17 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 			ID string `json:"id"`
 		}
 		if err := mutate(ctx, session, "nix_job_create", j.Submission, &task); err != nil {
+			// Admission checks the retained request receipt before its upload.
+			// A missing input therefore proves this request was not accepted.
+			if failure, ok := err.(*wire.Error); ok && failure.Code == "not_found" {
+				j.Submission = nil
+				j.CacheID = ""
+				j.CacheAttempt++
+				if err = save(); err != nil {
+					return nil, err
+				}
+				continue
+			}
 			return nil, err
 		}
 		if !wire.IDPattern.MatchString(task.ID) {
@@ -277,7 +302,7 @@ func observe(ctx context.Context, session *mcp.ClientSession, root *safefs.Root,
 	offset := st.Size()
 	previous := ""
 	var raw json.RawMessage
-	if err := call(ctx, session, "nix_job_get", map[string]any{"task_id": id}, &raw); err != nil {
+	if err := call(ctx, session, "nix_job_get", map[string]any{"job_id": id}, &raw); err != nil {
 		return nil, err
 	}
 	refs := []waitReference{{Kind: "nix_job", ID: id, Condition: "complete"}}
@@ -300,7 +325,7 @@ func observe(ctx context.Context, session *mcp.ClientSession, root *safefs.Root,
 				NextOffset int64  `json:"next_offset"`
 				EOF        bool   `json:"eof"`
 			}
-			if err := call(ctx, session, "execution_log", map[string]any{"task_id": id, "offset": offset}, &chunk); err != nil {
+			if err := call(ctx, session, "execution_log", map[string]any{"execution_id": id, "offset": offset}, &chunk); err != nil {
 				if failure, ok := err.(*wire.Error); ok && failure.Code == "not_found" {
 					break // Queued tasks may not have a log yet.
 				}

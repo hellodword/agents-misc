@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hellodword/agents-misc/vm-test-mcp/internal/state"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/telemetry"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
@@ -19,10 +18,10 @@ type Change struct {
 	RequestID string `json:"request_id"`
 }
 type TaskID struct {
-	TaskID string `json:"task_id"`
+	TaskID string `json:"lab_id"`
 }
 type NodeID struct {
-	TaskID
+	TaskID `json:"-"`
 	NodeID string `json:"node_id"`
 }
 type TaskChange struct {
@@ -43,14 +42,16 @@ type TaskListRequest struct {
 	Phase  string `json:"phase,omitempty"`
 }
 type EventsRequest struct {
-	TaskID
-	Cursor int64 `json:"cursor,omitempty"`
-	Limit  int   `json:"limit,omitempty"`
+	TaskID      `json:"-"`
+	ExecutionID string `json:"execution_id"`
+	Cursor      int64  `json:"cursor,omitempty"`
+	Limit       int    `json:"limit,omitempty"`
 }
 type LogRequest struct {
-	TaskID
-	Offset int64 `json:"offset,omitempty"`
-	Limit  int   `json:"limit,omitempty"`
+	TaskID      `json:"-"`
+	ExecutionID string `json:"execution_id"`
+	Offset      int64  `json:"offset,omitempty"`
+	Limit       int    `json:"limit,omitempty"`
 }
 type OperationRequest struct {
 	OperationID string `json:"operation_id"`
@@ -70,9 +71,9 @@ type ExtendRequest struct {
 }
 type NixRequest struct {
 	Change
-	CacheID        string `json:"cache_id"`
-	Derivation     string `json:"derivation"`
-	System         string `json:"system"`
+	CacheID        string `json:"upload_id"`
+	Derivation     string `json:"-"`
+	System         string `json:"-"`
 	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
 }
 type StartRequest struct {
@@ -85,14 +86,44 @@ type StartRequest struct {
 	TimeoutSeconds int               `json:"timeout_seconds,omitempty"`
 }
 type CommandRequest struct {
-	TaskID
+	TaskID    `json:"-"`
 	CommandID string `json:"command_id"`
 }
-type CommandGetRequest struct {
+type CommandGetRequest struct{ CommandRequest }
+type CommandInputReadRequest struct {
 	CommandRequest
-	InputFrom  *int `json:"input_from,omitempty"`
-	InputLimit int  `json:"input_limit,omitempty"`
+	Sequence  int `json:"sequence,omitempty"`
+	Offset    int `json:"offset,omitempty"`
+	ByteLimit int `json:"byte_limit,omitempty"`
 }
+type JobID struct {
+	JobID string `json:"job_id"`
+}
+type JobChange struct {
+	Change
+	JobID
+}
+type JobExtendRequest struct {
+	JobChange
+	Seconds int    `json:"seconds"`
+	Reason  string `json:"reason"`
+}
+type ExecutionChange struct {
+	Change
+	ExecutionID string `json:"execution_id"`
+}
+type CollectionRequest struct {
+	LabID  string `json:"lab_id,omitempty"`
+	Cursor int64  `json:"cursor,omitempty"`
+	Limit  int    `json:"limit,omitempty"`
+}
+
+type LabCollectionRequest struct {
+	LabID  string `json:"lab_id"`
+	Cursor int64  `json:"cursor,omitempty"`
+	Limit  int    `json:"limit,omitempty"`
+}
+
 type ReadRequest struct {
 	CommandRequest
 	Stream string `json:"stream"`
@@ -112,15 +143,14 @@ type CancelCommandRequest struct {
 }
 type TransferRequest struct {
 	Change
-	TaskID string `json:"task_id,omitempty"`
-	Kind   string `json:"kind"`
+	Kind string `json:"kind"`
 }
 type TransferGetRequest struct {
-	TransferID string `json:"transfer_id"`
+	TransferID string `json:"upload_id"`
 }
 type PutRequest struct {
 	NodeChange
-	TransferID string `json:"transfer_id"`
+	TransferID string `json:"upload_id"`
 	Path       string `json:"path"`
 }
 type GetRequest struct {
@@ -128,6 +158,7 @@ type GetRequest struct {
 	Path string `json:"path"`
 }
 type PowerRequest struct {
+	WaitUntil string `json:"wait_until,omitempty"`
 	NodeChange
 	Action string `json:"action"`
 }
@@ -156,7 +187,8 @@ type EndpointRequest struct {
 	Port     int    `json:"port"`
 }
 type CloseEndpointRequest struct {
-	TaskChange
+	Change
+	TaskID     `json:"-"`
 	EndpointID string `json:"endpoint_id"`
 }
 type ScreenshotRequest struct {
@@ -195,7 +227,7 @@ type CaptureRequest struct {
 	Kind string `json:"kind"`
 }
 type CaptureGetRequest struct {
-	TaskID
+	TaskID    `json:"-"`
 	CaptureID string `json:"capture_id"`
 }
 type CaptureStopRequest struct {
@@ -203,12 +235,13 @@ type CaptureStopRequest struct {
 	CaptureGetRequest
 }
 type ArtifactListRequest struct {
-	TaskID
+	TaskID      `json:"-"`
+	ExecutionID string `json:"execution_id,omitempty"`
 	ListRequest
 }
 type ArtifactGetRequest struct {
-	TaskID
-	ArtifactID string `json:"artifact_id"`
+	TaskID     `json:"-"`
+	ArtifactID string `json:"evidence_id"`
 }
 
 type DiagnoseRequest struct {
@@ -230,31 +263,37 @@ type Definition struct {
 
 var Definitions = []Definition{
 	{"wait", "Wait up to 600 seconds for any business condition or new failure; transport heartbeats stay outside tool results", WaitRequest{}, false},
-	{"nix_job_get", "Read a compact Nix execution and cleanup summary", TaskID{}, false},
+	{"nix_job_get", "Read a compact Nix execution and cleanup summary", JobID{}, false},
 	{"nix_job_list", "Page through Nix jobs", TaskListRequest{}, false},
-	{"nix_job_cancel", "Cancel a Nix job and await worker resource release", TaskChange{}, true},
-	{"nix_job_cleanup", "Retry Nix evidence handoff and resource cleanup", TaskChange{}, true},
+	{"nix_job_cancel", "Cancel a Nix job and await worker resource release", JobChange{}, true},
+	{"nix_job_cleanup", "Retry Nix evidence handoff and resource cleanup", JobChange{}, true},
 	{"lab_inspect", "Read lab nodes, networking, resource ledger and diagnostics", TaskID{}, false},
-	{"command_details", "Read command argv and explicitly paged stdin history", CommandGetRequest{}, false},
+	{"command_details", "Read command argv, working directory and environment", CommandGetRequest{}, false},
+	{"command_input_read", "Read retained stdin by sequence within a byte budget", CommandInputReadRequest{}, false},
+	{"nix_job_extend", "Extend a running Nix job with a continued-work reason, up to 24 hours total", JobExtendRequest{}, true},
+	{"command_list", "Page through command summaries in a lab", LabCollectionRequest{}, false},
+	{"endpoint_list", "Page through endpoint summaries in a lab", LabCollectionRequest{}, false},
+	{"capture_list", "Page through capture summaries in a lab", LabCollectionRequest{}, false},
+	{"upload_list", "Page through uploads, optionally filtered by lab", CollectionRequest{}, false},
 	{"evidence_pin", "Retain evidence and its metadata until explicitly unpinned", EvidenceChange{}, true},
 	{"evidence_unpin", "Release an evidence retention pin", EvidenceChange{}, true},
 	{"evidence_delete", "Delete unpinned evidence after confirmed resource cleanup", EvidenceChange{}, true},
-	{"upload_renew", "Renew a scoped upload capability", RenewRequest{}, true},
+	{"upload_delete", "Delete an unbound upload after active writes settle", UploadDeleteRequest{}, true},
 	{"upload_objects", "Read a page of immutable upload object metadata", UploadObjectsRequest{}, false},
 	{"service_get", "Describe templates, backend availability and effective limits", struct{}{}, false},
 	{"service_observe", "Read bounded host pressure, controller cgroup quotas and call timings from the last 1..240 seconds (default 30); missing data is explicit and no argv, environment or output is included", ObserveRequest{}, false},
 	{"lab_create", "Queue independent linked-clone nodes and a private router", LabRequest{}, true},
 	{"nix_job_create", "Queue an uploaded derivation closure for sandboxed host KVM execution", NixRequest{}, true},
-	{"lab_list", "Page through compact task summaries; phase defaults to active (queued, preparing, running or blocked cleanup). Use phase=ended or all for history; cursor is the last scanned task ID", TaskListRequest{}, false}, {"lab_get", "Read a compact laboratory summary and revision; use lab_inspect for the resource ledger", TaskID{}, false},
+	{"lab_list", "Page through compact task summaries; phase defaults to active (queued, preparing, running or blocked cleanup). Use phase=ended or all for history; cursor is the last scanned submission sequence", TaskListRequest{}, false}, {"lab_get", "Read a compact laboratory summary and revision; use lab_inspect for the resource ledger", TaskID{}, false},
 	{"node_get", "Read node capabilities, observations and expected state", NodeID{}, false},
 	{"lab_diagnose", "Collect bounded host and guest evidence, including the private router boot console before Guest Additions is ready", DiagnoseRequest{}, true},
 	{"node_exec", "Run a short guest command through Guest Control independently of the command service", ExecRequest{}, true},
 	{"lab_cleanup", "Release remaining resources of an ended VirtualBox lab and verify cleanup", TaskChange{}, true},
 	{"execution_events", "Read events after a cursor", EventsRequest{}, false}, {"execution_log", "Read task log bytes at an offset", LogRequest{}, false}, {"operation_get", "Read a durable operation receipt", OperationRequest{}, false},
-	{"lab_finish", "Submit a running lab conclusion and release resources; wait for cleanup.state=complete", FinishRequest{}, true}, {"lab_cancel", "Cancel a queued or executing task; wait for cleanup.state=complete", TaskChange{}, true}, {"lab_extend", "Extend an executing task with a concrete continued-work reason; independent startup deadlines do not change", ExtendRequest{}, true}, {"execution_delete", "Remove retained data for a cleaned terminal task", TaskChange{}, true},
+	{"lab_finish", "Submit a running lab conclusion and release resources; wait for cleanup.state=complete", FinishRequest{}, true}, {"lab_cancel", "Cancel a queued or executing task; wait for cleanup.state=complete", TaskChange{}, true}, {"lab_extend", "Extend an executing task with a concrete continued-work reason; independent startup deadlines do not change", ExtendRequest{}, true}, {"execution_delete", "Delete a cleaned execution and unpinned details; independent pins and receipts remain", ExecutionChange{}, true},
 	{"command_start", "Start argv; finite mode waits for exit, process-group release and output, service/interactive for confirmed start", StartRequest{}, true}, {"command_get", "Read compact command status and revision", CommandRequest{}, false}, {"command_read", "Read base64 output by byte offset; at_end is the current prefix, eof requires complete retention", ReadRequest{}, false}, {"command_input", "Persist ordered UTF-8 stdin or EOF (64KiB per packet, 64MiB and 4096 packets per command)", InputRequest{}, true}, {"command_cancel", "Request cancellation of one supervised process group; inspect command_get for confirmed termination", CancelCommandRequest{}, true},
-	{"upload_create", "Prepare a file upload for a queued/preparing/running lab, or an unbound standard Nix cache before nix_job_create", TransferRequest{}, true}, {"upload_get", "Inspect compact upload state and revision; use upload_objects for checksums and upload_renew for credentials", TransferGetRequest{}, false},
-	{"guest_file_put", "Copy a sealed upload to a guest path", PutRequest{}, true}, {"guest_file_get", "Archive a guest file or directory as an artifact", GetRequest{}, true},
+	{"upload_create", "Allocate an input; PUT its immutable manifest and objects to the issued capability URL", TransferRequest{}, true}, {"upload_get", "Inspect compact upload state and revision; return a fresh scoped capability; use upload_objects for checksums", TransferGetRequest{}, false},
+	{"guest_file_put", "Bind a ready upload to one lab and copy it to a guest path", PutRequest{}, true}, {"guest_file_get", "Archive a guest file or directory as an artifact", GetRequest{}, true},
 	{"node_control", "Start, shut down, reboot, power off, pause, resume or reset a lab node", PowerRequest{}, true},
 	{"network_set", "Set public egress, DHCP, DNS and node address registrations within the lab LAN", NetworkRequest{}, true}, {"network_recover", "Revalidate router, host protection and declared endpoints", TaskChange{}, true},
 	{"node_network_link", "Connect or disconnect the node's lab network cable", LinkRequest{}, true},
@@ -276,6 +315,9 @@ func Schema(t reflect.Type) map[string]any {
 		required := []string{}
 		for i := 0; i < t.NumField(); i++ {
 			f := t.Field(i)
+			if f.Tag.Get("json") == "-" {
+				continue
+			}
 			if f.Anonymous {
 				v := Schema(f.Type)
 				for k, x := range v["properties"].(map[string]any) {
@@ -335,9 +377,15 @@ func (s *Server) accept(ctx context.Context, name string, raw []byte) (any, erro
 	if e := validateArguments(reflect.TypeOf(def.Args), raw); e != nil {
 		return nil, e
 	}
-	args := v.Elem().Interface()
+	args := normalizeArguments(v.Elem().Interface())
 	if !def.Mutating {
-		return s.query(ctx, name, args)
+		s.mu.Lock()
+		resolved, err := s.resolveArguments(name, args)
+		s.mu.Unlock()
+		if err != nil {
+			return nil, err
+		}
+		return s.query(ctx, name, resolved)
 	}
 	field := v.Elem().FieldByName("RequestID")
 	request := field.String()
@@ -347,6 +395,9 @@ func (s *Server) accept(ctx context.Context, name string, raw []byte) (any, erro
 	h := sha256.Sum256(append([]byte(name+"\n"), wire.JSON(args)...))
 	hash := hex.EncodeToString(h[:])
 	accepted := time.Now()
+	if oneOf(name, "lab_create", "nix_job_create", "upload_create") {
+		s.refreshStorage(true)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -379,34 +430,131 @@ func (s *Server) accept(ctx context.Context, name string, raw []byte) (any, erro
 			return nil, wire.Fail("unavailable", "Service is stopping")
 		}
 	}
-	op := &Operation{ID: wire.ID(), RequestID: request, Tool: name, Hash: hash, State: "pending", Created: time.Now().UTC()}
-	var binding struct {
-		TaskID string `json:"task_id"`
+	resolved, resolveErr := s.resolveArguments(name, args)
+	if resolveErr != nil {
+		return nil, resolveErr
 	}
-	_ = json.Unmarshal(raw, &binding)
-	op.TaskID = binding.TaskID
+	args = resolved
+	op := &Operation{ID: wire.ID(), RequestID: request, Tool: name, Hash: hash, State: "pending", Created: time.Now().UTC()}
+	if name == "nix_job_create" {
+		if provider, ok := s.backend.(interface{ WorkerInstance() string }); ok {
+			op.WorkerInstance = provider.WorkerInstance()
+			if op.WorkerInstance == "" {
+				return nil, wire.Fail("worker_protocol_error", "Worker did not identify its storage instance")
+			}
+		}
+	}
+	op.TaskID = argumentExecution(args)
+	op.TargetID = argumentTarget(args)
+
+	if oneOf(name, "upload_create", "command_start", "endpoint_open", "capture_start", "node_screenshot", "guest_file_get") {
+		op.TargetID = wire.ID()
+	}
 	if name == "lab_create" || name == "nix_job_create" {
 		op.TaskID = wire.ID()
+		op.TargetID = op.TaskID
 	}
 	if oneOf(name, "lab_create", "nix_job_create", "upload_create") {
 		if e := s.admission(); e != nil {
 			return nil, e
 		}
 	}
-	if e := s.db.Admit(ctx, state.Document{Kind: "operation", ID: op.ID, Value: op}, wire.JSON(args)); e != nil {
+	var execution *Task
+	bindings := []*Transfer{}
+	docs := []record{}
+	switch a := args.(type) {
+	case LabRequest:
+		var err error
+		execution, err = s.buildLab(a, op)
+		if err != nil {
+			return nil, err
+		}
+		seen := map[string]bool{}
+		for _, id := range a.UploadIDs {
+			if seen[id] {
+				return nil, wire.Fail("invalid_argument", "Lab upload IDs must be unique")
+			}
+			seen[id] = true
+			upload, err := s.transfer(id)
+			if err != nil {
+				return nil, err
+			}
+			if upload.Kind != "file" || upload.State != "ready" || upload.TaskID != "" {
+				return nil, wire.Fail("invalid_state", "Lab inputs must be ready and unbound file uploads")
+			}
+			bound := *upload
+			bound.TaskID = execution.ID
+			bindings = append(bindings, &bound)
+		}
+
+	case NixRequest:
+		var bound *Transfer
+		var err error
+		execution, bound, err = s.buildNix(a, op)
+		if err != nil {
+			return nil, err
+		}
+		bindings = append(bindings, bound)
+	}
+	intent := wire.JSON(args)
+	if a, ok := args.(InputRequest); ok {
+		file, size, hash, err := s.db.PublishBody([]byte(a.Data))
+		if err != nil {
+			return nil, err
+		}
+		op.Payload = BodyRef{file, size, hash}
+		a.Data = ""
+		intent = wire.JSON(a)
+	}
+	if execution != nil {
+		op.State = "succeeded"
+		op.Result = map[string]any{"id": execution.ID}
+		intent = nil
+		docs = append(docs, execution)
+		for _, bound := range bindings {
+			docs = append(docs, bound)
+		}
+	}
+	if e := s.db.Admit(ctx, op, intent, docs...); e != nil {
 		return nil, e
 	}
-	s.operations[op.ID] = op
-	s.requests[request] = op
+	if execution != nil {
+		s.tasks = append(s.tasks, execution)
+		for _, bound := range bindings {
+			s.transfers[bound.ID] = bound
+		}
+	}
+	if op.State == "pending" {
+		s.operations[op.ID] = op
+		s.requests[request] = op
+	}
+	if execution != nil {
+		return clone(op), nil
+	}
+	s.dispatchOperation(op, args, accepted)
+	return clone(op), nil
+}
+func (s *Server) dispatchOperation(op *Operation, args any, accepted time.Time) {
+	name := op.Tool
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		started := time.Now()
-		result, e := s.mutate(name, args)
-		s.performance.Record(telemetry.Call{Started: accepted.UTC(), Finished: time.Now().UTC(), Scope: "operation", Operation: name, TaskID: binding.TaskID, WaitUS: started.Sub(accepted).Microseconds(), ExecutionUS: time.Since(started).Microseconds(), Failed: e != nil})
+		s.mu.Lock()
+		op.IntentStage = "dispatched"
+		e := s.db.Save(context.Background(), op)
+		s.mu.Unlock()
+		var result any
+		if e == nil {
+			result, e = s.mutate(name, args, op)
+		}
+		s.performance.Record(telemetry.Call{Started: accepted.UTC(), Finished: time.Now().UTC(), Scope: "operation", Operation: name, TaskID: op.TaskID, WaitUS: started.Sub(accepted).Microseconds(), ExecutionUS: time.Since(started).Microseconds(), Failed: e != nil})
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		op.State = "succeeded"
+		op.IntentStage = "confirmed"
+		op.Intent = BodyRef{}
+		op.Payload = BodyRef{}
 		op.Result = compactResult(name, result)
 		if name == "node_exec" && e == nil {
 			if value, ok := result.(map[string]any); ok && value["state"] == "uncertain" {
@@ -425,9 +573,10 @@ func (s *Server) accept(ctx context.Context, name string, raw []byte) (any, erro
 				op.State = "uncertain"
 			}
 		}
-		s.persist(state.Document{Kind: "operation", ID: op.ID, Value: op})
+		s.persist(op)
+		delete(s.operations, op.ID)
+		delete(s.requests, op.RequestID)
 	}()
-	return clone(op), nil
 }
 func clone[T any](v *T) *T { var out T; _ = json.Unmarshal(wire.JSON(v), &out); return &out }
 func window(offset int64, limit int) (int, error) {
@@ -465,11 +614,13 @@ type EvidenceChange struct {
 	Change
 	ArtifactGetRequest
 }
-type RenewRequest struct {
-	Change
-	TransferGetRequest
-}
 type UploadObjectsRequest struct {
 	TransferGetRequest
-	ListRequest
+	Cursor string `json:"cursor,omitempty"`
+	Limit  int    `json:"limit,omitempty"`
+}
+
+type UploadDeleteRequest struct {
+	Change
+	TransferGetRequest
 }

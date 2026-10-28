@@ -153,7 +153,7 @@ func (b *VBoxBackend) consoleDir(t *Task) string {
 
 func (b *VBoxBackend) consoleLog(ctx context.Context, t *Task, local string) ([]byte, error) {
 	status := bootConsoleStatus{State: "interrupted", LimitBytes: bootConsoleLimit}
-	if value, ok := b.bootConsoles.Load(t.Router.UUID); ok {
+	if value, ok := b.bootConsoles.Load(t.lab().Router.UUID); ok {
 		c := value.(*bootConsole)
 		if err := lockContext(ctx, &c.mu); err != nil {
 			return nil, err

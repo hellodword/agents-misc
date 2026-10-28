@@ -93,7 +93,7 @@ func TestRouterOnlyLabLifecycle(t *testing.T) {
 			lab, _ := s.task(id)
 			snapshot := clone(lab)
 			s.mu.Unlock()
-			if len(snapshot.Nodes) != 0 || !snapshot.Router.Cleaned || snapshot.GUI != nil {
+			if len(snapshot.lab().Nodes) != 0 || !snapshot.lab().Router.Cleaned || snapshot.lab().GUI != nil {
 				t.Fatal("router-only ownership or cleanup differs", snapshot)
 			}
 			f.mu.Lock()
@@ -208,20 +208,20 @@ func TestDisklessRouterOwnsVMAndSeedButNeverBootISO(t *testing.T) {
 	b := &VBoxBackend{Config: testConfig(t)}
 	t.Cleanup(func() { _ = b.Close() })
 	task := newTask("lab", 60)
-	task.LAN = b.Config.VirtualBox.Network.LAN
-	task.RouterPassword = wire.ID() + wire.ID()
+	task.lab().LAN = b.Config.VirtualBox.Network.LAN
+	task.lab().RouterPassword = wire.ID() + wire.ID()
 	realISO := filepath.Join(t.TempDir(), "router.iso")
 	if err := os.WriteFile(realISO, []byte("borrowed ISO"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	task.RouterISO = filepath.Join(t.TempDir(), "result.iso")
-	if err := os.Symlink(realISO, task.RouterISO); err != nil {
+	task.lab().RouterISO = filepath.Join(t.TempDir(), "result.iso")
+	if err := os.Symlink(realISO, task.lab().RouterISO); err != nil {
 		t.Fatal(err)
 	}
-	task.Router = &Node{ID: wire.ID(), UUID: wire.UUID(), MAC: "08:00:27:01:02:03", NodeRequest: NodeRequest{Name: "router", CPUs: 1, MemoryMiB: 256}, Intent: true}
-	r := &liveRouterRunner{uuid: task.Router.UUID, cfg: filepath.Join(b.vmDir(task, task.Router), "router.vbox"), iso: realISO, api: b.Config.VirtualBox.APIHelper}
+	task.lab().Router = &Node{ID: wire.ID(), UUID: wire.UUID(), MAC: "08:00:27:01:02:03", NodeRequest: NodeRequest{Name: "router", CPUs: 1, MemoryMiB: 256}, Intent: true}
+	r := &liveRouterRunner{uuid: task.lab().Router.UUID, cfg: filepath.Join(b.vmDir(task, task.lab().Router), "router.vbox"), iso: realISO, api: b.Config.VirtualBox.APIHelper}
 	b.Runner = r
-	if err := b.Prepare(context.Background(), task, task.Router); err != nil {
+	if err := b.Prepare(context.Background(), task, task.lab().Router); err != nil {
 		t.Fatal(err)
 	}
 	if r.info["memory"] != "256" || r.info["VMTestMedia-1-0"] != filepath.Join(b.runtime(task), "seed.iso") {
@@ -233,17 +233,17 @@ func TestDisklessRouterOwnsVMAndSeedButNeverBootISO(t *testing.T) {
 	if r.info["VMTestMedia-0-0"] != realISO {
 		t.Fatal("Nix-style ISO symlink was not resolved")
 	}
-	console, ok := b.bootConsoles.Load(task.Router.UUID)
+	console, ok := b.bootConsoles.Load(task.lab().Router.UUID)
 	if !ok || r.info["uartmode1"] != "client,"+console.(*bootConsole).socket {
 		t.Fatal("router console was not attached to its private collector")
 	}
 	// Readback must reject host devices and other sockets, including for a router.
 	copyTask := task.executionSnapshot()
-	copyTask.RouterISO = realISO
+	copyTask.lab().RouterISO = realISO
 	for _, unsafe := range []string{"/dev/ttyS0", "file,/tmp/log", "client,/tmp/other.sock"} {
 		mode := r.info["uartmode1"]
 		r.info["uartmode1"] = unsafe
-		if err := b.verify(copyTask, task.Router, r.info); wire.Safe(err).Code != "unsafe_device" {
+		if err := b.verify(copyTask, task.lab().Router, r.info); wire.Safe(err).Code != "unsafe_device" {
 			t.Fatal("unowned console accepted", unsafe, err)
 		}
 		r.info["uartmode1"] = mode
@@ -251,16 +251,16 @@ func TestDisklessRouterOwnsVMAndSeedButNeverBootISO(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(b.runtime(task), "seed.iso")); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Delete(context.Background(), task, task.Router); err != nil {
+	if err := b.Delete(context.Background(), task, task.lab().Router); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := b.bootConsoles.Load(task.Router.UUID); ok {
+	if _, ok := b.bootConsoles.Load(task.lab().Router.UUID); ok {
 		t.Fatal("released router retained its console collector")
 	}
 	if _, err := os.Stat(console.(*bootConsole).socket); !os.IsNotExist(err) {
 		t.Fatal("released router retained its console socket", err)
 	}
-	data, err := os.ReadFile(task.RouterISO)
+	data, err := os.ReadFile(task.lab().RouterISO)
 	if err != nil || string(data) != "borrowed ISO" || r.registered {
 		t.Fatal("boot ISO or registration ownership violated", err)
 	}
@@ -287,4 +287,8 @@ func TestMachineInfoRunningDisplayAndOwnershipFields(t *testing.T) {
 			t.Fatalf("ambiguous or malformed ownership metadata accepted: %q", raw)
 		}
 	}
+}
+
+func (idleWorker) OpenArtifact(context.Context, string, string, string) (io.ReadCloser, error) {
+	return nil, fmt.Errorf("no artifacts")
 }

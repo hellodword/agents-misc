@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-const Version = "0.12.0"
+const Version = "0.13.0"
 const MaxJSON = 1 << 20
 
 // NixExecution reports worker execution independently of scheduler and daemon
@@ -68,9 +68,10 @@ func Safe(err error) *Error {
 
 // CheckJSON rejects duplicate keys at every depth before any decoder can discard
 // them. Limit input and depth independently of the selected transport.
-func CheckJSON(data []byte) error {
-	if len(data) > MaxJSON {
-		return Fail("too_large", "JSON exceeds 1 MiB")
+func CheckJSON(data []byte) error { return checkJSON(data, MaxJSON) }
+func checkJSON(data []byte, limit int) error {
+	if len(data) > limit {
+		return Fail("too_large", "JSON exceeds its byte limit")
 	}
 	d := json.NewDecoder(bytes.NewReader(data))
 	d.UseNumber()
@@ -122,8 +123,9 @@ func CheckJSON(data []byte) error {
 	}
 	return nil
 }
-func Decode(data []byte, v any) error {
-	if err := CheckJSON(data); err != nil {
+func Decode(data []byte, v any) error { return DecodeLimit(data, v, MaxJSON) }
+func DecodeLimit(data []byte, v any, limit int) error {
+	if err := checkJSON(data, limit); err != nil {
 		return err
 	}
 	var object any
@@ -261,23 +263,23 @@ type Input struct {
 	EOF      bool   `json:"eof"`
 }
 type CommandStatus struct {
-	State       string            `json:"state"`
-	ExitCode    *int              `json:"exit_code,omitempty"`
-	ExitSignal  string            `json:"exit_signal,omitempty"`
-	CoreDumped  bool              `json:"core_dumped,omitempty"`
-	NextInput   int               `json:"next_input"`
-	InputClosed bool              `json:"input_closed"`
-	Error       string            `json:"error,omitempty"`
-	Stage       string            `json:"stage,omitempty"`
-	Final       bool              `json:"final"`
-	Started     *time.Time        `json:"started,omitempty"`
-	Deadline    *time.Time        `json:"deadline,omitempty"`
-	Updated     *time.Time        `json:"updated,omitempty"`
-	Finished    *time.Time        `json:"finished,omitempty"`
-	Supervisor  *ProcessIdentity  `json:"supervisor,omitempty"`
-	Termination *Termination      `json:"termination,omitempty"`
-	Output      *CommandOutput    `json:"output,omitempty"`
-	Execution   *CommandExecution `json:"execution,omitempty"`
+	State        string            `json:"state"`
+	ExitCode     *int              `json:"exit_code,omitempty"`
+	ExitSignal   string            `json:"exit_signal,omitempty"`
+	CoreDumped   bool              `json:"core_dumped,omitempty"`
+	WrittenInput int               `json:"written_input_sequence"`
+	InputClosed  bool              `json:"input_closed"`
+	Error        string            `json:"error,omitempty"`
+	Stage        string            `json:"stage,omitempty"`
+	Final        bool              `json:"final"`
+	Started      *time.Time        `json:"started,omitempty"`
+	Deadline     *time.Time        `json:"deadline,omitempty"`
+	Updated      *time.Time        `json:"updated,omitempty"`
+	Finished     *time.Time        `json:"finished,omitempty"`
+	Supervisor   *ProcessIdentity  `json:"supervisor,omitempty"`
+	Termination  *Termination      `json:"termination,omitempty"`
+	Output       *CommandOutput    `json:"output,omitempty"`
+	Execution    *CommandExecution `json:"execution,omitempty"`
 }
 
 type CommandExecution struct {

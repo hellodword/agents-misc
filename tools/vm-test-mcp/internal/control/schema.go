@@ -56,7 +56,7 @@ func constrainSchema(t reflect.Type, schema schemaMap) {
 	case reflect.TypeFor[WaitTarget]():
 		enum("kind", "lab", "nix_job", "command", "operation", "upload")
 		field("id", schemaMap{"pattern": wire.IDPattern.String()})
-		enum("condition", "ready", "started", "complete", "cleaned", "changed", "output")
+		enum("condition", "ready", "started", "complete", "cleaned", "changed", "output", "input_delivered", "input_written")
 		field("seen_revision", schemaMap{"minimum": 0})
 	case reflect.TypeFor[ListRequest](), reflect.TypeFor[EventsRequest]():
 		field("cursor", schemaMap{"minimum": 0})
@@ -65,7 +65,7 @@ func constrainSchema(t reflect.Type, schema schemaMap) {
 	case reflect.TypeFor[TaskListRequest]():
 		enum("phase", "active", "all", "queued", "preparing", "running", "ended")
 		field("phase", schemaMap{"default": "active"})
-		field("cursor", schemaMap{"pattern": wire.IDPattern.String(), "description": "Last scanned task ID from next_cursor; omit for a new scan."})
+		field("cursor", schemaMap{"pattern": "^[0-9]+$", "description": "Stable sequence cursor from next_cursor; omit for a new scan."})
 		rangeOf("limit", 0, 200)
 		field("limit", schemaMap{"default": 50})
 	case reflect.TypeFor[LogRequest](), reflect.TypeFor[ReadRequest]():
@@ -84,8 +84,6 @@ func constrainSchema(t reflect.Type, schema schemaMap) {
 		rangeOf("seconds", 1, 86400)
 		field("reason", schemaMap{"minLength": 1, "maxLength": 1024, "x-maxBytes": 1024, "pattern": "\\S", "description": "Actual continued work and its purpose; effective total limit comes from service_get."})
 	case reflect.TypeFor[NixRequest]():
-		enum("system", "x86_64-linux", "aarch64-linux")
-		field("derivation", schemaMap{"pattern": `^/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[A-Za-z0-9+._?=-]+\.drv$`})
 		rangeOf("timeout_seconds", 0, 86400)
 	case reflect.TypeFor[StartRequest]():
 		enum("mode", "finite", "service", "interactive")
@@ -97,24 +95,28 @@ func constrainSchema(t reflect.Type, schema schemaMap) {
 	case reflect.TypeFor[ExecRequest]():
 		rangeOf("timeout_seconds", 0, 30)
 		field("timeout_seconds", schemaMap{"default": 10, "description": "0 or omission uses 10 seconds. Diagnostic Guest Control execution, without durable supervisor semantics."})
-	case reflect.TypeFor[CommandGetRequest]():
-		field("input_from", schemaMap{"minimum": 0, "description": "Explicitly read retained stdin starting at this sequence; omitted reads metadata only."})
-		rangeOf("input_limit", 0, 16)
-		field("input_limit", schemaMap{"default": 16})
-		schema["dependentRequired"] = map[string][]string{"input_limit": {"input_from"}}
+	case reflect.TypeFor[UploadObjectsRequest]():
+		rangeOf("limit", 0, 200)
+		field("cursor", schemaMap{"description": "Last object name from next_cursor; omit for the first page."})
+	case reflect.TypeFor[CommandInputReadRequest]():
+		field("sequence", schemaMap{"minimum": 0})
+		rangeOf("byte_limit", 0, 65536)
+	case reflect.TypeFor[CollectionRequest](), reflect.TypeFor[LabCollectionRequest]():
+		field("cursor", schemaMap{"minimum": 0})
+		rangeOf("limit", 0, 200)
+	case reflect.TypeFor[JobExtendRequest]():
+		rangeOf("seconds", 1, 86400)
+		field("reason", schemaMap{"minLength": 1, "maxLength": 1024, "pattern": "\\S"})
 	case reflect.TypeFor[InputRequest]():
 		rangeOf("sequence", 0, wire.InputPacketCount-1)
 		field("data", schemaMap{"maxLength": wire.InputPacketLimit, "x-maxBytes": wire.InputPacketLimit, "description": "Raw UTF-8 text, including NUL if required; not base64. Maximum 65536 UTF-8 bytes."})
 		field("eof", schemaMap{"default": false, "description": "Close stdin after this packet; no later packet is accepted. Explicit EOF is required."})
 	case reflect.TypeFor[TransferRequest]():
 		enum("kind", "file", "cache")
-		schema["if"] = schemaMap{"properties": schemaMap{"kind": schemaMap{"const": "file"}}}
-		schema["then"] = schemaMap{"required": []string{"task_id"}}
-		schema["else"] = schemaMap{"not": schemaMap{"required": []string{"task_id"}}}
-		field("task_id", schemaMap{"description": "Required for file uploads on queued/preparing/running labs; forbidden for caches prepared before nix_job_create."})
 	case reflect.TypeFor[PutRequest](), reflect.TypeFor[GetRequest]():
 		field("path", schemaMap{"maxLength": 32768, "x-maxBytes": 32768, "pattern": "^(?:/|[A-Za-z]:[\\\\/])[^\\x00]*$", "description": "Absolute guest path. For put, create and verify the parent directory first; transfer must be fully uploaded. Get archives a file/directory without host extraction."})
 	case reflect.TypeFor[PowerRequest]():
+		enum("wait_until", "ready", "power_state")
 		enum("action", "start", "shutdown", "reboot", "poweroff", "pause", "resume", "reset")
 		field("action", schemaMap{"description": "Hypervisor/node power control. pause/resume does not test guest OS sleep or hibernation."})
 	case reflect.TypeFor[GUIRequest]():
@@ -147,6 +149,7 @@ func constrainSchema(t reflect.Type, schema schemaMap) {
 	case reflect.TypeFor[CaptureRequest]():
 		enum("kind", "video", "nic", "metrics")
 	case reflect.TypeFor[LabRequest]():
+		field("upload_ids", schemaMap{"maxItems": 256, "uniqueItems": true, "items": schemaMap{"type": "string", "pattern": wire.IDPattern.String()}})
 		field("nodes", schemaMap{"maxItems": 64, "description": "0..64 independent nodes; [] creates a router-only lab. Effective resource limits are in service_get."})
 		rangeOf("timeout_seconds", 0, 86400)
 		field("lan", schemaMap{"description": "Private IPv4 CIDR; omitted uses service_get defaults."})

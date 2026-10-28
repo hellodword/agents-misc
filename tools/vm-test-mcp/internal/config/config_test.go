@@ -10,7 +10,7 @@ import (
 
 func TestDurationConfigurationAndAnnotatedExample(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "config.yaml")
-	body := fmt.Sprintf("service:\n  token: fixture\n  public_url: http://localhost:8765\n  state_dir: %s\ntasks:\n  default_timeout: 2h\n  max_duration: 12h\n  cleanup_timeout: 45s\nvirtualbox:\n  startup_timeout: 8m\n  shutdown_timeout: 90s\n  unavailable_after: 40s\n  router:\n    iso: /fixture/router.iso\n  network:\n    lan: 10.99.0.0/24\nstorage:\n  failure_days: 7\n", t.TempDir())
+	body := fmt.Sprintf("state_dir: %s\nservice:\n  token: fixture\n  public_url: http://localhost:8765\ntasks:\n  default_timeout: 2h\n  max_duration: 12h\n  cleanup_timeout: 45s\nvirtualbox:\n  startup_timeout: 8m\n  shutdown_timeout: 90s\n  unavailable_after: 40s\n  router:\n    iso: /fixture/router.iso\n  network:\n    lan: 10.99.0.0/24\nstorage:\n  failure_days: 7\n", t.TempDir())
 	if err := os.WriteFile(file, []byte(body), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,7 @@ func TestStrictConfig(t *testing.T) {
 		}
 	}
 	c := Defaults()
-	c.Service.StateDir = t.TempDir()
+	c.StateDir = t.TempDir()
 	c.Service.PublicURL = "http://localhost:8765"
 	if c.Validate() == nil {
 		t.Fatal("empty token accepted")
@@ -55,7 +55,7 @@ func TestStrictConfig(t *testing.T) {
 func TestRouterWithoutTemplatesValidatesISOAndPrograms(t *testing.T) {
 	c := Defaults()
 	c.Service.Token = "synthetic"
-	c.Service.StateDir = t.TempDir()
+	c.StateDir = t.TempDir()
 	c.Service.PublicURL = "http://localhost:8765"
 	c.VirtualBox.Router.ISO = "/fixture/router.iso"
 	if err := c.Validate(); err != nil {
@@ -75,7 +75,7 @@ func TestRouterWithoutTemplatesValidatesISOAndPrograms(t *testing.T) {
 func TestSharedConfigurationAndPermissions(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "config.yaml")
-	body := fmt.Sprintf("service:\n  token: synthetic\n  public_url: http://127.0.0.1:8765\n  state_dir: %s/controller\nnix:\n  socket: %s/worker.sock\n  state_dir: %s/worker\n  executable: /fixture/nix\n  controller_uid: %d\n", dir, dir, dir, os.Getuid())
+	body := fmt.Sprintf("state_dir: %s\nservice:\n  token: synthetic\n  public_url: http://127.0.0.1:8765\nnix:\n  socket: %s/worker.sock\n  state_dir: %s\n  executable: /fixture/nix\n  controller_uid: %d\n", dir, dir, dir, os.Getuid())
 	if err := os.WriteFile(p, []byte(body), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestExecutableLibraryDiscovery(t *testing.T) {
 func TestTemplateDefaultsAndUnboundedHTTPHosts(t *testing.T) {
 	c := Defaults()
 	c.Service.Token = "fixture"
-	c.Service.StateDir = t.TempDir()
+	c.StateDir = t.TempDir()
 	c.Service.PublicURL = "http://example.test"
 	c.VirtualBox.Router.ISO = "/fixture/router.iso"
 	c.VirtualBox.Templates = map[string]Template{"linux": {Kind: "linux", VM: "named-vm", Snapshot: "11111111-1111-4111-8111-111111111111", Username: "root", Password: "fixture"}}
@@ -155,5 +155,35 @@ func TestTemplateDefaultsAndUnboundedHTTPHosts(t *testing.T) {
 	c.VirtualBox.Templates["linux"] = v
 	if c.Validate() == nil {
 		t.Fatal("non-root Linux template accepted")
+	}
+}
+
+func TestRoleDirectories(t *testing.T) {
+	root := t.TempDir()
+	for _, override := range []string{"", root, filepath.Join(root, "separate")} {
+		c := Defaults()
+		c.StateDir, c.Nix.StateDir = root, override
+		if err := c.validateStateDirs(); err != nil {
+			t.Fatal(err)
+		}
+		if c.ControllerDir() != filepath.Join(root, "controller") {
+			t.Fatal(c.ControllerDir())
+		}
+		expectedRoot := override
+		if expectedRoot == "" {
+			expectedRoot = root
+		}
+		if c.WorkerDir() != filepath.Join(expectedRoot, "nix-worker") {
+			t.Fatal(c.WorkerDir())
+		}
+	}
+	c := Defaults()
+	c.StateDir, c.Nix.StateDir = root, filepath.Join(root, "controller")
+	if c.validateStateDirs() == nil {
+		t.Fatal("nested role directory accepted")
+	}
+	c.StateDir, c.Nix.StateDir = filepath.Join(root, "nix-worker"), root
+	if c.validateStateDirs() == nil {
+		t.Fatal("reverse nesting accepted")
 	}
 }

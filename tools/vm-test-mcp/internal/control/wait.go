@@ -14,6 +14,9 @@ const WaitWindow = 600 * time.Second
 const TransportHeartbeat = 15 * time.Second
 
 type WaitTarget struct {
+	Sequence     *int   `json:"sequence,omitempty"`
+	Stream       string `json:"stream,omitempty"`
+	Offset       int64  `json:"offset,omitempty"`
 	Kind         string `json:"kind"`
 	ID           string `json:"id"`
 	Condition    string `json:"condition"`
@@ -24,62 +27,35 @@ type WaitRequest struct {
 }
 type TargetState struct {
 	WaitTarget
-	Revision  int64 `json:"revision"`
-	Satisfied bool  `json:"satisfied"`
-	Attention bool  `json:"attention"`
-	Summary   any   `json:"summary"`
+	Revision    int64       `json:"revision"`
+	Satisfied   bool        `json:"satisfied"`
+	Attention   bool        `json:"attention"`
+	Summary     any         `json:"summary"`
+	Unavailable *wire.Error `json:"unavailable,omitempty"`
 }
 type WaitResult struct {
 	Reason   string        `json:"reason"`
 	Targets  []TargetState `json:"targets"`
 	Continue []WaitTarget  `json:"continue"`
 }
-type revisionState struct {
-	value    string
-	revision int64
-}
 
-// Only semantic changes advance ordinary revisions. Progress, byte growth and
-// successful probes have an independent output revision or remain in memory.
-func (s *Server) revision(key string, value any) int64 {
-	v := string(wire.JSON(value))
-	old := s.revisions[key]
-	if old.value != v {
-		old.value = v
-		parts := strings.Split(key, "/")
-		owner := parts[1]
-		if parts[0] == "command" {
-			_ = s.db.QueryRowContext(s.ctx, "SELECT task_id FROM commands WHERE id=?", parts[1]).Scan(&owner)
-		}
-		if parts[0] == "operation" {
-			_ = s.db.QueryRowContext(s.ctx, "SELECT task_id FROM operations WHERE id=?", parts[1]).Scan(&owner)
-		}
-		if parts[0] == "upload" {
-			_ = s.db.QueryRowContext(s.ctx, "SELECT task_id FROM transfers WHERE id=?", parts[1]).Scan(&owner)
-		}
-		rev, err := s.db.Revision(s.ctx, key, owner, []byte(v))
-		if err != nil {
-			s.cancel()
-			s.closed = true
-			return old.revision
-		}
-		old.revision = rev
-		s.revisions[key] = old
+// Revisions belong to entity rows and are committed with mutations. Reads never
+// create revision records or turn log/heartbeat observations into durable events.
+func (s *Server) revision(key string, _ any) int64 {
+	parts := strings.Split(key, "/")
+	table := map[string]string{"lab": "executions", "nix_job": "executions", "command": "commands", "operation": "operations", "upload": "transfers"}[parts[0]]
+	var revision int64
+	if table != "" {
+		_ = s.db.QueryRowContext(s.ctx, "SELECT revision FROM "+table+" WHERE id=?", parts[1]).Scan(&revision)
 	}
-	return old.revision
+	return revision
 }
 
 func taskCondition(t *Task) any {
-	nodes := []any{}
-	for _, n := range append(append([]*Node{}, t.Nodes...), t.Router) {
-		if n != nil {
-			nodes = append(nodes, []any{n.ID, n.State, n.Preparation.Stage, n.Health.VirtualBox.State, n.Health.GuestControl.State, n.Health.Commands.State, n.Cleaned, n.CleanupSteps})
-		}
-	}
-	return []any{t.State, t.Conclusion, t.Reason, t.Cleanup, t.CleanupErrors, t.Failure, t.Network, nodes}
+	return []any{t.Deadline, t.Hold, t.State, t.Conclusion, t.Reason, t.Cleanup, t.CleanupErrors, t.Failure, t.domain.condition()}
 }
 func commandCondition(c *Command) any {
-	return []any{c.State, c.Stage, c.Final, c.ExitCode, c.ExitSignal, c.Error, c.Observation.State, c.Cancellation, c.Termination, c.Release, c.Retained.Stdout.State, c.Retained.Stderr.State, c.Retained.Stdout.Error, c.Retained.Stderr.Error}
+	return []any{c.Stdin, c.Started, c.State, c.Stage, c.Final, c.ExitCode, c.ExitSignal, c.Error, c.Observation.State, c.Cancellation, c.Termination, c.Release, c.Retained.Stdout.State, c.Retained.Stderr.State, c.Retained.Stdout.Error, c.Retained.Stderr.Error}
 }
 
 func (s *Server) targetLocked(target WaitTarget, business bool) (TargetState, error) {
@@ -97,11 +73,11 @@ func (s *Server) targetLocked(target WaitTarget, business bool) (TargetState, er
 		out.Summary = t.summaryView()
 		s.queueView(t, out.Summary.(map[string]any))
 		out.Revision = s.revision(key, taskCondition(t))
-		out.Attention = t.cleanupState() == "blocked" || t.Failure != nil || t.Terminal() && t.Conclusion != "passed" || t.Network == "degraded"
+		out.Attention = t.cleanupState() == "blocked" || t.Failure != nil || t.Terminal() && t.Conclusion != "passed" || t.Kind == "lab" && t.lab().Network == "degraded"
 		// Guest services are expected to be unavailable while nodes boot. The
 		// preparation deadline/failure path decides when that requires intervention.
-		if t.State == "running" {
-			for _, n := range t.Nodes {
+		if t.Kind == "lab" && t.State == "running" {
+			for _, n := range t.lab().Nodes {
 				out.Attention = out.Attention || n.Health.unavailable()
 			}
 		}
@@ -123,8 +99,8 @@ func (s *Server) targetLocked(target WaitTarget, business bool) (TargetState, er
 				}
 				f.Close()
 			}
-			out.Revision = s.revision(key+"/output", size)
-			out.Satisfied = out.Revision > target.SeenRevision
+			out.Satisfied = size > target.Offset
+			out.Offset = size
 		default:
 			return out, wire.Fail("invalid_argument", "Execution condition must be ready, complete, cleaned, changed or output")
 		}
@@ -156,14 +132,31 @@ func (s *Server) targetLocked(target WaitTarget, business bool) (TargetState, er
 		}
 		switch target.Condition {
 		case "started":
-			out.Satisfied = c.Started != nil || c.State == "running" || c.Final
+			out.Satisfied = c.Started != nil
 		case "complete":
 			out.Satisfied = c.Final && c.Retained.done() && (c.Release != nil || c.Termination != nil && c.Termination.GroupStopped)
 		case "changed":
 			out.Satisfied = out.Revision > target.SeenRevision
+		case "input_delivered", "input_written":
+			if target.Sequence == nil || *target.Sequence < 0 {
+				return out, wire.Fail("invalid_argument", "Input wait requires a sequence")
+			}
+			progress := c.Stdin.Delivered
+			if target.Condition == "input_written" {
+				progress = c.Stdin.Written
+			}
+			out.Satisfied = progress > *target.Sequence
+			out.Attention = out.Attention || c.Final && !out.Satisfied
 		case "output":
-			out.Revision = s.revision(key+"/output", []any{c.Retained.Stdout, c.Retained.Stderr})
-			out.Satisfied = out.Revision > target.SeenRevision
+			if target.Stream != "stdout" && target.Stream != "stderr" {
+				return out, wire.Fail("invalid_argument", "Output wait requires stdout or stderr")
+			}
+			stream := c.Retained.Stdout
+			if target.Stream == "stderr" {
+				stream = c.Retained.Stderr
+			}
+			out.Satisfied = stream.Bytes > target.Offset
+			out.Offset = stream.Bytes
 		default:
 			return out, wire.Fail("invalid_argument", "Command condition must be started, complete, changed or output")
 		}
@@ -172,7 +165,7 @@ func (s *Server) targetLocked(target WaitTarget, business bool) (TargetState, er
 		if err != nil {
 			return out, err
 		}
-		out.Summary = clone(o)
+		out.Summary = s.operationView(o)
 		out.Revision = s.revision(key, []any{o.State, o.Error})
 		out.Attention = oneOf(o.State, "failed", "uncertain")
 		if target.Condition == "complete" {
@@ -189,9 +182,9 @@ func (s *Server) targetLocked(target WaitTarget, business bool) (TargetState, er
 		}
 		out.Summary = map[string]any{"id": t.ID, "state": t.State, "bytes": t.Bytes, "uploading": s.uploading[t.ID] != nil}
 		out.Revision = s.revision(key, []any{t.State, t.Bytes, s.uploading[t.ID] != nil})
-		out.Attention = t.State == "purged"
+		out.Attention = t.State == "deleting"
 		if target.Condition == "complete" {
-			out.Satisfied = t.Bytes > 0 && s.uploading[t.ID] == nil
+			out.Satisfied = t.State == "ready"
 		} else if target.Condition == "changed" {
 			out.Satisfied = out.Revision > target.SeenRevision
 		} else {
@@ -229,16 +222,26 @@ func (s *Server) wait(ctx context.Context, req WaitRequest, budget time.Duration
 		for _, target := range req.Targets {
 			view, err := s.targetLocked(target, len(business) > 0 && business[0])
 			if err != nil {
-				s.mu.Unlock()
-				return result, err
+				if wire.Safe(err).Code != "not_found" {
+					s.mu.Unlock()
+					return result, err
+				}
+				view.Unavailable = wire.Safe(err)
+				view.Attention = true
+				result.Targets = append(result.Targets, view)
+				result.Reason = "unavailable"
+				continue
 			}
 			result.Targets = append(result.Targets, view)
 			next := target
 			next.SeenRevision = view.Revision
-			result.Continue = append(result.Continue, next)
-			if view.Satisfied {
+			next.Offset = view.Offset
+			if !view.Satisfied || oneOf(target.Condition, "output", "changed") {
+				result.Continue = append(result.Continue, next)
+			}
+			if result.Reason != "unavailable" && view.Satisfied {
 				result.Reason = "satisfied"
-			} else if view.Attention && view.Revision > target.SeenRevision {
+			} else if result.Reason != "unavailable" && view.Attention && view.Revision > target.SeenRevision {
 				result.Reason = "attention"
 			}
 		}
@@ -293,6 +296,7 @@ func (s *Server) Call(ctx context.Context, name string, raw []byte) (any, error)
 	target := WaitTarget{Kind: "operation", ID: op.ID, Condition: "complete"}
 	if op.State == "succeeded" {
 		var args struct {
+			Sequence  int    `json:"sequence"`
 			Mode      string `json:"mode"`
 			CommandID string `json:"command_id"`
 		}
@@ -307,6 +311,8 @@ func (s *Server) Call(ctx context.Context, name string, raw []byte) (any, error)
 			if name == "nix_job_cancel" || name == "nix_job_cleanup" {
 				target.Kind = "nix_job"
 			}
+		case "command_input":
+			target = WaitTarget{Kind: "command", ID: args.CommandID, Condition: "input_delivered", Sequence: &args.Sequence}
 		case "command_start", "command_cancel":
 			id := args.CommandID
 			if name == "command_start" {
@@ -326,7 +332,10 @@ func (s *Server) Call(ctx context.Context, name string, raw []byte) (any, error)
 			}
 		}
 	}
-	return map[string]any{"operation": op, "wait": reply}, nil
+	s.mu.Lock()
+	view := s.operationView(op)
+	s.mu.Unlock()
+	return map[string]any{"operation": view, "wait": reply}, nil
 }
 
 func (s *Server) operation(id string) (*Operation, error) {

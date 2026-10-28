@@ -3,6 +3,9 @@ package execution
 import "time"
 
 type Artifact struct {
+	ExecutionID   string `json:"execution_id"`
+	ExecutionKind string `json:"execution_kind"`
+
 	Source  string    `json:"source,omitempty"`
 	Pinned  bool      `json:"pinned"`
 	ID      string    `json:"id"`

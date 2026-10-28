@@ -192,14 +192,14 @@ func TestPreparationPreservesPrimaryFailureAndPeerCancellation(t *testing.T) {
 	task, _ := s.task(lab.ID)
 	snapshot := clone(task)
 	s.mu.Unlock()
-	if snapshot.Failure.Code != "initialization_failed" || snapshot.Failure.Details["node_id"] != snapshot.Nodes[0].ID || snapshot.Failure.Details["stage"] != "initializing" {
+	if snapshot.Failure.Code != "initialization_failed" || snapshot.Failure.Details["node_id"] != snapshot.lab().Nodes[0].ID || snapshot.Failure.Details["stage"] != "initializing" {
 		t.Fatal("primary failure lost its stage or identity", snapshot.Failure)
 	}
-	peer := snapshot.Nodes[1].Preparation
+	peer := snapshot.lab().Nodes[1].Preparation
 	if peer.Stage != "cancelled" || peer.Error.Code != "preparation_cancelled" || peer.Error.Details["cause"].(map[string]any)["code"] != "initialization_failed" {
 		t.Fatal("cancelled peer was misclassified as another startup timeout", peer)
 	}
-	if peer.Started == nil || peer.Deadline == nil || !peer.Deadline.After(*peer.Started) || !snapshot.Router.Cleaned || !snapshot.Nodes[0].Cleaned || !snapshot.Nodes[1].Cleaned {
+	if peer.Started == nil || peer.Deadline == nil || !peer.Deadline.After(*peer.Started) || !snapshot.lab().Router.Cleaned || !snapshot.lab().Nodes[0].Cleaned || !snapshot.lab().Nodes[1].Cleaned {
 		t.Fatal("preparation deadline or bounded cleanup missing", snapshot.Public())
 	}
 }

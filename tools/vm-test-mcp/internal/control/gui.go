@@ -5,7 +5,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hellodword/agents-misc/vm-test-mcp/internal/state"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
@@ -50,14 +49,14 @@ func (s *Server) setGUI(ctx context.Context, t *Task, value string, restore bool
 		return err
 	}
 	s.mu.Lock()
-	if t.GUI == nil {
+	if t.lab().GUI == nil {
 		if restore {
 			s.mu.Unlock()
 			return nil
 		}
-		t.GUI = &GUIOwnership{Original: current, Expected: current}
+		t.lab().GUI = &GUIOwnership{Original: current, Expected: current}
 	}
-	g := t.GUI
+	g := t.lab().GUI
 	if g.Restored {
 		s.mu.Unlock()
 		return nil
@@ -70,7 +69,7 @@ func (s *Server) setGUI(ctx context.Context, t *Task, value string, restore bool
 		value = g.Original
 	}
 	g.Pending = &value
-	err = s.db.Save(context.Background(), state.Document{Kind: "task", ID: t.ID, Value: t})
+	err = s.db.Save(context.Background(), t)
 	s.mu.Unlock()
 	if err != nil {
 		return err
@@ -85,7 +84,7 @@ func (s *Server) setGUI(ctx context.Context, t *Task, value string, restore bool
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	g.Expected, g.Pending, g.Restored = value, nil, restore
-	return s.db.Save(context.Background(), state.Document{Kind: "task", ID: t.ID, Value: t})
+	return s.db.Save(context.Background(), t)
 }
 
 func (s *Server) changeGUI(a GUIRequest) (any, error) {

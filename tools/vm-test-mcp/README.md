@@ -1,4 +1,4 @@
-# VM Test MCP 0.12.0
+# VM Test MCP 0.13.0
 
 One Go module, one public MCP service, with separate VirtualBox and Nix domains
 for disposable Windows/Linux VirtualBox labs and strict NixOS sandbox
@@ -49,7 +49,10 @@ the framebuffer remains available for screenshots.
 
 Follow [administrator preparation](preparation.md). Both services read the same
 [annotated YAML](config.example.yaml) outside the Nix store. There is no config-file
-permission requirement; their private state directories remain separate.
+permission requirement. Top-level `state_dir` owns the role directories
+`controller/` and `nix-worker/`; `nix.state_dir` optionally overrides the worker root.
+The roots can be identical while each role retains its own private directory,
+lock and database.
 Local `config.yaml` is Git-ignored. Optional backend blocks are commented
 out until their administrator-owned inputs are ready. Configuring `virtualbox.router.iso`
 enables VirtualBox even before templates are registered; `lab_create(nodes=[])`
@@ -80,7 +83,9 @@ vm-test-nix-worker --config /etc/vm-test/config.yaml
 vm-test-mcp --config /etc/vm-test/config.yaml
 ```
 
-Start each process as its configured account. An offline worker affects only Nix tools; `nix_job_create` returns `worker_unavailable` before reserving the request ID or queue slot. For `gui: true`, start the controller
+Start each process as its configured account. When Nix is configured, worker availability is also needed for evidence accounting.
+An offline worker pauses new labs/jobs/uploads and queued starts; existing
+execution, controls, diagnosis and cleanup remain usable. For `gui: true`, start the controller
 in the VM owner's graphical session. Headless is the node default. Executables
 accept `--help`; startup errors exit 1, usage errors exit 2, success exits 0.
 Diagnostics go to stderr. Streamable HTTP is at `/mcp`, authenticated with
@@ -102,9 +107,11 @@ transport heartbeats. Disconnects, timeout and MCP cancellation end observation;
 explicit business cancellation ends execution. Use empty controller/worker state
 for this release; old schemas/configuration are intentionally incompatible.
 
-1. Prepare scripts and dependencies locally. Call `service_get` for templates,
+1. Prepare scripts and dependencies locally. Allocate file inputs with `upload_create`,
+   PUT their immutable manifests and bytes, and wait for automatic `ready` state.
+   Call `service_get` for templates,
    backend status and limits, and `lab_list` for compact active/queued summaries.
-2. Call `lab_create` with a fresh `request_id` and a fixed list of named nodes.
+2. Call `lab_create` with a fresh `request_id`, a fixed list of named nodes and optional ready `upload_ids`.
    Select a deadline for one continuous test batch. Reusing a template creates
    independent clones with separate UUIDs, MACs and disks.
 3. Creation waits for readiness and returns `{operation, wait}`. If the 600-second
@@ -113,7 +120,8 @@ for this release; old schemas/configuration are intentionally incompatible.
 4. Use `command_start` with guest argv (finite mode waits for completion; explicit
    service/interactive mode waits for start), `command_read` for output and `command_input`
    for numbered stdin packets/EOF. A nonzero exit finishes only that command.
-5. Upload through `upload_create`/`guest_file_put`, collect files or guest tar
+5. Deliver ready inputs through `guest_file_put`; reuse them across nodes in the
+   same lab. Read fresh capabilities with `upload_get`. Collect files or guest tar
    archives with `guest_file_get`, and retrieve evidence through `evidence_get`.
 6. Submit `passed`, `failed` or `inconclusive` and a summary through `lab_finish`.
    Wait for `cleanup.state: complete` before lengthy local edits or reporting;
@@ -125,7 +133,7 @@ The [API contract](contract.md) describes parameters, errors and transfer routes
 The distributed [VirtualBox workflow](../../.agents/skills/virtualbox-vm-test/SKILL.md)
 and [NixOS workflow](../../.agents/skills/nixos-vm-test/SKILL.md) describe execution.
 
-Evidence budgets are 20 GiB with reclamation to 16 GiB; input staging is 16 GiB,
+Evidence budgets are 40 GiB across controller/worker with reclamation to 32 GiB; input staging is 16 GiB,
 with 8 GiB per upload. Protected data can pause admissions while cleanup remains
 available. Summary/receipt retention is 30 days; pins survive until unpin.
 VirtualBox guest S3 sleep/S4 hibernation are unsupported; hypervisor pause/resume
@@ -188,8 +196,11 @@ artifacts. Automatic evidence bundles include available VM logs, screenshots, in
 and `cleanup`. Queue views expose position and blocking task; resource states
 distinguish never allocated from released. `lab_list` defaults to active work,
 including blocked cleanup; request `phase=ended` or `all` for compact history.
-Task status omits command payloads. `command_get` reads the spec and input
-progress; `input_from` explicitly pages through retained stdin packets.
+Task status omits histories and command payloads. `command_get` reads status and
+stdin progress; `command_details` reads argv/cwd/environment. `command_input_read`
+reads retained stdin by sequence and byte window. Command, endpoint, capture and
+upload lists have separate pagination. Stdin acceptance, durable guest delivery
+and OS pipe writes are distinct; application consumption needs its own assertion.
 Use `node_get` for preparation progress, expected power state,
 capabilities and the last observation of VirtualBox, Guest Control and command
 service health. Each observation records its time, last success and bounded error.
@@ -202,7 +213,7 @@ finishes/cancels or the task deadline expires. A node's unavailable capability
 recovers after two successful observations. Power actions record their expected
 transition, so an intentional pause or shutdown does not become a lost-node alarm.
 
-Use `lab_diagnose(task_id, node_ids?)` during preparation or execution. Omitting
+Use `lab_diagnose(lab_id, node_ids?)` during preparation or execution. Omitting
 node IDs collects the whole lab, including its router. Available evidence is kept
 even if other collectors time out. `node_exec` executes a short absolute guest
 argv directly through Guest Control, independently of command-service readiness;
@@ -231,7 +242,7 @@ just --justfile tools/vm-test-mcp/justfile nixos-test
 ```
 
 This authenticates with the shared config, evaluates the bundled smoke module using
-this project's locked nixpkgs, allocates/uploads a cache, submits a fresh task and
+this project's locked nixpkgs, reserves an upload, evaluates its bound derivation, uploads the cache and submits a fresh job and
 waits for its result and cleanup. The smoke test starts three KVM nodes, each with
 2 vCPUs and 1024 MiB RAM, checks their CPU counts and pings between the nodes. It
 does not use VirtualBox or the router ISO. Host daemon sandbox policy still needs
@@ -241,7 +252,7 @@ waits for that task's cleanup before execution.
 
 Progress, task ID and live logs go to stderr; stdout is the final task JSON. Evidence
 and inputs stay on the server. The printed local workspace, by default
-`tmp/agent/vm-test-runs/ID`, retains `run.json`, `submission.json`, the uploaded cache,
+`tmp/agent/vm-test-runs/ID`, retains `run.json`, per-upload `inputs/ID/submission.json` and binary cache,
 `task.log` and `result.json` (including artifact metadata). An unsuccessful test or
 unresolved cleanup exits 1; only `passed` with `cleanup.state: complete` exits 0.
 
@@ -255,10 +266,12 @@ just --justfile tools/vm-test-mcp/justfile nixos-test --timeout-seconds 3600 --s
 ```
 
 Ctrl-C stops the submitting/observing client; an accepted remote task keeps its
-deadline. Resume using the same workspace, or use `lab_cancel` through MCP. A new
+deadline. Resume using the same workspace, or use `nix_job_cancel(job_id=…)` through MCP. A new
 invocation without a workspace or request ID creates a new execution. `--project`
 selects the locked project for the bundled smoke module; `--config` selects the
-shared config. No bearer token or transfer capability is written to `run.json`.
+shared config. No bearer token or upload capability is written to `run.json`. The journal
+reconciles the original request before regenerating an expired unbound input;
+accepted jobs keep their identity across retries.
 
 The packaged equivalent is `vm-test-submit --config /absolute/config.yaml`.
 Without `--config`, the helper retains its upload-only interface for MCP clients:
@@ -268,13 +281,13 @@ development container with the project's locked Nix environment:
 
 ```sh
 vm-test-submit --test '.#checks.x86_64-linux.integration' \
-  --request-id integration-001 --cache-id CACHE_ID --cache-url CACHE_UPLOAD_URL \
+  --request-id integration-001 --upload-id UPLOAD_ID --upload-url UPLOAD_URL \
   --work-dir /absolute/ignored/task-workspace
 ```
 
 The helper checks QEMU nodes and `qemu.forceAccel`, creates a unique top-level
-derivation, retains it for retries, copies the closure to a standard local binary
-cache and uploads it. Submit stdout JSON to `nix_job_create`. Optional
+derivation bound to the upload ID with substitution disabled, retains it for retries, copies the closure to a standard local binary
+cache and PUTs the manifest and objects. Submit stdout JSON (`request_id`, `upload_id`) to `nix_job_create`. Optional
 `--signing-key /absolute/private/key` signs content under the administrator's trust
 policy; signature checking stays enabled. Build outputs have worker-owned GC roots
 and are exported only as ordinary files under registered output roots. Verified durable handoff releases worker copies
@@ -296,7 +309,18 @@ nix flake check --no-build --no-write-lock-file
 The default tests inject synthetic virtualization adapters and use local HTTP/Unix
 sockets. They run Go vet, the race detector and supervisor cross compilation.
 SQLite extension loading is compiled out with `sqlite_omit_load_extension`.
-SDK ABI tests load a synthetic C API library. Router builds inspect EFI boot content, squashfs, initialization units and bundled tools. These checks are implementation evidence;
+SDK ABI tests load a synthetic C API library. Router builds inspect EFI boot content, squashfs, initialization units and bundled tools. The reproducible Codex transport check uses actual 0.163.0 and 0.165.0 binaries:
+
+```sh
+nix develop .#vm-test-mcp --command python3 tools/vm-test-mcp/scripts/check-codex.py \
+  --codex-0163 /absolute/codex-0.163.0 --codex-0165 /absolute/codex-0.165.0 \
+  --work-dir /absolute/ignored/new-acceptance-directory
+```
+
+It takes about eleven minutes, uses the production MCP transport with synthetic
+VM adapters, and makes no model API calls. It checks the real 600-second window,
+continuation, FIFO, client timeout/cancellation and explicit cleanup. The report
+records binary hashes and timings. These checks are implementation evidence;
 complete [real-host acceptance](preparation.md#acceptance) after setup.
 
 The official VirtualBox SDK 7.2.20 is fetched with its published checksum in a

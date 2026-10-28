@@ -1,18 +1,21 @@
 package control
 
 import (
+	"context"
+	"encoding/json"
 	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
-	"sort"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
-func directoryBytes(root string, excludeRuntime bool) (int64, error) {
+func directoryBytes(root string, excludeRuntime bool, seen map[[2]uint64]bool) (int64, error) {
 	var size int64
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if os.IsNotExist(err) {
@@ -45,18 +48,24 @@ func directoryBytes(root string, excludeRuntime bool) (int64, error) {
 			if err != nil {
 				return err
 			}
-			size += st.Size()
+			stat := st.Sys().(*syscall.Stat_t)
+			key := [2]uint64{stat.Dev, stat.Ino}
+			if !seen[key] {
+				size += st.Size()
+				seen[key] = true
+			}
 		}
 		return nil
 	})
 	return size, err
 }
 func (s *Server) evidenceUsage() (int64, error) {
-	size, err := directoryBytes(filepath.Join(s.root.Path, "tasks"), true)
+	seen := map[[2]uint64]bool{}
+	size, err := directoryBytes(filepath.Join(s.root.Path, "tasks"), true, seen)
 	if err != nil {
 		return 0, err
 	}
-	bodies, err := directoryBytes(filepath.Join(s.root.Path, "bodies"), false)
+	bodies, err := directoryBytes(filepath.Join(s.root.Path, "bodies"), false, seen)
 	if err != nil {
 		return 0, err
 	}
@@ -82,81 +91,94 @@ func (s *Server) evidenceUsage() (int64, error) {
 		return 0, e
 	}
 	for _, id := range ids {
-		n, err := directoryBytes(filepath.Join(s.root.Path, "transfers", id), false)
+		n, err := directoryBytes(filepath.Join(s.root.Path, "transfers", id), false, seen)
 		if err != nil {
 			return 0, err
 		}
 		size += n
+	}
+	if provider, ok := s.backend.(interface {
+		EvidenceUsage(context.Context) (int64, error)
+	}); ok {
+		ctx, cancel := context.WithTimeout(s.ctx, 3*time.Second)
+		defer cancel()
+		worker, err := provider.EvidenceUsage(ctx)
+		if err != nil {
+			return 0, err
+		}
+		size += worker
 	}
 	return size, nil
 }
 func (s *Server) inputUsage() int64 {
 	var n int64
 	for _, t := range s.transfers {
-		if t.State != "purged" && t.State != "retained" {
-			n += t.Bytes
+		if t.State != "retained" {
+			n += max(t.Bytes, t.ReservedBytes)
 		}
-	}
-	for _, u := range s.uploading {
-		n += u.reserved
 	}
 	return n
 }
 
-// Caller holds s.mu. Active work and unconfirmed cleanup are protected even
-// when they alone exceed the budget. No control or cleanup operation is gated.
+// Admission reads the last completed storage sample. Scans and reclamation run
+// independently of the control mutex, including while the executor is occupied.
 func (s *Server) admission() error {
-	used, err := s.evidenceUsage()
-	if err != nil {
-		return err
-	}
-	for used > s.cfg.Storage.EvidenceBytes {
-		previous := used
-		if err = s.reclaim(time.Now().UTC(), true); err != nil {
-			return err
-		}
-		used, err = s.evidenceUsage()
-		if err != nil {
-			return err
-		}
-		if used >= previous {
-			break
-		}
-	}
-	s.storageBlocked = used > s.cfg.Storage.EvidenceBytes
 	if s.storageBlocked {
-		return wire.Fail("storage_pressure", "Protected evidence exceeds the storage budget; unpin or delete eligible evidence")
+		return wire.Fail("storage_pressure", "Evidence storage is unavailable or above budget; existing execution and cleanup remain available")
 	}
 	return nil
 }
-func (s *Server) expireRetention() {
+func (s *Server) expireRetention() { s.refreshStorage(false) }
+func (s *Server) refreshStorage(force bool) {
+	if force {
+		s.retentionMu.Lock()
+	} else if !s.retentionMu.TryLock() {
+		return
+	}
+	defer s.retentionMu.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	now := time.Now().UTC()
-	if now.Sub(s.lastRetention) < time.Minute {
+	if !force && now.Sub(s.lastRetention) < time.Minute {
+		s.mu.Unlock()
 		return
 	}
 	s.lastRetention = now
-	if err := s.reclaim(now, false); err != nil {
-		return
+	s.mu.Unlock()
+	err := s.reclaim(now, false)
+	used, usageErr := s.evidenceUsage()
+	if err == nil {
+		err = usageErr
 	}
-	used, err := s.evidenceUsage()
 	if err == nil && used > s.cfg.Storage.EvidenceBytes {
-		_ = s.reclaim(now, true)
-		used, err = s.evidenceUsage()
+		for used > s.cfg.Storage.LowWaterBytes {
+			previous := used
+			if err = s.reclaim(now, true); err != nil {
+				break
+			}
+			used, err = s.evidenceUsage()
+			if err != nil || used >= previous {
+				break
+			}
+		}
 	}
+	s.mu.Lock()
+	s.evidenceBytes = used
 	s.storageBlocked = err != nil || used > s.cfg.Storage.EvidenceBytes
+	s.mu.Unlock()
 }
 func (s *Server) reclaim(now time.Time, pressure bool) error {
+	if pressure {
+		return s.reclaimPressure()
+	}
 	// Bounded batches, sorted by successful result first and oldest terminal time.
 	detailBefore := now.Add(-time.Duration(s.cfg.Storage.FailureDays) * 24 * time.Hour).Format(time.RFC3339Nano)
 	successBefore := now.Add(-time.Duration(s.cfg.Storage.SuccessDays) * 24 * time.Hour).Format(time.RFC3339Nano)
 	summaryBefore := now.Add(-time.Duration(s.cfg.Storage.SummaryDays) * 24 * time.Hour).Format(time.RFC3339Nano)
 	rows, err := s.db.QueryContext(s.ctx, `SELECT id FROM executions e WHERE cleanup='complete' AND ended<>'' AND (
- ((? OR ended<=CASE WHEN json_extract(body,'$.conclusion')='passed' AND state='finished' THEN ? ELSE ? END)
+ ((ended<=CASE WHEN json_extract(body,'$.conclusion')='passed' AND state='finished' THEN ? ELSE ? END)
  AND (COALESCE(json_extract(body,'$.purged'),0)=0 OR EXISTS(SELECT 1 FROM evidence a WHERE a.task_id=e.id AND a.pinned=0)))
- OR (ended<=? AND NOT EXISTS(SELECT 1 FROM evidence a WHERE a.task_id=e.id AND a.pinned=1)))
- ORDER BY CASE WHEN json_extract(body,'$.conclusion')='passed' THEN 0 ELSE 1 END, ended LIMIT 128`, pressure, successBefore, detailBefore, summaryBefore)
+ OR ended<=?)
+ ORDER BY CASE WHEN json_extract(body,'$.conclusion')='passed' THEN 0 ELSE 1 END, ended LIMIT 128`, successBefore, detailBefore, summaryBefore)
 	if err != nil {
 		return err
 	}
@@ -177,97 +199,100 @@ func (s *Server) reclaim(now time.Time, pressure bool) error {
 		return e
 	}
 	for _, id := range ids {
-		t, err := s.task(id)
-		if err != nil {
-			return err
-		}
-		if !t.Terminal() || t.Ended == nil {
-			continue
-		}
-		if !s.performancePending[id].IsZero() {
-			continue
-		}
-		days := s.cfg.Storage.FailureDays
-		if t.Conclusion == "passed" && t.State == "finished" {
-			days = s.cfg.Storage.SuccessDays
-		}
-		expired := !now.Before(t.Ended.Add(time.Duration(days) * 24 * time.Hour))
-		if expired || pressure {
-			if err := s.purge(t); err != nil {
-				continue
-			}
-		}
-		if !now.Before(t.Ended.Add(time.Duration(s.cfg.Storage.SummaryDays)*24*time.Hour)) && len(t.Artifacts) == 0 {
-			if err := s.db.DeleteExecution(s.ctx, id); err != nil {
-				return err
-			}
-			s.forget(id)
-		}
-		if pressure {
-			used, err := s.evidenceUsage()
+		s.mu.Lock()
+		err := func() error {
+			defer s.mu.Unlock()
+			t, err := s.task(id)
 			if err != nil {
 				return err
 			}
-			if used <= s.cfg.Storage.LowWaterBytes {
-				break
+			if !t.Terminal() || t.Ended == nil {
+				return nil
 			}
+			if !s.performancePending[id].IsZero() {
+				return nil
+			}
+			days := s.cfg.Storage.FailureDays
+			if t.Conclusion == "passed" && t.State == "finished" {
+				days = s.cfg.Storage.SuccessDays
+			}
+			expired := !now.Before(t.Ended.Add(time.Duration(days) * 24 * time.Hour))
+			if expired {
+				if err := s.purge(t); err != nil {
+					return err
+				}
+			}
+			if !now.Before(t.Ended.Add(time.Duration(s.cfg.Storage.SummaryDays) * 24 * time.Hour)) {
+				if err := s.db.DeleteExecution(s.ctx, id); err != nil {
+					return err
+				}
+				s.forget(id)
+			}
+			return nil
+		}()
+		if err != nil {
+			return err
 		}
 	}
-	for id, t := range s.transfers {
-		updated := t.Updated
-		if updated.IsZero() {
-			updated = t.Created
-		}
-		if t.TaskID == "" && s.uploading[id] == nil && !now.Before(updated.Add(s.cfg.Storage.UploadIdle.Value())) {
-			if err := s.removeTransfer(t); err != nil {
-				return err
+	s.mu.Lock()
+	err = func() error {
+		defer s.mu.Unlock()
+		for id, t := range s.transfers {
+			updated := t.Updated
+			if updated.IsZero() {
+				updated = t.Created
+			}
+			if t.TaskID == "" && s.uploading[id] == nil && !now.Before(updated.Add(s.cfg.Storage.UploadIdle.Value())) {
+				if err := s.removeTransfer(t); err != nil {
+					return err
+				}
 			}
 		}
-	}
-	// Failed/unbound receipts also expire; otherwise rejected admissions grow forever.
-	if _, err := s.db.ExecContext(s.ctx, `DELETE FROM revisions WHERE key IN (SELECT 'operation/'||id FROM operations WHERE state<>'pending' AND created<? AND (task_id='' OR NOT EXISTS(SELECT 1 FROM executions e WHERE e.id=operations.task_id)))`, now.Add(-time.Duration(s.cfg.Storage.SummaryDays)*24*time.Hour).Format(time.RFC3339Nano)); err != nil {
+		// Failed/unbound receipts also expire; otherwise rejected admissions grow forever.
+		if _, err := s.db.ExecContext(s.ctx, `DELETE FROM operations WHERE state<>'pending' AND ended<?`, now.Add(-time.Duration(s.cfg.Storage.SummaryDays)*24*time.Hour).Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+		for id, o := range s.operations {
+			if o.State != "pending" && o.Ended != nil && now.Sub(*o.Ended) > time.Duration(s.cfg.Storage.SummaryDays)*24*time.Hour {
+				delete(s.operations, id)
+				delete(s.requests, o.RequestID)
+			}
+		}
+		// Historical summaries and receipts remain queryable in SQLite, not in the
+		// live execution cache. Fault-window collection and pending dispatch stay live.
+		for _, t := range append([]*Task(nil), s.tasks...) {
+			if !t.Terminal() || t.Cleanup != "complete" || !s.performancePending[t.ID].IsZero() {
+				continue
+			}
+			pending := false
+			for _, o := range s.operations {
+				if o.TaskID == t.ID && o.State == "pending" {
+					pending = true
+					break
+				}
+			}
+			if !pending {
+				s.forget(t.ID)
+			}
+		}
+		for id, o := range s.operations {
+			if o.State != "pending" {
+				delete(s.operations, id)
+				delete(s.requests, o.RequestID)
+			}
+		}
+		return nil
+	}()
+	if err != nil {
 		return err
 	}
-	if _, err := s.db.ExecContext(s.ctx, `DELETE FROM operations WHERE state<>'pending' AND created<? AND (task_id='' OR NOT EXISTS(SELECT 1 FROM executions e WHERE e.id=operations.task_id))`, now.Add(-time.Duration(s.cfg.Storage.SummaryDays)*24*time.Hour).Format(time.RFC3339Nano)); err != nil {
-		return err
-	}
-	for id, o := range s.operations {
-		if o.State != "pending" && now.Sub(o.Created) > time.Duration(s.cfg.Storage.SummaryDays)*24*time.Hour {
-			delete(s.operations, id)
-			delete(s.requests, o.RequestID)
-		}
-	}
-	// Historical summaries and receipts remain queryable in SQLite, not in the
-	// live execution cache. Fault-window collection and pending dispatch stay live.
-	for _, t := range append([]*Task(nil), s.tasks...) {
-		if !t.Terminal() || t.Cleanup != "complete" || !s.performancePending[t.ID].IsZero() {
-			continue
-		}
-		pending := false
-		for _, o := range s.operations {
-			if o.TaskID == t.ID && o.State == "pending" {
-				pending = true
-				break
-			}
-		}
-		if !pending {
-			s.forget(t.ID)
-		}
-	}
-	for id, o := range s.operations {
-		if o.State != "pending" {
-			delete(s.operations, id)
-			delete(s.requests, o.RequestID)
-		}
-	}
-	s.revisions = map[string]revisionState{}
 	// Failed transfer creation can leave a directory before its index commit.
 	entries, err := os.ReadDir(filepath.Join(s.root.Path, "transfers"))
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	for _, entry := range entries {
-		if !entry.IsDir() || !wire.IDPattern.MatchString(entry.Name()) || s.uploading[entry.Name()] != nil {
+		if !entry.IsDir() || !wire.IDPattern.MatchString(entry.Name()) {
 			continue
 		}
 		info, err := entry.Info()
@@ -287,7 +312,13 @@ func (s *Server) reclaim(now time.Time, pressure bool) error {
 			}
 		}
 	}
+	if err := s.reclaimEvidence(now, false); err != nil {
+		return err
+	}
 	if err := s.db.SweepBodies(s.ctx); err != nil {
+		return err
+	}
+	if err := s.sweepExecutionFiles(now); err != nil {
 		return err
 	}
 	return s.db.Compact(s.ctx)
@@ -300,24 +331,21 @@ func (s *Server) forget(id string) {
 		}
 	}
 	delete(s.runtime, id)
-	for k := range s.revisions {
-		if k == "lab/"+id || k == "nix_job/"+id {
-			delete(s.revisions, k)
-		}
-	}
+
 }
 func (s *Server) removeTransfer(t *Transfer) error {
 	if s.uploading[t.ID] != nil {
 		return wire.Fail("conflict", "Upload is still settling")
 	}
-	// Removing the files first is recoverable: the next sweep retries the index.
-	if err := s.root.RemoveAll(path.Join("transfers", t.ID)); err != nil {
+	t.State = "deleting"
+	s.persist(t)
+	s.mu.Unlock()
+	removeErr := s.root.RemoveAll(path.Join("transfers", t.ID))
+	s.mu.Lock()
+	if err := removeErr; err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(s.ctx, "DELETE FROM transfers WHERE id=?", t.ID); err != nil {
-		return err
-	}
-	if _, err := s.db.ExecContext(s.ctx, "DELETE FROM revisions WHERE key=?", "upload/"+t.ID); err != nil {
 		return err
 	}
 	delete(s.transfers, t.ID)
@@ -325,55 +353,69 @@ func (s *Server) removeTransfer(t *Transfer) error {
 	return nil
 }
 func (s *Server) changeEvidence(name string, a EvidenceChange) (any, error) {
+	s.evidenceMu.Lock()
+	defer s.evidenceMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t, err := s.task(a.TaskID.TaskID)
+	v, err := s.db.evidence(s.ctx, a.ArtifactID)
 	if err != nil {
 		return nil, err
 	}
-	for i, v := range t.Artifacts {
-		if v.ID != a.ArtifactID {
-			continue
+	if name == "evidence_delete" {
+		var active int
+		if err = s.db.QueryRowContext(s.ctx, "SELECT COUNT(*) FROM executions WHERE id=? AND cleanup<>'complete'", v.ExecutionID).Scan(&active); err != nil {
+			return nil, err
 		}
-		if name == "evidence_delete" {
-			if !t.Terminal() || t.Cleanup != "complete" || v.Pinned {
-				return nil, wire.Fail("protected", "Evidence is active, required for cleanup or pinned")
-			}
-			if err = s.root.Remove(v.Path); err != nil && !os.IsNotExist(err) {
-				return nil, err
-			}
-			if _, err = s.db.ExecContext(s.ctx, "DELETE FROM evidence WHERE id=?", v.ID); err != nil {
-				return nil, err
-			}
-			t.Artifacts = append(t.Artifacts[:i], t.Artifacts[i+1:]...)
-		} else {
-			v.Pinned = name == "evidence_pin"
-			s.save(t)
+		if active > 0 || v.Pinned {
+			return nil, wire.Fail("protected", "Evidence is active, required for cleanup or pinned")
 		}
-		return map[string]any{"id": v.ID, "pinned": v.Pinned, "deleted": name == "evidence_delete"}, nil
+		if err = s.root.Remove(v.Path); err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		_, err = s.db.ExecContext(s.ctx, "DELETE FROM evidence WHERE id=?", v.ID)
+	} else {
+		v.Pinned = name == "evidence_pin"
+		_, err = s.db.ExecContext(s.ctx, "UPDATE evidence SET pinned=?,body=? WHERE id=?", v.Pinned, wire.JSON(v), v.ID)
 	}
-	return nil, wire.Fail("not_found", "Evidence not found")
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range s.tasks {
+		for i, x := range t.Artifacts {
+			if x.ID == v.ID {
+				if name == "evidence_delete" {
+					t.Artifacts = append(t.Artifacts[:i], t.Artifacts[i+1:]...)
+				} else {
+					*x = *v
+				}
+				break
+			}
+		}
+	}
+	return map[string]any{"id": v.ID, "pinned": v.Pinned, "deleted": name == "evidence_delete"}, nil
 }
 func (s *Server) uploadObjects(a UploadObjectsRequest) (any, error) {
-	t, err := s.transfer(a.TransferID)
+	limit := a.Limit
+	if limit == 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(s.ctx, "SELECT name,expected_size,expected_sha256,body IS NOT NULL FROM transfer_objects WHERE transfer_id=? AND name>? ORDER BY name LIMIT ?", a.TransferID, a.Cursor, limit)
 	if err != nil {
 		return nil, err
 	}
-	names := []string{}
-	for k := range t.Objects {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-	start, end, err := page(a.Cursor, a.Limit, len(names))
-	if err != nil {
-		return nil, err
-	}
+	defer rows.Close()
 	items := []any{}
-	for _, k := range names[start:end] {
-		o := t.Objects[k]
-		items = append(items, map[string]any{"name": k, "size": o.Size, "sha256": o.SHA256})
+	next := a.Cursor
+	for rows.Next() {
+		var size int64
+		var hash string
+		var published bool
+		if err = rows.Scan(&next, &size, &hash, &published); err != nil {
+			return nil, err
+		}
+		items = append(items, map[string]any{"name": next, "size": size, "sha256": hash, "published": published})
 	}
-	return map[string]any{"items": items, "next_cursor": end}, nil
+	return map[string]any{"items": items, "next_cursor": next}, rows.Err()
 }
 
 func (s *Server) listTasksKind(a TaskListRequest, name string) (any, error) {
@@ -395,8 +437,10 @@ func (s *Server) listStoredTasks(a TaskListRequest, kind string) (any, error) {
 	}
 	after := int64(0)
 	if a.Cursor != "" {
-		if err := s.db.QueryRowContext(s.ctx, "SELECT sequence FROM executions WHERE id=?", a.Cursor).Scan(&after); err != nil {
-			return nil, wire.Fail("invalid_argument", "Unknown execution cursor")
+		var err error
+		after, err = strconv.ParseInt(a.Cursor, 10, 64)
+		if err != nil || after < 0 {
+			return nil, wire.Fail("invalid_argument", "Invalid execution cursor")
 		}
 	}
 	filter := ""
@@ -409,37 +453,56 @@ func (s *Server) listStoredTasks(a TaskListRequest, kind string) (any, error) {
 	default:
 		filter = " AND state='" + a.Phase + "'"
 	}
-	rows, err := s.db.QueryContext(s.ctx, "SELECT id FROM executions WHERE sequence>? AND (?='' OR kind=?)"+filter+" ORDER BY sequence LIMIT ?", after, kind, kind, a.Limit)
+	rows, err := s.db.QueryContext(s.ctx, "SELECT sequence,body FROM executions WHERE sequence>? AND (?='' OR kind=?)"+filter+" ORDER BY sequence LIMIT ?", after, kind, kind, a.Limit)
 	if err != nil {
 		return nil, err
 	}
-	ids := []string{}
+	type row struct {
+		sequence int64
+		body     []byte
+	}
+	values := []row{}
 	for rows.Next() {
-		var id string
-		if err = rows.Scan(&id); err != nil {
+		var v row
+		if err = rows.Scan(&v.sequence, &v.body); err != nil {
 			break
 		}
-		ids = append(ids, id)
+		values = append(values, v)
 	}
-	e := rows.Err()
+	scanErr := rows.Err()
 	rows.Close()
 	if err != nil {
 		return nil, err
 	}
-	if e != nil {
-		return nil, e
+	if scanErr != nil {
+		return nil, scanErr
 	}
 	items := []any{}
 	next := a.Cursor
-	for _, id := range ids {
-		t, err := s.task(id)
-		if err != nil {
+	for _, value := range values {
+		t := newTask(kind, 0)
+		if err = json.Unmarshal(value.body, &t.executionRecord); err != nil {
 			return nil, err
 		}
-		v := t.summaryView()
-		s.queueView(t, v)
-		items = append(items, v)
-		next = id
+		if t.Kind == "nixos" {
+			var metadata []byte
+			if err = s.db.QueryRowContext(s.ctx, "SELECT body FROM nix_jobs WHERE id=?", t.ID).Scan(&metadata); err != nil {
+				return nil, err
+			}
+			if err = json.Unmarshal(metadata, t.nix()); err != nil {
+				return nil, err
+			}
+		}
+		view := t.summaryView()
+		var commands, endpoints, captures int
+		if err = s.db.QueryRowContext(s.ctx, "SELECT (SELECT COUNT(*) FROM commands WHERE task_id=? AND needs_poll=1),(SELECT COUNT(*) FROM endpoints WHERE task_id=? AND state='open'),(SELECT COUNT(*) FROM captures WHERE task_id=? AND state NOT IN ('stopped','released'))", t.ID, t.ID, t.ID).Scan(&commands, &endpoints, &captures); err != nil {
+			return nil, err
+		}
+		view["activity"] = map[string]int{"commands_active": commands, "endpoints_open": endpoints, "captures_active": captures}
+		s.queueView(t, view)
+		items = append(items, view)
+		next = strconv.FormatInt(value.sequence, 10)
 	}
+
 	return *clone(&map[string]any{"items": items, "next_cursor": next}), nil
 }

@@ -1,6 +1,6 @@
 # Executing VirtualBox labs
 
-Use a prepared VM Test MCP 0.12 executor. `service_get` reports templates,
+Use a prepared VM Test MCP 0.13 executor. `service_get` reports templates,
 resource/media policy, backend availability, endpoint address and limits. Its
 token holders share task authority. Use the advertised tool schemas; do not infer
 host paths, VM UUIDs or executable options from guest data.
@@ -8,7 +8,7 @@ host paths, VM UUIDs or executable options from guest data.
 ## Create and observe
 
 `lab_create` takes a fresh `request_id`, a fixed `nodes` list and optional
-`lan`, `dhcp`, `dns`, `internet`, `timeout_seconds`. Each node has a unique lowercase
+`upload_ids`, `lan`, `dhcp`, `dns`, `internet`, `timeout_seconds`. Each node has a unique lowercase
 name and a registered template, optional IPv4/CPU/memory overrides, per-node GUI
 and media requests. Using the same Windows template twice creates independent
 clones. The private router is not a test-command target.
@@ -22,7 +22,9 @@ readiness and returns `{operation, wait}`. A window expires after 600 seconds;
 continue with `wait({targets: response.wait.continue})`. Expiry is not execution
 failure. SSE heartbeats every 15 seconds are transport-only. Multiple targets can
 be observed together; ordinary waits ignore log growth/healthy samples. Request
-condition `output` when output changes matter. Read `lab_inspect` for node IDs. `node_get` exposes preparation stage, expected power state,
+condition `output` when output changes matter. Read `lab_inspect(lab_id=…)` for node IDs. Node and command operations take only
+their resource ID; `command_list`, `endpoint_list`, `capture_list` and `upload_list`
+page through history separately. `node_get` exposes preparation stage, expected power state,
 capabilities and health observations while the lab prepares. Keep original IDs after disconnects and retry identical
 mutations with the original request ID. A changed request requires a new ID.
 Task `router` exposes router preparation and health; each preparation record
@@ -34,7 +36,7 @@ Waiting and ordinary controls do not extend the deadline. HTTP disconnect, clien
 timeout and MCP cancellation stop observation only; explicit business cancellation
 releases the lab. Choose a deadline
 for the continuous test batch. `lab_list` defaults to compact active tasks;
-`phase=ended` or `all` selects history. Retain its task-ID `next_cursor` for paging.
+`phase=ended` or `all` selects history. Retain its sequence `next_cursor` for paging.
 `lab_get.queue` identifies the position, blocker and waiting reason without
 requiring another user's command payload. Activity counts describe supervised
 commands, open endpoints and captures; detached services can still be active.
@@ -48,12 +50,15 @@ never created have `state=never_allocated`, distinct from `released`.
 
 ## Commands, files and Compose
 
-Use `upload_create(kind="file", task_id=…)` and PUT locally prepared bytes while
-the task is queued or preparing. Once the node is available, use `guest_file_put`
-with node ID and an absolute guest path; successful sealing makes the upload
-read-only. Reuse the same sealed upload for multiple nodes; the controller keeps
-one input object. `upload_objects` pages checksums; `upload_renew` renews URLs. Ending the task interrupts pending writes and retains complete inputs.
-`upload_get.can_upload` and `uploading` expose the current upload boundary.
+Prepare inputs before acquiring the execution slot. Use `upload_create(kind="file")`,
+then PUT `URL/manifest` with `upload_id` and `objects: [{name:"blob", size, sha256}]`,
+followed by PUT `URL/blob`. The manifest is immutable; repeated identical PUTs are
+safe and completion makes the input ready automatically, including empty files.
+Bind ready `upload_ids` in `lab_create` or on the first `guest_file_put(node_id,
+upload_id, path)` to an absolute guest path. Reuse that upload across the lab's
+nodes without retained duplicate host copies. `upload_get` returns fresh URLs and
+state; `upload_objects` pages declarations/checksums. `upload_delete` settles writes
+and deletes unbound inputs. Lab cleanup settles all writes before release.
 `command_start` takes argv, optional absolute guest cwd/environment and an independent
 timeout. Default `mode="finite"` waits for exit, process-group stop and output
 collection; choose `mode="service"` or `"interactive"` explicitly to return after
@@ -77,9 +82,12 @@ request ID for retries and send EOF explicitly. `command_cancel` affects its
 supervised process group. A failed command leaves the lab available for diagnosis.
 Input is raw UTF-8 text, at most 64 KiB per packet, 64 MiB and 4096 packets per
 command including EOF. Use files for larger inputs. Compare `stdin.next_sequence` (accepted), `delivered_sequence` and
-`consumed_sequence`. Consumption means delivery into the guest process stdin pipe,
-not application processing; assert the application's result separately.
-To inspect retained input, use `command_details(input_from=0)` and its `next_sequence`.
+`written_sequence`. Each cursor is the next sequence at its boundary. Delivery
+means persisted by the guest; written means copied to the child process's OS pipe.
+Assert application processing separately. `command_input` waits for delivery;
+explicit `wait` with `input_written` and `sequence` waits for the pipe write.
+Use `command_input_read(sequence=0, offset=0, byte_limit=…)` for retained input
+windows and `command_details` for argv/cwd/environment.
 
 Check the live command's `final`, actual `exit_code` or `exit_signal`, `termination`
 and output completeness. A Linux signal exit has no exit code; `exit_signal`
@@ -150,7 +158,8 @@ a conflict.
 `capture_start` selects `video`, `nic` or `metrics`; keep its ID and stop/collect
 with `capture_stop`. `guest_file_get` creates a tar archive inside the guest and
 stores it as opaque data. `evidence_list` and `evidence_get` provide evidence and
-expiring download capabilities; read a new evidence capability or call `upload_renew` for inputs as needed.
+expiring download capabilities using only `evidence_id`. Read fresh capabilities
+with `evidence_get` or `upload_get`; no mutation or receipt is needed.
 
 Submit the caller's `passed`, `failed` or `inconclusive` conclusion and a summary
 through `lab_finish`. Cancellation and timeout use the same cleanup path. Wait
@@ -159,10 +168,11 @@ resource step errors; inspect them and use a new `lab_cleanup` request for a ret
 and reproduction inputs default to 1 day after success or 7 days after other
 terminal outcomes; summaries/receipts last 30 days. `evidence_pin` retains selected
 files until `evidence_unpin` without extending VM occupancy. Evidence budgets are
-20 GiB with reclamation to 16 GiB, including pins/protected data. Protected pressure
+40 GiB with reclamation to 32 GiB, including pins/protected data. Protected pressure
 blocks new labs/jobs/uploads while control and cleanup remain available. Input
 staging is 16 GiB total and 8 GiB per transfer; unbound idle uploads expire after
-one hour. `execution_delete` removes eligible detail early. Enter local edits or reporting only after cleanup is
+one hour. `execution_delete(execution_id=…)` removes a cleaned summary and unpinned detail;
+independent pins and receipts remain available. Enter local edits or reporting only after cleanup is
 complete; a later batch uses a new request and task. Keep capability URLs private.
 
 ## Fault handling
@@ -173,7 +183,10 @@ the lab and healthy nodes available until the caller finishes/cancels or its dea
 expires. Collect needed evidence within a stated diagnostic window, then release
 the shared executor before local investigation. Do not restart or recreate it
 automatically. After reviewing evidence,
-explicit node power actions remain available; they record the expected transition.
+explicit node power actions remain available. Start/reboot/reset/resume wait for
+guest readiness by default; reboot/reset require a new boot identity. Select
+`wait_until="power_state"` when only hypervisor state is needed. Later power
+operations supersede earlier pending observations.
 
 `node_get.health` separates VirtualBox, Guest Control and command-service
 observations, including last success, failure duration and error. `lab_diagnose`

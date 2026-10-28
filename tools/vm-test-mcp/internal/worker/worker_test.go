@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/config"
-	"github.com/hellodword/agents-misc/vm-test-mcp/internal/state"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
@@ -26,6 +25,46 @@ func fixture(t *testing.T, uid int) (*Worker, config.Worker) {
 		t.Fatal(e)
 	}
 	return w, c
+}
+
+func waitExecution(t *testing.T, w *Worker, id string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		w.mu.Lock()
+		j := w.jobs[id]
+		complete := j != nil && j.Execution != nil && j.Execution.Finished != nil
+		w.mu.Unlock()
+		if complete {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("worker execution did not finish")
+}
+
+func TestStorageIdentitySurvivesRestartAndCannotConfirmAnotherStore(t *testing.T) {
+	w, cfg := fixture(t, os.Getuid())
+	identity := w.db.InstanceID
+	id := wire.ID()
+	w.Close()
+	w, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if w.db.InstanceID != identity {
+		t.Fatal("restart changed the durable worker identity")
+	}
+	result, err := w.Call("cleanup", Request{TaskID: id, InstanceID: identity})
+	if err != nil || result.(map[string]any)["never_accepted"] != true {
+		t.Fatal(result, err)
+	}
+	replacement, _ := fixture(t, os.Getuid())
+	defer replacement.Close()
+	if _, err = replacement.Call("cleanup", Request{TaskID: id, InstanceID: identity}); wire.Safe(err).Code != "worker_instance_changed" {
+		t.Fatal("replacement storage falsely confirmed release", err)
+	}
 }
 
 func TestExecutionRetainsPhaseAndObservedClientResult(t *testing.T) {
@@ -48,20 +87,20 @@ func TestExecutionRetainsPhaseAndObservedClientResult(t *testing.T) {
 				t.Fatal(err)
 			}
 			drv := "/nix/store/" + strings.Repeat("0", 32) + "-test.drv"
-			metadata := wire.JSON(map[string]any{drv: map[string]any{"system": "x86_64-linux", "env": map[string]string{"requiredSystemFeatures": tc.features}}})
+			metadata := wire.JSON(map[string]any{drv: map[string]any{"system": "x86_64-linux", "env": map[string]string{"vmTestUploadID": strings.Repeat("a", 32), "allowSubstitutes": "", "requiredSystemFeatures": tc.features}}})
 			w.cfg.Nix = filepath.Join(w.root.Path, "fake-nix")
 			script := fmt.Sprintf("#!%s\ncase \"$1\" in\ncopy) %s;;\nderivation) printf '%%s' '%s';;\nbuild) %s;;\n*) exit 98;;\nesac\n", shell, tc.copy, metadata, tc.build)
 			if err = os.WriteFile(w.cfg.Nix, []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
 			id := wire.ID()
-			if _, err = w.Call("start", Request{TaskID: id, Derivation: drv, System: "x86_64-linux", Cache: "/files/synthetic-private-capability", TimeoutSeconds: 60}); err != nil {
+			if _, err = w.Call("start", Request{UploadID: strings.Repeat("a", 32), InstanceID: w.db.InstanceID, TaskID: id, Derivation: drv, System: "x86_64-linux", Cache: "/files/synthetic-private-capability", TimeoutSeconds: 60}); err != nil {
 				t.Fatal(err)
 			}
-			w.wg.Wait()
+			waitExecution(t, w, id)
 			check := func() {
 				t.Helper()
-				v, err := w.Call("status", Request{TaskID: id})
+				v, err := w.Call("status", Request{InstanceID: w.db.InstanceID, TaskID: id})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -134,10 +173,10 @@ func TestClientLaunchFailureHasNoInventedExit(t *testing.T) {
 	w, _ := fixture(t, os.Getuid())
 	defer w.Close()
 	id := wire.ID()
-	if _, err := w.Call("start", Request{TaskID: id, Derivation: "/nix/store/" + strings.Repeat("0", 32) + "-test.drv", System: "x86_64-linux", Cache: "/files/synthetic", TimeoutSeconds: 30}); err != nil {
+	if _, err := w.Call("start", Request{UploadID: strings.Repeat("a", 32), InstanceID: w.db.InstanceID, TaskID: id, Derivation: "/nix/store/" + strings.Repeat("0", 32) + "-test.drv", System: "x86_64-linux", Cache: "/files/synthetic", TimeoutSeconds: 30}); err != nil {
 		t.Fatal(err)
 	}
-	w.wg.Wait()
+	waitExecution(t, w, id)
 	e := w.jobs[id].Execution
 	if e == nil || e.Stage != "import" || e.Process == nil || e.Process.Exited || e.Process.ExitCode != nil || e.Process.ExitSignal != "" || e.Process.Source != "unconfirmed" || e.Error == nil {
 		t.Fatal(e)
@@ -239,7 +278,7 @@ func TestFixedDaemonBoundaryAndDerivationPolicy(t *testing.T) {
 			drv := "/nix/store/" + strings.Repeat("0", 32) + "-test.drv"
 			trace := filepath.Join(w.root.Path, "trace")
 			exe := filepath.Join(w.root.Path, "fake-nix")
-			script := "#!" + shell + "\nprintf '%s\\n' \"$@\" >> '" + trace + "'\ncase \"$1\" in\ncopy) exit 0;;\nderivation) printf '%s\\n' '" + string(wire.JSON(map[string]any{drv: map[string]any{"system": "x86_64-linux", "env": map[string]string{"requiredSystemFeatures": features}}})) + "';;\nbuild) printf '[]\\n';;\n*) exit 1;;\nesac\n"
+			script := "#!" + shell + "\nprintf '%s\\n' \"$@\" >> '" + trace + "'\ncase \"$1\" in\ncopy) exit 0;;\nderivation) printf '%s\\n' '" + string(wire.JSON(map[string]any{drv: map[string]any{"system": "x86_64-linux", "env": map[string]string{"vmTestUploadID": strings.Repeat("a", 32), "allowSubstitutes": "", "requiredSystemFeatures": features}}})) + "';;\nbuild) printf '[]\\n';;\n*) exit 1;;\nesac\n"
 			if scenario.signalled {
 				script = strings.Replace(script, "build) printf '[]\\n'", "build) kill -KILL $$", 1)
 			}
@@ -248,10 +287,10 @@ func TestFixedDaemonBoundaryAndDerivationPolicy(t *testing.T) {
 			}
 			w.cfg.Nix = exe
 			id := wire.ID()
-			if _, e = w.Call("start", Request{TaskID: id, Derivation: drv, System: "x86_64-linux", Cache: "/files/synthetic-capability", TimeoutSeconds: 60}); e != nil {
+			if _, e = w.Call("start", Request{UploadID: strings.Repeat("a", 32), InstanceID: w.db.InstanceID, TaskID: id, Derivation: drv, System: "x86_64-linux", Cache: "/files/synthetic-capability", TimeoutSeconds: 60}); e != nil {
 				t.Fatal(e)
 			}
-			w.wg.Wait()
+			waitExecution(t, w, id)
 			w.mu.Lock()
 			state := w.jobs[id].State
 			w.mu.Unlock()
@@ -282,13 +321,13 @@ func TestDeadlineExtensionAndMethodArguments(t *testing.T) {
 	j := &Job{Request: Request{TaskID: id}, State: "building", Started: now, Deadline: now.Add(time.Minute)}
 	w.jobs[id] = j
 	deadline := now.Add(2 * time.Minute)
-	if _, e := w.Call("extend", Request{TaskID: id, Deadline: &deadline}); e != nil {
+	if _, e := w.Call("extend", Request{InstanceID: w.db.InstanceID, TaskID: id, Deadline: &deadline}); e != nil {
 		t.Fatal(e)
 	}
 	if !j.Deadline.Equal(deadline) {
 		t.Fatal(j.Deadline)
 	}
-	if _, e := w.Call("status", Request{TaskID: id, Cache: "/files/injected"}); e == nil {
+	if _, e := w.Call("status", Request{InstanceID: w.db.InstanceID, TaskID: id, Cache: "/files/injected"}); e == nil {
 		t.Fatal("method accepted unrelated input")
 	}
 	if _, e := w.Call("describe", Request{Derivation: "--option sandbox false"}); e == nil {
@@ -299,12 +338,12 @@ func TestDeadlineExtensionAndMethodArguments(t *testing.T) {
 func TestVersionedDerivationJSON(t *testing.T) {
 	drv := "/nix/store/" + strings.Repeat("0", 32) + "-test.drv"
 	for _, noChroot := range []bool{false, true} {
-		env := map[string]string{"requiredSystemFeatures": "kvm nixos-test"}
+		env := map[string]string{"vmTestUploadID": strings.Repeat("a", 32), "allowSubstitutes": "", "requiredSystemFeatures": "kvm nixos-test"}
 		if noChroot {
 			env["__json"] = `{"__noChroot":true,"requiredSystemFeatures":["kvm"]}`
 		}
 		data := wire.JSON(map[string]any{"version": 4, "derivations": map[string]any{filepath.Base(drv): map[string]any{"system": "x86_64-linux", "env": env}}})
-		e := derivationPolicy(data, Request{Derivation: drv, System: "x86_64-linux"})
+		e := derivationPolicy(data, Request{UploadID: strings.Repeat("a", 32), Derivation: drv, System: "x86_64-linux"})
 		if (e != nil) != noChroot {
 			t.Fatal(noChroot, e)
 		}
@@ -338,7 +377,7 @@ func TestRestartBlocksDaemonAndConfinesArtifacts(t *testing.T) {
 	w, c := fixture(t, os.Getuid())
 	id := wire.ID()
 	j := &Job{Request: Request{TaskID: id}, State: "building", Cleanup: "pending"}
-	if e := w.db.Save(context.Background(), state.Document{Kind: "job", ID: id, Value: j}); e != nil {
+	if e := w.save(j); e != nil {
 		t.Fatal(e)
 	}
 	w.Close()

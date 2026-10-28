@@ -54,7 +54,7 @@ func TestRetentionPhysicalTTLAndPin(t *testing.T) {
 	s.save(active)
 	paths := map[string]string{}
 	for _, task := range []*Task{success, failure, pinned, expired, active} {
-		paths[task.ID] = task.Artifacts[0].Path
+		paths[task.ID] = evidenceForTest(t, s, task.ID)[0].Path
 	}
 	if err = s.reclaim(now, false); err != nil {
 		t.Fatal(err)
@@ -78,7 +78,7 @@ func TestRetentionPhysicalTTLAndPin(t *testing.T) {
 	if count != 1 {
 		t.Fatal("summary expired too early")
 	}
-	if _, err = s.changeEvidence("evidence_unpin", EvidenceChange{ArtifactGetRequest: ArtifactGetRequest{TaskID: TaskID{pinned.ID}, ArtifactID: pinned.Artifacts[0].ID}}); err != nil {
+	if _, err = s.changeEvidence("evidence_unpin", EvidenceChange{ArtifactGetRequest: ArtifactGetRequest{TaskID: TaskID{pinned.ID}, ArtifactID: evidenceForTest(t, s, pinned.ID)[0].ID}}); err != nil {
 		t.Fatal(err)
 	}
 	if err = s.reclaim(now.Add(2*24*time.Hour), false); err != nil {
@@ -104,6 +104,7 @@ func TestPressureCountsPinsProtectsCleanupAndRecovers(t *testing.T) {
 	pinned := retainedFixture(t, s, now, true, true)
 	s.cfg.Storage.EvidenceBytes = 2500
 	s.cfg.Storage.LowWaterBytes = 2100
+	s.refreshStorage(true)
 	if err = s.admission(); err != nil {
 		t.Fatal(err)
 	}
@@ -118,12 +119,14 @@ func TestPressureCountsPinsProtectsCleanupAndRecovers(t *testing.T) {
 	}
 	s.cfg.Storage.EvidenceBytes = 512
 	s.cfg.Storage.LowWaterBytes = 256
+	s.refreshStorage(true)
 	if err = s.admission(); wire.Safe(err).Code != "storage_pressure" {
 		t.Fatal(err)
 	}
-	if _, err = s.changeEvidence("evidence_unpin", EvidenceChange{ArtifactGetRequest: ArtifactGetRequest{TaskID: TaskID{pinned.ID}, ArtifactID: pinned.Artifacts[0].ID}}); err != nil {
+	if _, err = s.changeEvidence("evidence_unpin", EvidenceChange{ArtifactGetRequest: ArtifactGetRequest{TaskID: TaskID{pinned.ID}, ArtifactID: evidenceForTest(t, s, pinned.ID)[0].ID}}); err != nil {
 		t.Fatal(err)
 	}
+	s.refreshStorage(true)
 	if err = s.admission(); err != nil {
 		t.Fatal("admissions did not reopen", err)
 	}
@@ -137,7 +140,7 @@ func TestInactiveUploadAndBodyCollection(t *testing.T) {
 	old := time.Now().Add(-2 * time.Hour)
 	transfer := &Transfer{ID: wire.ID(), Kind: "file", State: "open", Created: old, Updated: old, Objects: map[string]state.TransferObject{}}
 	s.transfers[transfer.ID] = transfer
-	if err = s.db.CreateTransfer(context.Background(), state.Document{Kind: "transfer", ID: transfer.ID, Value: transfer}, nil); err != nil {
+	if err = s.db.CreateTransfer(context.Background(), transfer, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err = s.root.Write("transfers/"+transfer.ID+"/abandoned", strings.NewReader("partial"), 64); err != nil {
@@ -177,6 +180,7 @@ func TestProtectedRunningCapturesCountButCloneDisksDoNot(t *testing.T) {
 	}
 	s.cfg.Storage.EvidenceBytes = 512
 	s.cfg.Storage.LowWaterBytes = 256
+	s.refreshStorage(true)
 	if err = s.admission(); wire.Safe(err).Code != "storage_pressure" {
 		t.Fatal(err)
 	}
@@ -199,7 +203,7 @@ func TestRetainedInputsStayReadableAndExpireAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	input.Objects["blob"] = state.TransferObject{File: "blob", Size: size, SHA256: hash}
-	if err = s.db.CreateTransfer(context.Background(), state.Document{Kind: "transfer", ID: input.ID, Value: input}, input.Objects); err != nil {
+	if err = s.db.CreateTransfer(context.Background(), input, input.Objects); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()
@@ -211,16 +215,14 @@ func TestRetainedInputsStayReadableAndExpireAfterRestart(t *testing.T) {
 	if s.transfers[input.ID] != nil {
 		t.Fatal("startup loaded historical input")
 	}
-	renewed := successful(t, s, "upload_renew", RenewRequest{Change: Change{"renew-historical-input"}, TransferGetRequest: TransferGetRequest{TransferID: input.ID}})
-	url := renewed.Result.(map[string]any)["url"].(string)
+	renewed := readUpload(t, s, input.ID)
+	url := renewed["url"].(string)
 	response := httptest.NewRecorder()
-	s.Handler().ServeHTTP(response, httptest.NewRequest("GET", url, nil))
+	s.Handler().ServeHTTP(response, httptest.NewRequest("GET", url+"/blob", nil))
 	if response.Code != 200 || response.Body.String() != "reusable input" {
 		t.Fatal("historical input unavailable", response.Code, response.Body.String())
 	}
-	s.mu.Lock()
 	err = s.reclaim(time.Now().UTC(), false)
-	s.mu.Unlock()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +231,55 @@ func TestRetainedInputsStayReadableAndExpireAfterRestart(t *testing.T) {
 	if count != 0 {
 		t.Fatal("retained input index survived TTL")
 	}
-	if _, err = os.Stat(filepath.Join(cfg.Service.StateDir, relative)); !os.IsNotExist(err) {
+	if _, err = os.Stat(filepath.Join(cfg.ControllerDir(), relative)); !os.IsNotExist(err) {
 		t.Fatal("retained input survived TTL", err)
+	}
+}
+
+func TestIndependentPinReceiptAndOrphanLifetimes(t *testing.T) {
+	s, err := New(testConfig(t), &fakeBackend{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().UTC()
+	task := retainedFixture(t, s, now.Add(-40*24*time.Hour), true, true)
+	artifact := evidenceForTest(t, s, task.ID)[0]
+	op := &Operation{ID: wire.ID(), RequestID: "retained-receipt", Tool: "lab_finish", TaskID: task.ID, State: "succeeded", Created: now.Add(-time.Hour), Ended: &now}
+	if err = s.db.Save(context.Background(), op); err != nil {
+		t.Fatal(err)
+	}
+	orphan := "tasks/" + task.ID + "/artifacts/" + wire.ID() + ".partial"
+	if _, _, err = s.root.Write(orphan, strings.NewReader("unindexed"), 64); err != nil {
+		t.Fatal(err)
+	}
+	old := now.Add(-2 * time.Hour)
+	if err = os.Chtimes(filepath.Join(s.root.Path, orphan), old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.reclaim(now, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.task(task.ID); wire.Safe(err).Code != "not_found" {
+		t.Fatal("summary survived its lifetime", err)
+	}
+	if _, err = s.operation(op.ID); err != nil {
+		t.Fatal("recent receipt depended on old summary", err)
+	}
+	result, err := s.Call(context.Background(), "evidence_get", wire.JSON(ArtifactGetRequest{ArtifactID: artifact.ID}))
+	if err != nil || result.(map[string]any)["execution_id"] != task.ID {
+		t.Fatal("pin lost provenance or readability", result, err)
+	}
+	if _, err = os.Stat(filepath.Join(s.root.Path, orphan)); !os.IsNotExist(err) {
+		t.Fatal("unindexed artifact retained", err)
+	}
+	if err = s.reclaim(now.Add(31*24*time.Hour), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.operation(op.ID); wire.Safe(err).Code != "not_found" {
+		t.Fatal("receipt did not physically expire", err)
+	}
+	if _, err = s.db.evidence(context.Background(), artifact.ID); err != nil {
+		t.Fatal("receipt TTL removed pin", err)
 	}
 }

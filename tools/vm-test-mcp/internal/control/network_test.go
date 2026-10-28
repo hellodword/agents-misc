@@ -36,9 +36,9 @@ func networkFixture(t *testing.T) (*Server, *Task, *Runtime, *heartbeatBackend) 
 	t.Helper()
 	f := &heartbeatBackend{}
 	s, task, r := fixtureLab(t, f, time.Second)
-	task.Network = "pending"
-	task.LAN, task.DNS, task.DHCP, task.Internet = s.cfg.VirtualBox.Network.LAN, s.cfg.VirtualBox.Network.DNS, true, true
-	for i, n := range task.Nodes {
+	task.lab().Network = "pending"
+	task.lab().LAN, task.lab().DNS, task.lab().DHCP, task.lab().Internet = s.cfg.VirtualBox.Network.LAN, s.cfg.VirtualBox.Network.DNS, true, true
+	for i, n := range task.lab().Nodes {
 		n.IPv4, n.MAC = fmt.Sprintf("10.77.0.%d", i+2), fmt.Sprintf("08:00:27:00:00:%02x", i+1)
 	}
 	if err := s.refreshNetworkContext(context.Background(), task, r, false); err != nil {
@@ -49,15 +49,15 @@ func networkFixture(t *testing.T) (*Server, *Task, *Runtime, *heartbeatBackend) 
 
 func TestOneLateHeartbeatPreservesLeaseAndReconcilesWithoutRecovery(t *testing.T) {
 	s, task, r, f := networkFixture(t)
-	command := &Command{ID: wire.ID(), NodeID: task.Nodes[0].ID, CommandStatus: wire.CommandStatus{State: "running"}}
-	task.Commands = append(task.Commands, command)
-	task.Endpoints = append(task.Endpoints, &Endpoint{ID: wire.ID(), State: "open", Protocol: "tcp", GuestPort: 8080, RouterPort: 20000})
+	command := &Command{ID: wire.ID(), NodeID: task.lab().Nodes[0].ID, CommandStatus: wire.CommandStatus{State: "running"}}
+	task.lab().Commands = append(task.lab().Commands, command)
+	task.lab().Endpoints = append(task.lab().Endpoints, &Endpoint{ID: wire.ID(), State: "open", Protocol: "tcp", GuestPort: 8080, RouterPort: 20000})
 	// Establish a baseline with the declared entry before simulating a late probe.
-	task.Endpoints[0].NodeID = task.Nodes[0].ID
+	task.lab().Endpoints[0].NodeID = task.lab().Nodes[0].ID
 	if err := s.refreshNetworkContext(context.Background(), task, r, false); err != nil {
 		t.Fatal(err)
 	}
-	lastLease := task.NetworkLeaseExpires
+	lastLease := task.lab().NetworkLeaseExpires
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -76,7 +76,7 @@ func TestOneLateHeartbeatPreservesLeaseAndReconcilesWithoutRecovery(t *testing.T
 		t.Fatal(err)
 	}
 	defer relay.Close()
-	r.relays[task.Endpoints[0].ID] = relay
+	r.relays[task.lab().Endpoints[0].ID] = relay
 	conn, err := net.DialTimeout("tcp", relay.address, time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -98,11 +98,11 @@ func TestOneLateHeartbeatPreservesLeaseAndReconcilesWithoutRecovery(t *testing.T
 	ctx, cancel := context.WithTimeout(r.ctx, 30*time.Millisecond)
 	s.heartbeatNetwork(ctx, task, r)
 	cancel()
-	if task.Network != "suspect" || task.Endpoints[0].State != "open" || !task.NetworkLeaseExpires.Equal(lastLease) || command.State != "running" {
+	if task.lab().Network != "suspect" || task.lab().Endpoints[0].State != "open" || !task.lab().NetworkLeaseExpires.Equal(lastLease) || command.State != "running" {
 		t.Fatal("late observation tore down a valid unchanged lease", task.Public())
 	}
 	assertEcho()
-	a := task.NetworkObservation
+	a := task.lab().NetworkObservation
 	if a.Error.Code != "backend_timeout" || a.Stage != "router_probe" || a.BudgetMS <= 0 || a.ExecutionMS <= 0 || a.Finished.Before(a.Started) {
 		t.Fatal("missing bounded failure attribution", a)
 	}
@@ -110,7 +110,7 @@ func TestOneLateHeartbeatPreservesLeaseAndReconcilesWithoutRecovery(t *testing.T
 	ctx, cancel = context.WithTimeout(r.ctx, time.Second)
 	s.heartbeatNetwork(ctx, task, r)
 	cancel()
-	if task.Network != "ready" || len(task.Commands) != 1 || task.Commands[0].ID != command.ID || task.NetworkObservation.Error != nil {
+	if task.lab().Network != "ready" || len(task.lab().Commands) != 1 || task.lab().Commands[0].ID != command.ID || task.lab().NetworkObservation.Error != nil {
 		t.Fatal("reconciliation replayed work or failed to confirm router", task.Public())
 	}
 	assertEcho()
@@ -131,7 +131,7 @@ func TestOneLateHeartbeatPreservesLeaseAndReconcilesWithoutRecovery(t *testing.T
 	}
 	f.mode.Store(2)
 	s.heartbeatNetwork(r.ctx, task, r)
-	if task.Network != "degraded" || task.Endpoints[0].State != "suspended" || command.State != "running" {
+	if task.lab().Network != "degraded" || task.lab().Endpoints[0].State != "suspended" || command.State != "running" {
 		t.Fatal("identity failure did not isolate network from command result")
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
@@ -158,9 +158,9 @@ func TestHeartbeatLockAndExecutionShareOneDeadline(t *testing.T) {
 	started := time.Now()
 	s.heartbeatNetwork(ctx, task, r)
 	<-released
-	a := task.NetworkObservation
-	if time.Since(started) > 300*time.Millisecond || a.BudgetMS > 80 || a.LockWaitMS < 40 || a.ExecutionMS > 80 || task.Network != "suspect" {
-		t.Fatal("lock and execution got independent timeout budgets", a, time.Since(started), task.Network)
+	a := task.lab().NetworkObservation
+	if time.Since(started) > 300*time.Millisecond || a.BudgetMS > 80 || a.LockWaitMS < 40 || a.ExecutionMS > 80 || task.lab().Network != "suspect" {
+		t.Fatal("lock and execution got independent timeout budgets", a, time.Since(started), task.lab().Network)
 	}
 }
 
@@ -170,8 +170,8 @@ func TestLeaseExpiryAndIdentityFailureRequireExplicitRecovery(t *testing.T) {
 			s, task, r, f := networkFixture(t)
 			switch failure {
 			case "lease":
-				task.NetworkUpdated = time.Now().Add(-time.Minute)
-				task.NetworkLeaseExpires = task.NetworkUpdated.Add(15 * time.Second)
+				task.lab().NetworkUpdated = time.Now().Add(-time.Minute)
+				task.lab().NetworkLeaseExpires = task.lab().NetworkUpdated.Add(15 * time.Second)
 			case "identity":
 				f.mode.Store(2)
 			case "changed_protection":
@@ -182,19 +182,19 @@ func TestLeaseExpiryAndIdentityFailureRequireExplicitRecovery(t *testing.T) {
 			ctx, cancel := context.WithTimeout(r.ctx, 30*time.Millisecond)
 			s.heartbeatNetwork(ctx, task, r)
 			cancel()
-			if task.Network != "degraded" || task.NetworkObservation.Error == nil {
+			if task.lab().Network != "degraded" || task.lab().NetworkObservation.Error == nil {
 				t.Fatal("unconfirmed protection remained usable", task.Public())
 			}
-			if failure == "lease" && (f.calls.Load() != calls || task.NetworkObservation.Error.Code != "network_lease_expired") {
-				t.Fatal("expired lease was automatically renewed", task.NetworkObservation)
+			if failure == "lease" && (f.calls.Load() != calls || task.lab().NetworkObservation.Error.Code != "network_lease_expired") {
+				t.Fatal("expired lease was automatically renewed", task.lab().NetworkObservation)
 			}
 			f.mode.Store(0)
 			calls = f.calls.Load()
 			s.heartbeatNetwork(context.Background(), task, r)
-			if task.Network != "degraded" || f.calls.Load() != calls {
+			if task.lab().Network != "degraded" || f.calls.Load() != calls {
 				t.Fatal("degraded network recovered without explicit request")
 			}
-			if err := s.refreshNetworkContext(context.Background(), task, r, true); err != nil || task.Network != "ready" {
+			if err := s.refreshNetworkContext(context.Background(), task, r, true); err != nil || task.lab().Network != "ready" {
 				t.Fatal("explicit validated recovery failed", err)
 			}
 		})
@@ -204,7 +204,7 @@ func TestLeaseExpiryAndIdentityFailureRequireExplicitRecovery(t *testing.T) {
 func TestStaleLeaseExpiryCannotDegradeNewConfirmation(t *testing.T) {
 	s, task, r, _ := networkFixture(t)
 	s.degrade(task, r, wire.Fail("network_lease_expired", "An earlier observer saw an expired lease"))
-	if task.Network != "ready" {
+	if task.lab().Network != "ready" {
 		t.Fatal("stale expiry suspended a new lease")
 	}
 }

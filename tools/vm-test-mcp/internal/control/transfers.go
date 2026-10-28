@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"io"
-	"log/slog"
 	"net/http"
 	"os"
 	"path"
@@ -18,7 +17,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hellodword/agents-misc/vm-test-mcp/internal/state"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
@@ -32,9 +30,8 @@ type capability struct {
 const uploadBudget = 5 * time.Minute
 
 type Upload struct {
-	reserved int64
-	cancel   context.CancelFunc
-	done     chan struct{}
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 type uploadReader struct {
 	ctx context.Context
@@ -56,9 +53,9 @@ func (s *Server) retainTransfers(taskID string) []<-chan struct{} {
 		if t.TaskID != taskID {
 			continue
 		}
-		if t.State == "open" {
-			t.State = "retained"
-			s.persist(state.Document{Kind: "transfer", ID: t.ID, Value: t})
+		if oneOf(t.State, "open", "ready") {
+			t.State = "settling"
+			s.persist(t)
 		}
 		if upload := s.uploading[id]; upload != nil {
 			upload.cancel()
@@ -73,7 +70,7 @@ func (s *Server) uploadAllowed(t *Transfer) error {
 		return wire.Fail("unavailable", "Service is stopping")
 	}
 	if t.State != "open" {
-		return wire.Fail("sealed", "Transfer is read-only")
+		return wire.Fail("immutable", "Upload is read-only")
 	}
 	if t.TaskID != "" {
 		task, err := s.task(t.TaskID)
@@ -128,58 +125,29 @@ func (s *Server) decodeCap(token string) (capability, error) {
 func (s *Server) transferView(t *Transfer) map[string]any {
 	right := "read"
 	canUpload := s.uploadAllowed(t) == nil
-	if canUpload {
+	if canUpload || t.State == "ready" && t.TaskID == "" {
 		right = "write"
 	}
 	u, expires := s.capURL("transfer", t.ID, right)
-	if t.Kind == "file" {
-		u += "/blob"
-	}
-	return map[string]any{"id": t.ID, "task_id": t.TaskID, "kind": t.Kind, "state": t.State, "can_upload": canUpload, "uploading": s.uploading[t.ID] != nil, "bytes": t.Bytes, "object_count": len(t.Objects), "url": u, "expires": expires}
+	return map[string]any{"id": t.ID, "execution_id": t.TaskID, "kind": t.Kind, "state": t.State, "can_upload": canUpload, "uploading": s.uploading[t.ID] != nil, "bytes": t.Bytes, "object_count": len(t.Objects), "reserved_bytes": t.ReservedBytes, "manifest_digest": t.ManifestDigest, "url": u, "expires": expires}
 }
-func (s *Server) createTransfer(a TransferRequest) (any, error) {
+func (s *Server) createTransfer(a TransferRequest, id string) (any, error) {
 	if a.Kind != "file" && a.Kind != "cache" {
 		return nil, wire.Fail("invalid_argument", "Transfer kind must be file or cache")
 	}
-	if a.Kind == "cache" && a.TaskID != "" {
-		return nil, wire.Fail("invalid_argument", "Cache uploads are prepared before nix_job_create and must omit task_id")
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if a.TaskID != "" {
-		t, e := s.task(a.TaskID)
-		if e != nil {
-			return nil, e
-		}
-		if t.Purged {
-			return nil, wire.Fail("purged", "Task was purged")
-		}
-		if t.Kind != "lab" || !oneOf(t.State, "queued", "preparing", "running") {
-			return nil, wire.Fail("invalid_state", "File preparation requires a queued, preparing or running lab")
-		}
-	} else if a.Kind == "file" {
-		return nil, wire.Fail("invalid_argument", "File uploads require a task_id")
-	}
 	if err := s.admission(); err != nil {
 		return nil, err
 	}
 	if s.inputUsage() >= s.cfg.Storage.InputBytes {
 		return nil, wire.Fail("quota_exceeded", "Input staging budget is full")
 	}
-	t := &Transfer{ID: wire.ID(), TaskID: a.TaskID, Kind: a.Kind, State: "open", Created: time.Now().UTC(), Updated: time.Now().UTC(), Objects: map[string]Object{}}
+	t := &Transfer{ID: id, Kind: a.Kind, State: "open", Created: time.Now().UTC(), Updated: time.Now().UTC(), Objects: map[string]Object{}}
 	if e := s.root.MkdirAll(path.Join("transfers", t.ID), 0700); e != nil {
 		return nil, e
 	}
-	if a.Kind == "cache" {
-		data := "StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 30\n"
-		n, h, e := s.root.Write(path.Join("transfers", t.ID, "nix-cache-info"), strings.NewReader(data), 65536)
-		if e != nil {
-			return nil, e
-		}
-		t.Objects["nix-cache-info"] = Object{Size: n, SHA256: h, File: "nix-cache-info"}
-		t.Bytes = n
-	}
-	if e := s.db.CreateTransfer(context.Background(), state.Document{Kind: "transfer", ID: t.ID, Value: t}, t.Objects); e != nil {
+	if e := s.db.CreateTransfer(context.Background(), t, t.Objects); e != nil {
 		return nil, e
 	}
 	s.transfers[t.ID] = t
@@ -271,12 +239,28 @@ func parseNarInfo(name string, data []byte) (narInfo, error) {
 	}
 	return n, nil
 }
-func (s *Server) seal(t *Transfer) error {
-	if t.State == "sealed" {
+
+// The caller serializes this upload. Cache verification may read many narinfo
+// objects and deliberately runs outside the controller mutex.
+func (s *Server) completeUpload(t *Transfer) error {
+	s.mu.Lock()
+	snapshot := *t
+	s.mu.Unlock()
+	return s.verifyUpload(t, &snapshot)
+}
+func (s *Server) verifyUpload(target, t *Transfer) error {
+	if t.State == "ready" {
 		return nil
 	}
-	if t.State != "open" || s.uploading[t.ID] != nil {
+	if t.State != "open" || t.ManifestDigest == "" {
 		return wire.Fail("conflict", "Transfer is unavailable or upload is still in progress")
+	}
+	var missing int
+	if err := s.db.QueryRowContext(s.ctx, "SELECT COUNT(*) FROM transfer_objects WHERE transfer_id=? AND body IS NULL", t.ID).Scan(&missing); err != nil {
+		return err
+	}
+	if missing != 0 {
+		return nil
 	}
 	if t.Kind == "file" {
 		if _, ok := t.Objects["blob"]; !ok {
@@ -311,12 +295,17 @@ func (s *Server) seal(t *Transfer) error {
 			return wire.Fail("invalid_cache", "Cache contains no derivations")
 		}
 	}
-	sealed := *t
-	sealed.State = "sealed"
-	if err := s.db.Save(context.Background(), state.Document{Kind: "transfer", ID: t.ID, Value: &sealed}); err != nil {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.uploadAllowed(target); err != nil {
 		return err
 	}
-	t.State = sealed.State
+	ready := *target
+	ready.State = "ready"
+	if err := s.db.Save(context.Background(), &ready); err != nil {
+		return err
+	}
+	target.State = ready.State
 	return nil
 }
 func (s *Server) putGuest(a PutRequest) (any, error) {
@@ -325,7 +314,7 @@ func (s *Server) putGuest(a PutRequest) (any, error) {
 	}
 	s.mu.Lock()
 	t := s.transfers[a.TransferID]
-	if t == nil || t.Kind != "file" || t.TaskID != a.TaskID.TaskID {
+	if t == nil || t.Kind != "file" || (t.TaskID != "" && t.TaskID != a.TaskID.TaskID) {
 		s.mu.Unlock()
 		return nil, wire.Fail("not_found", "Transfer does not belong to task")
 	}
@@ -333,7 +322,18 @@ func (s *Server) putGuest(a PutRequest) (any, error) {
 		s.mu.Unlock()
 		return nil, err
 	}
-	e := s.seal(t)
+	var e error
+	if t.State != "ready" {
+		e = wire.Fail("input_not_ready", "Upload must have its complete verified manifest")
+	}
+	if e == nil && t.TaskID == "" {
+		bound := *t
+		bound.TaskID = a.TaskID.TaskID
+		e = s.db.Save(s.ctx, &bound)
+		if e == nil {
+			t.TaskID = bound.TaskID
+		}
+	}
 	s.mu.Unlock()
 	if e != nil {
 		return nil, e
@@ -365,26 +365,12 @@ func (s *Server) Files(w http.ResponseWriter, r *http.Request) {
 			httpError(w, 403, wire.Fail("forbidden", "Read-only artifact capability"))
 			return
 		}
-		ids := strings.Split(cap.ID, "/")
-		if len(ids) != 2 {
-			httpError(w, 404, wire.Fail("not_found", "Artifact not found"))
+		a, err := s.db.evidence(r.Context(), cap.ID)
+		if err != nil {
+			httpError(w, 404, err)
 			return
 		}
-		s.mu.Lock()
-		t, e := s.task(ids[0])
-		var file string
-		if e == nil {
-			for _, a := range t.Artifacts {
-				if a.ID == ids[1] {
-					file = a.Path
-				}
-			}
-		}
-		s.mu.Unlock()
-		if file == "" {
-			httpError(w, 404, wire.Fail("not_found", "Artifact not found"))
-			return
-		}
+		file := a.Path
 		s.serveFile(w, r, file)
 		return
 	}
@@ -405,9 +391,34 @@ func (s *Server) Files(w http.ResponseWriter, r *http.Request) {
 	defer lock.Unlock()
 	s.mu.Lock()
 	t, loadErr := s.transfer(cap.ID)
-	if loadErr != nil || t.State == "purged" || !objectName(t.Kind, name) {
+	if loadErr != nil || (name != "manifest" && !objectName(t.Kind, name)) {
 		s.mu.Unlock()
 		httpError(w, 404, wire.Fail("not_found", "Object not found"))
+		return
+	}
+	if r.Method == "PUT" {
+		if cap.Right != "write" || s.closed || !oneOf(t.State, "open", "ready") {
+			s.mu.Unlock()
+			httpError(w, 409, wire.Fail("immutable", "Upload is read-only"))
+			return
+		}
+		upload := &Upload{cancel: cancel, done: make(chan struct{})}
+		s.uploading[t.ID] = upload
+		s.wg.Add(1)
+		stopBody := context.AfterFunc(ctx, func() { _ = http.NewResponseController(w).SetReadDeadline(time.Now()); _ = r.Body.Close() })
+		defer func() {
+			stopBody()
+			s.mu.Lock()
+			delete(s.uploading, t.ID)
+			close(upload.done)
+			s.mu.Unlock()
+			s.wg.Done()
+		}()
+	}
+	r = r.WithContext(ctx)
+	if name == "manifest" {
+		s.mu.Unlock()
+		s.uploadManifest(w, r, t, cap.Right)
 		return
 	}
 	if r.Method != "PUT" {
@@ -422,44 +433,42 @@ func (s *Server) Files(w http.ResponseWriter, r *http.Request) {
 	}
 	if cap.Right != "write" {
 		s.mu.Unlock()
-		httpError(w, 409, wire.Fail("sealed", "Transfer is sealed"))
+		httpError(w, 409, wire.Fail("immutable", "Upload capability is read-only"))
 		return
 	}
-	if err := s.uploadAllowed(t); err != nil {
+	expectedSize, expectedHash, expectedErr := s.db.ExpectedObject(ctx, t.ID, name)
+	if expectedErr != nil {
+		s.mu.Unlock()
+		httpError(w, 409, wire.Fail("manifest_required", "Object must be declared in the immutable manifest"))
+		return
+	}
+	if err := s.uploadAllowed(t); err != nil && t.State != "ready" {
 		s.mu.Unlock()
 		httpError(w, 409, err)
 		return
 	}
 	previous, exists := t.Objects[name]
-	if !exists && len(t.Objects) >= 100000 {
+	quota := expectedSize
+	if !exists && r.ContentLength >= 0 && r.ContentLength != quota {
 		s.mu.Unlock()
-		httpError(w, 413, wire.Fail("quota_exceeded", "Transfer object count exceeds 100000"))
+		httpError(w, 400, wire.Fail("size_mismatch", "Object length differs from manifest"))
 		return
 	}
-	quota := min(s.cfg.Storage.MaxUploadBytes-t.Bytes+previous.Size, s.cfg.Storage.InputBytes-s.inputUsage())
-	if err := s.admission(); err != nil {
-		s.mu.Unlock()
-		httpError(w, 507, err)
-		return
-	}
-	if r.ContentLength > quota || quota < 0 {
-		s.mu.Unlock()
-		httpError(w, 413, wire.Fail("quota_exceeded", "Input staging budget exceeded"))
-		return
-	}
-	if r.ContentLength >= 0 {
-		quota = min(quota, r.ContentLength)
-	}
-	if strings.HasSuffix(name, ".narinfo") || name == "nix-cache-info" {
-		quota = min(quota, 65536)
-	}
-	upload := &Upload{reserved: quota, cancel: cancel, done: make(chan struct{})}
-	s.uploading[t.ID] = upload
-	s.wg.Add(1)
 	s.mu.Unlock()
-	defer func() { s.mu.Lock(); delete(s.uploading, t.ID); close(upload.done); s.mu.Unlock(); s.wg.Done() }()
-	stopBody := context.AfterFunc(ctx, func() { _ = http.NewResponseController(w).SetReadDeadline(time.Now()); _ = r.Body.Close() })
-	defer stopBody()
+	if exists {
+		n, h, err := hashFile(uploadReader{ctx, r.Body}, expectedSize)
+		if err != nil || n != previous.Size || h != previous.SHA256 {
+			httpError(w, 409, wire.Fail("object_conflict", "Published upload bytes are immutable"))
+			return
+		}
+		err = s.completeUpload(t)
+		if err != nil {
+			httpError(w, 409, err)
+			return
+		}
+		w.WriteHeader(200)
+		return
+	}
 	var reader io.Reader = uploadReader{ctx, r.Body}
 	if strings.HasSuffix(name, ".narinfo") || name == "nix-cache-info" {
 		data, err := io.ReadAll(io.LimitReader(reader, quota+1))
@@ -476,8 +485,7 @@ func (s *Server) Files(w http.ResponseWriter, r *http.Request) {
 		}
 		reader = bytesReader(data)
 	}
-	// Each revision has its own file. SQLite publishes only a fully synced file;
-	// a lost process before commit cannot replace the last accepted bytes.
+	// SQLite publishes the immutable object only after its file is fully synced.
 	storageName := ".object-" + wire.ID()
 	staged := path.Join("transfers", t.ID, storageName)
 	published := false
@@ -495,6 +503,10 @@ func (s *Server) Files(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if n != expectedSize || h != expectedHash {
+		httpError(w, 400, wire.Fail("integrity_mismatch", "Object size or SHA-256 differs from manifest"))
+		return
+	}
 	s.mu.Lock()
 	e = ctx.Err()
 	if e == nil {
@@ -505,6 +517,9 @@ func (s *Server) Files(w http.ResponseWriter, r *http.Request) {
 		published = e == nil
 	}
 	s.mu.Unlock()
+	if e == nil {
+		e = s.completeUpload(t)
+	}
 	if e != nil {
 		httpError(w, 409, e)
 		return
@@ -512,22 +527,16 @@ func (s *Server) Files(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(200)
 }
 
-// The caller holds s.mu and the transfer lock. Old files are unreachable only
-// after commit; restart removes any unreferenced revisions left by interruption.
+// The caller holds s.mu and the transfer lock. The index is the publication boundary.
 func (s *Server) publishTransferObject(ctx context.Context, t *Transfer, name string, object Object) error {
 	if err := s.db.StoreTransferObject(ctx, t.ID, name, object); err != nil {
 		return err
 	}
-	old := t.Objects[name]
-	t.Bytes += object.Size - old.Size
+	t.Bytes += object.Size
 	t.Objects[name] = object
 	t.Updated = time.Now().UTC()
-	s.persist(state.Document{Kind: "transfer", ID: t.ID, Value: t})
-	if old.File != "" {
-		if err := s.root.Remove(path.Join("transfers", t.ID, old.File)); err != nil && !os.IsNotExist(err) {
-			slog.Warn("superseded input file retained until restart", "transfer_id", t.ID, "error", err)
-		}
-	}
+	s.persist(t)
+
 	return nil
 }
 
@@ -546,9 +555,6 @@ func (s *Server) recoverTransfer(ctx context.Context, t *Transfer) error {
 			return wire.Fail("invalid_transfer", "Invalid retained transfer object path")
 		}
 		referenced[object.File] = true
-	}
-	if t.State == "purged" {
-		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
@@ -616,4 +622,14 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, name string) 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	http.ServeContent(w, r, "object", st.ModTime(), f)
+}
+
+// Input storage changes category only after the execution resource boundary.
+func (s *Server) completeTransfers(id string) {
+	for _, t := range s.transfers {
+		if t.TaskID == id && t.State != "deleting" {
+			t.State = "retained"
+			s.persist(t)
+		}
+	}
 }

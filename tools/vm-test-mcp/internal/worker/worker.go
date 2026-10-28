@@ -32,14 +32,15 @@ import (
 )
 
 type Request struct {
+	UploadID       string     `json:"upload_id,omitempty"`
+	InstanceID     string     `json:"instance_id,omitempty"`
 	ManifestDigest string     `json:"manifest_digest,omitempty"`
-	Cursor         int        `json:"cursor,omitempty"`
+	Cursor         int64      `json:"cursor,omitempty"`
 	TaskID         string     `json:"task_id"`
 	Derivation     string     `json:"derivation,omitempty"`
 	System         string     `json:"system,omitempty"`
 	Cache          string     `json:"cache,omitempty"`
 	TimeoutSeconds int        `json:"timeout_seconds,omitempty"`
-	ArtifactID     string     `json:"artifact_id,omitempty"`
 	Offset         int64      `json:"offset,omitempty"`
 	Deadline       *time.Time `json:"deadline,omitempty"`
 }
@@ -52,54 +53,51 @@ type File struct {
 	Size     int64  `json:"size"`
 }
 type Job struct {
-	CopiesReleased  bool              `json:"copies_released"`
-	HandoffComplete bool              `json:"handoff_complete"`
-	ManifestDigest  string            `json:"manifest_digest,omitempty"`
-	Request         Request           `json:"request"`
-	State           string            `json:"state"`
-	Cleanup         string            `json:"cleanup"`
-	Outputs         map[string]string `json:"outputs"`
-	Files           []File            `json:"files"`
-	// Retain the historical on-disk field; it has no observed-exit provenance.
-	ExitCode  int                `json:"exit_code"`
-	Execution *wire.NixExecution `json:"execution,omitempty"`
-	Started   time.Time          `json:"started"`
-	Deadline  time.Time          `json:"deadline"`
+	indexedFiles    int
+	CopiesReleased  bool               `json:"copies_released"`
+	HandoffComplete bool               `json:"handoff_complete"`
+	ManifestDigest  string             `json:"manifest_digest,omitempty"`
+	Request         Request            `json:"request"`
+	State           string             `json:"state"`
+	Cleanup         string             `json:"cleanup"`
+	Outputs         map[string]string  `json:"outputs"`
+	Files           []File             `json:"files"`
+	HandoffFinished *time.Time         `json:"handoff_finished,omitempty"`
+	Execution       *wire.NixExecution `json:"execution,omitempty"`
+	Started         time.Time          `json:"started"`
+	Deadline        time.Time          `json:"deadline"`
 }
 type Worker struct {
-	lastRetention time.Time
-	mu            sync.Mutex
-	cfg           config.Worker
-	root          *safefs.Root
-	db            *state.DB
-	jobs          map[string]*Job
-	cancel        map[string]context.CancelFunc
-	wg            sync.WaitGroup
-	active        string
+	lastRetention   time.Time
+	maintenanceStop chan struct{}
+	mu              sync.Mutex
+	cfg             config.Worker
+	root            *safefs.Root
+	db              *state.DB
+	jobs            map[string]*Job
+	cancel          map[string]context.CancelFunc
+	wg              sync.WaitGroup
+	streams         map[string]int
+	active          string
 }
 
 func New(c config.Worker) (*Worker, error) {
-	root, e := safefs.Private(c.StateDir, true)
+	root, e := safefs.Private(c.Directory(), true)
 	if e != nil {
 		return nil, e
 	}
-	db, e := state.Open(root.Path)
+	db, e := state.OpenWorker(root.Path)
 	if e != nil {
 		root.Close()
 		return nil, e
 	}
-	w := &Worker{cfg: c, root: root, db: db, jobs: map[string]*Job{}, cancel: map[string]context.CancelFunc{}}
-	rows, e := db.Active(context.Background(), "job")
+	w := &Worker{maintenanceStop: make(chan struct{}), streams: map[string]int{}, cfg: c, root: root, db: db, jobs: map[string]*Job{}, cancel: map[string]context.CancelFunc{}}
+	jobs, e := w.activeJobs()
 	if e != nil {
 		w.Close()
 		return nil, e
 	}
-	for _, b := range rows {
-		var j Job
-		if e = json.Unmarshal(b, &j); e != nil {
-			w.Close()
-			return nil, e
-		}
+	for _, j := range jobs {
 		if j.State == "building" || j.State == "cleanup_required" {
 			j.State = "cleanup_required"
 			j.Cleanup = "required"
@@ -111,20 +109,24 @@ func New(c config.Worker) (*Worker, error) {
 		if (j.State == "interrupted" || j.State == "cleanup_required") && j.Execution != nil && j.Execution.Error == nil {
 			j.Execution.Error = wire.Safe(wire.Fail("worker_restarted", "Worker restarted before the execution result was durable"))
 		}
-		w.jobs[j.Request.TaskID] = &j
-		if e = w.save(&j); e != nil {
+		w.jobs[j.Request.TaskID] = j
+		if e = w.save(j); e != nil {
 			w.Close()
 			return nil, e
 		}
 	}
+	w.wg.Add(1)
+	go w.maintain()
 	return w, nil
 }
 
-func (w *Worker) save(j *Job) error {
-	return w.db.Save(context.Background(), state.Document{Kind: "job", ID: j.Request.TaskID, Value: j})
-}
 func (w *Worker) Close() {
 	w.mu.Lock()
+	select {
+	case <-w.maintenanceStop:
+	default:
+		close(w.maintenanceStop)
+	}
 	for _, cancel := range w.cancel {
 		cancel()
 	}
@@ -185,26 +187,22 @@ func (w *Worker) Preflight(ctx context.Context) error {
 func (w *Worker) Call(method string, a Request) (any, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if err := w.expireCompleted(time.Now().UTC()); err != nil {
-		return nil, err
-	}
-	allowed := Request{TaskID: a.TaskID}
+	allowed := Request{TaskID: a.TaskID, InstanceID: a.InstanceID}
 	switch method {
 	case "describe":
 		allowed = Request{}
 	case "start":
+		allowed.UploadID = a.UploadID
 		allowed.Derivation, allowed.System, allowed.Cache, allowed.TimeoutSeconds = a.Derivation, a.System, a.Cache, a.TimeoutSeconds
 	case "extend":
 		allowed.Deadline = a.Deadline
 	case "log":
 		allowed.Offset = a.Offset
-	case "file":
-		allowed.Offset, allowed.ArtifactID = a.Offset, a.ArtifactID
 	case "handoff":
 		allowed.ManifestDigest = a.ManifestDigest
 	case "files":
 		allowed.Cursor = a.Cursor
-	case "status", "cleanup", "cancel", "purge", "forget":
+	case "status", "cleanup", "cancel":
 	default:
 		return nil, wire.Fail("invalid_argument", "Unknown worker operation")
 	}
@@ -212,20 +210,30 @@ func (w *Worker) Call(method string, a Request) (any, error) {
 		return nil, wire.Fail("invalid_argument", "Unexpected worker operation parameter")
 	}
 	if method == "describe" {
-		return map[string]any{"version": wire.Version, "build": wire.Identity(), "busy": w.active != "", "active_task_id": w.active}, nil
+		w.mu.Unlock()
+		used, err := w.evidenceUsage()
+		w.mu.Lock()
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"version": wire.Version, "build": wire.Identity(), "busy": w.active != "", "active_task_id": w.active, "instance_id": w.db.InstanceID, "evidence_bytes": used}, nil
+	}
+	if a.InstanceID != w.db.InstanceID {
+		return nil, wire.Fail("worker_instance_changed", "Worker storage identity differs; resource release requires administrator reconciliation")
 	}
 	if !wire.IDPattern.MatchString(a.TaskID) {
 		return nil, wire.Fail("invalid_argument", "Invalid task ID")
 	}
 	if method == "start" {
 		if w.jobs[a.TaskID] == nil {
-			var old Job
-			if w.db.Load(context.Background(), "job", a.TaskID, &old) == nil {
-				w.jobs[a.TaskID] = &old
+			if old, err := w.loadJob(a.TaskID); err == nil {
+				w.jobs[a.TaskID] = old
 			}
 		}
 		if old := w.jobs[a.TaskID]; old != nil {
-			if string(wire.JSON(old.Request)) != string(wire.JSON(a)) {
+			previous, current := old.Request, a
+			previous.Cache, current.Cache = "", ""
+			if string(wire.JSON(previous)) != string(wire.JSON(current)) {
 				return nil, wire.Fail("request_conflict", "Worker task parameters differ")
 			}
 			return public(old), nil
@@ -239,7 +247,7 @@ func (w *Worker) Call(method string, a Request) (any, error) {
 		} else if runtime.GOARCH == "arm64" {
 			system = "aarch64-linux"
 		}
-		if a.System != system || !wire.StorePattern.MatchString(a.Derivation) || !strings.HasSuffix(a.Derivation, ".drv") || a.TimeoutSeconds < 1 || a.TimeoutSeconds > 86400 {
+		if !wire.IDPattern.MatchString(a.UploadID) || a.System != system || !wire.StorePattern.MatchString(a.Derivation) || !strings.HasSuffix(a.Derivation, ".drv") || a.TimeoutSeconds < 1 || a.TimeoutSeconds > 86400 {
 			return nil, wire.Fail("invalid_argument", "Invalid Nix request")
 		}
 		u, e := url.Parse(a.Cache)
@@ -264,41 +272,25 @@ func (w *Worker) Call(method string, a Request) (any, error) {
 	}
 	j := w.jobs[a.TaskID]
 	if j == nil {
-		var stored Job
-		if w.db.Load(context.Background(), "job", a.TaskID, &stored) == nil {
-			j = &stored
-			w.jobs[a.TaskID] = j
+		if stored, err := w.loadJob(a.TaskID); err == nil {
+			j = stored
+			if !j.CopiesReleased {
+				w.jobs[a.TaskID] = j
+			}
 		}
 	}
 	if j == nil {
-		if method == "forget" {
-			return map[string]any{"deleted": true}, nil
-		}
 		if method == "cleanup" {
 			return map[string]any{"cleanup": "complete", "never_accepted": true}, nil
 		}
 		return nil, wire.Fail("not_found", "Worker task not found")
 	}
 	switch method {
-	case "forget":
-		if !j.HandoffComplete {
-			return nil, wire.Fail("protected", "Evidence handoff is not confirmed")
-		}
-		if _, err := w.db.ExecContext(context.Background(), "DELETE FROM worker_jobs WHERE id=?", a.TaskID); err != nil {
-			return nil, err
-		}
-		delete(w.jobs, a.TaskID)
-		return map[string]any{"deleted": true}, w.db.Compact(context.Background())
 	case "files":
-		if a.Cursor < 0 || a.Cursor > len(j.Files) {
+		if a.Cursor < 0 {
 			return nil, wire.Fail("invalid_argument", "Invalid file cursor")
 		}
-		end := min(a.Cursor+100, len(j.Files))
-		files := []any{}
-		for _, f := range j.Files[a.Cursor:end] {
-			files = append(files, map[string]any{"id": f.ID, "name": f.Name, "size": f.Size, "sha256": f.SHA256})
-		}
-		return map[string]any{"items": files, "next_cursor": end, "eof": end == len(j.Files)}, nil
+		return w.filePage(a.TaskID, a.Cursor)
 	case "handoff":
 		return w.handoff(j, a.ManifestDigest)
 	case "extend":
@@ -316,23 +308,6 @@ func (w *Worker) Call(method string, a Request) (any, error) {
 		return public(j), nil
 	case "log":
 		return w.readFile(filepath.Join(w.root.Path, a.TaskID), "task.log", a.Offset)
-	case "file":
-		for _, f := range j.Files {
-			if f.ID == a.ArtifactID {
-				return w.readFile(f.Root, f.Relative, a.Offset)
-			}
-		}
-		return nil, wire.Fail("not_found", "Artifact does not belong to task")
-	case "purge":
-		if j.Cleanup != "complete" {
-			return nil, wire.Fail("cleanup_required", "Worker cleanup is unresolved")
-		}
-		if e := w.root.RemoveAll(a.TaskID); e != nil {
-			return nil, e
-		}
-		j.Files = nil
-		j.Outputs = nil
-		return public(j), w.save(j)
 	default:
 		return nil, wire.Fail("invalid_argument", "Unknown worker operation")
 	}
@@ -490,7 +465,7 @@ func (w *Worker) run(ctx context.Context, j *Job) {
 		return
 	}
 	out := &strings.Builder{}
-	build := w.command(ctx, "build", "--store", "daemon", "--builders", "", "--option", "sandbox", "true", "--option", "sandbox-fallback", "false", "--out-link", filepath.Join(w.root.Path, task, "result"), "--json", "--timeout", strconv.Itoa(86400), "-L", j.Request.Derivation+"^*")
+	build := w.command(ctx, "build", "--store", "daemon", "--builders", "", "--option", "sandbox", "true", "--option", "sandbox-fallback", "false", "--option", "always-allow-substitutes", "false", "--out-link", filepath.Join(w.root.Path, task, "result"), "--json", "--timeout", strconv.Itoa(86400), "-L", j.Request.Derivation+"^*")
 	if w.cfg.KeepFailed {
 		build.Args = append(build.Args, "--keep-failed")
 	}
@@ -525,9 +500,6 @@ func (w *Worker) run(ctx context.Context, j *Job) {
 	}
 	w.mu.Lock()
 	j.Outputs, j.Files = result.Outputs, result.Files
-	if build.ProcessState != nil {
-		j.ExitCode = build.ProcessState.ExitCode()
-	}
 	w.mu.Unlock()
 	if err := log.Sync(); e == nil {
 		e = err
@@ -555,6 +527,7 @@ func (w *Worker) stage(j *Job, stage string) error {
 	j.Execution.Stage, j.Execution.Process = stage, nil
 	if stage == "validate" {
 		j.Execution.Imported = true
+		j.Request.Cache = ""
 	}
 	return w.save(j)
 }
@@ -608,18 +581,25 @@ func derivationPolicy(b []byte, a Request) error {
 	v, ok := all[key]
 	features := strings.Fields(v.Env["requiredSystemFeatures"])
 	noChroot := v.Env["__noChroot"] != "" && v.Env["__noChroot"] != "0"
+	binding := v.Env["vmTestUploadID"]
+	substitute, declared := v.Env["allowSubstitutes"]
+	noSubstitute := declared && substitute == ""
 	if raw := v.Env["__json"]; raw != "" {
 		var attrs struct {
-			NoChroot bool     `json:"__noChroot"`
-			Features []string `json:"requiredSystemFeatures"`
+			NoChroot         bool     `json:"__noChroot"`
+			UploadID         string   `json:"vmTestUploadID"`
+			AllowSubstitutes *bool    `json:"allowSubstitutes"`
+			Features         []string `json:"requiredSystemFeatures"`
 		}
 		if e := json.Unmarshal([]byte(raw), &attrs); e != nil {
 			return e
 		}
 		noChroot = noChroot || attrs.NoChroot
+		binding = attrs.UploadID
+		noSubstitute = attrs.AllowSubstitutes != nil && !*attrs.AllowSubstitutes
 		features = append(features, attrs.Features...)
 	}
-	if !ok || v.System != a.System || noChroot || !slices.Contains(features, "kvm") {
+	if !ok || binding != a.UploadID || !wire.IDPattern.MatchString(binding) || !noSubstitute || v.System != a.System || noChroot || !slices.Contains(features, "kvm") {
 		return wire.Fail("policy_denied", "Expected a sandboxed KVM test derivation")
 	}
 	return nil
@@ -793,6 +773,10 @@ func (w *Worker) HTTPServer() *http.Server {
 	}, Handler: http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		if uid, _ := r.Context().Value(peerKey{}).(int); uid != w.cfg.ControllerUID {
 			rw.WriteHeader(403)
+			return
+		}
+		if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/files/") {
+			w.serveArtifact(rw, r)
 			return
 		}
 		if r.Method != "POST" || r.URL.Path != "/call" {

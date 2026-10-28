@@ -105,10 +105,15 @@ type Preparation struct {
 	Error        *wire.Error `json:"error,omitempty"`
 }
 type ExpectedState struct {
-	Action    string     `json:"action"`
-	Power     string     `json:"power"`
-	Requested time.Time  `json:"requested"`
-	Until     *time.Time `json:"until,omitempty"`
+	RequestID     string     `json:"request_id"`
+	BeforeBoot    string     `json:"before_boot,omitempty"`
+	Dispatched    *time.Time `json:"dispatched,omitempty"`
+	Ready         bool       `json:"ready"`
+	PowerObserved bool       `json:"power_observed"`
+	Action        string     `json:"action"`
+	Power         string     `json:"power"`
+	Requested     time.Time  `json:"requested"`
+	Until         *time.Time `json:"until,omitempty"`
 }
 type NodeStatus struct {
 	Identity          *NodeIdentity      `json:"identity,omitempty"`
@@ -151,6 +156,9 @@ func (s *Server) observeNode(n *Node, status *NodeStatus, err error, now time.Ti
 	} else {
 		n.Health.VirtualBox.update(now, nil, after, false)
 		n.State, n.Guest, n.GuestSessions = status.State, status.Guest, status.GuestSessions
+		if n.Expected != nil && n.Expected.Dispatched != nil && now.After(*n.Expected.Dispatched) {
+			n.Expected.PowerObserved = status.State == n.Expected.Power
+		}
 		expected := n.Expected != nil && ((n.Expected.Until != nil && now.Before(*n.Expected.Until)) || (status.State != "running" && n.Expected.Power == status.State))
 		if oneOf(status.State, "aborted", "stuck", "gurumeditation") || status.PreparationFailed {
 			expected = false
@@ -181,9 +189,11 @@ func (s *Server) observeNode(n *Node, status *NodeStatus, err error, now time.Ti
 			} else {
 				n.Health.Commands.update(now, serviceErr, after, status.PreparationFailed)
 			}
-			transitionObserved := n.Expected == nil || !oneOf(n.Expected.Action, "reboot", "reset") || !now.Before(n.Expected.Requested.Add(probeInterval))
+			transitionObserved := n.Expected == nil || !oneOf(n.Expected.Action, "reboot", "reset") || n.Expected.BeforeBoot != "" && bootOf(status.Guest) != "" && bootOf(status.Guest) != n.Expected.BeforeBoot
 			if status.GuestError == nil && serviceErr == nil && transitionObserved && (n.Expected == nil || n.Expected.Power == "running") {
-				n.Expected = nil
+				if n.Expected != nil && n.Expected.Dispatched != nil && now.After(*n.Expected.Dispatched) {
+					n.Expected.Ready = true
+				}
 			}
 		}
 	}

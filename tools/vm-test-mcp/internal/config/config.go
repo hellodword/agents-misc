@@ -23,7 +23,6 @@ type Service struct {
 	Listen    string   `yaml:"listen"`
 	PublicURL string   `yaml:"public_url"`
 	Token     string   `yaml:"token"`
-	StateDir  string   `yaml:"state_dir"`
 	Hosts     []string `yaml:"hosts"`
 	Origins   []string `yaml:"origins"`
 }
@@ -118,6 +117,7 @@ type Storage struct {
 }
 type Nix = Worker
 type Config struct {
+	StateDir   string     `yaml:"state_dir"`
 	Service    Service    `yaml:"service"`
 	Tasks      Tasks      `yaml:"tasks"`
 	VirtualBox VirtualBox `yaml:"virtualbox"`
@@ -135,7 +135,7 @@ func Defaults() Config {
 		Tasks:   Tasks{DefaultTimeout: Duration(time.Hour), MaxDuration: Duration(24 * time.Hour), CleanupTimeout: Duration(5 * time.Minute)},
 		VirtualBox: VirtualBox{StartupTimeout: Duration(10 * time.Minute), ShutdownTimeout: Duration(time.Minute), UnavailableAfter: Duration(30 * time.Second),
 			Network: Network{LAN: "10.77.0.0/24", WAN: "10.0.2.0/24", DNS: []string{"1.1.1.1", "9.9.9.9"}, Listen: "127.0.0.1", Sources: []string{"127.0.0.1/32"}, PortMin: 20000, PortMax: 29999, LeaseSeconds: 15}},
-		Nix: Worker{ControllerUID: -1, Nix: "nix"}, Storage: Storage{SuccessDays: 1, FailureDays: 7, SummaryDays: 30, EvidenceBytes: 20 << 30, LowWaterBytes: 16 << 30, InputBytes: 16 << 30, UploadIdle: Duration(time.Hour), MaxUploadBytes: 8 << 30},
+		Nix: Worker{ControllerUID: -1, Nix: "nix"}, Storage: Storage{SuccessDays: 1, FailureDays: 7, SummaryDays: 30, EvidenceBytes: 40 << 30, LowWaterBytes: 32 << 30, InputBytes: 16 << 30, UploadIdle: Duration(time.Hour), MaxUploadBytes: 8 << 30},
 	}
 }
 func decode(file string, v any) error {
@@ -177,8 +177,11 @@ func origin(s string) bool {
 }
 func (c *Config) Validate() error {
 	bad := func(s string) error { return fmt.Errorf("invalid configuration: %s", s) }
-	if c.Service.Token == "" || strings.ContainsAny(c.Service.Token, "\r\n") || !absolute(c.Service.StateDir) {
-		return bad("service token and absolute private state_dir are required")
+	if c.Service.Token == "" || strings.ContainsAny(c.Service.Token, "\r\n") || !absolute(c.StateDir) {
+		return bad("service token and canonical absolute state_dir are required")
+	}
+	if err := c.validateStateDirs(); err != nil {
+		return err
 	}
 	host, port, e := net.SplitHostPort(c.Service.Listen)
 	number, portError := strconv.Atoi(port)
@@ -352,7 +355,13 @@ func LoadWorker(file string) (Worker, error) {
 	if e := decode(file, &shared); e != nil {
 		return shared.Nix, e
 	}
+	if err := shared.validateStateDirs(); err != nil {
+		return shared.Nix, err
+	}
 	c := shared.Nix
+	if c.StateDir == "" {
+		c.StateDir = shared.StateDir
+	}
 	if c.CacheURL == "" {
 		c.CacheURL = shared.Service.PublicURL
 	}
@@ -375,9 +384,6 @@ func LoadWorker(file string) (Worker, error) {
 	}
 	if !origin(c.CacheURL) {
 		return c, fmt.Errorf("nix.cache_url (or service.public_url) must be an HTTP(S) origin")
-	}
-	if c.StateDir == shared.Service.StateDir {
-		return c, fmt.Errorf("controller and worker require separate state directories")
 	}
 	return c, nil
 }

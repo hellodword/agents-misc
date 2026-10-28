@@ -110,7 +110,13 @@ func TestWindowsInheritedOutputEndsWithJob(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	var out, errout bytes.Buffer
-	child, err := launch(ctx, spec, strings.NewReader(""), &out, &errout)
+	input, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	writer.Close()
+	child, err := launch(ctx, spec, input, &out, &errout)
 	if err != nil {
 		t.Fatal(err)
 	}

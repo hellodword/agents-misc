@@ -32,8 +32,8 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 	f.StringVar(&o.Nix, "nix", "nix", "Nix executable in this container")
 	f.StringVar(&o.Test, "test", "", "locked project test flake attribute; with --config, omission selects the smoke test")
 	f.StringVar(&o.RequestID, "request-id", "", "execution identity; generated in automatic mode, reused on retries")
-	f.StringVar(&o.CacheURL, "cache-url", "", "cache upload capability URL")
-	f.StringVar(&o.CacheID, "cache-id", "", "cache transfer ID")
+	f.StringVar(&o.CacheURL, "upload-url", "", "cache upload capability URL")
+	f.StringVar(&o.CacheID, "upload-id", "", "input upload ID")
 	f.StringVar(&o.WorkDir, "work-dir", "", "absolute retained workspace; automatic mode defaults to tmp/agent/vm-test-runs/ID")
 	f.StringVar(&o.SigningKey, "signing-key", "", "optional cache signing key trusted by administrator")
 	if e := f.Parse(args); e != nil {

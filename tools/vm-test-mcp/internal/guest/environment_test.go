@@ -46,7 +46,7 @@ func TestSupervisorPassesAndRecordsResolvedEnvironment(t *testing.T) {
 	if err := os.WriteFile(request, wire.JSON(wire.CommandSpec{ID: id, Argv: []string{"synthetic"}, Cwd: root, Env: map[string]string{"TASK_MARKER": "synthetic-private-value"}}), 0600); err != nil {
 		t.Fatal(err)
 	}
-	launch := func(ctx context.Context, s wire.CommandSpec, in io.Reader, out, stderr io.Writer) (Child, error) {
+	launch := func(ctx context.Context, s wire.CommandSpec, in *os.File, out, stderr io.Writer) (Child, error) {
 		if s.Cwd != root || s.Context != "service" || s.Env["TASK_MARKER"] != "synthetic-private-value" || s.Env["PATH"] == "" {
 			t.Fatal(s)
 		}

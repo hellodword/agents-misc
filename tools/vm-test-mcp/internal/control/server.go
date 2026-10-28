@@ -9,26 +9,28 @@ import (
 	"log/slog"
 	"net/netip"
 	"os"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/config"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/safefs"
-	"github.com/hellodword/agents-misc/vm-test-mcp/internal/state"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/telemetry"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
 type Server struct {
+	pending            []pendingDispatch
 	mu                 sync.Mutex
-	revisions          map[string]revisionState
+	retentionMu        sync.Mutex
+	evidenceMu         sync.Mutex
+	evidenceBytes      int64
 	lastRetention      time.Time
 	storageBlocked     bool
 	wg                 sync.WaitGroup
 	cfg                config.Config
 	root               *safefs.Root
-	db                 *state.DB
+	db                 *repository
 	backend            Backend
 	tasks              []*Task
 	recovering         []*Task
@@ -51,22 +53,24 @@ func New(cfg config.Config, b Backend) (*Server, error) {
 	if e := cfg.Validate(); e != nil {
 		return nil, e
 	}
-	root, e := safefs.Private(cfg.Service.StateDir, true)
+	root, e := safefs.Private(cfg.ControllerDir(), true)
 	if e != nil {
 		return nil, e
 	}
-	db, e := state.Open(root.Path)
+	db, e := openRepository(root.Path)
 	if e != nil {
 		root.Close()
 		return nil, e
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{cfg: cfg, root: root, db: db, backend: b, ctx: ctx, cancel: cancel, operations: map[string]*Operation{}, requests: map[string]*Operation{}, transfers: map[string]*Transfer{}, runtime: map[string]*Runtime{}, uploading: map[string]*Upload{}}
-	s.revisions = map[string]revisionState{}
 	s.performance = telemetry.New()
 	s.performancePending = map[string]time.Time{}
 	if backends, ok := b.(*Backends); ok {
 		backends.Performance = s.performance
+		if backends.NixBackend != nil {
+			backends.NixBackend.PublishEvidence = s.db.PublishEvidence
+		}
 	}
 	fail := func(e error) (*Server, error) { db.Close(); root.Close(); cancel(); return nil, e }
 	if s.secret, e = root.Read("capability-key", 128); os.IsNotExist(e) {
@@ -88,6 +92,7 @@ func New(cfg config.Config, b Backend) (*Server, error) {
 				if e = json.Unmarshal(row, &t); e != nil {
 					return fail(e)
 				}
+				t.repository = db
 				s.tasks = append(s.tasks, &t)
 			case "operation":
 				var o Operation
@@ -95,10 +100,18 @@ func New(cfg config.Config, b Backend) (*Server, error) {
 					return fail(e)
 				}
 				if o.State == "pending" {
-					o.State = "uncertain"
-					o.Error = &wire.Error{Code: "interrupted", Message: "Service stopped before confirming this operation"}
-					if e = db.Save(ctx, state.Document{Kind: kind, ID: o.ID, Value: o}); e != nil {
-						return fail(e)
+					intent, stage, err := db.DispatchIntent(ctx, o.ID)
+					if err != nil {
+						return fail(err)
+					}
+					if stage == "prepared" {
+						s.pending = append(s.pending, pendingDispatch{ID: o.ID, Args: intent})
+					} else {
+						o.State = "uncertain"
+						o.Error = &wire.Error{Code: "interrupted", Message: "Service stopped before confirming this operation"}
+						if e = db.Save(ctx, &o); e != nil {
+							return fail(e)
+						}
 					}
 				}
 				s.operations[o.ID] = &o
@@ -111,15 +124,34 @@ func New(cfg config.Config, b Backend) (*Server, error) {
 				if t.Objects, t.Bytes, e = db.TransferObjects(ctx, t.ID); e != nil {
 					return fail(e)
 				}
+				if t.State == "deleting" {
+					if e = root.RemoveAll("transfers/" + t.ID); e != nil {
+						return fail(e)
+					}
+					if _, e = db.ExecContext(ctx, "DELETE FROM transfers WHERE id=?", t.ID); e != nil {
+						return fail(e)
+					}
+					continue
+				}
 				if e = s.recoverTransfer(ctx, &t); e != nil {
 					return fail(e)
+				}
+				if t.State == "open" && t.ManifestDigest != "" {
+					if e = s.completeUpload(&t); e != nil {
+						return fail(e)
+					}
 				}
 				s.transfers[t.ID] = &t
 			}
 		}
 	}
 	s.recovering = append([]*Task(nil), s.tasks...)
-	sort.SliceStable(s.tasks, func(i, j int) bool { return s.tasks[i].Created.Before(s.tasks[j].Created) })
+	if used, err := s.evidenceUsage(); err == nil {
+		s.evidenceBytes = used
+		s.storageBlocked = used > s.cfg.Storage.EvidenceBytes
+	} else {
+		s.storageBlocked = true
+	}
 	return s, nil
 }
 func bytesReader(b []byte) io.Reader { return &byteReader{b: b} }
@@ -134,7 +166,7 @@ func (b *byteReader) Read(p []byte) (int, error) {
 	b.b = b.b[n:]
 	return n, nil
 }
-func (s *Server) persist(docs ...state.Document) {
+func (s *Server) persist(docs ...record) {
 	if e := s.db.Save(context.Background(), docs...); e != nil {
 		slog.Error("state write failed", "error", e)
 		s.cancel()
@@ -142,19 +174,24 @@ func (s *Server) persist(docs ...state.Document) {
 	}
 }
 func (s *Server) save(t *Task) {
-	s.persist(state.Document{Kind: "task", ID: t.ID, Value: t})
+	if t.Ended != nil && t.DetailExpires == nil {
+		days := s.cfg.Storage.FailureDays
+		if t.State == "finished" && t.Conclusion == "passed" {
+			days = s.cfg.Storage.SuccessDays
+		}
+		expires := t.Ended.Add(time.Duration(days) * 24 * time.Hour)
+		t.DetailExpires = &expires
+	}
+	s.persist(t)
 	if s.closed {
 		return
 	}
-	kind := "lab"
-	if t.Kind == "nixos" {
-		kind = "nix_job"
+	if t.Kind != "lab" {
+		return
 	}
-	s.revision(kind+"/"+t.ID, taskCondition(t))
-	for _, c := range t.Commands {
-		s.revision("command/"+c.ID, commandCondition(c))
-		s.revision("command/"+c.ID+"/output", []any{c.Retained.Stdout, c.Retained.Stderr})
-	}
+	t.lab().Commands = slices.DeleteFunc(t.lab().Commands, func(c *Command) bool { return !c.Polling() })
+	t.lab().Endpoints = slices.DeleteFunc(t.lab().Endpoints, func(e *Endpoint) bool { return e.State == "closed" })
+	t.lab().Captures = slices.DeleteFunc(t.lab().Captures, func(c *Capture) bool { return oneOf(c.State, "stopped", "released") })
 }
 func (s *Server) event(t *Task, code, msg string) {
 	s.eventDetails(t, code, msg, nil)
@@ -163,11 +200,8 @@ func (s *Server) eventDetails(t *Task, code, msg string, details any) {
 	if oneOf(code, "prepare_failed", "network_degraded", "network_observation_late", "node_unavailable", "cleanup_blocked", "command_unavailable") {
 		s.retainPerformance(t, code)
 	}
-	e := s.db.Event(context.Background(), t.ID, map[string]any{"time": time.Now().UTC(), "code": code, "message": msg, "phase": t.phase(), "result": t.result(), "cleanup": t.cleanupState(), "details": details})
-	if e != nil {
-		slog.Error("event write failed", "error", e)
-		s.cancel()
-	}
+	t.pendingEvents = append(t.pendingEvents, map[string]any{"time": time.Now().UTC(), "code": code, "message": msg, "phase": t.phase(), "result": t.result(), "cleanup": t.cleanupState(), "details": details})
+
 }
 func (s *Server) task(id string) (*Task, error) {
 	for _, t := range s.tasks {
@@ -242,6 +276,7 @@ func (s *Server) schedule() {
 	s.mu.Lock()
 	s.active = blocked
 	s.mu.Unlock()
+	s.resumeDispatches()
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
 	for {
@@ -265,17 +300,6 @@ func (s *Server) schedule() {
 			if next == nil {
 				s.mu.Unlock()
 				s.expireRetention()
-				continue
-			}
-			earlier := false
-			for _, op := range s.operations {
-				if op.State == "pending" && (op.Tool == "lab_create" || op.Tool == "nix_job_create") && op.Created.Before(next.Created) {
-					earlier = true
-					break
-				}
-			}
-			if earlier {
-				s.mu.Unlock()
 				continue
 			}
 			s.active = next.ID
@@ -396,7 +420,7 @@ func (s *Server) execute(t *Task) {
 func (s *Server) prepare(t *Task, r *Runtime) error {
 	ctx, cancel := context.WithCancelCause(r.ctx)
 	defer cancel(nil)
-	if len(t.Nodes) != 0 {
+	if len(t.lab().Nodes) != 0 {
 		if err := s.setGUI(ctx, t, "any", false); err != nil {
 			return err
 		}
@@ -408,7 +432,7 @@ func (s *Server) prepare(t *Task, r *Runtime) error {
 		s.mu.Lock()
 		n.Intent = true
 		n.Preparation = Preparation{Stage: "creating", Started: &started, StageStarted: &started, Deadline: &until, Updated: started}
-		err := s.db.Save(context.Background(), state.Document{Kind: "task", ID: t.ID, Value: t})
+		err := s.db.Save(context.Background(), t)
 		tc, nc := t.executionSnapshot(), clone(n)
 		s.mu.Unlock()
 		if err != nil {
@@ -474,7 +498,7 @@ func (s *Server) prepare(t *Task, r *Runtime) error {
 		s.mu.Unlock()
 		return err
 	}
-	if err := prepare(t.Router); err != nil {
+	if err := prepare(t.lab().Router); err != nil {
 		return err
 	}
 	// All clone MACs and reservations are fixed at admission. Establish DHCP,
@@ -483,7 +507,7 @@ func (s *Server) prepare(t *Task, r *Runtime) error {
 		return err
 	}
 	var wg sync.WaitGroup
-	for _, n := range t.Nodes {
+	for _, n := range t.lab().Nodes {
 		wg.Add(1)
 		go func() { defer wg.Done(); _ = prepare(n) }()
 	}
@@ -535,8 +559,8 @@ func (s *Server) observe(t *Task, r *Runtime) {
 				return
 			}
 			kind := t.Kind
-			healthy := oneOf(t.Network, "ready", "suspect")
-			expired := healthy && !t.NetworkLeaseExpires.IsZero() && !time.Now().Before(t.NetworkLeaseExpires)
+			healthy := t.Kind == "lab" && oneOf(t.lab().Network, "ready", "suspect")
+			expired := healthy && !t.lab().NetworkLeaseExpires.IsZero() && !time.Now().Before(t.lab().NetworkLeaseExpires)
 			snapshot := t.executionSnapshot()
 			s.mu.Unlock()
 			if expired {
@@ -558,17 +582,18 @@ func (s *Server) observe(t *Task, r *Runtime) {
 					continue
 				}
 				s.mu.Lock()
-				if v.Execution != nil && string(wire.JSON(t.NixExecution)) != string(wire.JSON(v.Execution)) {
-					t.NixExecution, t.Failure = v.Execution, v.Execution.Error
+				if v.Execution != nil && string(wire.JSON(t.nix().NixExecution)) != string(wire.JSON(v.Execution)) {
+					t.nix().NixExecution, t.Failure = v.Execution, v.Execution.Error
 					if t.Failure == nil {
 						t.Failure = v.Execution.PersistenceError
 					}
 					s.save(t)
 				}
 				if v.Execution != nil && v.Execution.Imported {
-					if input := s.transfers[t.CacheID]; input != nil {
+					if input := s.transfers[t.nix().CacheID]; input != nil {
 						if err := s.removeTransfer(input); err != nil {
 							s.event(t, "input_release_failed", "Imported upload removal will be retried")
+							s.save(t)
 						}
 					}
 				}
@@ -605,12 +630,12 @@ func (s *Server) observe(t *Task, r *Runtime) {
 				nextNetwork = time.Now().Add(time.Duration(s.cfg.VirtualBox.Network.LeaseSeconds/3) * time.Second)
 			}
 
-			for _, n := range snapshot.Nodes {
+			for _, n := range snapshot.lab().Nodes {
 				if n.Preparation.Stage == "ready" && n.Polling.due(time.Now()) {
 					poll("node/"+n.ID, func() { s.pollNode(t, r, n.ID) })
 				}
 			}
-			for _, c := range snapshot.Commands {
+			for _, c := range snapshot.lab().Commands {
 				if c.Polling() && c.Schedule.due(time.Now()) {
 					poll("command/"+c.ID, func() { s.pollCommand(t, r, c.ID) })
 				}
@@ -651,6 +676,10 @@ func (s *Server) pollNode(t *Task, r *Runtime, id string) {
 	}
 	s.mu.Lock()
 	if t.Terminal() {
+		s.mu.Unlock()
+		return
+	}
+	if nc.Expected != nil && (nc.Expected.Dispatched == nil || n.Expected == nil || nc.Expected.RequestID != n.Expected.RequestID) || nc.Expected == nil && n.Expected != nil {
 		s.mu.Unlock()
 		return
 	}
@@ -723,25 +752,25 @@ func (s *Server) closeRelays(t *Task, r *Runtime) {
 }
 func (s *Server) degrade(t *Task, r *Runtime, err error) {
 	s.mu.Lock()
-	if t.Terminal() || t.Network == "degraded" {
+	if t.Terminal() || t.lab().Network == "degraded" {
 		s.mu.Unlock()
 		return
 	}
 	// A renewal may have completed between the observer's expiry snapshot and
 	// this transition. Never suspend a newly confirmed lease using stale data.
-	if wire.Safe(err).Code == "network_lease_expired" && time.Now().Before(t.NetworkLeaseExpires) {
+	if wire.Safe(err).Code == "network_lease_expired" && time.Now().Before(t.lab().NetworkLeaseExpires) {
 		s.mu.Unlock()
 		return
 	}
-	t.Network = "degraded"
+	t.lab().Network = "degraded"
 	relays := r.relays
 	r.relays = map[string]*Relay{}
-	for _, e := range t.Endpoints {
+	for _, e := range t.lab().Endpoints {
 		if e.State == "open" {
 			e.State = "suspended"
 		}
 	}
-	s.eventDetails(t, "network_degraded", "Network requires explicit recovery", map[string]any{"cause": wire.Safe(err), "observation": t.NetworkObservation, "policy_updated": t.NetworkUpdated, "lease_expires": t.NetworkLeaseExpires, "router_identity": routerIdentity(t)})
+	s.eventDetails(t, "network_degraded", "Network requires explicit recovery", map[string]any{"cause": wire.Safe(err), "observation": t.lab().NetworkObservation, "policy_updated": t.lab().NetworkUpdated, "lease_expires": t.lab().NetworkLeaseExpires, "router_identity": routerIdentity(t)})
 	s.save(t)
 	s.mu.Unlock()
 	for _, relay := range relays {

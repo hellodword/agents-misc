@@ -4,21 +4,25 @@ package nixos
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"time"
 
+	"github.com/hellodword/agents-misc/vm-test-mcp/internal/execution"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
 type Client interface {
 	Call(context.Context, string, any) (json.RawMessage, error)
+	OpenArtifact(context.Context, string, string, string) (io.ReadCloser, error)
 }
 type Request struct {
-	ID, CacheID, Derivation, System string
-	TimeoutSeconds                  int
-	Deadline                        *time.Time
-	Manifest                        []wire.HandoffFile
+	ManifestDigest                              string
+	ID, InstanceID, CacheID, Derivation, System string
+	TimeoutSeconds                              int
+	Deadline                                    *time.Time
 }
 type Backend struct {
+	PublishEvidence  func(context.Context, *execution.Artifact) error
 	Client           Client
 	CacheURL         func(string) string
 	StateDir         string
@@ -29,14 +33,15 @@ func (b *Backend) Call(ctx context.Context, action string, t *Request) (json.Raw
 	if b.Client == nil {
 		return nil, wire.Fail("worker_unavailable", "Configure and start the Nix worker to use this operation")
 	}
-	req := map[string]any{"task_id": t.ID}
+	req := map[string]any{"task_id": t.ID, "instance_id": t.InstanceID}
 	if action == "handoff" {
-		req["manifest_digest"] = wire.ManifestDigest(t.Manifest)
+		req["manifest_digest"] = t.ManifestDigest
 	}
 	if action == "extend" {
 		req["deadline"] = t.Deadline
 	}
 	if action == "start" {
+		req["upload_id"] = t.CacheID
 		req["derivation"] = t.Derivation
 		req["system"] = t.System
 		req["timeout_seconds"] = t.TimeoutSeconds

@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hellodword/agents-misc/vm-test-mcp/internal/state"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
@@ -81,6 +80,13 @@ func TestOfflineWorkerDoesNotReserveRequestOrBlockLab(t *testing.T) {
 	f.mu.Lock()
 	f.offline = false
 	f.mu.Unlock()
+	id, url := newUpload(t, s, "cache")
+	drv, objects := cacheObjects()
+	declareUpload(t, s, id, url, drv, objects)
+	for name, data := range objects {
+		transferHTTP(t, s, "PUT", url+"/"+name, data, 200)
+	}
+	a.CacheID = id
 	if _, err = s.accept(context.Background(), "nix_job_create", wire.JSON(a)); err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +101,7 @@ func TestQueuedUnsubmittedNixFailsWithoutHoldingNextLab(t *testing.T) {
 	defer s.Close()
 	job := newTask("nixos", 60)
 	s.tasks = append(s.tasks, job)
-	if err = s.db.Save(context.Background(), state.Document{Kind: "task", ID: job.ID, Value: job}); err != nil {
+	if err = s.db.Save(context.Background(), job); err != nil {
 		t.Fatal(err)
 	}
 	s.Start()
@@ -132,13 +138,13 @@ func TestNixTaskRetainsExecutionThroughCompletionAndCancellationCleanup(t *testi
 			defer s.Close()
 			job := newTask("nixos", 60)
 			s.tasks = append(s.tasks, job)
-			if err = s.db.Save(context.Background(), state.Document{Kind: "task", ID: job.ID, Value: job}); err != nil {
+			if err = s.db.Save(context.Background(), job); err != nil {
 				t.Fatal(err)
 			}
 			s.Start()
 			if cancelled {
 				waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return job.State == "running" })
-				successful(t, s, "nix_job_cancel", TaskChange{Change: Change{"cancel-nix-result"}, TaskID: TaskID{job.ID}})
+				successful(t, s, "nix_job_cancel", JobChange{Change: Change{"cancel-nix-result"}, JobID: JobID{job.ID}})
 			}
 			waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return job.Cleanup == "complete" })
 			s.mu.Lock()
@@ -148,11 +154,11 @@ func TestNixTaskRetainsExecutionThroughCompletionAndCancellationCleanup(t *testi
 			if cancelled {
 				want = "cancelled"
 			}
-			if got.State != want || got.NixExecution == nil || got.NixExecution.Process.ExitCode == nil || *got.NixExecution.Process.ExitCode != 23 || got.Failure == nil || got.Failure.Code != "backend_error" {
+			if got.State != want || got.nix().NixExecution == nil || got.nix().NixExecution.Process.ExitCode == nil || *got.nix().NixExecution.Process.ExitCode != 23 || got.Failure == nil || got.Failure.Code != "backend_error" {
 				t.Fatal(got.Public())
 			}
 			var stored Task
-			if err = s.db.Load(context.Background(), "task", job.ID, &stored); err != nil || stored.NixExecution == nil || *stored.NixExecution.Process.ExitCode != 23 {
+			if err = s.db.Load(context.Background(), "task", job.ID, &stored); err != nil || stored.nix().NixExecution == nil || *stored.nix().NixExecution.Process.ExitCode != 23 {
 				t.Fatal(stored.Public(), err)
 			}
 		})
@@ -200,7 +206,7 @@ func TestNetworkChangesValidateAtomicallyAndRequireLeaseRecovery(t *testing.T) {
 	s, _ := testServer(t)
 	lab := createLab(t, s, "network-updates")
 	waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); v, _ := s.task(lab.ID); return v.State == "running" })
-	a := NetworkRequest{TaskChange: TaskChange{Change: Change{"update"}, TaskID: TaskID{lab.ID}}, DHCP: new(false), DNS: []string{"8.8.8.8"}, Nodes: []AddressRequest{{NodeID: lab.Nodes[0].ID, IPv4: "10.77.0.80"}}}
+	a := NetworkRequest{TaskChange: TaskChange{Change: Change{"update"}, TaskID: TaskID{lab.ID}}, DHCP: new(false), DNS: []string{"8.8.8.8"}, Nodes: []AddressRequest{{NodeID: lab.lab().Nodes[0].ID, IPv4: "10.77.0.80"}}}
 	successful(t, s, "network_set", a)
 	a.RequestID = "conflict"
 	a.Nodes[0].IPv4 = "10.77.0.1"
@@ -209,11 +215,11 @@ func TestNetworkChangesValidateAtomicallyAndRequireLeaseRecovery(t *testing.T) {
 	}
 	s.mu.Lock()
 	v, _ := s.task(lab.ID)
-	if v.DHCP || v.DNS[0] != "8.8.8.8" || v.Nodes[0].IPv4 != "10.77.0.80" {
+	if v.lab().DHCP || v.lab().DNS[0] != "8.8.8.8" || v.lab().Nodes[0].IPv4 != "10.77.0.80" {
 		t.Fatal(v)
 	}
-	v.NetworkUpdated = time.Now().Add(-time.Minute)
-	v.NetworkLeaseExpires = v.NetworkUpdated.Add(time.Duration(s.cfg.VirtualBox.Network.LeaseSeconds) * time.Second)
+	v.lab().NetworkUpdated = time.Now().Add(-time.Minute)
+	v.lab().NetworkLeaseExpires = v.lab().NetworkUpdated.Add(time.Duration(s.cfg.VirtualBox.Network.LeaseSeconds) * time.Second)
 	s.mu.Unlock()
 	a.RequestID = "expired"
 	a.Nodes = nil
@@ -226,14 +232,14 @@ func TestNetworkChangesValidateAtomicallyAndRequireLeaseRecovery(t *testing.T) {
 func TestRouterBootChangeRequiresExplicitRecovery(t *testing.T) {
 	b := &VBoxBackend{Config: testConfig(t)}
 	task := newTask("lab", 60)
-	task.LAN = b.Config.VirtualBox.Network.LAN
-	task.DNS = b.Config.VirtualBox.Network.DNS
-	task.Router = &Node{ID: wire.ID(), UUID: wire.UUID()}
-	task.RouterBootID = wire.UUID()
+	task.lab().LAN = b.Config.VirtualBox.Network.LAN
+	task.lab().DNS = b.Config.VirtualBox.Network.DNS
+	task.lab().Router = &Node{ID: wire.ID(), UUID: wire.UUID()}
+	task.lab().RouterBootID = wire.UUID()
 	if err := os.MkdirAll(b.runtime(task), 0700); err != nil {
 		t.Fatal(err)
 	}
-	r := &routerRecoveryRunner{uuid: task.Router.UUID, configPath: b.vmDir(task, task.Router) + "/router.vbox", state: "running"}
+	r := &routerRecoveryRunner{uuid: task.lab().Router.UUID, configPath: b.vmDir(task, task.lab().Router) + "/router.vbox", state: "running"}
 	b.Runner = r
 	if _, err := b.Network(context.Background(), task, nil, false); wire.Safe(err).Code != "network_degraded" {
 		t.Fatal(err)
@@ -247,9 +253,9 @@ func TestRouterBootChangeRequiresExplicitRecovery(t *testing.T) {
 
 func TestPublicTaskHidesRouterBootAndGUIPolicyOwnership(t *testing.T) {
 	task := newTask("lab", 60)
-	task.RouterISO = "/fixture/private.iso"
-	task.RouterBootID = wire.UUID()
-	task.GUI = &GUIOwnership{Original: "fixture"}
+	task.lab().RouterISO = "/fixture/private.iso"
+	task.lab().RouterBootID = wire.UUID()
+	task.lab().GUI = &GUIOwnership{Original: "fixture"}
 	data, _ := json.Marshal(task.Public())
 	for _, key := range []string{"router_iso", "router_boot_id", "gui_ownership"} {
 		if strings.Contains(string(data), key) {
@@ -299,9 +305,9 @@ func TestSlowGuestPollDoesNotStarveNetworkLease(t *testing.T) {
 	}
 	defer s.Close()
 	task := newTask("lab", 60)
-	task.State, task.Network = "running", "ready"
-	task.NetworkUpdated = time.Now().UTC()
-	task.Nodes = []*Node{{ID: wire.ID(), State: "running", Preparation: Preparation{Stage: "ready"}}}
+	task.State, task.lab().Network = "running", "ready"
+	task.lab().NetworkUpdated = time.Now().UTC()
+	task.lab().Nodes = []*Node{{ID: wire.ID(), State: "running", Preparation: Preparation{Stage: "ready"}}}
 	ctx, cancel := context.WithCancel(context.Background())
 	runtime := &Runtime{ctx: ctx, cancel: cancel}
 	done := make(chan struct{})
@@ -332,7 +338,7 @@ func TestSlowGuestPollDoesNotStarveNetworkLease(t *testing.T) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if task.Network != "ready" {
+	if task.lab().Network != "ready" {
 		t.Fatal("healthy router was degraded by a slow guest poll")
 	}
 }
@@ -354,7 +360,7 @@ func TestGuestStatusRefreshesWithoutPowerStateChange(t *testing.T) {
 	task := newTask("lab", 60)
 	task.State = "running"
 	node := &Node{ID: wire.ID(), State: "running"}
-	task.Nodes = []*Node{node}
+	task.lab().Nodes = []*Node{node}
 	runtime := &Runtime{ctx: context.Background()}
 	for _, ready := range []bool{false, true} {
 		f.guest = map[string]any{"hostname": "independent-clone", "prepared": ready}
@@ -366,7 +372,7 @@ func TestGuestStatusRefreshesWithoutPowerStateChange(t *testing.T) {
 		if err = s.db.Load(context.Background(), "task", task.ID, &saved); err != nil {
 			t.Fatal(err)
 		}
-		if saved.Nodes[0].Guest["prepared"] != ready {
+		if saved.lab().Nodes[0].Guest["prepared"] != ready {
 			t.Fatal("guest status was not persisted")
 		}
 	}
@@ -402,7 +408,7 @@ func TestNixTerminalReplyPreservesConcurrentTaskTermination(t *testing.T) {
 			}()
 			job := newTask("nixos", 60)
 			s.tasks = append(s.tasks, job)
-			if err = s.db.Save(context.Background(), state.Document{Kind: "task", ID: job.ID, Value: job}); err != nil {
+			if err = s.db.Save(context.Background(), job); err != nil {
 				t.Fatal(err)
 			}
 			s.Start()
@@ -412,7 +418,7 @@ func TestNixTerminalReplyPreservesConcurrentTaskTermination(t *testing.T) {
 				t.Fatal("status did not start")
 			}
 			if termination == "cancelled" {
-				successful(t, s, "nix_job_cancel", TaskChange{Change: Change{"cancel-inflight-nix-result"}, TaskID: TaskID{job.ID}})
+				successful(t, s, "nix_job_cancel", JobChange{Change: Change{"cancel-inflight-nix-result"}, JobID: JobID{job.ID}})
 			} else {
 				s.mu.Lock()
 				expired := time.Now().Add(-time.Second)
@@ -426,14 +432,14 @@ func TestNixTerminalReplyPreservesConcurrentTaskTermination(t *testing.T) {
 			s.mu.Lock()
 			got := clone(job)
 			s.mu.Unlock()
-			if got.State != termination || got.NixExecution == nil || got.NixExecution.Process == nil || got.NixExecution.Process.ExitCode == nil || *got.NixExecution.Process.ExitCode != 23 || got.Failure == nil || got.Failure.Code != "backend_error" {
+			if got.State != termination || got.nix().NixExecution == nil || got.nix().NixExecution.Process == nil || got.nix().NixExecution.Process.ExitCode == nil || *got.nix().NixExecution.Process.ExitCode != 23 || got.Failure == nil || got.Failure.Code != "backend_error" {
 				t.Fatal(got.Public())
 			}
 			if termination == "cancelled" && got.Conclusion != "inconclusive" {
 				t.Fatal(got.Public())
 			}
 			var persisted Task
-			if err := s.db.Load(context.Background(), "task", job.ID, &persisted); err != nil || persisted.State != termination || persisted.NixExecution == nil || persisted.NixExecution.Process.ExitCode == nil || *persisted.NixExecution.Process.ExitCode != 23 {
+			if err := s.db.Load(context.Background(), "task", job.ID, &persisted); err != nil || persisted.State != termination || persisted.nix().NixExecution == nil || persisted.nix().NixExecution.Process.ExitCode == nil || *persisted.nix().NixExecution.Process.ExitCode != 23 {
 				t.Fatal(persisted.Public(), err)
 			}
 		})

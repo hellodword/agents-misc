@@ -38,8 +38,12 @@ host public/NAT addresses and extra management ranges for egress protection.
 
 Run the controller as the VirtualBox owner. Run the worker as an ordinary account
 outside Nix `trusted-users`, including trusted groups. Both processes may use the
-same account. Their state directories remain separate, real, owner-matched `0700`
-directories without symlink components. Set `nix.controller_uid` to the controller
+same account. Top-level `state_dir` is a root with `controller/` and `nix-worker/`
+role directories. Optional `nix.state_dir` overrides the worker root; it can equal
+the controller root. Each role has its own database and lock in a real,
+owner-matched `0700` directory without symlink components. For separate accounts
+sharing a root, prepare parent traversal permissions and each role directory
+before startup. Final role directories must not overlap or nest. Set `nix.controller_uid` to the controller
 account's UID (`id -u` when using the same account); connections are checked using
 `SO_PEERCRED`.
 
@@ -97,7 +101,9 @@ Thus project commands have guest administrative privileges. The command supervis
 puts Windows children in a kill-on-close Job Object **before** resuming them. The
 controller probes the prepared command service and records its version/hash as
 diagnostic metadata. Both `vm-test-guest.exe` and the resident
-`vm-test-service.exe` must come from the selected package. A fresh heartbeat must
+`vm-test-service.exe` are copies of the single executable supplied above;
+`prepare` installs both and registers the service. No separate service download
+or installation command is needed. A fresh heartbeat must
 identify a live service process with the same hash and command protocol as the
 probed executable; replacing just the command binary leaves the node unready.
 Preparation records the selected local Guest Control account in the service's
@@ -107,8 +113,9 @@ wait rights, preserving the remaining process DACL. This permits filtered Guest
 Control tokens to verify creation time and termination without granting process
 termination, memory access, or control over unrelated processes. Failed identity
 queries remain distinct from a confirmed exit or reused PID.
-Re-run preparation when changing the guest protocol or
-baseline account. No project dependencies are installed
+Guest command protocol 2 reports confirmed process startup, distinct stdin delivery/OS
+pipe progress and an OS boot identity used to verify reboot readiness. Re-run
+preparation when changing the guest protocol or baseline account. No project dependencies are installed
 implicitly by the MCP service.
 
 After Sysprep has shut down successfully, create a powered-off snapshot and put
@@ -327,7 +334,9 @@ These commands build/run the package without changing accounts or provisioning t
 host. The worker's socket must be accessible to the controller; with different
 accounts, place it outside the worker's private `0700` state directory.
 
-Start the worker when Nix tests are needed. MCP and VirtualBox remain usable without it.
+When Nix is configured, run the worker alongside the controller. If it becomes
+unavailable, storage accounting is unknown and new labs/jobs/uploads and queued
+starts pause. Existing execution, controls, diagnostics and cleanup remain usable.
 For a system service using the same `vm-owner` account as the controller:
 
 ```ini
@@ -346,15 +355,21 @@ account supervision. Use `--check-config --config /etc/vm-test/config.yaml` on e
 when changing policy or paths.
 
 This release requires new configuration and empty controller **and worker** state
-with fresh schema-20 databases. The user must stop the old services, confirm all
+with fresh schema-21 databases. The user must stop the old services, confirm all
 old VM/daemon/port resources are released, and clear or retire the old state before
 starting. Preserve any required old evidence in private offline backups first.
 Do not run the new binary against a live old state or attempt an in-place schema
-migration. VirtualBox baselines and host Nix-store contents remain independent.
+migration. Guest protocol 2 requires rebuilding and preparing both Linux and
+Windows baseline executables; Windows also requires the matching resident service.
+Keep the new state for subsequent restart/recovery acceptance. VirtualBox baselines and host Nix-store contents remain independent.
 Old private backups can contain credentials and command inputs; keep them outside
 version control and the Nix store.
 
 ## Recovery
+
+The worker database has a durable instance identity. A replacement database cannot
+attest release of jobs owned by the previous one; inspect and reconcile their actual
+resources instead of using an empty store as cleanup evidence.
 
 Inspect `node_get`, `execution_events` and `lab_diagnose` for node failures. `node_exec`
 provides a short Guest Control command even when first-boot initialization or the
@@ -395,7 +410,9 @@ controller confirms durable size/hash-verified evidence handoff.
 
 ## Acceptance
 
-Record these real-host results separately from the default adapter suite:
+Run the reproducible [Codex transport check](README.md#development-and-verification)
+with CLI 0.163.0 and 0.165.0. Record these real-host results separately from the
+adapter/transport suites:
 
 1. Two nodes from one generalized Windows snapshot have independent identities,
    MACs and disk state; the baseline remains unchanged.

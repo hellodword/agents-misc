@@ -28,7 +28,7 @@ func TestNativeClickDefaultsToAButtonTransition(t *testing.T) {
 	b := &nativeInputBackend{received: make(chan NodeAction, 2)}
 	s, task, _ := fixtureLab(t, b, time.Second)
 	for _, action := range []string{"click", "drag"} {
-		request := InputNodeRequest{NodeChange: NodeChange{Change: Change{RequestID: "default-" + action}, NodeID: NodeID{TaskID: TaskID{task.ID}, NodeID: task.Nodes[0].ID}}, Action: action, X: 12, Y: 24, EndX: 30, EndY: 40}
+		request := InputNodeRequest{NodeChange: NodeChange{Change: Change{RequestID: "default-" + action}, NodeID: NodeID{TaskID: TaskID{task.ID}, NodeID: task.lab().Nodes[0].ID}}, Action: action, X: 12, Y: 24, EndX: 30, EndY: 40}
 		successful(t, s, "node_input", request)
 		if got := <-b.received; got.Button != 1 || got.X != 12 || got.Y != 24 || got.Action != "input_"+action {
 			t.Fatal(got)
@@ -41,8 +41,7 @@ func TestDiscoveredSchemaAndRuntimeAcceptTheSameBoundaries(t *testing.T) {
 	for _, d := range Definitions {
 		compiledSchema(reflect.TypeOf(d.Args))
 	}
-	id := wire.ID()
-	base := schemaMap{"request_id": "schema-check", "task_id": id, "node_id": wire.ID()}
+	base := schemaMap{"request_id": "schema-check", "node_id": wire.ID()}
 	for _, test := range []struct {
 		name   string
 		typ    any
@@ -67,7 +66,7 @@ func TestDiscoveredSchemaAndRuntimeAcceptTheSameBoundaries(t *testing.T) {
 		{"bad context", StartRequest{}, schemaMap{"argv": []string{"fixture"}, "context": "auto"}, false},
 		{"relative cwd", StartRequest{}, schemaMap{"argv": []string{"fixture"}, "cwd": "relative"}, false},
 		{"windows cwd", StartRequest{}, schemaMap{"argv": []string{"fixture"}, "cwd": `C:\Task`}, true},
-		{"input path", PutRequest{}, schemaMap{"path": "/tmp/fixture", "transfer_id": wire.ID()}, true},
+		{"input path", PutRequest{}, schemaMap{"path": "/tmp/fixture", "upload_id": wire.ID()}, true},
 		{"udp endpoint", EndpointRequest{}, schemaMap{"protocol": "udp", "port": 65535}, true},
 		{"invalid endpoint", EndpointRequest{}, schemaMap{"protocol": "tcp", "port": 65536}, false},
 	} {
@@ -91,10 +90,8 @@ func TestDiscoveredSchemaAndRuntimeAcceptTheSameBoundaries(t *testing.T) {
 		v     schemaMap
 		valid bool
 	}{
-		{schemaMap{"request_id": "file", "kind": "file", "task_id": id}, true},
-		{schemaMap{"request_id": "file", "kind": "file"}, false},
+		{schemaMap{"request_id": "file", "kind": "file"}, true},
 		{schemaMap{"request_id": "cache", "kind": "cache"}, true},
-		{schemaMap{"request_id": "cache", "kind": "cache", "task_id": id}, false},
 	} {
 		if ok := validateArguments(reflect.TypeFor[TransferRequest](), wire.JSON(test.v)) == nil; ok != test.valid {
 			t.Fatal(test)
@@ -110,8 +107,8 @@ func TestSchemaRejectsBytesWithoutEchoingContentOrAllocatingReceipt(t *testing.T
 	defer s.Close()
 	marker := "synthetic-sensitive-value"
 	for _, args := range []schemaMap{
-		{"request_id": "invalid-argument", "task_id": wire.ID(), "node_id": wire.ID(), "argv": []string{strings.Repeat(marker, 2000)}},
-		{"request_id": "byte-limit", "task_id": wire.ID(), "node_id": wire.ID(), "argv": []string{strings.Repeat("界", 12000)}},
+		{"request_id": "invalid-argument", "node_id": wire.ID(), "argv": []string{strings.Repeat(marker, 2000)}},
+		{"request_id": "byte-limit", "node_id": wire.ID(), "argv": []string{strings.Repeat("界", 12000)}},
 	} {
 		_, err = s.accept(context.Background(), "command_start", wire.JSON(args))
 		if err == nil || wire.Safe(err).Code != "invalid_argument" || wire.Safe(err).Category != "validation" || strings.Contains(string(wire.JSON(wire.Safe(err))), marker) {
@@ -126,16 +123,24 @@ func TestSchemaRejectsBytesWithoutEchoingContentOrAllocatingReceipt(t *testing.T
 func TestEndpointFailuresHaveDistinctRecoveryConditions(t *testing.T) {
 	task := newTask("lab", 60)
 	task.State = "running"
-	task.Network = "degraded"
+	task.lab().Network = "degraded"
 	if e := wire.Safe(endpointAdmission(task)); e.Code != "network_not_ready" || e.Details["network"] != "degraded" {
 		t.Fatal(e)
 	}
-	task.Network = "ready"
-	task.Endpoints = make([]*Endpoint, 128)
-	if e := wire.Safe(endpointAdmission(task)); e.Code != "endpoint_limit" || e.Details["scope"] != "task_history" || e.Category != "capacity" {
+	task.lab().Network = "ready"
+	for range 128 {
+		task.lab().Endpoints = append(task.lab().Endpoints, &Endpoint{ID: wire.ID(), State: "closed"})
+	}
+	if err := endpointAdmission(task); err != nil {
+		t.Fatal("closed history occupied endpoint capacity", err)
+	}
+	for range 128 {
+		task.lab().Endpoints = append(task.lab().Endpoints, &Endpoint{ID: wire.ID(), State: "open"})
+	}
+	if e := wire.Safe(endpointAdmission(task)); e.Code != "endpoint_limit" || e.Details["active"] != 128 || e.Category != "capacity" {
 		t.Fatal(e)
 	}
-	task.Endpoints = nil
+	task.lab().Endpoints = nil
 	if e := endpointAdmission(task); e != nil {
 		t.Fatal(e)
 	}

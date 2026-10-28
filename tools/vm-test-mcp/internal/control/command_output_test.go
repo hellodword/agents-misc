@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hellodword/agents-misc/vm-test-mcp/internal/state"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
@@ -50,8 +49,8 @@ func (b *readBackend) Action(ctx context.Context, task *Task, n *Node, a NodeAct
 func commandFixture(t *testing.T, b Backend) (*Server, *Task, *Command) {
 	s, task, _ := fixtureLab(t, b, time.Second)
 	end := time.Now().UTC().Add(time.Minute)
-	c := &Command{ID: wire.ID(), NodeID: task.Nodes[0].ID, CommandStatus: wire.CommandStatus{State: "starting"}, StatusDeadline: &end}
-	task.Commands = append(task.Commands, c)
+	c := &Command{ID: wire.ID(), NodeID: task.lab().Nodes[0].ID, CommandStatus: wire.CommandStatus{State: "starting"}, StatusDeadline: &end}
+	task.lab().Commands = append(task.lab().Commands, c)
 	return s, task, c
 }
 
@@ -84,7 +83,7 @@ func TestCommandStatusPendingHasItsOwnDeadlineAndCanRecover(t *testing.T) {
 func TestSignalExitSurvivesCollectionAndRepeatedReads(t *testing.T) {
 	b := &readBackend{}
 	s, task, c := commandFixture(t, b)
-	if err := s.db.CreateCommand(context.Background(), state.Document{Kind: "task", ID: task.ID, Value: task}, c.ID, wire.CommandSpec{ID: c.ID, Argv: []string{"synthetic"}}); err != nil {
+	if err := s.db.CreateCommand(context.Background(), task, c.ID, wire.CommandSpec{ID: c.ID, Argv: []string{"synthetic"}}); err != nil {
 		t.Fatal(err)
 	}
 	b.read = func(a NodeAction) (wire.CommandSnapshot, error) {
@@ -276,7 +275,7 @@ func TestTerminalCommandPollIncludesFinalOutput(t *testing.T) {
 func BenchmarkExecutionSnapshot(b *testing.B) {
 	task := newTask("lab", 60)
 	for range 32 {
-		task.Commands = append(task.Commands, &Command{ID: wire.ID()})
+		task.lab().Commands = append(task.lab().Commands, &Command{ID: wire.ID()})
 	}
 	b.ReportAllocs()
 	for b.Loop() {

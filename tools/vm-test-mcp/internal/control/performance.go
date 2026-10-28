@@ -37,8 +37,9 @@ func (s *Server) retainPerformanceWindow(t *Task, trigger string, duration time.
 		data := wire.JSON(map[string]any{"trigger": trigger, "time": at, "before": before, "after": after})
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		pending := s.performancePending[t.ID]
 		delete(s.performancePending, t.ID)
-		if t.Purged {
+		if t.Purged || pending.IsZero() {
 			return
 		}
 		// Serialize the bounded artifact publication with purge. An explicit
@@ -46,10 +47,10 @@ func (s *Server) retainPerformanceWindow(t *Task, trigger string, duration time.
 		a, err := s.writeJSONArtifact(t, "performance.json", data)
 		if err == nil {
 			t.Artifacts = append(t.Artifacts, a)
-			s.save(t)
-			s.eventDetails(t, "performance_collected", "Host and controller observation window retained", map[string]any{"artifact_id": a.ID, "trigger": trigger, "time": at})
+			s.eventDetails(t, "performance_collected", "Host and controller observation window retained", map[string]any{"evidence_id": a.ID, "trigger": trigger, "time": at})
 		} else {
 			s.eventDetails(t, "performance_unavailable", "Host observation window could not be retained", map[string]any{"cause": wire.Safe(err), "trigger": trigger, "time": at})
 		}
+		s.save(t)
 	}()
 }

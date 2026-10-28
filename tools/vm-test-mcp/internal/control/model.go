@@ -24,6 +24,7 @@ type NodeRequest struct {
 	Camera    string       `json:"camera,omitempty"`
 }
 type LabRequest struct {
+	UploadIDs      []string      `json:"upload_ids,omitempty"`
 	RequestID      string        `json:"request_id"`
 	Nodes          []NodeRequest `json:"nodes"`
 	LAN            string        `json:"lan,omitempty"`
@@ -53,6 +54,7 @@ type Node struct {
 	CleanupSteps  map[string]*CleanupStep `json:"cleanup_steps,omitempty"`
 }
 type Command struct {
+	VersionState
 	ID     string `json:"id"`
 	NodeID string `json:"node_id"`
 	wire.CommandStatus
@@ -65,12 +67,6 @@ type Command struct {
 	IdlePolls      int              `json:"-"`
 	Stdin          state.InputQueue `json:"stdin"`
 	Created        time.Time        `json:"created"`
-}
-type CommandDetails struct {
-	*Command
-	Spec         wire.CommandSpec `json:"spec"`
-	Input        []wire.Input     `json:"input,omitempty"`
-	NextSequence *int             `json:"next_sequence,omitempty"`
 }
 type CommandRelease struct {
 	Source string    `json:"source"`
@@ -120,13 +116,14 @@ type Capture struct {
 	NodeID     string `json:"node_id"`
 	Kind       string `json:"kind"`
 	State      string `json:"state"`
-	ArtifactID string `json:"artifact_id,omitempty"`
+	ArtifactID string `json:"evidence_id,omitempty"`
 }
 type Artifact = execution.Artifact
 
-type Task struct {
-	*LabState
-	*NixJobState
+type executionRecord struct {
+	DetailExpires  *time.Time     `json:"detail_expires,omitempty"`
+	ResourceCounts map[string]int `json:"resource_counts,omitempty"`
+	VersionState
 	ID             string        `json:"id"`
 	Kind           string        `json:"kind"`
 	State          string        `json:"state"`
@@ -143,7 +140,14 @@ type Task struct {
 	Failure        *wire.Error   `json:"failure,omitempty"`
 	Purged         bool          `json:"purged"`
 	Hold           *Hold         `json:"hold,omitempty"`
-	Artifacts      []*Artifact   `json:"artifacts"`
+}
+
+type Task struct {
+	executionRecord
+	domain        executionDomain
+	Artifacts     []*Artifact `json:"artifacts"`
+	repository    *repository
+	pendingEvents []any
 }
 
 // Hold explains an explicit extension; it is not an idle-detection lease.
@@ -157,17 +161,10 @@ type Hold struct {
 // Command payloads live in immutable files and are loaded by explicit detail reads.
 func (t *Task) executionSnapshot() *Task {
 	v := *t
-	lab := *t.LabState
-	v.LabState = &lab
-	job := *t.NixJobState
-	v.NixJobState = &job
 	v.Artifacts = nil
-	v.Commands = make([]*Command, 0, len(t.Commands))
-	for _, c := range t.Commands {
-		cc := *c
-		v.Commands = append(v.Commands, &cc)
-	}
-	return clone(&v)
+	v.pendingEvents = nil
+	v.domain = t.domain.snapshot()
+	return &v
 }
 
 func (n *Node) resourceState(ended bool) string {
@@ -206,18 +203,21 @@ func (c *Command) publicStatus() any {
 
 func (t *Task) activity() map[string]int {
 	v := map[string]int{"commands_active": 0, "endpoints_open": 0, "captures_active": 0}
-	for _, c := range t.Commands {
-		if c.Observing() {
+	if t.Kind != "lab" {
+		return v
+	}
+	for _, c := range t.lab().Commands {
+		if c.Polling() {
 			v["commands_active"]++
 		}
 	}
-	for _, e := range t.Endpoints {
+	for _, e := range t.lab().Endpoints {
 		if e.State == "open" {
 			v["endpoints_open"]++
 		}
 	}
-	for _, c := range t.Captures {
-		if c.State == "running" {
+	for _, c := range t.lab().Captures {
+		if !oneOf(c.State, "stopped", "released") {
 			v["captures_active"]++
 		}
 	}
@@ -225,10 +225,16 @@ func (t *Task) activity() map[string]int {
 }
 
 func (t *Task) summaryView() map[string]any {
-	resources := map[string]int{}
-	for _, n := range append(append([]*Node{}, t.Nodes...), t.Router) {
-		if n != nil {
-			resources[n.resourceState(t.Terminal())]++
+	resources := t.ResourceCounts
+	if resources == nil {
+		resources = map[string]int{}
+	}
+	if t.Kind == "lab" && len(t.lab().Nodes) > 0 || t.Kind == "lab" && t.lab().Router != nil {
+		resources = map[string]int{}
+		for _, n := range append(append([]*Node{}, t.lab().Nodes...), t.lab().Router) {
+			if n != nil {
+				resources[n.resourceState(t.Terminal())]++
+			}
 		}
 	}
 	v := map[string]any{
@@ -236,7 +242,11 @@ func (t *Task) summaryView() map[string]any {
 		"started": t.Started, "deadline": t.Deadline, "ended": t.Ended,
 		"cleanup":  map[string]any{"state": t.cleanupState(), "resources": resources},
 		"activity": t.activity(), "purged": t.Purged, "hold": t.Hold,
-		"result": nil,
+		"result": nil, "revision": t.Revision,
+	}
+	if t.Kind == "nixos" {
+		v["execution"] = t.nix().NixExecution
+		v["handoff_complete"] = t.nix().HandoffComplete
 	}
 	if t.Terminal() {
 		v["result"] = map[string]any{"termination": t.State, "conclusion": t.Conclusion, "reason": t.Reason}
@@ -245,7 +255,10 @@ func (t *Task) summaryView() map[string]any {
 }
 
 func (t *Task) Node(id string) (*Node, error) {
-	for _, n := range t.Nodes {
+	if t.Kind != "lab" {
+		return nil, wire.Fail("not_found", "Node requires a lab")
+	}
+	for _, n := range t.lab().Nodes {
 		if n.ID == id {
 			return n, nil
 		}
@@ -253,10 +266,16 @@ func (t *Task) Node(id string) (*Node, error) {
 	return nil, wire.Fail("not_found", "Node does not belong to this task")
 }
 func (t *Task) Command(id string) (*Command, error) {
-	for _, c := range t.Commands {
+	if t.Kind != "lab" {
+		return nil, wire.Fail("not_found", "Command requires a lab")
+	}
+	for _, c := range t.lab().Commands {
 		if c.ID == id {
 			return c, nil
 		}
+	}
+	if t.repository != nil {
+		return t.repository.command(context.Background(), t.ID, id)
 	}
 	return nil, wire.Fail("not_found", "Command does not belong to this task")
 }
@@ -284,46 +303,35 @@ func (t *Task) Public() any {
 	// stdin packets and secrets in argv/env that status discovery does not need.
 	v := t.summaryView()
 	v["timeout_seconds"] = t.TimeoutSeconds
-	v["lan"], v["dhcp"], v["dns"] = t.LAN, t.DHCP, t.DNS
-	v["internet"] = t.Internet
-	v["network"] = map[string]any{"state": t.Network, "policy_updated": t.NetworkUpdated, "lease_expires": t.NetworkLeaseExpires, "router_identity": routerIdentity(t), "observation": t.NetworkObservation}
-	v["endpoints"], v["captures"] = t.Endpoints, t.Captures
-	v["cache_id"], v["derivation"], v["system"] = t.CacheID, t.Derivation, t.System
-	if t.Kind == "nixos" {
-		v["execution"] = t.NixExecution
+	if t.Kind != "lab" {
+		v["result"] = t.result()
+		return v
 	}
-	commands := []any{}
-	for _, c := range t.Commands {
-		commands = append(commands, c.publicStatus())
-	}
-	v["commands"] = commands
+	v["lan"], v["dhcp"], v["dns"] = t.lab().LAN, t.lab().DHCP, t.lab().DNS
+	v["internet"] = t.lab().Internet
+	v["network"] = map[string]any{"state": t.lab().Network, "policy_updated": t.lab().NetworkUpdated, "lease_expires": t.lab().NetworkLeaseExpires, "router_identity": routerIdentity(t), "observation": t.lab().NetworkObservation}
 	v["result"] = t.result()
 	if t.State == "queued" {
 		v["waiting_reason"] = t.Reason
 	}
 	resources := []any{}
-	for _, n := range append(append([]*Node{}, t.Nodes...), t.Router) {
+	for _, n := range append(append([]*Node{}, t.lab().Nodes...), t.lab().Router) {
 		if n != nil {
 			resources = append(resources, map[string]any{"id": n.ID, "name": n.Name, "state": n.resourceState(t.Terminal()), "steps": n.CleanupSteps})
 		}
 	}
 	v["cleanup"] = map[string]any{"state": t.cleanupState(), "errors": t.CleanupErrors, "resources": resources}
 	nodes := []any{}
-	for _, n := range t.Nodes {
+	for _, n := range t.lab().Nodes {
 		nodes = append(nodes, n.public())
 	}
 	v["nodes"] = nodes
-	if t.Router != nil {
+	if t.lab().Router != nil {
 		// Router progress is observable, but it is not a public command target.
-		health := t.Router.Health
+		health := t.lab().Router.Health
 		health.normalize()
-		v["router"] = map[string]any{"id": t.Router.ID, "state": t.Router.State, "preparation": t.Router.Preparation, "health": health, "polling": t.Router.Polling}
+		v["router"] = map[string]any{"id": t.lab().Router.ID, "state": t.lab().Router.State, "preparation": t.lab().Router.Preparation, "health": health, "polling": t.lab().Router.Polling}
 	}
-	artifacts := []any{}
-	for _, a := range t.Artifacts {
-		artifacts = append(artifacts, artifactView(a))
-	}
-	v["artifacts"] = artifacts
 	// HTTP encodes after the caller releases s.mu; resource journals must not
 	// retain references to maps that cleanup is still updating.
 	snapshot := map[string]any{}
@@ -334,22 +342,40 @@ func (t *Task) Terminal() bool {
 	return t.State == "finished" || t.State == "cancelled" || t.State == "timed_out" || t.State == "failed" || t.State == "interrupted"
 }
 
+type BodyRef struct {
+	File   string `json:"file"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+}
+
 type Operation struct {
-	Revision  int64       `json:"revision,omitempty"`
-	ID        string      `json:"id"`
-	RequestID string      `json:"request_id"`
-	Tool      string      `json:"tool"`
-	Hash      string      `json:"hash"`
-	State     string      `json:"state"`
-	Created   time.Time   `json:"created"`
-	TaskID    string      `json:"task_id,omitempty"`
-	Result    any         `json:"result,omitempty"`
-	Error     *wire.Error `json:"error,omitempty"`
+	IntentStage string  `json:"intent_stage"`
+	Intent      BodyRef `json:"intent"`
+	Payload     BodyRef `json:"payload"`
+	TargetID    string  `json:"target_id,omitempty"`
+	VersionState
+	Ended          *time.Time  `json:"ended,omitempty"`
+	WorkerInstance string      `json:"worker_instance,omitempty"`
+	ID             string      `json:"id"`
+	RequestID      string      `json:"request_id"`
+	Tool           string      `json:"tool"`
+	Hash           string      `json:"hash"`
+	State          string      `json:"state"`
+	Created        time.Time   `json:"created"`
+	TaskID         string      `json:"execution_id,omitempty"`
+	Result         any         `json:"result,omitempty"`
+	Error          *wire.Error `json:"error,omitempty"`
 }
 type Transfer struct {
+	VersionState
+	ManifestDigest string `json:"manifest_digest,omitempty"`
+	ReservedBytes  int64  `json:"reserved_bytes"`
+	Derivation     string `json:"derivation,omitempty"`
+	System         string `json:"system,omitempty"`
+
 	Updated time.Time         `json:"updated"`
 	ID      string            `json:"id"`
-	TaskID  string            `json:"task_id,omitempty"`
+	TaskID  string            `json:"execution_id,omitempty"`
 	Kind    string            `json:"kind"`
 	State   string            `json:"state"`
 	Created time.Time         `json:"created"`
@@ -367,6 +393,7 @@ type Runtime struct {
 	diagnostics sync.Mutex
 }
 type NodeAction struct {
+	RequestID      string            `json:"-"`
 	Action         string            `json:"action"`
 	Path           string            `json:"path,omitempty"`
 	Local          string            `json:"-"`
@@ -410,15 +437,62 @@ type Backend interface {
 	Nix(context.Context, string, *Task) (json.RawMessage, error)
 }
 
-// Task is the shared scheduler record; backend execution state has separate owners.
-type NixJobState = nixos.JobState
+// Domain state is exclusive: an execution contains either a lab or a Nix job.
+type NixJobState nixos.JobState
 
-func (t *Task) UnmarshalJSON(b []byte) error {
-	type record Task
-	v := record{LabState: &LabState{}, NixJobState: &NixJobState{}}
-	if err := json.Unmarshal(b, &v); err != nil {
+type executionDomain interface {
+	snapshot() executionDomain
+	condition() any
+}
+
+func (t *Task) lab() *LabState    { return t.domain.(*LabState) }
+func (t *Task) nix() *NixJobState { return t.domain.(*NixJobState) }
+
+type storedExecution struct {
+	executionRecord
+	Lab       *LabState    `json:"lab,omitempty"`
+	Job       *NixJobState `json:"job,omitempty"`
+	Artifacts []*Artifact  `json:"artifacts,omitempty"`
+}
+
+func (t *Task) MarshalJSON() ([]byte, error) {
+	v := storedExecution{executionRecord: t.executionRecord, Artifacts: t.Artifacts}
+	switch domain := t.domain.(type) {
+	case *LabState:
+		v.Lab = domain
+	case *NixJobState:
+		v.Job = domain
+	}
+	return json.Marshal(v)
+}
+func (t *Task) UnmarshalJSON(data []byte) error {
+	var v storedExecution
+	if err := json.Unmarshal(data, &v); err != nil {
 		return err
 	}
-	*t = Task(v)
+	t.executionRecord, t.Artifacts = v.executionRecord, v.Artifacts
+	if v.Kind == "lab" {
+		if v.Lab == nil {
+			v.Lab = &LabState{}
+		}
+		t.domain = v.Lab
+	} else {
+		if v.Job == nil {
+			v.Job = &NixJobState{}
+		}
+		t.domain = v.Job
+	}
 	return nil
 }
+func (l *LabState) snapshot() executionDomain    { return clone(l) }
+func (j *NixJobState) snapshot() executionDomain { return clone(j) }
+func (l *LabState) condition() any {
+	nodes := []any{}
+	for _, n := range append(append([]*Node{}, l.Nodes...), l.Router) {
+		if n != nil {
+			nodes = append(nodes, []any{n.ID, n.State, n.Preparation.Stage, n.Health.VirtualBox.State, n.Health.GuestControl.State, n.Health.Commands.State, n.Cleaned, n.CleanupSteps})
+		}
+	}
+	return []any{l.Network, nodes}
+}
+func (j *NixJobState) condition() any { return []any{j.NixExecution, j.HandoffComplete} }

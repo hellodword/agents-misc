@@ -45,7 +45,7 @@ func (b *VBoxBackend) run(ctx context.Context, args ...string) ([]byte, error) {
 	return result.Stdout, b.executionError(args[0], err)
 }
 func (b *VBoxBackend) redact(value string) string {
-	values := []string{b.Config.Service.Token, b.Config.Service.StateDir}
+	values := []string{b.Config.Service.Token, b.Config.ControllerDir()}
 	for _, t := range b.Config.VirtualBox.Templates {
 		values = append(values, t.Password, t.VM, t.Snapshot)
 	}
@@ -162,7 +162,7 @@ func (b *VBoxBackend) Available(ctx context.Context, kind string) (string, error
 	return "", e
 }
 func (b *VBoxBackend) runtime(t *Task) string {
-	return filepath.Join(b.Config.Service.StateDir, "tasks", t.ID, "runtime")
+	return filepath.Join(b.Config.ControllerDir(), "tasks", t.ID, "runtime")
 }
 func (b *VBoxBackend) vmDir(t *Task, n *Node) string {
 	return filepath.Join(b.runtime(t), "vm-"+n.UUID)
@@ -186,7 +186,7 @@ func (b *VBoxBackend) Prepare(ctx context.Context, t *Task, n *Node) error {
 	defer cancel()
 	reportProgress(ctx, "creating", nil, nil)
 	template := b.Config.VirtualBox.Templates[n.Template]
-	router := n.ID == t.Router.ID
+	router := n.ID == t.lab().Router.ID
 	if e := os.MkdirAll(b.runtime(t), 0700); e != nil {
 		return e
 	}
@@ -195,14 +195,14 @@ func (b *VBoxBackend) Prepare(ctx context.Context, t *Task, n *Node) error {
 	if router {
 		// Nix result paths normally contain symlinks. Register the real medium
 		// path so VirtualBox's attachment readback can be compared exactly.
-		real, err := filepath.EvalSymlinks(t.RouterISO)
+		real, err := filepath.EvalSymlinks(t.lab().RouterISO)
 		if err != nil {
 			return wire.Fail("router_unavailable", "Configured router Live ISO could not be resolved")
 		}
 		copyTask := t.executionSnapshot()
-		copyTask.RouterISO = real
+		copyTask.lab().RouterISO = real
 		t = copyTask
-		st, err := os.Stat(t.RouterISO)
+		st, err := os.Stat(t.lab().RouterISO)
 		if err != nil || !st.Mode().IsRegular() {
 			return wire.Fail("router_unavailable", "Configured router Live ISO is not a regular file")
 		}
@@ -278,7 +278,7 @@ func (b *VBoxBackend) Prepare(ctx context.Context, t *Task, n *Node) error {
 		if _, e = b.run(ctx, "storagectl", n.UUID, "--name", "VMTestMedia", "--add", "sata", "--portcount", "2"); e != nil {
 			return e
 		}
-		if _, e = b.run(ctx, "storageattach", n.UUID, "--storagectl", "VMTestMedia", "--port", "0", "--device", "0", "--type", "dvddrive", "--medium", t.RouterISO); e != nil {
+		if _, e = b.run(ctx, "storageattach", n.UUID, "--storagectl", "VMTestMedia", "--port", "0", "--device", "0", "--type", "dvddrive", "--medium", t.lab().RouterISO); e != nil {
 			return e
 		}
 		if e = b.seed(ctx, t, n); e != nil {
@@ -448,9 +448,9 @@ func (b *VBoxBackend) verify(t *Task, n *Node, i map[string]string) error {
 	for slot := 2; slot <= 8; slot++ {
 		expected[fmt.Sprintf("nic%d", slot)] = "none"
 	}
-	if t.Router != nil && n.ID == t.Router.ID {
+	if t.lab().Router != nil && n.ID == t.lab().Router.ID {
 		expected["nic2"] = "nat"
-		expected["VMTestMedia-0-0"] = t.RouterISO
+		expected["VMTestMedia-0-0"] = t.lab().RouterISO
 		expected["VMTestMedia-1-0"] = filepath.Join(b.runtime(t), "seed.iso")
 	}
 	expected["teleporterenabled"] = "off"
@@ -459,7 +459,7 @@ func (b *VBoxBackend) verify(t *Task, n *Node, i map[string]string) error {
 	for slot := 1; slot <= 4; slot++ {
 		expected[fmt.Sprintf("uart%d", slot)] = "off"
 	}
-	if t.Router != nil && n.ID == t.Router.ID {
+	if t.lab().Router != nil && n.ID == t.lab().Router.ID {
 		console, ok := b.bootConsoles.Load(n.UUID)
 		if !ok {
 			return wire.Fail("unsafe_device", "Router console ownership could not be verified")
@@ -483,7 +483,7 @@ func (b *VBoxBackend) verify(t *Task, n *Node, i map[string]string) error {
 	return nil
 }
 func (b *VBoxBackend) seedData(t *Task) map[string]any {
-	return map[string]any{"password": t.RouterPassword, "lan_mac": t.Router.MAC, "wan_mac": "08:00:27:" + t.ID[6:8] + ":" + t.ID[8:10] + ":" + t.ID[10:12], "lan": t.LAN, "wan": b.Config.VirtualBox.Network.WAN}
+	return map[string]any{"password": t.lab().RouterPassword, "lan_mac": t.lab().Router.MAC, "wan_mac": "08:00:27:" + t.ID[6:8] + ":" + t.ID[8:10] + ":" + t.ID[10:12], "lan": t.lab().LAN, "wan": b.Config.VirtualBox.Network.WAN}
 }
 func (b *VBoxBackend) seed(ctx context.Context, t *Task, n *Node) error {
 	dir := filepath.Join(b.runtime(t), "seed")
@@ -508,8 +508,8 @@ func (b *VBoxBackend) seed(ctx context.Context, t *Task, n *Node) error {
 	return e
 }
 func (b *VBoxBackend) guestConfig(t *Task, n *Node) config.Template {
-	if t.Router != nil && n.ID == t.Router.ID {
-		return config.Template{Kind: "linux", Username: "root", Password: t.RouterPassword, Supervisor: "/run/current-system/sw/bin/vm-test-router-helper", WorkDir: "/run/vm-test"}
+	if t.lab().Router != nil && n.ID == t.lab().Router.ID {
+		return config.Template{Kind: "linux", Username: "root", Password: t.lab().RouterPassword, Supervisor: "/run/current-system/sw/bin/vm-test-router-helper", WorkDir: "/run/vm-test"}
 	}
 	return b.Config.VirtualBox.Templates[n.Template]
 }
@@ -563,12 +563,12 @@ func (b *VBoxBackend) copyFrom(ctx context.Context, t *Task, n *Node, remote, lo
 	return b.publish(local, f)
 }
 func (b *VBoxBackend) publish(local string, r io.Reader) error {
-	root, e := os.OpenRoot(b.Config.Service.StateDir)
+	root, e := os.OpenRoot(b.Config.ControllerDir())
 	if e != nil {
 		return e
 	}
 	defer root.Close()
-	rel, e := filepath.Rel(b.Config.Service.StateDir, local)
+	rel, e := filepath.Rel(b.Config.ControllerDir(), local)
 	if e != nil {
 		return e
 	}
@@ -672,7 +672,7 @@ func (b *VBoxBackend) Delete(ctx context.Context, t *Task, n *Node) error {
 				if m == nil || value == "none" || value == "emptydrive" {
 					continue
 				}
-				if _, ok := info[fmt.Sprintf("%s-tempeject-%s-%s", m[1], m[2], m[3])]; ok || value == t.RouterISO || strings.HasSuffix(strings.ToLower(value), ".iso") {
+				if _, ok := info[fmt.Sprintf("%s-tempeject-%s-%s", m[1], m[2], m[3])]; ok || value == t.lab().RouterISO || strings.HasSuffix(strings.ToLower(value), ".iso") {
 					if _, err := b.run(ctx, "storageattach", n.UUID, "--storagectl", m[1], "--port", m[2], "--device", m[3], "--medium", "none"); err != nil {
 						return err
 					}
@@ -700,7 +700,7 @@ func (b *VBoxBackend) Delete(ctx context.Context, t *Task, n *Node) error {
 	}
 	b.guestSlots.Delete(n.UUID)
 	b.guestSessions.Delete(n.UUID)
-	if t.Router != nil && n.ID == t.Router.ID {
+	if t.lab().Router != nil && n.ID == t.lab().Router.ID {
 		if err = cleanupStep(ctx, "console", func() error { return b.stopConsole(ctx, n.UUID) }); err != nil {
 			return err
 		}
@@ -736,7 +736,7 @@ func (b *VBoxBackend) closeSeed(ctx context.Context, t *Task) error {
 	return nil
 }
 func (b *VBoxBackend) Action(ctx context.Context, t *Task, n *Node, a NodeAction) (json.RawMessage, error) {
-	if n == nil || (t.Router != nil && n.ID == t.Router.ID && !oneOf(a.Action, "diagnostics", "vm_info", "screenshot", "boot_log")) {
+	if n == nil || (t.lab().Router != nil && n.ID == t.lab().Router.ID && !oneOf(a.Action, "diagnostics", "vm_info", "screenshot", "boot_log")) {
 		return nil, wire.Fail("policy_denied", "Router is not a test target")
 	}
 	c := b.guestConfig(t, n)
@@ -747,7 +747,7 @@ func (b *VBoxBackend) Action(ctx context.Context, t *Task, n *Node, a NodeAction
 	}
 	switch a.Action {
 	case "boot_log":
-		if t.Router == nil || n.ID != t.Router.ID {
+		if t.lab().Router == nil || n.ID != t.lab().Router.ID {
 			return nil, wire.Fail("policy_denied", "Boot console collection belongs to the private router")
 		}
 		return b.consoleLog(ctx, t, a.Local)
@@ -773,9 +773,6 @@ func (b *VBoxBackend) Action(ctx context.Context, t *Task, n *Node, a NodeAction
 		raw, e = control(a.Action)
 	case "shutdown":
 		raw, e = control("acpipowerbutton")
-		if e == nil {
-			e = b.waitPowerOff(ctx, n)
-		}
 	case "network_link":
 		raw, e = control("setlinkstate1", on(a.Enabled))
 	case "reboot":
@@ -875,7 +872,7 @@ func (b *VBoxBackend) Action(ctx context.Context, t *Task, n *Node, a NodeAction
 	return wire.JSON(map[string]any{"delivered": true}), nil
 }
 func (b *VBoxBackend) recoverRouter(ctx context.Context, t *Task) error {
-	n := t.Router
+	n := t.lab().Router
 	info, e := b.info(ctx, n.UUID)
 	if e != nil {
 		return e
@@ -920,7 +917,7 @@ func (b *VBoxBackend) Network(ctx context.Context, t *Task, protected []string, 
 		}
 	}
 	reportNetworkProgress(ctx, "router_probe")
-	raw, err := b.guestExec(ctx, t, t.Router, "probe")
+	raw, err := b.guestExec(ctx, t, t.lab().Router, "probe")
 	if err != nil {
 		return "", networkStage(err, "router_probe")
 	}
@@ -931,7 +928,7 @@ func (b *VBoxBackend) Network(ctx context.Context, t *Task, protected []string, 
 	if json.Unmarshal(raw, &status) != nil || !status.Ready || !wire.UUIDPattern.MatchString(status.BootID) {
 		return "", networkStage(wire.Fail("network_degraded", "Router identity could not be verified"), "router_identity")
 	}
-	if !recover && t.RouterBootID != "" && t.RouterBootID != status.BootID {
+	if !recover && t.lab().RouterBootID != "" && t.lab().RouterBootID != status.BootID {
 		return "", networkStage(wire.Fail("network_degraded", "Router restarted; explicit network_recover is required"), "router_identity")
 	}
 	p := taskPolicy(t, b.Config.VirtualBox.Network.WAN, b.Config.VirtualBox.Network.LeaseSeconds, protected)
@@ -939,18 +936,18 @@ func (b *VBoxBackend) Network(ctx context.Context, t *Task, protected []string, 
 		return "", e
 	}
 	reportNetworkProgress(ctx, "policy_upload")
-	remote, e := b.requestFile(ctx, t, t.Router, "policy.json", p)
+	remote, e := b.requestFile(ctx, t, t.lab().Router, "policy.json", p)
 	if e != nil {
 		return "", networkStage(e, "policy_upload")
 	}
 	reportNetworkProgress(ctx, "policy_apply")
-	_, e = b.guestExec(ctx, t, t.Router, "apply", "--request", remote)
+	_, e = b.guestExec(ctx, t, t.lab().Router, "apply", "--request", remote)
 	return status.BootID, networkStage(e, "policy_apply")
 }
 func (b *VBoxBackend) Endpoint(ctx context.Context, t *Task, e *Endpoint, open bool) error {
 	name := "vm-test-" + e.ID
-	args := []string{"controlvm", t.Router.UUID, "natpf2"}
-	info, err := b.info(ctx, t.Router.UUID)
+	args := []string{"controlvm", t.lab().Router.UUID, "natpf2"}
+	info, err := b.info(ctx, t.lab().Router.UUID)
 	if err != nil {
 		return err
 	}
@@ -1029,11 +1026,11 @@ func (b *VBoxBackend) capture(ctx context.Context, t *Task, n *Node, a NodeActio
 }
 
 func taskPolicy(t *Task, wan string, seconds int, protected []string) network.Policy {
-	p := network.Policy{LAN: t.LAN, WAN: wan, DHCP: t.DHCP, Internet: t.Internet, DNS: t.DNS, Protected: protected, LeaseSeconds: seconds}
-	for _, n := range t.Nodes {
+	p := network.Policy{LAN: t.lab().LAN, WAN: wan, DHCP: t.lab().DHCP, Internet: t.lab().Internet, DNS: t.lab().DNS, Protected: protected, LeaseSeconds: seconds}
+	for _, n := range t.lab().Nodes {
 		p.Nodes = append(p.Nodes, network.Lease{Name: n.Name, MAC: n.MAC, IPv4: n.IPv4})
 	}
-	for _, e := range t.Endpoints {
+	for _, e := range t.lab().Endpoints {
 		if e.State != "closed" {
 			n, _ := t.Node(e.NodeID)
 			p.Entries = append(p.Entries, network.Entry{Protocol: e.Protocol, Port: e.RouterPort, IPv4: n.IPv4, GuestPort: e.GuestPort})

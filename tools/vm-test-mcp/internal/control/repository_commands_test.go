@@ -1,4 +1,4 @@
-package state
+package control
 
 import (
 	"context"
@@ -16,7 +16,7 @@ import (
 // The new contract requires an empty state directory; rejection must not
 // rewrite or delete any old schema, payload or version.
 func TestLegacySchemaRefusalPreservesDatabase(t *testing.T) {
-	for _, version := range []int{9, 10, 11} {
+	for _, version := range []int{20} {
 		dir := t.TempDir()
 		raw, err := sql.Open("sqlite3", dir+"/state.sqlite")
 		if err != nil {
@@ -26,7 +26,7 @@ func TestLegacySchemaRefusalPreservesDatabase(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if d, err := Open(dir); err == nil {
+		if d, err := openRepository(dir); err == nil {
 			d.Close()
 			t.Fatal("legacy state accepted")
 		}
@@ -44,11 +44,11 @@ func TestLegacySchemaRefusalPreservesDatabase(t *testing.T) {
 func TestCommandFilesSurviveRestartAndDetectCorruption(t *testing.T) {
 	dir := t.TempDir()
 	ctx := context.Background()
-	d, err := Open(dir)
+	d, err := openRepository(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc := Document{Kind: "task", ID: "task", Value: map[string]any{"id": "task", "kind": "lab", "state": "running", "cleanup": "pending"}}
+	doc := storedCommandFixture("task", "command")
 	spec := wire.CommandSpec{ID: "command", Argv: []string{"example", "x y"}, Env: map[string]string{"FIXTURE": "retained"}}
 	if err = d.CreateCommand(ctx, doc, "command", spec); err != nil {
 		t.Fatal(err)
@@ -58,7 +58,7 @@ func TestCommandFilesSurviveRestartAndDetectCorruption(t *testing.T) {
 		t.Fatal(err)
 	}
 	d.Close()
-	d, err = Open(dir)
+	d, err = openRepository(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,48 +85,52 @@ func TestCommandFilesSurviveRestartAndDetectCorruption(t *testing.T) {
 
 func TestInputTransactionRollbackRecoveryAndScopedPurge(t *testing.T) {
 	ctx := context.Background()
-	d, err := Open(t.TempDir())
+	d, err := openRepository(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer d.Close()
 	for _, id := range []string{"one", "other"} {
-		doc := Document{Kind: "task", ID: id, Value: map[string]any{"stdin": InputQueue{}}}
-		if err = d.CreateCommand(ctx, doc, "command", wire.CommandSpec{ID: "command", Argv: []string{"fixture"}}); err != nil {
+		doc := storedCommandFixture(id, id+"-command")
+		if err = d.CreateCommand(ctx, doc, id+"-command", wire.CommandSpec{ID: id + "-command", Argv: []string{"fixture"}}); err != nil {
 			t.Fatal(err)
 		}
-		if err = d.AppendInput(ctx, doc, "command", wire.Input{Sequence: 0, Data: "retained"}); err != nil {
+		if err = d.AppendInput(ctx, doc, id+"-command", wire.Input{Sequence: 0, Data: "retained"}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	doc := Document{Kind: "task", ID: "one", Value: map[string]any{"stdin": InputQueue{NextSequence: 2, Closed: true}}}
-	if err = d.AppendInput(ctx, doc, "command", wire.Input{Sequence: 0, EOF: true}); err == nil {
+	doc, err := d.loadTask(ctx, "one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = d.AppendInput(ctx, doc, "one-command", wire.Input{Sequence: 0, EOF: true}); err == nil {
 		t.Fatal("conflicting input replaced")
 	}
-	var original struct{ Stdin InputQueue }
-	if err = d.Load(ctx, "task", "one", &original); err != nil || original.Stdin.NextSequence != 0 {
-		t.Fatal(original, err)
+	if _, err = d.Exec("CREATE TRIGGER fail_state BEFORE UPDATE ON executions BEGIN SELECT RAISE(ABORT,'fixture'); END;"); err != nil {
+		t.Fatal(err)
 	}
-	doc.Value = make(chan int)
-	if err = d.AppendInput(ctx, doc, "command", wire.Input{Sequence: 1, EOF: true}); err == nil {
-		t.Fatal("unserializable task accepted")
+	doc.Summary = "changed"
+	if err = d.AppendInput(ctx, doc, "one-command", wire.Input{Sequence: 1, EOF: true}); err == nil {
+		t.Fatal("state failure did not roll back input")
 	}
-	got, err := d.Inputs(ctx, "one", "command", 0, 16)
+	got, err := d.Inputs(ctx, "one", "one-command", 0, 16)
 	if err != nil || len(got) != 1 || got[0].Data != "retained" {
 		t.Fatal(got, err)
 	}
-	doc.Value = map[string]any{"stdin": InputQueue{NextSequence: 2, Closed: true}}
-	if err = d.AppendInput(ctx, doc, "command", wire.Input{Sequence: 1, EOF: true}); err != nil {
+	if _, err = d.Exec("DROP TRIGGER fail_state"); err != nil {
 		t.Fatal(err)
 	}
-	if err = d.PurgeCommandData(ctx, Document{Kind: "task", ID: "one", Value: map[string]any{"purged": true}}); err != nil {
+	if err = d.AppendInput(ctx, doc, "one-command", wire.Input{Sequence: 1, EOF: true}); err != nil {
 		t.Fatal(err)
 	}
-	got, err = d.Inputs(ctx, "one", "command", 0, 16)
+	if err = d.PruneDetails(ctx, "one"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = d.Inputs(ctx, "one", "one-command", 0, 16)
 	if err != nil || len(got) != 0 {
 		t.Fatal(got, err)
 	}
-	got, err = d.Inputs(ctx, "other", "command", 0, 16)
+	got, err = d.Inputs(ctx, "other", "other-command", 0, 16)
 	if err != nil || len(got) != 1 || got[0].Data != "retained" {
 		t.Fatal(got, err)
 	}
@@ -135,14 +139,14 @@ func TestInputTransactionRollbackRecoveryAndScopedPurge(t *testing.T) {
 func BenchmarkStatusPersistence(b *testing.B) {
 	for _, payload := range []int{0, 32 << 20} {
 		b.Run(fmtBytes(payload), func(b *testing.B) {
-			d, err := Open(b.TempDir())
+			d, err := openRepository(b.TempDir())
 			if err != nil {
 				b.Fatal(err)
 			}
 			defer d.Close()
 			ctx := context.Background()
-			q := InputQueue{}
-			doc := Document{Kind: "task", ID: "task", Value: map[string]any{"stdin": &q, "state": "running"}}
+			doc := storedCommandFixture("task", "command")
+			q := &doc.lab().Commands[0].Stdin
 			if err = d.CreateCommand(ctx, doc, "command", wire.CommandSpec{ID: "command", Argv: []string{"fixture"}}); err != nil {
 				b.Fatal(err)
 			}
@@ -165,3 +169,11 @@ func BenchmarkStatusPersistence(b *testing.B) {
 }
 
 func fmtBytes(n int) string { v, _ := json.Marshal(n); return string(v) + "B_stdin" }
+
+func storedCommandFixture(id, command string) *Task {
+	task := newTask("lab", 60)
+	task.ID = id
+	task.State = "running"
+	task.lab().Commands = []*Command{{ID: command, CommandStatus: wire.CommandStatus{State: "running"}}}
+	return task
+}

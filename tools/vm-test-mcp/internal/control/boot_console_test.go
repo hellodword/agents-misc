@@ -18,12 +18,12 @@ func consoleFixture(t *testing.T) (*VBoxBackend, *Task, *bootConsole) {
 	t.Helper()
 	b := &VBoxBackend{Config: testConfig(t)}
 	task := newTask("lab", 60)
-	task.Router = &Node{UUID: wire.UUID()}
+	task.lab().Router = &Node{UUID: wire.UUID()}
 	c, err := newBootConsole(b.consoleDir(task))
 	if err != nil {
 		t.Fatal(err)
 	}
-	b.bootConsoles.Store(task.Router.UUID, c)
+	b.bootConsoles.Store(task.lab().Router.UUID, c)
 	t.Cleanup(func() {
 		if err := b.Close(); err != nil {
 			t.Error(err)
@@ -117,7 +117,7 @@ func TestBootConsoleStopsWithNoClientOrIdleClientAndNeverSendsInput(t *testing.T
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
-			if err := b.stopConsole(ctx, task.Router.UUID); err != nil {
+			if err := b.stopConsole(ctx, task.lab().Router.UUID); err != nil {
 				t.Fatal(err)
 			}
 			if connected {
@@ -163,13 +163,13 @@ func TestBootConsoleCleanupDeadlineCanBeRetriedWithoutLosingBytes(t *testing.T) 
 	})
 	c.mu.Lock()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	err := b.stopConsole(ctx, task.Router.UUID)
+	err := b.stopConsole(ctx, task.lab().Router.UUID)
 	cancel()
 	c.mu.Unlock()
 	if err == nil {
 		t.Fatal("cleanup ignored its lock deadline")
 	}
-	if _, ok := b.bootConsoles.Load(task.Router.UUID); !ok {
+	if _, ok := b.bootConsoles.Load(task.lab().Router.UUID); !ok {
 		t.Fatal("unconfirmed cleanup discarded the collector")
 	}
 	if err := b.Close(); err != nil {
@@ -186,7 +186,7 @@ func TestBootConsoleRecoveryRejectsMissingOversizedAndSymlinkLogs(t *testing.T) 
 		t.Run(kind, func(t *testing.T) {
 			b := &VBoxBackend{Config: testConfig(t)}
 			task := newTask("lab", 60)
-			task.Router = &Node{UUID: wire.UUID()}
+			task.lab().Router = &Node{UUID: wire.UUID()}
 			dir := b.consoleDir(task)
 			if err := os.MkdirAll(dir, 0700); err != nil {
 				t.Fatal(err)

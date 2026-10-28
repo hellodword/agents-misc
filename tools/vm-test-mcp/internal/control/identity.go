@@ -37,6 +37,7 @@ func cloneIdentity(template config.Template, source string, info map[string]stri
 }
 
 type backendIdentity struct {
+	InstanceID     string              `json:"instance_id,omitempty"`
 	State          string              `json:"state"`
 	Observed       time.Time           `json:"observed"`
 	Build          *wire.BuildIdentity `json:"build,omitempty"`

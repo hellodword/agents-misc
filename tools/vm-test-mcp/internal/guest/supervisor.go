@@ -77,7 +77,7 @@ type processExit struct {
 func exitedWithCode(code int) processExit { return processExit{code: &code} }
 func (e processExit) confirmed() bool     { return e.code != nil || e.signal != "" }
 
-type launchFunc func(context.Context, wire.CommandSpec, io.Reader, io.Writer, io.Writer) (Child, error)
+type launchFunc func(context.Context, wire.CommandSpec, *os.File, io.Writer, io.Writer) (Child, error)
 type limitWriter struct {
 	f         *os.File
 	n         syncatomic.Int64
@@ -138,7 +138,7 @@ type inputProgress struct {
 	closed syncatomic.Bool
 }
 
-func feedInput(ctx context.Context, dir string, stdin *io.PipeWriter, progress *inputProgress, updates chan<- struct{}) error {
+func feedInput(ctx context.Context, dir string, stdin *os.File, progress *inputProgress, updates chan<- struct{}) error {
 	tick := time.NewTicker(50 * time.Millisecond)
 	defer tick.Stop()
 	var inputBytes int64
@@ -196,8 +196,7 @@ func supervise(parent context.Context, root, request string, start launchFunc, l
 	if err := os.Mkdir(dir, 0700); err != nil {
 		return err
 	}
-	began := time.Now().UTC()
-	status := wire.CommandStatus{State: "starting", Stage: "starting", Started: &began, Output: &wire.CommandOutput{State: "open"}}
+	status := wire.CommandStatus{State: "starting", Stage: "starting", Output: &wire.CommandOutput{State: "open"}}
 	identity, _, identityErr := processIdentity(os.Getpid())
 	if identityErr == nil {
 		status.Supervisor = &identity
@@ -251,7 +250,10 @@ func supervise(parent context.Context, root, request string, start launchFunc, l
 	}
 	defer errout.Close()
 	stdout, stderr := &limitWriter{f: out, hash: sha256.New()}, &limitWriter{f: errout, hash: sha256.New()}
-	stdinR, stdinW := io.Pipe()
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		return failStart(err)
+	}
 	defer stdinR.Close()
 	defer stdinW.Close()
 	startCtx, stopStart := context.WithTimeout(ctx, limits.start)
@@ -306,7 +308,9 @@ func supervise(parent context.Context, root, request string, start launchFunc, l
 	updates := make(chan struct{}, 1)
 	inputDone := make(chan error, 1)
 	go func() { inputDone <- feedInput(inputCtx, dir, stdinW, progress, updates) }()
-	readProgress := func() { status.NextInput = int(progress.next.Load()); status.InputClosed = progress.closed.Load() }
+	readProgress := func() { status.WrittenInput = int(progress.next.Load()); status.InputClosed = progress.closed.Load() }
+	began := time.Now().UTC()
+	status.Started = &began
 	status.State, status.Stage = "running", "running"
 	reason := "exited"
 	var failure error
@@ -519,6 +523,9 @@ func Probe(roots ...string) map[string]any {
 	}
 	privileged, prepared := readiness(root)
 	v["privileged"], v["prepared"] = privileged, prepared
+	if boot, err := bootIdentity(); err == nil {
+		v["boot_id"] = boot
+	}
 	v["network"] = observeNetwork()
 	v["command_protocol"] = wire.CommandProtocol
 	v["command_service"] = commandServiceObservation(root)

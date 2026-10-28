@@ -36,12 +36,12 @@ type NetworkAttempt struct {
 
 func routerIdentity(t *Task) any {
 	var id string
-	if t.Router != nil {
-		id = t.Router.ID
+	if t.lab().Router != nil {
+		id = t.lab().Router.ID
 	}
 	fingerprint := ""
-	if t.RouterBootID != "" {
-		h := sha256.Sum256([]byte(t.RouterBootID))
+	if t.lab().RouterBootID != "" {
+		h := sha256.Sum256([]byte(t.lab().RouterBootID))
 		fingerprint = hex.EncodeToString(h[:])
 	}
 	return map[string]any{"node_id": id, "boot_fingerprint": fingerprint}
@@ -70,7 +70,7 @@ func (s *Server) recordNetworkAttempt(t *Task, a *NetworkAttempt, err error) {
 		}
 	}
 	s.mu.Lock()
-	t.NetworkObservation = a
+	t.lab().NetworkObservation = a
 	s.save(t)
 	s.mu.Unlock()
 }
@@ -88,7 +88,7 @@ func (s *Server) heartbeatNetwork(parent context.Context, t *Task, r *Runtime) {
 	if err == nil {
 		defer lock.Unlock()
 		s.mu.Lock()
-		active := oneOf(t.Network, "ready", "suspect") && !t.Terminal()
+		active := oneOf(t.lab().Network, "ready", "suspect") && !t.Terminal()
 		s.mu.Unlock()
 		if !active {
 			return
@@ -102,12 +102,12 @@ func (s *Server) heartbeatNetwork(parent context.Context, t *Task, r *Runtime) {
 	}
 	s.mu.Lock()
 	transient := oneOf(wire.Safe(err).Code, "backend_timeout", "resource_busy")
-	unchanged := a.PolicyHash == "" && a.Stage == "network_lock" || a.PolicyHash != "" && a.PolicyHash == t.NetworkPolicyHash
-	tolerate := transient && unchanged && !t.Terminal() && oneOf(t.Network, "ready", "suspect") && time.Now().Before(t.NetworkLeaseExpires)
+	unchanged := a.PolicyHash == "" && a.Stage == "network_lock" || a.PolicyHash != "" && a.PolicyHash == t.lab().NetworkPolicyHash
+	tolerate := transient && unchanged && !t.Terminal() && oneOf(t.lab().Network, "ready", "suspect") && time.Now().Before(t.lab().NetworkLeaseExpires)
 	if tolerate {
-		if t.Network != "suspect" {
-			t.Network = "suspect"
-			s.eventDetails(t, "network_observation_late", "Network observation is late within the confirmed policy lease", map[string]any{"observation": a, "lease_expires": t.NetworkLeaseExpires, "router_identity": routerIdentity(t)})
+		if t.lab().Network != "suspect" {
+			t.lab().Network = "suspect"
+			s.eventDetails(t, "network_observation_late", "Network observation is late within the confirmed policy lease", map[string]any{"observation": a, "lease_expires": t.lab().NetworkLeaseExpires, "router_identity": routerIdentity(t)})
 		}
 		s.save(t)
 	}
@@ -149,7 +149,7 @@ func (s *Server) refreshNetworkAttempt(ctx context.Context, t *Task, r *Runtime,
 	h := sha256.Sum256(wire.JSON(policy))
 	a.PolicyHash = hex.EncodeToString(h[:])
 	a.Stage = "lease"
-	if !recover && (copyTask.Network == "degraded" || oneOf(copyTask.Network, "ready", "suspect") && (copyTask.NetworkUpdated.IsZero() || time.Since(copyTask.NetworkUpdated) >= time.Duration(s.cfg.VirtualBox.Network.LeaseSeconds)*time.Second)) {
+	if !recover && (copyTask.lab().Network == "degraded" || oneOf(copyTask.lab().Network, "ready", "suspect") && (copyTask.lab().NetworkUpdated.IsZero() || time.Since(copyTask.lab().NetworkUpdated) >= time.Duration(s.cfg.VirtualBox.Network.LeaseSeconds)*time.Second)) {
 		return wire.Fail("network_lease_expired", "Network lease is unavailable; explicit recovery is required")
 	}
 	a.Stage = "router_policy"
@@ -175,7 +175,7 @@ func (s *Server) refreshNetworkAttempt(ctx context.Context, t *Task, r *Runtime,
 	}
 	if recover {
 		a.Stage = "endpoint_restore"
-		for _, entry := range copyTask.Endpoints {
+		for _, entry := range copyTask.lab().Endpoints {
 			if entry.State == "closed" {
 				continue
 			}
@@ -187,14 +187,14 @@ func (s *Server) refreshNetworkAttempt(ctx context.Context, t *Task, r *Runtime,
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if t.Terminal() || t.Network == "degraded" && !recover {
+	if t.Terminal() || t.lab().Network == "degraded" && !recover {
 		return wire.Fail("network_degraded", "Task or network state changed before policy acknowledgement")
 	}
-	late := t.Network == "suspect"
-	t.Network, t.RouterBootID, t.NetworkUpdated = "ready", bootID, leaseStart
-	t.NetworkLeaseExpires, t.NetworkPolicyHash = leaseEnd, a.PolicyHash
+	late := t.lab().Network == "suspect"
+	t.lab().Network, t.lab().RouterBootID, t.lab().NetworkUpdated = "ready", bootID, leaseStart
+	t.lab().NetworkLeaseExpires, t.lab().NetworkPolicyHash = leaseEnd, a.PolicyHash
 	if recover {
-		for _, e := range t.Endpoints {
+		for _, e := range t.lab().Endpoints {
 			if e.State != "closed" {
 				e.State = "open"
 			}
