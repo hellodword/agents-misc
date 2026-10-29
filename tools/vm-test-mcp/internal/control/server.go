@@ -417,19 +417,40 @@ func (s *Server) execute(t *Task) {
 	s.releaseScheduler(t)
 	s.mu.Unlock()
 }
-func (s *Server) prepare(t *Task, r *Runtime) error {
+func (s *Server) prepare(t *Task, r *Runtime) (result error) {
 	ctx, cancel := context.WithCancelCause(r.ctx)
 	defer cancel(nil)
+	defer func() {
+		if result == nil {
+			return
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for _, n := range append([]*Node{t.lab().Router}, t.lab().Nodes...) {
+			if !n.Intent {
+				now := time.Now().UTC()
+				n.Preparation = Preparation{Stage: "cancelled", StageStarted: &now, Updated: now,
+					Error: &wire.Error{Code: "preparation_cancelled", Message: "Node preparation was cancelled", Details: map[string]any{"cause": wire.Safe(result)}}}
+			}
+		}
+		s.save(t)
+	}()
 	if len(t.lab().Nodes) != 0 {
 		if err := s.setGUI(ctx, t, "any", false); err != nil {
 			return err
 		}
 	}
-	prepare := func(n *Node) error {
+	done := make(chan error, s.cfg.VirtualBox.StartupParallelism)
+	prepare := func(n *Node) {
 		prepareCtx, stop := context.WithTimeout(ctx, s.cfg.VirtualBox.StartupTimeout.Value())
-		defer stop()
 		started, until := time.Now().UTC(), deadline(prepareCtx).UTC()
 		s.mu.Lock()
+		if cause := context.Cause(ctx); cause != nil {
+			s.mu.Unlock()
+			stop()
+			done <- cause
+			return
+		}
 		n.Intent = true
 		n.Preparation = Preparation{Stage: "creating", Started: &started, StageStarted: &started, Deadline: &until, Updated: started}
 		err := s.db.Save(context.Background(), t)
@@ -437,68 +458,74 @@ func (s *Server) prepare(t *Task, r *Runtime) error {
 		s.mu.Unlock()
 		if err != nil {
 			cancel(err)
-			return err
+			stop()
+			done <- err
+			return
 		}
-		progress := progressFunc(func(stage string, status *NodeStatus, err error) {
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			now := time.Now().UTC()
-			if n.Preparation.Stage != stage {
-				n.Preparation.StageStarted = &now
-			}
-			n.Preparation.Stage, n.Preparation.Updated, n.Preparation.Error = stage, now, nil
-			if err != nil {
-				n.Preparation.Error = wire.Safe(err)
-			}
-			if status != nil && status.Identity != nil {
-				n.Identity = status.Identity
-			}
-			if status != nil && status.State != "" {
-				s.observeNode(n, status, nil, time.Now().UTC())
-			}
-			if status != nil && status.Polling != nil {
-				n.Polling = *status.Polling
-			}
-			s.save(t)
-		})
-		err = s.backend.Prepare(context.WithValue(prepareCtx, progressKey{}, progress), tc, nc)
-		if err == nil {
-			err = prepareCtx.Err()
-		}
-		if err != nil {
-			// Only the initiating failure cancels peers. A peer's adapter may
-			// report its last probe error after cancellation; preserve the cause.
-			if cause := context.Cause(ctx); cause != nil {
-				err = &wire.Error{Code: "preparation_cancelled", Message: "Node preparation was cancelled", Details: map[string]any{"node_id": n.ID, "cause": wire.Safe(cause), "last_error": wire.Safe(err)}}
-			} else {
+		go func() {
+			defer stop()
+			progress := progressFunc(func(stage string, status *NodeStatus, err error) {
 				s.mu.Lock()
-				stage := n.Preparation.Stage
-				s.mu.Unlock()
-				cause := wire.Safe(err)
-				err = &wire.Error{Code: cause.Code, Message: cause.Message, Details: map[string]any{"node_id": n.ID, "stage": stage, "started": started, "deadline": until, "elapsed_ms": time.Since(started).Milliseconds(), "cause": cause}}
-				cancel(err)
+				defer s.mu.Unlock()
+				now := time.Now().UTC()
+				if n.Preparation.Stage != stage {
+					n.Preparation.StageStarted = &now
+				}
+				n.Preparation.Stage, n.Preparation.Updated, n.Preparation.Error = stage, now, nil
+				if err != nil {
+					n.Preparation.Error = wire.Safe(err)
+				}
+				if status != nil && status.Identity != nil {
+					n.Identity = status.Identity
+				}
+				if status != nil && status.State != "" {
+					s.observeNode(n, status, nil, time.Now().UTC())
+				}
+				if status != nil && status.Polling != nil {
+					n.Polling = *status.Polling
+				}
+				s.save(t)
+			})
+			err = s.backend.Prepare(context.WithValue(prepareCtx, progressKey{}, progress), tc, nc)
+			if err == nil {
+				err = prepareCtx.Err()
 			}
-		}
-		s.mu.Lock()
-		n.Polling = PollSchedule{}
-		n.Preparation.Updated = time.Now().UTC()
-		if err == nil {
-			n.State = "running"
-			n.Preparation.Stage, n.Preparation.Error = "ready", nil
-			now := time.Now().UTC()
-			n.Health = Health{VirtualBox: Observation{State: "available", LastSuccess: &now}, GuestControl: Observation{State: "available", LastSuccess: &now}, Commands: Observation{State: "available", LastSuccess: &now}}
-		} else {
-			n.Preparation.Stage, n.Preparation.Error = "failed", wire.Safe(err)
-			if wire.Safe(err).Code == "preparation_cancelled" {
-				n.Preparation.Stage = "cancelled"
+			if err != nil {
+				// Only the initiating failure cancels peers. A peer's adapter may
+				// report its last probe error after cancellation; preserve the cause.
+				if cause := context.Cause(ctx); cause != nil {
+					err = &wire.Error{Code: "preparation_cancelled", Message: "Node preparation was cancelled", Details: map[string]any{"node_id": n.ID, "cause": wire.Safe(cause), "last_error": wire.Safe(err)}}
+				} else {
+					s.mu.Lock()
+					stage := n.Preparation.Stage
+					s.mu.Unlock()
+					cause := wire.Safe(err)
+					err = &wire.Error{Code: cause.Code, Message: cause.Message, Details: map[string]any{"node_id": n.ID, "stage": stage, "started": started, "deadline": until, "elapsed_ms": time.Since(started).Milliseconds(), "cause": cause}}
+					cancel(err)
+				}
 			}
-		}
-		n.Preparation.StageStarted = &n.Preparation.Updated
-		s.save(t)
-		s.mu.Unlock()
-		return err
+			s.mu.Lock()
+			n.Polling = PollSchedule{}
+			n.Preparation.Updated = time.Now().UTC()
+			if err == nil {
+				n.State = "running"
+				n.Preparation.Stage, n.Preparation.Error = "ready", nil
+				now := time.Now().UTC()
+				n.Health = Health{VirtualBox: Observation{State: "available", LastSuccess: &now}, GuestControl: Observation{State: "available", LastSuccess: &now}, Commands: Observation{State: "available", LastSuccess: &now}}
+			} else {
+				n.Preparation.Stage, n.Preparation.Error = "failed", wire.Safe(err)
+				if wire.Safe(err).Code == "preparation_cancelled" {
+					n.Preparation.Stage = "cancelled"
+				}
+			}
+			n.Preparation.StageStarted = &n.Preparation.Updated
+			s.save(t)
+			s.mu.Unlock()
+			done <- err
+		}()
 	}
-	if err := prepare(t.lab().Router); err != nil {
+	prepare(t.lab().Router)
+	if err := <-done; err != nil {
 		return err
 	}
 	// All clone MACs and reservations are fixed at admission. Establish DHCP,
@@ -506,16 +533,22 @@ func (s *Server) prepare(t *Task, r *Runtime) error {
 	if err := s.refreshNetworkContext(ctx, t, r, false); err != nil {
 		return err
 	}
-	var wg sync.WaitGroup
-	for _, n := range t.lab().Nodes {
-		wg.Add(1)
-		go func() { defer wg.Done(); _ = prepare(n) }()
+	// Admission is ordered and includes clone/configuration work. Waiting nodes
+	// have no resource intent or startup deadline until a preparation slot opens.
+	active, next := 0, 0
+	for next < len(t.lab().Nodes) || active > 0 {
+		for next < len(t.lab().Nodes) && active < s.cfg.VirtualBox.StartupParallelism && ctx.Err() == nil {
+			prepare(t.lab().Nodes[next])
+			next++
+			active++
+		}
+		if active == 0 {
+			break
+		}
+		<-done
+		active--
 	}
-	wg.Wait()
-	if err := context.Cause(ctx); err != nil {
-		return err
-	}
-	return nil
+	return context.Cause(ctx)
 }
 func (s *Server) observe(t *Task, r *Runtime) {
 	tick := time.NewTicker(time.Second)

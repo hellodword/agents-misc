@@ -36,6 +36,7 @@ type runRecord struct {
 	CacheID        string         `json:"upload_id,omitempty"`
 	Submission     map[string]any `json:"submission,omitempty"`
 	TaskID         string         `json:"job_id,omitempty"`
+	CleanupInputs  []string       `json:"cleanup_inputs,omitempty"`
 }
 
 type receipt struct {
@@ -183,6 +184,29 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 	if err := save(); err != nil {
 		return nil, err
 	}
+	cleanupInputs := func() {
+		if len(j.CleanupInputs) == 0 {
+			return
+		}
+		remaining := []string{}
+		for _, id := range j.CleanupInputs {
+			var err error
+			if !wire.IDPattern.MatchString(id) {
+				err = fmt.Errorf("invalid upload identity in cleanup record")
+			} else {
+				err = root.RemoveAll(filepath.Join("inputs", id, "cache"))
+			}
+			if err != nil {
+				fmt.Fprintf(o.Progress, "Local input cache cleanup pending for %s: %v; retry by resuming this workspace\n", id, err)
+				remaining = append(remaining, id)
+			}
+		}
+		j.CleanupInputs = remaining
+		if err := save(); err != nil {
+			fmt.Fprintf(o.Progress, "Local cache cleanup journal update failed: %v; resume this workspace to reconcile\n", err)
+		}
+	}
+	cleanupInputs()
 	fmt.Fprintf(o.Progress, "Request: %s\nWorkspace: %s\n", j.RequestID, o.WorkDir)
 	client := mcp.NewClient(&mcp.Implementation{Name: "vm-test-submit", Version: wire.Version}, nil)
 	httpClient := &http.Client{Transport: bearerTransport{o.Token}, Timeout: 660 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -231,11 +255,13 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 				if failure, ok := err.(*wire.Error); ok && failure.Code == "not_found" {
 					// No submission was journaled, so this input was never sent
 					// to nix_job_create. Reserve a fresh input and evaluation.
+					j.CleanupInputs = append(j.CleanupInputs, j.CacheID)
 					j.CacheID = ""
 					j.CacheAttempt++
 					if err = save(); err != nil {
 						return nil, err
 					}
+					cleanupInputs()
 					continue
 				}
 				return nil, err
@@ -267,12 +293,14 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 			// Admission checks the retained request receipt before its upload.
 			// A missing input therefore proves this request was not accepted.
 			if failure, ok := err.(*wire.Error); ok && failure.Code == "not_found" {
+				j.CleanupInputs = append(j.CleanupInputs, j.CacheID)
 				j.Submission = nil
 				j.CacheID = ""
 				j.CacheAttempt++
 				if err = save(); err != nil {
 					return nil, err
 				}
+				cleanupInputs()
 				continue
 			}
 			return nil, err
@@ -281,9 +309,11 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 			return nil, fmt.Errorf("invalid task ID")
 		}
 		j.TaskID = task.ID
+		j.CleanupInputs = append(j.CleanupInputs, j.CacheID)
 		if err := save(); err != nil {
 			return nil, err
 		}
+		cleanupInputs()
 	}
 	fmt.Fprintf(o.Progress, "Task: %s\n", j.TaskID)
 	return observe(ctx, session, root, j.TaskID, o)

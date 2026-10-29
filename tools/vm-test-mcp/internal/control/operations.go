@@ -75,7 +75,7 @@ func (s *Server) query(ctx context.Context, name string, args any) (result any, 
 			backends[kind] = view
 		}
 		s.mu.Lock()
-		return map[string]any{"version": wire.Version, "build": wire.Identity(), "performance": s.performance.Latest(), "templates": templates, "backends": backends, "active_execution_id": s.active, "limits": map[string]any{"minimum_codex_version": "0.163.0", "wait_seconds": 600, "tool_timeout_sec": 660, "heartbeat_seconds": 15, "storage": s.cfg.Storage, "storage_blocked": s.storageBlocked, "default_seconds": s.cfg.Tasks.DefaultTimeout.Seconds(), "max_seconds": s.cfg.Tasks.MaxDuration.Seconds(), "max_upload_bytes": s.cfg.Storage.MaxUploadBytes, "max_nodes": 64, "startup_timeout": s.cfg.VirtualBox.StartupTimeout.Value().String(), "shutdown_timeout": s.cfg.VirtualBox.ShutdownTimeout.Value().String(), "cleanup_timeout": s.cfg.Tasks.CleanupTimeout.Value().String(), "probe_interval": probeInterval.String(), "probe_timeout": probeTimeout.String(), "unavailable_after": s.cfg.VirtualBox.UnavailableAfter.Value().String(), "failure_threshold": 3, "recovery_successes": 2, "diagnostic_timeout": diagnosticBudget.String(), "node_exec_default_seconds": 10, "node_exec_max_seconds": 30, "max_active_endpoints_per_lab": 128, "command_protocol": wire.CommandProtocol, "stdin_packet_bytes": wire.InputPacketLimit, "stdin_packets": wire.InputPacketCount, "stdin_bytes": wire.CommandInputLimit, "output_bytes_per_stream": wire.CommandOutputLimit, "guest_read_bytes_per_stream": wire.CommandReadLimit}, "endpoint_address": s.cfg.VirtualBox.Network.Listen}, nil
+		return map[string]any{"version": wire.Version, "build": wire.Identity(), "performance": s.performance.Latest(), "templates": templates, "backends": backends, "active_execution_id": s.active, "limits": map[string]any{"minimum_codex_version": "0.163.0", "wait_seconds": 600, "tool_timeout_sec": 660, "heartbeat_seconds": 15, "storage": s.cfg.Storage, "storage_blocked": s.storageBlocked, "default_seconds": s.cfg.Tasks.DefaultTimeout.Seconds(), "max_seconds": s.cfg.Tasks.MaxDuration.Seconds(), "max_upload_bytes": s.cfg.Storage.MaxUploadBytes, "max_nodes": 64, "startup_timeout": s.cfg.VirtualBox.StartupTimeout.Value().String(), "startup_parallelism": s.cfg.VirtualBox.StartupParallelism, "shutdown_timeout": s.cfg.VirtualBox.ShutdownTimeout.Value().String(), "cleanup_timeout": s.cfg.Tasks.CleanupTimeout.Value().String(), "probe_interval": probeInterval.String(), "probe_timeout": probeTimeout.String(), "unavailable_after": s.cfg.VirtualBox.UnavailableAfter.Value().String(), "failure_threshold": 3, "recovery_successes": 2, "diagnostic_timeout": diagnosticBudget.String(), "node_exec_default_seconds": 10, "node_exec_max_seconds": 30, "max_active_endpoints_per_lab": 128, "command_protocol": wire.CommandProtocol, "stdin_packet_bytes": wire.InputPacketLimit, "stdin_packets": wire.InputPacketCount, "stdin_bytes": wire.CommandInputLimit, "output_bytes_per_stream": wire.CommandOutputLimit, "guest_read_bytes_per_stream": wire.CommandReadLimit}, "endpoint_address": s.cfg.VirtualBox.Network.Listen}, nil
 	case TaskListRequest:
 		return s.listTasksKind(a, name)
 	case TaskID:
@@ -526,14 +526,14 @@ func (s *Server) buildLab(a LabRequest, op *Operation) (*Task, error) {
 			mac = "08:00:27:" + x[:2] + ":" + x[2:4] + ":" + x[4:6]
 		}
 		macs[mac] = true
-		n := &Node{ID: wire.ID(), NodeRequest: v, UUID: wire.UUID(), MAC: mac, State: "pending", Link: true}
+		n := &Node{ID: wire.ID(), NodeRequest: v, UUID: wire.UUID(), MAC: mac, State: "pending", Preparation: Preparation{Stage: "pending", Updated: op.Created}, Link: true}
 		t.lab().Nodes = append(t.lab().Nodes, n)
 		policy.Nodes = append(policy.Nodes, network.Lease{Name: v.Name, MAC: mac, IPv4: v.IPv4})
 	}
 	if e = policy.Validate(); e != nil {
 		return nil, e
 	}
-	t.lab().Router = &Node{ID: wire.ID(), UUID: wire.UUID(), NodeRequest: NodeRequest{Name: "router", CPUs: 1, MemoryMiB: 256}, MAC: routerMAC, State: "pending"}
+	t.lab().Router = &Node{ID: wire.ID(), UUID: wire.UUID(), NodeRequest: NodeRequest{Name: "router", CPUs: 1, MemoryMiB: 256}, MAC: routerMAC, State: "pending", Preparation: Preparation{Stage: "pending", Updated: op.Created}}
 
 	t.Created = op.Created
 	return t, nil

@@ -6,9 +6,154 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hellodword/agents-misc/vm-test-mcp/internal/config"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/network"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
+
+type scheduledPreparationBackend struct {
+	fakeBackend
+	entered chan string
+	release map[string]chan error
+}
+
+func (f *scheduledPreparationBackend) Prepare(ctx context.Context, task *Task, node *Node) error {
+	if err := f.fakeBackend.Prepare(ctx, task, node); err != nil {
+		return err
+	}
+	f.entered <- node.Name
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-f.release[node.Name]:
+		return err
+	}
+}
+
+func TestPreparationSlotsAndWaitingBudgets(t *testing.T) {
+	for _, parallelism := range []int{1, 2} {
+		t.Run(map[int]string{1: "serial", 2: "parallel"}[parallelism], func(t *testing.T) {
+			f := &scheduledPreparationBackend{entered: make(chan string, 4), release: map[string]chan error{}}
+			for _, name := range []string{"router", "one", "two", "three"} {
+				f.release[name] = make(chan error, 1)
+			}
+			cfg := testConfig(t)
+			cfg.VirtualBox.StartupParallelism = parallelism
+			s, err := New(cfg, f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.Start()
+			defer s.Close()
+			op := successful(t, s, "lab_create", LabRequest{RequestID: "ordered-preparation", Nodes: []NodeRequest{{Name: "one", Template: "windows"}, {Name: "two", Template: "windows"}, {Name: "three", Template: "windows"}}})
+			id := op.Result.(map[string]any)["id"].(string)
+			entered := func() string {
+				t.Helper()
+				select {
+				case name := <-f.entered:
+					return name
+				case <-time.After(3 * time.Second):
+					t.Fatal("preparation did not start")
+					return ""
+				}
+			}
+			if name := entered(); name != "router" {
+				t.Fatal("first preparation", name)
+			}
+			f.release["router"] <- nil
+			for range parallelism {
+				entered()
+			}
+			s.mu.Lock()
+			task, _ := s.task(id)
+			before := clone(task)
+			s.mu.Unlock()
+			for i, n := range before.lab().Nodes {
+				if i < parallelism {
+					if !n.Intent || n.Preparation.Started == nil || n.Preparation.Deadline.Sub(*n.Preparation.Started) < cfg.VirtualBox.StartupTimeout.Value()-time.Second {
+						t.Fatal("dispatched node lost its startup budget", n.Preparation)
+					}
+				} else if n.Intent || n.Preparation.Stage != "pending" || n.Preparation.Started != nil || n.Preparation.Deadline != nil {
+					t.Fatal("waiting node acquired resources or consumed startup time", n.Preparation)
+				}
+			}
+			released := time.Now().UTC()
+			f.release["one"] <- nil
+			expected := map[int]string{1: "two", 2: "three"}[parallelism]
+			if name := entered(); name != expected {
+				t.Fatal("dispatch order", name, expected)
+			}
+			s.mu.Lock()
+			after := clone(task)
+			s.mu.Unlock()
+			if after.lab().Nodes[parallelism].Preparation.Started.Before(released) || !after.Deadline.Equal(*before.Deadline) {
+				t.Fatal("waiting changed node or lab timing", after.Public())
+			}
+			f.release["two"] <- nil
+			if parallelism == 1 && entered() != "three" {
+				t.Fatal("last node did not follow the request order")
+			}
+			f.release["three"] <- nil
+			waitFor(t, func() bool { return taskView(t, s, id)["phase"] == "running" })
+			successful(t, s, "lab_cancel", TaskChange{Change: Change{"release-slots"}, TaskID: TaskID{id}})
+			waitFor(t, func() bool { return taskView(t, s, id)["cleanup"].(map[string]any)["state"] == "complete" })
+		})
+	}
+}
+
+func TestPreparationStopsDispatchAndCleansAllocatedNodes(t *testing.T) {
+	for _, ending := range []string{"failure", "cancel", "deadline"} {
+		t.Run(ending, func(t *testing.T) {
+			f := &scheduledPreparationBackend{entered: make(chan string, 4), release: map[string]chan error{"router": make(chan error, 1), "one": make(chan error, 1)}}
+			f.release["router"] <- nil
+			cfg := testConfig(t)
+			if ending == "deadline" {
+				cfg.Tasks.DefaultTimeout = config.Duration(time.Second)
+			}
+			s, err := New(cfg, f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.Start()
+			defer s.Close()
+			op := successful(t, s, "lab_create", LabRequest{RequestID: "stop-dispatch", Nodes: []NodeRequest{{Name: "one", Template: "windows"}, {Name: "two", Template: "windows"}}})
+			id := op.Result.(map[string]any)["id"].(string)
+			for range 2 {
+				select {
+				case <-f.entered:
+				case <-time.After(3 * time.Second):
+					t.Fatal("first node did not start")
+				}
+			}
+			switch ending {
+			case "failure":
+				f.release["one"] <- wire.Fail("initialization_failed", "Synthetic preparation failure")
+			case "cancel":
+				successful(t, s, "lab_cancel", TaskChange{Change: Change{"cancel-preparation"}, TaskID: TaskID{id}})
+			}
+			waitFor(t, func() bool { return taskView(t, s, id)["cleanup"].(map[string]any)["state"] == "complete" })
+			s.mu.Lock()
+			task, _ := s.task(id)
+			snapshot := clone(task)
+			s.mu.Unlock()
+			pending := snapshot.lab().Nodes[1]
+			if pending.Intent || pending.Preparation.Stage != "cancelled" || pending.Preparation.Started != nil || pending.Preparation.Deadline != nil {
+				t.Fatal("unstarted node was allocated", pending)
+			}
+			if !snapshot.lab().Router.Cleaned || !snapshot.lab().Nodes[0].Cleaned {
+				t.Fatal("allocated resources survived cleanup")
+			}
+			if ending == "failure" && snapshot.Failure.Code != "initialization_failed" {
+				t.Fatal("initial failure was lost", snapshot.Failure)
+			}
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if len(f.created) != 2 || len(f.deleted) != 2 {
+				t.Fatal("dispatch continued after termination", f.created, f.deleted)
+			}
+		})
+	}
+}
 
 type preparationNetworkBackend struct {
 	fakeBackend
@@ -180,7 +325,9 @@ func (f *failingPreparationBackend) Prepare(ctx context.Context, task *Task, nod
 
 func TestPreparationPreservesPrimaryFailureAndPeerCancellation(t *testing.T) {
 	f := &failingPreparationBackend{peerEntered: make(chan struct{})}
-	s, err := New(testConfig(t), f)
+	cfg := testConfig(t)
+	cfg.VirtualBox.StartupParallelism = 2
+	s, err := New(cfg, f)
 	if err != nil {
 		t.Fatal(err)
 	}

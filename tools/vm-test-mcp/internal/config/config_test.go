@@ -10,7 +10,7 @@ import (
 
 func TestDurationConfigurationAndAnnotatedExample(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "config.yaml")
-	body := fmt.Sprintf("state_dir: %s\nservice:\n  token: fixture\n  public_url: http://localhost:8765\ntasks:\n  default_timeout: 2h\n  max_duration: 12h\n  cleanup_timeout: 45s\nvirtualbox:\n  startup_timeout: 8m\n  shutdown_timeout: 90s\n  unavailable_after: 40s\n  router:\n    iso: /fixture/router.iso\n  network:\n    lan: 10.99.0.0/24\nstorage:\n  failure_days: 7\n", t.TempDir())
+	body := fmt.Sprintf("state_dir: %s\nservice:\n  token: fixture\n  public_url: http://localhost:8765\ntasks:\n  default_timeout: 2h\n  max_duration: 12h\n  cleanup_timeout: 45s\nvirtualbox:\n  startup_parallelism: 3\n  startup_timeout: 8m\n  shutdown_timeout: 90s\n  unavailable_after: 40s\n  router:\n    iso: /fixture/router.iso\n  network:\n    lan: 10.99.0.0/24\nstorage:\n  failure_days: 7\n", t.TempDir())
 	if err := os.WriteFile(file, []byte(body), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -18,11 +18,12 @@ func TestDurationConfigurationAndAnnotatedExample(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Tasks.DefaultTimeout.Value() != 2*time.Hour || c.Tasks.CleanupTimeout.Value() != 45*time.Second || c.VirtualBox.StartupTimeout.Value() != 8*time.Minute || c.VirtualBox.Network.LAN != "10.99.0.0/24" || c.Storage.FailureDays != 7 {
+	if c.Tasks.DefaultTimeout.Value() != 2*time.Hour || c.Tasks.CleanupTimeout.Value() != 45*time.Second || c.VirtualBox.StartupTimeout.Value() != 8*time.Minute || c.VirtualBox.StartupParallelism != 3 || c.VirtualBox.Network.LAN != "10.99.0.0/24" || c.Storage.FailureDays != 7 {
 		t.Fatal("duration or nested configuration differs")
 	}
-	if _, err = Load("../../config.example.yaml"); err != nil {
-		t.Fatal(err)
+	example, err := Load("../../config.example.yaml")
+	if err != nil || example.VirtualBox.StartupParallelism != 1 {
+		t.Fatal("example startup default", example.VirtualBox.StartupParallelism, err)
 	}
 }
 

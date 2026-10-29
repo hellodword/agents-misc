@@ -79,16 +79,17 @@ type Template struct {
 	Cameras       map[string]string `yaml:"cameras" json:"-"`
 }
 type VirtualBox struct {
-	Executable       string              `yaml:"executable"`
-	LibraryDir       string              `yaml:"library_dir"`
-	APIHelper        string              `yaml:"api_helper"`
-	ISOBuilder       string              `yaml:"iso_builder"`
-	StartupTimeout   Duration            `yaml:"startup_timeout"`
-	ShutdownTimeout  Duration            `yaml:"shutdown_timeout"`
-	UnavailableAfter Duration            `yaml:"unavailable_after"`
-	Router           Router              `yaml:"router"`
-	Network          Network             `yaml:"network"`
-	Templates        map[string]Template `yaml:"templates"`
+	Executable         string              `yaml:"executable"`
+	LibraryDir         string              `yaml:"library_dir"`
+	APIHelper          string              `yaml:"api_helper"`
+	ISOBuilder         string              `yaml:"iso_builder"`
+	StartupTimeout     Duration            `yaml:"startup_timeout"`
+	StartupParallelism int                 `yaml:"startup_parallelism"`
+	ShutdownTimeout    Duration            `yaml:"shutdown_timeout"`
+	UnavailableAfter   Duration            `yaml:"unavailable_after"`
+	Router             Router              `yaml:"router"`
+	Network            Network             `yaml:"network"`
+	Templates          map[string]Template `yaml:"templates"`
 }
 type Router struct {
 	ISO string `yaml:"iso"`
@@ -133,7 +134,7 @@ func Defaults() Config {
 	return Config{
 		Service: Service{Listen: "127.0.0.1:8765"},
 		Tasks:   Tasks{DefaultTimeout: Duration(time.Hour), MaxDuration: Duration(24 * time.Hour), CleanupTimeout: Duration(5 * time.Minute)},
-		VirtualBox: VirtualBox{StartupTimeout: Duration(10 * time.Minute), ShutdownTimeout: Duration(time.Minute), UnavailableAfter: Duration(30 * time.Second),
+		VirtualBox: VirtualBox{StartupParallelism: 1, StartupTimeout: Duration(10 * time.Minute), ShutdownTimeout: Duration(time.Minute), UnavailableAfter: Duration(30 * time.Second),
 			Network: Network{LAN: "10.77.0.0/24", WAN: "10.0.2.0/24", DNS: []string{"1.1.1.1", "9.9.9.9"}, Listen: "127.0.0.1", Sources: []string{"127.0.0.1/32"}, PortMin: 20000, PortMax: 29999, LeaseSeconds: 15}},
 		Nix: Worker{ControllerUID: -1, Nix: "nix"}, Storage: Storage{SuccessDays: 1, FailureDays: 7, SummaryDays: 30, EvidenceBytes: 40 << 30, LowWaterBytes: 32 << 30, InputBytes: 16 << 30, UploadIdle: Duration(time.Hour), MaxUploadBytes: 8 << 30},
 	}
@@ -270,6 +271,9 @@ func (c *Config) Validate() error {
 		c.VirtualBox.Templates[name] = t
 	}
 	defaults := Defaults().VirtualBox
+	if c.VirtualBox.StartupParallelism < 1 || c.VirtualBox.StartupParallelism > 64 {
+		return bad("startup_parallelism must be between 1 and 64")
+	}
 	if c.VirtualBox.StartupTimeout == 0 {
 		c.VirtualBox.StartupTimeout = defaults.StartupTimeout
 	}

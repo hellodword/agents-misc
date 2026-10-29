@@ -27,6 +27,8 @@ type runFixture struct {
 	available        bool
 	waitingReason    string
 	expireInput      bool
+	rejectSubmission bool
+	failUpload       bool
 	loseReply        bool
 	cleanup          string
 	submits, uploads int
@@ -42,7 +44,11 @@ func (f *runFixture) tool(_ context.Context, r *mcp.CallToolRequest) (*mcp.CallT
 	if err := json.Unmarshal(r.Params.Arguments, &args); err != nil {
 		return nil, err
 	}
-	transfer := map[string]any{"id": strings.Repeat("c", 32), "state": "open", "url": f.url + "/files/capability-secret"}
+	inputID := strings.Repeat("c", 32)
+	if f.creates > 1 {
+		inputID = fmt.Sprintf("%032x", f.creates)
+	}
+	transfer := map[string]any{"id": inputID, "state": "open", "url": f.url + "/files/capability-secret"}
 	var value any
 	failed := false
 	switch r.Params.Name {
@@ -66,6 +72,11 @@ func (f *runFixture) tool(_ context.Context, r *mcp.CallToolRequest) (*mcp.CallT
 		value = transfer
 	case "nix_job_create":
 		f.submits++
+		if f.rejectSubmission {
+			f.rejectSubmission = false
+			value, failed = map[string]any{"error": wire.Fail("not_found", "Unbound input expired before admission")}, true
+			break
+		}
 		request := string(wire.JSON(args))
 		if f.firstRequest != "" && f.firstRequest != request {
 			return nil, fmt.Errorf("retry changed the request")
@@ -129,7 +140,11 @@ func newRunFixture(t *testing.T) (*runFixture, RunOptions, string) {
 			_, _ = io.Copy(io.Discard, r.Body)
 			f.mu.Lock()
 			f.uploads++
+			fail := f.failUpload
 			f.mu.Unlock()
+			if fail {
+				w.WriteHeader(http.StatusServiceUnavailable)
+			}
 			return
 		}
 		if r.Header.Get("Authorization") != "Bearer unit-token" {
@@ -148,7 +163,7 @@ func newRunFixture(t *testing.T) (*runFixture, RunOptions, string) {
 		t.Fatal(err)
 	}
 	meta := Metadata{Derivation: "/nix/store/" + strings.Repeat("0", 32) + "-smoke.drv", System: "x86_64-linux", ForceAccel: true, Nodes: []string{"first", "second", "third"}, Containers: []string{}}
-	script := "#!" + shell + "\nprintf '%s\\n' \"$1\" >> '" + trace + "'\ncase \"$1\" in\nflake) printf '%s\\n' '{\"resolvedUrl\":\"git+file:///synthetic/project\"}';;\neval) printf '%s\\n' '" + string(wire.JSON(meta)) + "';;\ncopy) exit 0;;\n*) exit 1;;\nesac\n"
+	script := "#!" + shell + "\nprintf '%s\\n' \"$1\" >> '" + trace + "'\ncase \"$1\" in\nflake) printf '%s\\n' '{\"resolvedUrl\":\"git+file:///synthetic/project\"}';;\neval) printf '%s\\n' '" + string(wire.JSON(meta)) + "';;\ncopy) vm_test_cache=${4#file://}; vm_test_cache=${vm_test_cache%%\\?*}; mkdir -p \"$vm_test_cache/nar\"; printf synthetic > \"$vm_test_cache/nar/fixture.nar.xz\";;\n*) exit 1;;\nesac\n"
 	if err := os.WriteFile(exe, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -170,9 +185,19 @@ func TestAutomaticRunWaitsForCleanupAndResumesLostReply(t *testing.T) {
 	if _, err := Run(ctx, options); err == nil {
 		t.Fatal("expected lost submission reply")
 	}
+	cache := filepath.Join(options.WorkDir, "inputs", strings.Repeat("c", 32), "cache")
+	if _, err := os.Stat(filepath.Join(cache, "nar", "fixture.nar.xz")); err != nil {
+		t.Fatal("uncertain acceptance lost its input", err)
+	}
 	result, err := Run(ctx, options)
 	if err != nil || !bytes.Contains(result, []byte(`"state":"complete"`)) {
 		t.Fatal(string(result), err)
+	}
+	if _, err := os.Stat(cache); !os.IsNotExist(err) {
+		t.Fatal("accepted job retained its local cache", err)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(cache), "submission.json")); err != nil {
+		t.Fatal("accepted job lost its evaluated metadata", err)
 	}
 	f.mu.Lock()
 	if f.creates != 1 || f.uploads != 3 || f.submits != 2 || f.polls < 3 {
@@ -274,5 +299,111 @@ func TestExpiredUnsubmittedInputGetsFreshReservation(t *testing.T) {
 	data, err := os.ReadFile(trace)
 	if err != nil || string(data) != "eval\ncopy\n" {
 		t.Fatal("evaluated before a usable input was reserved", string(data), err)
+	}
+}
+
+func TestUploadFailureRetainsCacheUntilAccepted(t *testing.T) {
+	f, options, _ := newRunFixture(t)
+	f.failUpload = true
+	if _, err := Run(context.Background(), options); err == nil {
+		t.Fatal("upload unexpectedly completed")
+	}
+	cache := filepath.Join(options.WorkDir, "inputs", strings.Repeat("c", 32), "cache")
+	if _, err := os.Stat(filepath.Join(cache, "nar", "fixture.nar.xz")); err != nil {
+		t.Fatal("interrupted upload lost input", err)
+	}
+	f.mu.Lock()
+	f.failUpload = false
+	f.mu.Unlock()
+	if _, err := Run(context.Background(), options); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(cache); !os.IsNotExist(err) {
+		t.Fatal("accepted retry retained its input cache", err)
+	}
+}
+
+func TestUnacceptedSubmissionReleasesCacheBeforeNewAttempt(t *testing.T) {
+	f, options, trace := newRunFixture(t)
+	f.rejectSubmission = true
+	if _, err := Run(context.Background(), options); err != nil {
+		t.Fatal(err)
+	}
+	if f.creates != 2 || f.submits != 2 {
+		t.Fatal("unaccepted input did not get a fresh attempt", f.creates, f.submits)
+	}
+	data, err := os.ReadFile(trace)
+	if err != nil || string(data) != "eval\ncopy\neval\ncopy\n" {
+		t.Fatal("retry did not regenerate its released cache", string(data), err)
+	}
+	for _, id := range []string{strings.Repeat("c", 32), fmt.Sprintf("%032x", 2)} {
+		if _, err := os.Stat(filepath.Join(options.WorkDir, "inputs", id, "cache")); !os.IsNotExist(err) {
+			t.Fatal("released attempt retained input cache", id, err)
+		}
+		if _, err := os.Stat(filepath.Join(options.WorkDir, "inputs", id, "submission.json")); err != nil {
+			t.Fatal("attempt lost evaluated metadata", id, err)
+		}
+	}
+}
+
+func TestAcceptedRunRetriesLocalCleanupWithoutResubmitting(t *testing.T) {
+	f, options, _ := newRunFixture(t)
+	if _, err := Run(context.Background(), options); err != nil {
+		t.Fatal(err)
+	}
+	journalPath := filepath.Join(options.WorkDir, "run.json")
+	data, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record runRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatal(err)
+	}
+	// Model interruption after the accepted identity and cleanup intent were synced.
+	record.CleanupInputs = []string{record.CacheID}
+	if err := os.WriteFile(journalPath, wire.JSON(record), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cache := filepath.Join(options.WorkDir, "inputs", record.CacheID, "cache")
+	if err := os.MkdirAll(cache, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "remaining"), []byte("input"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Dir(cache)
+	if err := os.Chmod(parent, 0500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(parent, 0700) })
+	var progress bytes.Buffer
+	options.Progress = &progress
+	if _, err := Run(context.Background(), options); err != nil {
+		t.Fatal("cache deletion changed job result", err)
+	}
+	if !strings.Contains(progress.String(), "cleanup pending") {
+		t.Fatal("failed local deletion was not reported", progress.String())
+	}
+	if err := os.Chmod(parent, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(context.Background(), options); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(cache); !os.IsNotExist(err) {
+		t.Fatal("resumed run retained released input", err)
+	}
+	if f.submits != 1 {
+		t.Fatal("cleanup retry resubmitted execution", f.submits)
+	}
+	data, err = os.ReadFile(journalPath)
+	if err != nil || json.Unmarshal(data, &record) != nil {
+		t.Fatal(err)
+	}
+	// The journal contains only unfinished cleanup work.
+	var contents map[string]any
+	if err := json.Unmarshal(data, &contents); err != nil || contents["cleanup_inputs"] != nil {
+		t.Fatal("completed cache cleanup kept accumulating records", string(data), err)
 	}
 }

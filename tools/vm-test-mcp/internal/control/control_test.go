@@ -108,7 +108,7 @@ func testConfig(t *testing.T) config.Config {
 	os.Chmod(c.StateDir, 0700)
 	c.Tasks.DefaultTimeout = config.Duration(60 * time.Second)
 	c.Tasks.MaxDuration = config.Duration(600 * time.Second)
-	c.VirtualBox = config.VirtualBox{StartupTimeout: c.VirtualBox.StartupTimeout, ShutdownTimeout: c.VirtualBox.ShutdownTimeout, UnavailableAfter: c.VirtualBox.UnavailableAfter, Network: c.VirtualBox.Network, Executable: "/fake/VBoxManage", LibraryDir: "/fake/lib", APIHelper: "/fake/input", ISOBuilder: "/fake/xorriso", Templates: map[string]config.Template{"windows": {Kind: "windows", VM: "11111111-1111-4111-8111-111111111111", Snapshot: "22222222-2222-4222-8222-222222222222", Username: "synthetic", Password: "synthetic", Supervisor: "C:\\guest.exe", WorkDir: "C:\\work", CPUs: 1, MemoryMiB: 512, MaxCPUs: 4, MaxMemoryMiB: 4096}}}
+	c.VirtualBox = config.VirtualBox{StartupParallelism: c.VirtualBox.StartupParallelism, StartupTimeout: c.VirtualBox.StartupTimeout, ShutdownTimeout: c.VirtualBox.ShutdownTimeout, UnavailableAfter: c.VirtualBox.UnavailableAfter, Network: c.VirtualBox.Network, Executable: "/fake/VBoxManage", LibraryDir: "/fake/lib", APIHelper: "/fake/input", ISOBuilder: "/fake/xorriso", Templates: map[string]config.Template{"windows": {Kind: "windows", VM: "11111111-1111-4111-8111-111111111111", Snapshot: "22222222-2222-4222-8222-222222222222", Username: "synthetic", Password: "synthetic", Supervisor: "C:\\guest.exe", WorkDir: "C:\\work", CPUs: 1, MemoryMiB: 512, MaxCPUs: 4, MaxMemoryMiB: 4096}}}
 	c.VirtualBox.Router = config.Router{ISO: "/fake/router.iso"}
 	return c
 }

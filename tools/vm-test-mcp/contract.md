@@ -304,11 +304,24 @@ a result already recorded remains unchanged.
 consecutive `failures`/`successes` and `error`. An absent observation is `unknown`;
 other states are `available`, `suspect`, `unavailable` and `expected`.
 
+The router becomes ready first, followed by DHCP/DNS and host protection. Test
+nodes then enter preparation in `lab_create.nodes` order. Administrator setting
+`virtualbox.startup_parallelism` defaults to 1 and accepts 1..64; `service_get.limits`
+exposes its effective value as `startup_parallelism`. Each slot covers cloning,
+configuration, boot and guest readiness. A slot opens when its node is ready.
+This limit applies to lab initialization; callers control the concurrency of
+explicit runtime power operations.
+
 Preparation records its start, current stage start, independent startup deadline,
-last update and error. The public task's `router` supplies the router's preparation
-and health without making it a test-command target. Parallel preparation keeps
-the initiating failure's node, stage, elapsed time and budget; cancelled peers
-retain that cause instead of reporting a second startup timeout.
+last update and error. Waiting nodes remain `pending`, with no start/deadline or
+resource intent. Their startup budget begins at dispatch; the lab deadline begins
+when it acquires the shared execution slot. The public task's `router` supplies
+the router's preparation and health without making it a test-command target.
+The first preparation failure, cancellation or lab deadline stops further
+dispatch and cancels in-progress preparations. The initiating failure retains
+its node, stage, elapsed time and budget; cancelled peers retain that cause.
+Unstarted nodes become `cancelled` with resources `never_allocated`. Allocated
+resources follow the lab cleanup boundary before the shared slot is released.
 During preparation, probes begin two seconds apart and back off with bounded
 jitter to at most 30 seconds while the stage remains unchanged. Advancing to a
 new stage resets the delay. The router and client nodes expose this schedule in

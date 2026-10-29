@@ -51,7 +51,12 @@ service:
 #   # 可选，默认使用包内 xorriso，再查 PATH。覆盖程序必须支持 -as mkisofs。
 #   # 它只制作每个 lab 的 seed ISO（路由凭据和初始化参数），不制作系统安装盘。
 #   # iso_builder: /opt/vm-test-mcp/bin/xorriso
+#   # 可选，默认 1，范围 1..64。实验室初始化时同时准备的测试节点数。
+#   # router 就绪并应用 DHCP/DNS 和保护策略后，按请求顺序准备测试节点。
+#   # 每个名额覆盖克隆、配置、启动及 guest 就绪；显式运行期电源操作由调用方安排并发。
+#   startup_parallelism: 1
 #   # 可选，默认 10m，范围 1s..1h。每个节点创建、启动及首次初始化的总时间。
+#   # 等待准备名额不计入节点超时，但计入 lab 的执行期限。
 #   startup_timeout: 10m
 #   # 可选，默认 1m，范围 1s..1h。node_control shutdown 等待关机的上限。
 #   shutdown_timeout: 1m

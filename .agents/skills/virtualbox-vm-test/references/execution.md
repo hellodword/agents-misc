@@ -13,6 +13,15 @@ name and a registered template, optional IPv4/CPU/memory overrides, per-node GUI
 and media requests. Using the same Windows template twice creates independent
 clones. The private router is not a test-command target.
 
+Initialization readies the router and applies DHCP/DNS and host protection before
+dispatching test nodes in request order. `service_get.limits.startup_parallelism`
+reports the administrator's concurrency limit (default 1). A preparation slot
+covers cloning, configuration, boot and guest readiness. Waiting nodes have no
+runtime resources or startup deadline; the lab deadline already runs. Select
+node order and the batch deadline accordingly. Preparation failure stops dispatch
+and cleans allocated nodes. Explicit runtime power operations retain caller-selected
+concurrency.
+
 Each node's `gui` flag selects its host frontend: omitted or `false` uses headless;
 `true` opens a host-visible VirtualBox window. A GUI frontend requires the
 controller to run in the VM owner's graphical session.

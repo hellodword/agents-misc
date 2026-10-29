@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd tools/vm-test-mcp
+python3 -B -m unittest discover -s scripts -p 'test_*.py'
 go vet -tags sqlite_omit_load_extension ./...
 go test -race -tags sqlite_omit_load_extension ./...
 # Cross compilation is distinct from real Windows and cgroup acceptance.

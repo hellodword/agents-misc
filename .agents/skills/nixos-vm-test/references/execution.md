@@ -42,6 +42,14 @@ automatic helper reconciles its journal before regenerating an expired input
 that has no accepted job. Do not submit duplicate jobs to work around an uncertain accepted execution. If the project's wrapper hides standard test metadata/override
 interfaces, adapt that project's entrypoint within its existing output policy.
 
+For upload-only use, record the accepted job ID before removing the workspace's
+`cache/` directory. A ready upload alone is not that boundary: it may expire before
+job admission. Keep `submission.json`, needed logs/results and any irreplaceable
+test inputs for review or reproduction. The automatic `--config` workflow releases
+its `inputs/ID/cache/` after persisting the job ID, and reconciles pending deletion
+when resumed. It also releases caches of attempts confirmed unaccepted. A local
+deletion error is reported on stderr and retried on resume without resubmission.
+
 Use an administrator-approved `--signing-key /absolute/private/key` when local
 input-addressed objects need signatures. Preserve signature validation. Never make
 the worker a trusted Nix user to work around a cache failure.

@@ -150,6 +150,13 @@ LAN defaults to `10.77.0.0/24`; callers can select an RFC1918 subnet and disable
 Guest Control remains usable independently of networking. Docker/Compose run
 inside Linux nodes, with their privileges scoped to that guest.
 
+Lab initialization prepares the router and network first, then test nodes in
+request order. `virtualbox.startup_parallelism` defaults to 1 (range 1..64) and
+covers cloning through guest readiness. Waiting nodes acquire no resources and
+start their individual timeout only when dispatched. The lab's execution deadline
+includes this waiting time. Explicit runtime power operations use caller-selected
+concurrency.
+
 Public IPv4 TCP/UDP egress defaults on. The router filters non-public IANA ranges,
 host addresses and administrator-protected ranges, including its own connections.
 IPv6 is available between LAN guests, without managed egress/publication.
@@ -252,8 +259,13 @@ waits for that task's cleanup before execution.
 
 Progress, task ID and live logs go to stderr; stdout is the final task JSON. Evidence
 and inputs stay on the server. The printed local workspace, by default
-`tmp/agent/vm-test-runs/ID`, retains `run.json`, per-upload `inputs/ID/submission.json` and binary cache,
-`task.log` and `result.json` (including artifact metadata). An unsuccessful test or
+`tmp/agent/vm-test-runs/ID`, retains `run.json`, per-upload `inputs/ID/submission.json`,
+`task.log` and `result.json` (including artifact metadata). The helper releases each
+local binary cache after the accepted job ID is persisted, including on resume.
+Uploading or uncertain acceptance retains the cache; an expired input confirmed
+unaccepted releases its cache before a fresh attempt. Local deletion failures are
+reported on stderr and retried on resume without changing the job result.
+An unsuccessful test or
 unresolved cleanup exits 1; only `passed` with `cleanup.state: complete` exits 0.
 
 ```sh
@@ -287,7 +299,10 @@ vm-test-submit --test '.#checks.x86_64-linux.integration' \
 
 The helper checks QEMU nodes and `qemu.forceAccel`, creates a unique top-level
 derivation bound to the upload ID with substitution disabled, retains it for retries, copies the closure to a standard local binary
-cache and PUTs the manifest and objects. Submit stdout JSON (`request_id`, `upload_id`) to `nix_job_create`. Optional
+cache and PUTs the manifest and objects. Submit stdout JSON (`request_id`, `upload_id`) to `nix_job_create`.
+In upload-only mode, retain `cache/` until the accepted job identity is recorded,
+then remove that directory; retain `submission.json` and needed logs/results for review.
+Optional
 `--signing-key /absolute/private/key` signs content under the administrator's trust
 policy; signature checking stays enabled. Build outputs have worker-owned GC roots
 and are exported only as ordinary files under registered output roots. Verified durable handoff releases worker copies
@@ -320,7 +335,11 @@ nix develop .#vm-test-mcp --command python3 tools/vm-test-mcp/scripts/check-code
 It takes about eleven minutes, uses the production MCP transport with synthetic
 VM adapters, and makes no model API calls. It checks the real 600-second window,
 continuation, FIFO, client timeout/cancellation and explicit cleanup. The report
-records binary hashes and timings. These checks are implementation evidence;
+records binary hashes and timings. Logs and `result.json` are retained in the output
+directory; the fixture executable and isolated Codex profiles live under `runtime/`
+and are removed after process-group exit confirmation, including on failure or
+interruption. Unconfirmed exit retains `runtime/` and records the pending resource
+for recovery. Supplied Codex executables remain caller-owned. These checks are implementation evidence;
 complete [real-host acceptance](preparation.md#acceptance) after setup.
 
 The official VirtualBox SDK 7.2.20 is fetched with its published checksum in a
