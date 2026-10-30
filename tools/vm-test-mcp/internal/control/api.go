@@ -103,6 +103,14 @@ type JobChange struct {
 	Change
 	JobID
 }
+type JobRecoverRequest struct {
+	JobChange
+	Scope string `json:"scope"`
+}
+type RecoverNixRequest struct {
+	TaskChange
+	Scope string `json:"scope"`
+}
 type JobExtendRequest struct {
 	JobChange
 	Seconds int    `json:"seconds"`
@@ -263,10 +271,10 @@ type Definition struct {
 
 var Definitions = []Definition{
 	{"wait", "Wait up to 600 seconds for any business condition or new failure; transport heartbeats stay outside tool results", WaitRequest{}, false},
-	{"nix_job_get", "Read a compact Nix execution and cleanup summary", JobID{}, false},
+	{"nix_job_get", "Read Nix result, resource release and evidence progress", JobID{}, false},
 	{"nix_job_list", "Page through Nix jobs", TaskListRequest{}, false},
 	{"nix_job_cancel", "Cancel a Nix job and await worker resource release", JobChange{}, true},
-	{"nix_job_cleanup", "Retry Nix evidence handoff and resource cleanup", JobChange{}, true},
+	{"nix_job_recover", "Recover resource release or evidence handoff for an ended Nix job", JobRecoverRequest{}, true},
 	{"lab_inspect", "Read lab nodes, networking, resource ledger and diagnostics", TaskID{}, false},
 	{"command_details", "Read command argv, working directory and environment", CommandGetRequest{}, false},
 	{"command_input_read", "Read retained stdin by sequence within a byte budget", CommandInputReadRequest{}, false},

@@ -65,7 +65,7 @@ func (f *fakeBackend) Network(context.Context, *Task, []string, bool) (string, e
 }
 func (f *fakeBackend) Endpoint(context.Context, *Task, *Endpoint, bool) error { return nil }
 func (f *fakeBackend) Nix(context.Context, string, *Task) (json.RawMessage, error) {
-	return wire.JSON(map[string]any{"state": "succeeded", "cleanup": "complete"}), nil
+	return wire.JSON(map[string]any{"state": "succeeded", "cleanup": "complete", "execution": wire.NixExecution{Resources: wire.NixResources{State: "released"}, Evidence: wire.NixEvidence{State: "transferring"}}}), nil
 }
 func (f *fakeBackend) Action(_ context.Context, t *Task, n *Node, a NodeAction) (json.RawMessage, error) {
 	f.mu.Lock()

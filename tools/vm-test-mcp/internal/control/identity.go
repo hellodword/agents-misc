@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/config"
+	"github.com/hellodword/agents-misc/vm-test-mcp/internal/nixexecutor"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
@@ -37,11 +38,12 @@ func cloneIdentity(template config.Template, source string, info map[string]stri
 }
 
 type backendIdentity struct {
-	InstanceID     string              `json:"instance_id,omitempty"`
-	State          string              `json:"state"`
-	Observed       time.Time           `json:"observed"`
-	Build          *wire.BuildIdentity `json:"build,omitempty"`
-	RuntimeVersion string              `json:"runtime_version,omitempty"`
+	Executor       *nixexecutor.Description `json:"executor,omitempty"`
+	InstanceID     string                   `json:"instance_id,omitempty"`
+	State          string                   `json:"state"`
+	Observed       time.Time                `json:"observed"`
+	Build          *wire.BuildIdentity      `json:"build,omitempty"`
+	RuntimeVersion string                   `json:"runtime_version,omitempty"`
 }
 
 func (b *VBoxBackend) BackendIdentity(kind string) any {

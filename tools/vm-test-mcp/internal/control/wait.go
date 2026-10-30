@@ -26,6 +26,7 @@ type WaitRequest struct {
 	Targets []WaitTarget `json:"targets"`
 }
 type TargetState struct {
+	Manual bool `json:"manual_intervention,omitempty"`
 	WaitTarget
 	Revision    int64       `json:"revision"`
 	Satisfied   bool        `json:"satisfied"`
@@ -74,6 +75,10 @@ func (s *Server) targetLocked(target WaitTarget, business bool) (TargetState, er
 		s.queueView(t, out.Summary.(map[string]any))
 		out.Revision = s.revision(key, taskCondition(t))
 		out.Attention = t.cleanupState() == "blocked" || t.Failure != nil || t.Terminal() && t.Conclusion != "passed" || t.Kind == "lab" && t.lab().Network == "degraded"
+		if t.Kind == "nixos" {
+			out.Manual = t.nixResources().State == "blocked" || t.nix().Evidence.State == "blocked"
+			out.Attention = out.Attention || out.Manual
+		}
 		// Guest services are expected to be unavailable while nodes boot. The
 		// preparation deadline/failure path decides when that requires intervention.
 		if t.Kind == "lab" && t.State == "running" {
@@ -85,10 +90,29 @@ func (s *Server) targetLocked(target WaitTarget, business bool) (TargetState, er
 		case "ready":
 			out.Satisfied = t.State == "running"
 		case "complete", "cleaned":
+			if t.Kind == "nixos" {
+				if target.Condition == "cleaned" {
+					return out, wire.Fail("invalid_argument", "Nix jobs use resources_released, evidence_complete or complete")
+				}
+				out.Satisfied = t.settled()
+				break
+			}
 			if target.Condition == "cleaned" {
 				out.Attention = t.cleanupState() == "blocked"
 			}
 			out.Satisfied = t.Terminal() && t.Cleanup == "complete"
+		case "resources_released", "evidence_complete":
+			if t.Kind != "nixos" {
+				return out, wire.Fail("invalid_argument", "This condition requires a Nix job")
+			}
+			out.Satisfied = t.Terminal() && t.Cleanup == "complete"
+			out.Attention = t.nixResources().State == "blocked"
+			out.Manual = out.Attention
+			if target.Condition == "evidence_complete" {
+				out.Satisfied = out.Satisfied && t.nix().Evidence.State == "complete"
+				out.Manual = out.Manual || t.nix().Evidence.State == "blocked"
+				out.Attention = out.Manual
+			}
 		case "changed":
 			out.Satisfied = out.Revision > target.SeenRevision
 		case "output":
@@ -236,12 +260,12 @@ func (s *Server) wait(ctx context.Context, req WaitRequest, budget time.Duration
 			next := target
 			next.SeenRevision = view.Revision
 			next.Offset = view.Offset
-			if !view.Satisfied || oneOf(target.Condition, "output", "changed") {
+			if !view.Manual && (!view.Satisfied || oneOf(target.Condition, "output", "changed")) {
 				result.Continue = append(result.Continue, next)
 			}
 			if result.Reason != "unavailable" && view.Satisfied {
 				result.Reason = "satisfied"
-			} else if result.Reason != "unavailable" && view.Attention && view.Revision > target.SeenRevision {
+			} else if result.Reason != "unavailable" && view.Attention && (view.Manual || view.Revision > target.SeenRevision) {
 				result.Reason = "attention"
 			}
 		}
@@ -296,6 +320,7 @@ func (s *Server) Call(ctx context.Context, name string, raw []byte) (any, error)
 	target := WaitTarget{Kind: "operation", ID: op.ID, Condition: "complete"}
 	if op.State == "succeeded" {
 		var args struct {
+			Scope     string `json:"scope"`
 			Sequence  int    `json:"sequence"`
 			Mode      string `json:"mode"`
 			CommandID string `json:"command_id"`
@@ -305,12 +330,14 @@ func (s *Server) Call(ctx context.Context, name string, raw []byte) (any, error)
 		case "lab_create":
 			target = WaitTarget{Kind: "lab", ID: op.TaskID, Condition: "ready"}
 		case "nix_job_create":
-			target = WaitTarget{Kind: "nix_job", ID: op.TaskID, Condition: "cleaned"}
-		case "lab_finish", "lab_cancel", "lab_cleanup", "nix_job_cancel", "nix_job_cleanup":
-			target = WaitTarget{Kind: "lab", ID: op.TaskID, Condition: "cleaned"}
-			if name == "nix_job_cancel" || name == "nix_job_cleanup" {
-				target.Kind = "nix_job"
+			target = WaitTarget{Kind: "nix_job", ID: op.TaskID, Condition: "complete"}
+		case "nix_job_cancel", "nix_job_recover":
+			target = WaitTarget{Kind: "nix_job", ID: op.TaskID, Condition: "resources_released"}
+			if args.Scope == "evidence" {
+				target.Condition = "evidence_complete"
 			}
+		case "lab_finish", "lab_cancel", "lab_cleanup":
+			target = WaitTarget{Kind: "lab", ID: op.TaskID, Condition: "cleaned"}
 		case "command_input":
 			target = WaitTarget{Kind: "command", ID: args.CommandID, Condition: "input_delivered", Sequence: &args.Sequence}
 		case "command_start", "command_cancel":

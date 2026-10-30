@@ -174,7 +174,7 @@ func (s *Server) reclaim(now time.Time, pressure bool) error {
 	detailBefore := now.Add(-time.Duration(s.cfg.Storage.FailureDays) * 24 * time.Hour).Format(time.RFC3339Nano)
 	successBefore := now.Add(-time.Duration(s.cfg.Storage.SuccessDays) * 24 * time.Hour).Format(time.RFC3339Nano)
 	summaryBefore := now.Add(-time.Duration(s.cfg.Storage.SummaryDays) * 24 * time.Hour).Format(time.RFC3339Nano)
-	rows, err := s.db.QueryContext(s.ctx, `SELECT id FROM executions e WHERE cleanup='complete' AND ended<>'' AND (
+	rows, err := s.db.QueryContext(s.ctx, `SELECT id FROM executions e WHERE settled=1 AND ended<>'' AND (
  ((ended<=CASE WHEN json_extract(body,'$.conclusion')='passed' AND state='finished' THEN ? ELSE ? END)
  AND (COALESCE(json_extract(body,'$.purged'),0)=0 OR EXISTS(SELECT 1 FROM evidence a WHERE a.task_id=e.id AND a.pinned=0)))
  OR ended<=?)
@@ -261,7 +261,7 @@ func (s *Server) reclaim(now time.Time, pressure bool) error {
 		// Historical summaries and receipts remain queryable in SQLite, not in the
 		// live execution cache. Fault-window collection and pending dispatch stay live.
 		for _, t := range append([]*Task(nil), s.tasks...) {
-			if !t.Terminal() || t.Cleanup != "complete" || !s.performancePending[t.ID].IsZero() {
+			if !t.settled() || !s.performancePending[t.ID].IsZero() {
 				continue
 			}
 			pending := false
@@ -363,7 +363,7 @@ func (s *Server) changeEvidence(name string, a EvidenceChange) (any, error) {
 	}
 	if name == "evidence_delete" {
 		var active int
-		if err = s.db.QueryRowContext(s.ctx, "SELECT COUNT(*) FROM executions WHERE id=? AND cleanup<>'complete'", v.ExecutionID).Scan(&active); err != nil {
+		if err = s.db.QueryRowContext(s.ctx, "SELECT COUNT(*) FROM executions WHERE id=? AND settled=0", v.ExecutionID).Scan(&active); err != nil {
 			return nil, err
 		}
 		if active > 0 || v.Pinned {
@@ -446,7 +446,7 @@ func (s *Server) listStoredTasks(a TaskListRequest, kind string) (any, error) {
 	filter := ""
 	switch a.Phase {
 	case "active":
-		filter = " AND cleanup<>'complete'"
+		filter = " AND settled=0"
 	case "all":
 	case "ended":
 		filter = " AND state NOT IN ('queued','preparing','running')"

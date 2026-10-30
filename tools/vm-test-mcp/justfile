@@ -15,6 +15,20 @@ nix-worker *args:
     vm_test_package="$(nix build --no-link --print-out-paths --no-write-lock-file .#vm-test-mcp)"
     exec "$vm_test_package/bin/vm-test-nix-worker" --config tools/vm-test-mcp/config.yaml "$@"
 
+# Run the delegated executor in the foreground; sudo authorizes this build and config.
+nix-executor *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    vm_test_package="$(nix build --no-link --print-out-paths --no-write-lock-file .#vm-test-mcp)"
+    exec sudo -- systemd-run \
+      --unit=vm-test-nix-executor.service \
+      --service-type=exec --pty --wait --collect --expand-environment=no \
+      --property=Delegate=yes --property=DelegateSubgroup=supervisor \
+      --property=KillMode=mixed --property=TimeoutStopSec=6min \
+      --property=Restart=no --property=UMask=0077 \
+      -- "$vm_test_package/bin/vm-test-nix-executor" \
+      --config "$PWD/tools/vm-test-mcp/config.yaml" "$@"
+
 # Run in the container: submit the three-node KVM smoke test and wait for cleanup.
 nixos-test *args:
     #!/usr/bin/env bash

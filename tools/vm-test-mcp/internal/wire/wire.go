@@ -17,20 +17,45 @@ import (
 	"time"
 )
 
-const Version = "0.13.0"
+const Version = "0.14.0"
 const MaxJSON = 1 << 20
 
 // NixExecution reports worker execution independently of scheduler and daemon
 // cleanup. Process results describe the local Nix client, not a QEMU exit.
 type NixExecution struct {
-	Imported             bool              `json:"imported"`
-	ResourcesReleased    bool              `json:"resources_released"`
-	ResourceConfirmation string            `json:"resource_confirmation,omitempty"`
-	Stage                string            `json:"stage"`
-	Process              *NixProcessResult `json:"process,omitempty"`
-	Error                *Error            `json:"error,omitempty"`
-	PersistenceError     *Error            `json:"persistence_error,omitempty"`
-	Finished             *time.Time        `json:"finished,omitempty"`
+	Resources        NixResources      `json:"resources"`
+	Evidence         NixEvidence       `json:"evidence"`
+	Imported         bool              `json:"imported"`
+	Stage            string            `json:"stage"`
+	Process          *NixProcessResult `json:"process,omitempty"`
+	Error            *Error            `json:"error,omitempty"`
+	PersistenceError *Error            `json:"persistence_error,omitempty"`
+	Finished         *time.Time        `json:"finished,omitempty"`
+}
+
+// NixResources is a durable observation of a sealed executor session. A client
+// process exit is recorded separately and cannot supply this observation.
+type NixResources struct {
+	Attempts         int        `json:"attempts"`
+	ReleaseStarted   *time.Time `json:"release_started,omitempty"`
+	ReleaseDeadline  *time.Time `json:"release_deadline,omitempty"`
+	State            string     `json:"state"`
+	SessionID        string     `json:"session_id,omitempty"`
+	ExecutorInstance string     `json:"executor_instance,omitempty"`
+	Confirmation     string     `json:"confirmation,omitempty"`
+	Reason           string     `json:"reason,omitempty"`
+	Observed         *time.Time `json:"observed,omitempty"`
+	Error            *Error     `json:"error,omitempty"`
+}
+
+func (r NixResources) Released() bool { return r.State == "released" || r.State == "unallocated" }
+
+type NixEvidence struct {
+	State       string     `json:"state"`
+	Attempts    int        `json:"attempts"`
+	Updated     *time.Time `json:"updated,omitempty"`
+	NextAttempt *time.Time `json:"next_attempt,omitempty"`
+	Error       *Error     `json:"error,omitempty"`
 }
 type NixProcessResult struct {
 	Stage      string `json:"stage"`

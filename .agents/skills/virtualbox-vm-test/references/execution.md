@@ -1,6 +1,6 @@
 # Executing VirtualBox labs
 
-Use a prepared VM Test MCP 0.13 executor. `service_get` reports templates,
+Use a prepared VM Test MCP 0.14 executor. `service_get` reports templates,
 resource/media policy, backend availability, endpoint address and limits. Its
 token holders share task authority. Use the advertised tool schemas; do not infer
 host paths, VM UUIDs or executable options from guest data.
@@ -181,8 +181,9 @@ files until `evidence_unpin` without extending VM occupancy. Evidence budgets ar
 blocks new labs/jobs/uploads while control and cleanup remain available. Input
 staging is 16 GiB total and 8 GiB per transfer; unbound idle uploads expire after
 one hour. `execution_delete(execution_id=…)` removes a cleaned summary and unpinned detail;
-independent pins and receipts remain available. Enter local edits or reporting only after cleanup is
-complete; a later batch uses a new request and task. Keep capability URLs private.
+independent pins and receipts remain available. Confirm resource release before the next executor batch. An administrator blocker
+requires retained task identity, ownership evidence and a concrete report; independent
+local edits, analysis and reporting can continue. A later batch uses a new request and task. Keep capability URLs private.
 
 ## Fault handling
 

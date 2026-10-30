@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hellodword/agents-misc/vm-test-mcp/internal/nixexecutor"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/nixos"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
@@ -31,18 +32,27 @@ func (b *Backends) Available(ctx context.Context, kind string) (string, error) {
 			return "worker_unavailable", e
 		}
 		var v struct {
-			InstanceID string              `json:"instance_id"`
-			Busy       bool                `json:"busy"`
-			Build      *wire.BuildIdentity `json:"build"`
+			Executor      *nixexecutor.Description `json:"executor"`
+			ExecutorError *wire.Error              `json:"executor_error"`
+			InstanceID    string                   `json:"instance_id"`
+			Busy          bool                     `json:"busy"`
+			Build         *wire.BuildIdentity      `json:"build"`
 		}
 		if e = json.Unmarshal(raw, &v); e != nil {
 			return "worker_unavailable", e
 		}
 		identity := backendIdentity{State: "observed", Observed: time.Now().UTC(), Build: v.Build, InstanceID: v.InstanceID}
+		identity.Executor = v.Executor
 		if v.Build == nil {
 			identity.State = "build_unavailable"
 		}
 		b.backendIdentities.Store(kind, identity)
+		if v.ExecutorError != nil {
+			return "executor_unavailable", v.ExecutorError
+		}
+		if v.Executor == nil || !v.Executor.Ready {
+			return "executor_unavailable", nil
+		}
 		if v.Busy {
 			return "worker_busy", nil
 		}

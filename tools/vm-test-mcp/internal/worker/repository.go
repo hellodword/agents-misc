@@ -19,10 +19,10 @@ func (w *Worker) save(j *Job) error {
 	defer tx.Rollback()
 	request := j.Request
 	request.Cache = ""
-	_, err = tx.ExecContext(ctx, `INSERT INTO worker_jobs(id,state,cleanup,request,execution,started,deadline,handoff_complete,copies_released,manifest_digest,handoff_finished,file_count)
- VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state,cleanup=excluded.cleanup,request=excluded.request,execution=excluded.execution,
- deadline=excluded.deadline,handoff_complete=excluded.handoff_complete,copies_released=excluded.copies_released,manifest_digest=excluded.manifest_digest,handoff_finished=excluded.handoff_finished,file_count=excluded.file_count`,
-		j.Request.TaskID, j.State, j.Cleanup, wire.JSON(request), wire.JSON(j.Execution), j.Started.Format(time.RFC3339Nano), j.Deadline.Format(time.RFC3339Nano), j.HandoffComplete, j.CopiesReleased, j.ManifestDigest, timeText(j.HandoffFinished), len(j.Files))
+	_, err = tx.ExecContext(ctx, `INSERT INTO worker_jobs(id,state,cleanup,request,execution,started,deadline,handoff_complete,copies_released,manifest_digest,handoff_finished,file_count,session,outputs)
+ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state,cleanup=excluded.cleanup,request=excluded.request,execution=excluded.execution,
+ deadline=excluded.deadline,handoff_complete=excluded.handoff_complete,copies_released=excluded.copies_released,manifest_digest=excluded.manifest_digest,handoff_finished=excluded.handoff_finished,file_count=excluded.file_count,session=excluded.session,outputs=excluded.outputs`,
+		j.Request.TaskID, j.State, j.Cleanup, wire.JSON(request), wire.JSON(j.Execution), j.Started.Format(time.RFC3339Nano), j.Deadline.Format(time.RFC3339Nano), j.HandoffComplete, j.CopiesReleased, j.ManifestDigest, timeText(j.HandoffFinished), len(j.Files), wire.JSON(j.Session), wire.JSON(j.Outputs))
 	if err != nil {
 		return err
 	}
@@ -46,16 +46,22 @@ func timeText(t *time.Time) any {
 
 func (w *Worker) loadJob(id string) (*Job, error) {
 	var j Job
-	var request, execution []byte
+	var request, execution, session, outputs []byte
 	var started, deadline string
 	var finished sql.NullString
-	if err := w.db.QueryRow(`SELECT state,cleanup,request,execution,started,deadline,handoff_complete,copies_released,manifest_digest,handoff_finished FROM worker_jobs WHERE id=?`, id).Scan(&j.State, &j.Cleanup, &request, &execution, &started, &deadline, &j.HandoffComplete, &j.CopiesReleased, &j.ManifestDigest, &finished); err != nil {
+	if err := w.db.QueryRow(`SELECT state,cleanup,request,execution,started,deadline,handoff_complete,copies_released,manifest_digest,handoff_finished,session,outputs FROM worker_jobs WHERE id=?`, id).Scan(&j.State, &j.Cleanup, &request, &execution, &started, &deadline, &j.HandoffComplete, &j.CopiesReleased, &j.ManifestDigest, &finished, &session, &outputs); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(request, &j.Request); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(execution, &j.Execution); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(session, &j.Session); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(outputs, &j.Outputs); err != nil {
 		return nil, err
 	}
 	var err error

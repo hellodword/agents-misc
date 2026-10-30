@@ -41,7 +41,7 @@ func (w *Worker) sweepUnreferenced(now time.Time) error {
 
 func (w *Worker) maintain() {
 	defer w.wg.Done()
-	ticker := time.NewTicker(time.Minute)
+	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
 		select {
@@ -49,6 +49,13 @@ func (w *Worker) maintain() {
 			return
 		case now := <-ticker.C:
 			w.mu.Lock()
+			for _, j := range w.jobs {
+				if j.Cleanup != "complete" {
+					w.observeLocked(j)
+				} else {
+					w.collectLocked(j)
+				}
+			}
 			_ = w.expireCompleted(now.UTC())
 			w.mu.Unlock()
 		}
@@ -98,15 +105,60 @@ func (w *Worker) evidenceUsage() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer rows.Close()
+	var files []string
 	for rows.Next() {
 		var root, relative string
 		if err = rows.Scan(&root, &relative); err != nil {
+			rows.Close()
 			return 0, err
 		}
-		if err = add(filepath.Join(root, relative)); err != nil {
+		files = append(files, filepath.Join(root, relative))
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return 0, err
+	}
+	for _, file := range files {
+		if err = add(file); err != nil {
 			return 0, err
 		}
 	}
-	return total, rows.Err()
+	// Output roots count before their asynchronous file manifest is ready.
+	rows, err = w.db.Query("SELECT DISTINCT value FROM worker_jobs,json_each(outputs) WHERE copies_released=0")
+	if err != nil {
+		return 0, err
+	}
+	var roots []string
+	for rows.Next() {
+		var root string
+		if err = rows.Scan(&root); err != nil {
+			break
+		}
+		roots = append(roots, root)
+	}
+	if err == nil {
+		err = rows.Err()
+	}
+	rows.Close()
+	if err != nil {
+		return 0, err
+	}
+	for _, root := range roots {
+		if err = filepath.WalkDir(root, func(name string, d os.DirEntry, err error) error {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			if d.Type().IsRegular() {
+				return add(name)
+			}
+			return nil
+		}); err != nil {
+			return 0, err
+		}
+	}
+	return total, nil
 }

@@ -47,23 +47,43 @@ func (b *Backend) Call(ctx context.Context, action string, t *Request) (json.Raw
 		req["timeout_seconds"] = t.TimeoutSeconds
 		req["cache"] = b.CacheURL(t.CacheID)
 	}
-	raw, err := b.Client.Call(ctx, action, req)
+	method := action
+	if action == "logs" {
+		method = "status"
+	}
+	raw, err := b.Client.Call(ctx, method, req)
 	if err != nil {
 		return nil, err
 	}
-	if action == "status" {
+	if action == "logs" {
 		return b.workerEvidence(ctx, t, raw, false)
 	}
-	if action == "cleanup" {
+	if action == "resources" || action == "resources_retry" || action == "evidence" {
 		for {
 			var status struct {
-				Cleanup string `json:"cleanup"`
+				Execution     *wire.NixExecution `json:"execution"`
+				NeverAccepted bool               `json:"never_accepted"`
+				Cleanup       string             `json:"cleanup"`
 			}
 			if err = json.Unmarshal(raw, &status); err != nil {
 				return nil, err
 			}
-			if status.Cleanup != "pending" {
-				break
+			if status.NeverAccepted {
+				return raw, nil
+			}
+			if status.Execution == nil {
+				return nil, wire.Fail("worker_protocol_error", "Worker omitted lifecycle state")
+			}
+			if action != "evidence" && (status.Execution.Resources.Released() && status.Cleanup == "complete" || status.Execution.Resources.State == "blocked") {
+				return raw, nil
+			}
+			if action == "evidence" {
+				if status.Execution.Evidence.State == "blocked" {
+					return nil, status.Execution.Evidence.Error
+				}
+				if status.Execution.Evidence.State == "transferring" || status.Execution.Evidence.State == "complete" {
+					return b.workerEvidence(ctx, t, raw, true)
+				}
 			}
 			select {
 			case <-ctx.Done():
@@ -75,11 +95,6 @@ func (b *Backend) Call(ctx context.Context, action string, t *Request) (json.Raw
 				return nil, err
 			}
 		}
-		collected, e := b.workerEvidence(ctx, t, raw, true)
-		if e == nil {
-			return collected, nil
-		}
-		return nil, e
 	}
 	return raw, nil
 }

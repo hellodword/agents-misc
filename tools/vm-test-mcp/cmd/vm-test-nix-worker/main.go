@@ -23,7 +23,6 @@ func run() int {
 	file := f.String("config", "", "shared YAML configuration file")
 	version := f.Bool("version", false, "print JSON build and running-binary identity without configuration or state access")
 	check := f.Bool("check-config", false, "validate worker configuration without starting it or creating state")
-	reconcile := f.String("reconcile", "", "attest locally verified daemon cleanup for task ID")
 	if e := f.Parse(os.Args[1:]); e != nil {
 		return 2
 	}
@@ -49,14 +48,6 @@ func run() int {
 		return 1
 	}
 	defer w.Close()
-	if *reconcile != "" {
-		if e = w.Reconcile(*reconcile); e != nil {
-			slog.Error("reconcile failed", "error", e)
-			return 1
-		}
-		fmt.Println("{\"cleanup\":\"complete\"}")
-		return 0
-	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	probe, stop := context.WithTimeout(ctx, 30*time.Second)

@@ -1,4 +1,4 @@
-# VM Test MCP 0.13 contract
+# VM Test MCP 0.14 contract
 
 ## Transport and identity
 
@@ -115,7 +115,7 @@ execution deadlines.
 
 A target is `{kind,id,condition,seen_revision}`. Kinds are `lab`, `nix_job`,
 `command`, `operation`, `upload`; conditions are `ready` (execution), `started`
-(command), `complete`, `cleaned` (execution), `changed`, or `output` (execution
+(command), `complete`, `cleaned` (lab), `resources_released`/`evidence_complete` (Nix job), `changed`, or `output` (execution
 or command), and `input_delivered`/`input_written` (command, with `sequence`). Inapplicable conditions are rejected. Up to 64 targets can be
 observed together. Return when any target satisfies its condition or reports a
 new failure/intervention state; include every target's summary, revision,
@@ -144,13 +144,14 @@ host executable, directory, VM UUID or raw backend option.
 | `service_get`                                       | No parameters; build, templates/policy, backend availability, active execution and limits                                                                   |
 | `service_observe`                                   | Optional `seconds` (1..240, default 30); bounded host/controller samples and call timings                                                                   |
 | `lab_create`                                        | `nodes`, optional ready `upload_ids`, `lan`, `dhcp`, `dns`, `internet`, `timeout_seconds`; queued lab, waits for readiness                                  |
-| `nix_job_create`                                    | Ready `upload_id`, optional `timeout_seconds`; derivation/system come from its manifest, waits for execution and cleanup                                    |
+| `nix_job_create`                                    | Ready `upload_id`, optional `timeout_seconds`; derivation/system come from its manifest, waits for result, resource release and evidence                    |
 | `lab_list`, `nix_job_list`                          | Optional sequence `cursor`, `limit`, `phase` (`active` default, `all`, `queued`, `preparing`, `running`, `ended`)                                           |
 | `lab_get`, `lab_inspect`                            | `lab_id`; compact summary or node inventory, network and resource ledger                                                                                    |
-| `nix_job_get`                                       | `job_id`; compact execution, worker result and resource release                                                                                             |
+| `nix_job_get`                                       | `job_id`; result, resources, evidence and observed worker execution                                                                                         |
 | `lab_finish`                                        | `lab_id`, `conclusion`, `summary`; record the caller's conclusion and await cleanup                                                                         |
 | `lab_cancel`, `lab_cleanup`                         | `lab_id`; cancel or retry cleanup and await resource release                                                                                                |
-| `nix_job_cancel`, `nix_job_cleanup`                 | `job_id`; cancel or retry evidence handoff/resource cleanup                                                                                                 |
+| `nix_job_cancel`                                    | `job_id`; cancel and await resource release                                                                                                                 |
+| `nix_job_recover`                                   | `job_id`, `scope` (`resources` or `evidence`); recover the original job and await that boundary                                                             |
 | `lab_extend`, `nix_job_extend`                      | `lab_id` or `job_id`, positive `seconds`, `reason` (1..1024 bytes)                                                                                          |
 | `execution_delete`                                  | `execution_id`; delete a cleaned execution and unpinned detail; independent pins/receipts remain                                                            |
 | `execution_events`, `execution_log`                 | `execution_id`; event `cursor`/`limit` or byte `offset`/`limit`                                                                                             |
@@ -254,7 +255,9 @@ live memory even while their lab remains active.
 
 One continuous test batch occupies the scheduler until resource cleanup is
 confirmed. Prepare inputs locally, collect bounded evidence, finish/cancel and
-wait for complete cleanup before lengthy local work. Queued abandonment uses
+confirm resource release before the next executor batch. An administrator blocker
+requires a concrete report with retained ownership evidence; independent local
+edits, analysis and reporting can continue. Queued abandonment uses
 `lab_cancel`; no VM deletion is needed for `never_allocated` resources. Activity
 counts cover supervised commands, open endpoints and captures; detached guest
 services are not inferred from these counts. Empty counts and HTTP disconnects
@@ -262,22 +265,69 @@ do not trigger task destruction. `lab_extend` records the continued-work reason
 and new deadline in `hold`; independent node startup budgets remain unchanged.
 
 An offline worker prevents fresh storage accounting; new labs, Nix jobs, uploads
-and queued starts pause while existing execution/control/cleanup remain usable. A queued Nix job which has not been submitted fails with
-complete cleanup if the worker disappears. Once build submission may have occurred,
-daemon cleanup must be confirmed locally.
+and queued starts pause while existing controls and recovery remain usable.
+Unsubmitted jobs have `resources.state: unallocated`. Once dispatch may have
+occurred, the worker and executor reconcile the original durable identity.
 
-Nix `nix_job_get.execution` records `stage` (`import`, `validate`, `build`, `collect`
-or `unknown`), a structured `error`, and the worker's completion time when known.
-Its `process` identifies the observed stage, `source: nix_client_wait` (or
-`unconfirmed` when no wait result exists), whether
-the client exited, and either the actual `exit_code` or `exit_signal`. A policy
-rejection can follow a successful metadata command; artifact collection can fail
-after a successful build. Neither situation changes that command's exit result.
-These observations describe the Nix client, not a QEMU process or confirmed daemon
-teardown. Cancellation and task deadlines remain under `result`, independently of
-the recovered execution result. An unknown result remains unconfirmed. A terminal storage
-failure appears as `persistence_error` and keeps cleanup blocked; failed local
-reconciliation cannot release scheduler ownership.
+Nix job status separates these fields:
+
+| Field             | States and completion                                                                                                                      |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `result`          | The ended test's termination, conclusion and error; cancellation/deadline remain distinct from a later observed client result.             |
+| `resources.state` | `unallocated`, `owned`, `releasing`, `released`, `blocked`; only `unallocated` or `released` frees an ended job's execution slot.          |
+| `evidence.state`  | `pending`, `collecting`, `transferring`, `complete`, `blocked`; attempts, timestamps, retry time and structured errors accompany progress. |
+
+`execution` retains the observed Nix client stage (`session`, `import`, `validate`,
+`build`), wait source, actual exit code or signal, error and finish time. Its
+`resources` and `evidence` fields project the same current lifecycle state as
+their top-level counterparts. A failed
+evidence attempt cannot change a successful build result. A client exit cannot
+prove daemon/QEMU release. The executor closes each task's Unix admission endpoint,
+interrupts its private daemons, waits the default 30s grace, then uses `cgroup.kill`.
+Release requires a sealed cgroup with `populated=0` and confirmed worker client
+exit. The default resource budget is five minutes, including the grace period.
+Known groups remain monitored after a blocked observation; later confirmed release
+updates the same job. Missing or mismatched ownership requires administrator action.
+
+The FIFO slot is independent of evidence. Collection and handoff run outside
+admission/control locks, with at most two controller transfers at once. Each attempt
+uses `tasks.evidence_timeout` (default 5m); transient failures have three total
+attempts with 1s/5s delays. Other failures retain an actionable blocker. Worker
+copies and GC roots survive until durable controller publication and manifest
+acknowledgement. Partial verified copies are reused on retry. Pending evidence is
+protected from TTL, pressure reclamation and explicit deletion; storage quotas
+still apply to new admission.
+
+`nix_job_recover(request_id, job_id, scope)` accepts `resources` or `evidence` for an
+ended job. Resource recovery reuses the session; evidence recovery reuses its
+outputs and manifest. Neither starts a new build. Repeated requests preserve
+receipt identity. Nix waits accept `resources_released`, `evidence_complete` and
+`complete`; the last requires an ended result, released resources and complete
+evidence. Manual blockers return `attention`, `manual_intervention: true` and no
+automatic continuation for that target. Other targets remain observable. Errors
+retain stage, job/worker/session identity, observed time, cause, retry disposition,
+required actor and next action. Operating-system causes use `system_error` with
+the errno number and, when available, the filesystem operation or syscall name.
+These diagnostics omit host paths and arbitrary error text.
+
+The root executor accepts authenticated Unix `POST /call` requests containing
+`{method,params}`. Methods are `describe`, `create`, `status`, `stop`, `extend`;
+params bind `worker_instance`, `task_id`, optional `session_id`, absolute UTC
+`deadline` and a fixed stop `reason`. Unknown fields are rejected. Peer identity
+must be root or the configured worker UID; daemon streams accept only the worker
+UID. Responses are session snapshots or `{error:{code,message,details,...}}`.
+No RPC accepts executable paths, environment, PIDs, cgroup paths or sudo commands.
+The three services share one YAML file. Explicit sudo startup authorizes the
+build and its `executor` configuration; the executor reads that policy once.
+The configured worker UID, executable, state and socket paths, grace period and
+release budget stay fixed until restart. Runtime state and socket directories
+remain under root control independently of configuration-file ownership.
+Session intent is durable before process creation. Deadlines are persisted at the
+executor, extend monotonically within 24h, and never reopen a stopped session.
+The dedicated daemon uses the local shared store with forced-untrusted clients;
+it never forwards builds to the shared daemon. Session records bind boot,
+service invocation, cgroup inode and both storage identities. Restart recovers
+these records; a replaced database supplies no proof about an old session.
 
 Deadlines start when execution begins, default to one hour and allow explicit
 extension up to 24 hours total. `tasks` configures these limits and a cleanup budget
@@ -620,7 +670,7 @@ prepared parent directory and correctly owned role children. Worker database
 identity persists across restarts and is bound into accepted Nix jobs. A replacement
 worker database cannot confirm that an old execution was never accepted.
 
-Both roles require fresh **schema 21** databases and guest protocol **2**. Before
+Controller, worker and executor require fresh **schema 22** databases and guest protocol **2**. Before
 initial deployment the user stops old services, confirms resources are released,
 backs up needed evidence and provides empty state/new configuration. Baselines and
 the host Nix store remain independent; update baseline guest executables through
@@ -630,17 +680,18 @@ tests retain the new state.
 One Go module separates VirtualBox and Nix domain repositories from shared
 SQLite/file primitives. SQLite stores indexed state, identity and recovery facts:
 
-| Records                      | Purpose and lifetime                                                                           |
-| ---------------------------- | ---------------------------------------------------------------------------------------------- |
-| Executions, lab/Nix state    | FIFO sequence, result and cleanup ownership; compact terminal summaries                        |
-| Nodes and resource ledger    | Reconcile VM sessions, clones, network entries, captures and display policy                    |
-| Commands and input rows      | Command state/spec reference; ordered stdin references and delivery progress                   |
-| Operations                   | Request digest, typed receipt, target and dispatch stage/payload reference; independent expiry |
-| Uploads and declared objects | Ownership, reservation, expected size/hash and durable publication reference                   |
-| Evidence                     | Independent provenance, size/hash, file reference, protection, pin and expiry                  |
-| Events                       | Real state changes and faults; no healthy samples or wait history                              |
-| Worker jobs/files            | Execution intent/result, release and handoff confirmation; direct store references             |
-| Store metadata               | Role and durable instance identity                                                             |
+| Records                      | Purpose and lifetime                                                                                  |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------- |
+| Executions, lab/Nix state    | FIFO sequence, result and cleanup ownership; compact terminal summaries                               |
+| Nodes and resource ledger    | Reconcile VM sessions, clones, network entries, captures and display policy                           |
+| Commands and input rows      | Command state/spec reference; ordered stdin references and delivery progress                          |
+| Operations                   | Request digest, typed receipt, target and dispatch stage/payload reference; independent expiry        |
+| Uploads and declared objects | Ownership, reservation, expected size/hash and durable publication reference                          |
+| Evidence                     | Independent provenance, size/hash, file reference, protection, pin and expiry                         |
+| Events                       | Real state changes and faults; no healthy samples or wait history                                     |
+| Worker jobs/files            | Execution intent/result, release and handoff confirmation; direct store references                    |
+| Executor sessions            | Worker/task/session ownership, boot/invocation/cgroup identity, deadline and durable resource release |
+| Store metadata               | Role and durable instance identity                                                                    |
 
 Command bodies, stdin, logs and binary data are files. State changes update changed
 entity rows, without rewriting histories or file inventories. Startup loads only
@@ -648,16 +699,16 @@ active/recovery objects; historical queries use bounded SQL readers. Healthy
 samples remain in bounded memory. Pins retain reading metadata independently of
 execution summaries and idempotency receipts.
 
-| Data                                                        | Default retention                               |
-| ----------------------------------------------------------- | ----------------------------------------------- |
-| Active execution, unresolved cleanup, recovery dependencies | Until confirmed release                         |
-| Successful evidence and detailed diagnostics                | 1 day after execution terminal time             |
-| Other terminal evidence and detailed diagnostics            | 7 days after execution terminal time            |
-| Compact execution summary                                   | 30 days after its terminal time                 |
-| Idempotency receipt                                         | 30 days after the operation's own terminal time |
-| Worker receipt                                              | 30 days after handoff and local copy release    |
-| Pinned evidence and reading metadata                        | Until unpin                                     |
-| Unbound inactive upload                                     | 1 idle hour                                     |
+| Data                                                                       | Default retention                               |
+| -------------------------------------------------------------------------- | ----------------------------------------------- |
+| Active execution, unresolved resources and evidence, recovery dependencies | Until resource release and evidence completion  |
+| Successful evidence and detailed diagnostics                               | 1 day after execution terminal time             |
+| Other terminal evidence and detailed diagnostics                           | 7 days after execution terminal time            |
+| Compact execution summary                                                  | 30 days after its terminal time                 |
+| Idempotency receipt                                                        | 30 days after the operation's own terminal time |
+| Worker receipt                                                             | 30 days after handoff and local copy release    |
+| Pinned evidence and reading metadata                                       | Until unpin                                     |
+| Unbound inactive upload                                                    | 1 idle hour                                     |
 
 Evidence has a **40 GiB budget** and **32 GiB reclamation low watermark**. It includes
 both roles, pinned/protected files and temporary physical copies; hard links count

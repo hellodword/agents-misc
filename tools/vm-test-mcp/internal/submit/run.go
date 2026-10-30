@@ -340,12 +340,13 @@ func observe(ctx context.Context, session *mcp.ClientSession, root *safefs.Root,
 		var task struct {
 			Phase   string
 			Result  struct{ Termination, Conclusion string }
-			Cleanup struct{ State string }
+			Resources struct{ State string }
+			Evidence struct{ State string }
 		}
 		if err := json.Unmarshal(raw, &task); err != nil {
 			return nil, err
 		}
-		if status := task.Phase + "/" + task.Cleanup.State; status != previous {
+		if status := task.Phase + "/" + task.Resources.State + "/" + task.Evidence.State; status != previous {
 			fmt.Fprintln(o.Progress, status)
 			previous = status
 		}
@@ -378,12 +379,13 @@ func observe(ctx context.Context, session *mcp.ClientSession, root *safefs.Root,
 			}
 		}
 		terminal := task.Phase == "ended"
-		if terminal && (task.Cleanup.State == "complete" || task.Cleanup.State == "blocked") {
+		released := task.Resources.State == "released" || task.Resources.State == "unallocated"
+		if terminal && ((released && task.Evidence.State == "complete") || task.Resources.State == "blocked" || task.Evidence.State == "blocked") {
 			if _, _, err := root.Write("result.json", bytes.NewReader(raw), 4<<20); err != nil {
 				return nil, err
 			}
-			if task.Result.Termination != "finished" || task.Result.Conclusion != "passed" || task.Cleanup.State != "complete" {
-				return raw, fmt.Errorf("task %s: state=%s conclusion=%s cleanup=%s", id, task.Result.Termination, task.Result.Conclusion, task.Cleanup.State)
+			if task.Result.Termination != "finished" || task.Result.Conclusion != "passed" || !released || task.Evidence.State != "complete" {
+				return raw, fmt.Errorf("task %s: state=%s conclusion=%s resources=%s evidence=%s", id, task.Result.Termination, task.Result.Conclusion, task.Resources.State, task.Evidence.State)
 			}
 			return raw, nil
 		}

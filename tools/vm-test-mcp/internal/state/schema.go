@@ -1,13 +1,13 @@
 package state
 
 // Each role starts with a new database when this contract changes.
-const SchemaVersion = 21
+const SchemaVersion = 22
 
 const controllerSchema = `
 PRAGMA auto_vacuum=INCREMENTAL;
 CREATE TABLE executions (
  sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
- kind TEXT NOT NULL, state TEXT NOT NULL, cleanup TEXT NOT NULL,
+ kind TEXT NOT NULL, state TEXT NOT NULL, cleanup TEXT NOT NULL, settled INTEGER NOT NULL,
  created TEXT NOT NULL, ended TEXT, revision INTEGER NOT NULL, body BLOB NOT NULL);
 CREATE INDEX execution_lifecycle ON executions(cleanup,state,sequence);
 CREATE INDEX execution_retention ON executions(ended,cleanup);
@@ -52,7 +52,8 @@ const workerSchema = `
 CREATE TABLE worker_jobs (sequence INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,
  state TEXT NOT NULL, cleanup TEXT NOT NULL, request BLOB NOT NULL, execution BLOB NOT NULL,
  started TEXT NOT NULL, deadline TEXT NOT NULL,handoff_complete INTEGER NOT NULL,copies_released INTEGER NOT NULL,
- manifest_digest TEXT NOT NULL,handoff_finished TEXT,file_count INTEGER NOT NULL);
+ manifest_digest TEXT NOT NULL,handoff_finished TEXT,file_count INTEGER NOT NULL,
+ session BLOB NOT NULL,outputs BLOB NOT NULL);
 CREATE INDEX worker_recovery ON worker_jobs(cleanup,copies_released,sequence);
 CREATE INDEX worker_retention ON worker_jobs(handoff_finished,copies_released);
 CREATE TABLE worker_files (sequence INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,
@@ -63,5 +64,12 @@ CREATE INDEX worker_files_execution ON worker_files(task_id,sequence);
 
 const metadataSchema = `
 CREATE TABLE store (singleton INTEGER PRIMARY KEY CHECK(singleton=1), role TEXT NOT NULL, instance_id TEXT NOT NULL);
-PRAGMA user_version=21;
+PRAGMA user_version=22;
+`
+
+const executorSchema = `
+CREATE TABLE executor_sessions (
+ id TEXT PRIMARY KEY,worker_instance TEXT NOT NULL,task_id TEXT NOT NULL,
+ state TEXT NOT NULL,body BLOB NOT NULL,UNIQUE(worker_instance,task_id));
+CREATE INDEX executor_recovery ON executor_sessions(state);
 `

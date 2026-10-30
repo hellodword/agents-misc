@@ -21,6 +21,7 @@ type DB struct {
 
 func OpenController(dir string) (*DB, error) { return open(dir, "controller", controllerSchema) }
 func OpenWorker(dir string) (*DB, error)     { return open(dir, "nix-worker", workerSchema) }
+func OpenExecutor(dir string) (*DB, error)   { return open(dir, "nix-executor", executorSchema) }
 
 func open(dir, role, schema string) (*DB, error) {
 	u := url.URL{Scheme: "file", Path: filepath.Join(dir, "state.sqlite")}

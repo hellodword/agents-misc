@@ -45,7 +45,7 @@ func TestHandoffIntegrityAndRecovery(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(w.root.Path, id, "task.log"), []byte("immutable output"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	j := &Job{Started: time.Now().UTC(), Request: Request{TaskID: id}, State: "succeeded", Cleanup: "complete", Files: []File{{ID: wire.ID(), Name: "task.log", Root: filepath.Join(w.root.Path, id), Relative: "task.log", Size: 16}}}
+	j := &Job{Started: time.Now().UTC(), Request: Request{TaskID: id}, State: "succeeded", Cleanup: "complete", Execution: &wire.NixExecution{Resources: wire.NixResources{State: "released"}, Evidence: wire.NixEvidence{State: "transferring"}}, Files: []File{{ID: wire.ID(), Name: "task.log", Root: filepath.Join(w.root.Path, id), Relative: "task.log", Size: 16}}}
 	if err := w.indexFiles(j); err != nil {
 		t.Fatal(err)
 	}

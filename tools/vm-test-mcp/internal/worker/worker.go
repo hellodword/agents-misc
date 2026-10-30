@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/config"
+	"github.com/hellodword/agents-misc/vm-test-mcp/internal/nixexecutor"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/safefs"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/state"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
@@ -53,21 +54,27 @@ type File struct {
 	Size     int64  `json:"size"`
 }
 type Job struct {
-	indexedFiles    int
-	CopiesReleased  bool               `json:"copies_released"`
-	HandoffComplete bool               `json:"handoff_complete"`
-	ManifestDigest  string             `json:"manifest_digest,omitempty"`
-	Request         Request            `json:"request"`
-	State           string             `json:"state"`
-	Cleanup         string             `json:"cleanup"`
-	Outputs         map[string]string  `json:"outputs"`
-	Files           []File             `json:"files"`
-	HandoffFinished *time.Time         `json:"handoff_finished,omitempty"`
-	Execution       *wire.NixExecution `json:"execution,omitempty"`
-	Started         time.Time          `json:"started"`
-	Deadline        time.Time          `json:"deadline"`
+	recoverResources      bool
+	io                    sync.Mutex
+	observing, collecting bool
+	Session               Session `json:"session"`
+	indexedFiles          int
+	CopiesReleased        bool               `json:"copies_released"`
+	HandoffComplete       bool               `json:"handoff_complete"`
+	ManifestDigest        string             `json:"manifest_digest,omitempty"`
+	Request               Request            `json:"request"`
+	State                 string             `json:"state"`
+	Cleanup               string             `json:"cleanup"`
+	Outputs               map[string]string  `json:"outputs"`
+	Files                 []File             `json:"files"`
+	HandoffFinished       *time.Time         `json:"handoff_finished,omitempty"`
+	Execution             *wire.NixExecution `json:"execution,omitempty"`
+	Started               time.Time          `json:"started"`
+	Deadline              time.Time          `json:"deadline"`
 }
 type Worker struct {
+	executor        nixexecutor.Caller
+	closing         bool
 	lastRetention   time.Time
 	maintenanceStop chan struct{}
 	mu              sync.Mutex
@@ -82,6 +89,9 @@ type Worker struct {
 }
 
 func New(c config.Worker) (*Worker, error) {
+	return newWorker(c, nixexecutor.NewClient(c.ExecutorSocket))
+}
+func newWorker(c config.Worker, executor nixexecutor.Caller) (*Worker, error) {
 	root, e := safefs.Private(c.Directory(), true)
 	if e != nil {
 		return nil, e
@@ -91,23 +101,32 @@ func New(c config.Worker) (*Worker, error) {
 		root.Close()
 		return nil, e
 	}
-	w := &Worker{maintenanceStop: make(chan struct{}), streams: map[string]int{}, cfg: c, root: root, db: db, jobs: map[string]*Job{}, cancel: map[string]context.CancelFunc{}}
+	w := &Worker{executor: executor, maintenanceStop: make(chan struct{}), streams: map[string]int{}, cfg: c, root: root, db: db, jobs: map[string]*Job{}, cancel: map[string]context.CancelFunc{}}
 	jobs, e := w.activeJobs()
 	if e != nil {
 		w.Close()
 		return nil, e
 	}
 	for _, j := range jobs {
-		if j.State == "building" || j.State == "cleanup_required" {
-			j.State = "cleanup_required"
-			j.Cleanup = "required"
-			w.active = j.Request.TaskID
-		} else if j.State == "importing" {
-			j.State = "interrupted"
-			j.Cleanup = "complete"
+		if j.Execution == nil {
+			j.Execution = &wire.NixExecution{}
 		}
-		if (j.State == "interrupted" || j.State == "cleanup_required") && j.Execution != nil && j.Execution.Error == nil {
+		if j.State == "building" || j.State == "importing" {
+			j.State = "interrupted"
+			now := time.Now().UTC()
+			j.Execution.Finished = &now
 			j.Execution.Error = wire.Safe(wire.Fail("worker_restarted", "Worker restarted before the execution result was durable"))
+		}
+		if !j.Execution.Resources.Released() {
+			w.active = j.Request.TaskID
+			j.Cleanup = "pending"
+		}
+		if j.Execution.Evidence.State == "collecting" {
+			j.Execution.Evidence.State = "pending"
+			if j.Execution.Evidence.Attempts >= 3 {
+				j.Execution.Evidence.State = "blocked"
+				j.Execution.Evidence.Error = lifecycleError(j, "evidence", wire.Fail("worker_restarted", "Final evidence attempt was interrupted"), "administrator")
+			}
 		}
 		w.jobs[j.Request.TaskID] = j
 		if e = w.save(j); e != nil {
@@ -122,6 +141,7 @@ func New(c config.Worker) (*Worker, error) {
 
 func (w *Worker) Close() {
 	w.mu.Lock()
+	w.closing = true
 	select {
 	case <-w.maintenanceStop:
 	default:
@@ -130,7 +150,17 @@ func (w *Worker) Close() {
 	for _, cancel := range w.cancel {
 		cancel()
 	}
+	var sessions []nixexecutor.Request
+	for _, j := range w.jobs {
+		if j.Session.Intent && j.Cleanup != "complete" {
+			sessions = append(sessions, w.sessionRequest(j, "worker_stopped"))
+		}
+	}
 	w.mu.Unlock()
+	for _, a := range sessions {
+		var released nixexecutor.Session
+		_ = w.executor.Call(context.Background(), "stop", a, &released)
+	}
 	w.wg.Wait()
 	w.db.Close()
 	w.root.Close()
@@ -162,26 +192,14 @@ func (w *Worker) Preflight(ctx context.Context) error {
 	if cfg["sandbox-fallback"].Value != false {
 		return fmt.Errorf("client sandbox fallback must be disabled")
 	}
-	// Client configuration is not daemon policy. In particular, Nix defaults
-	// build-users-group to empty for this ordinary user and to nixbld for root.
-	// Check connectivity and client trust with the daemon used for builds;
-	// actual sandbox/build-user/KVM policy remains an administrator acceptance check.
-	raw, e = w.command(ctx, "store", "info", "--store", "daemon", "--json").Output()
-	if e != nil {
-		return fmt.Errorf("inspect Nix daemon (nix store info --store daemon --json): %w", e)
+	var executor nixexecutor.Description
+	if e = w.executor.Call(ctx, "describe", nixexecutor.Request{}, &executor); e != nil {
+		return e
 	}
-	var daemon struct {
-		Trusted *bool `json:"trusted"`
+	if !executor.Ready || executor.Build.Version != wire.Version {
+		return fmt.Errorf("executor is not ready or its version differs")
 	}
-	if e = json.Unmarshal(raw, &daemon); e != nil {
-		return fmt.Errorf("decode Nix daemon information: %w", e)
-	}
-	if daemon.Trusted == nil {
-		return fmt.Errorf("Nix daemon did not report client trust")
-	}
-	if *daemon.Trusted {
-		return fmt.Errorf("worker must not be a trusted Nix daemon client")
-	}
+
 	return nil
 }
 func (w *Worker) Call(method string, a Request) (any, error) {
@@ -202,7 +220,7 @@ func (w *Worker) Call(method string, a Request) (any, error) {
 		allowed.ManifestDigest = a.ManifestDigest
 	case "files":
 		allowed.Cursor = a.Cursor
-	case "status", "cleanup", "cancel":
+	case "status", "resources", "resources_retry", "evidence", "evidence_retry", "cancel":
 	default:
 		return nil, wire.Fail("invalid_argument", "Unknown worker operation")
 	}
@@ -212,11 +230,19 @@ func (w *Worker) Call(method string, a Request) (any, error) {
 	if method == "describe" {
 		w.mu.Unlock()
 		used, err := w.evidenceUsage()
+		var executor nixexecutor.Description
+		probe, stop := context.WithTimeout(context.Background(), 3*time.Second)
+		executorErr := w.executor.Call(probe, "describe", nixexecutor.Request{}, &executor)
+		stop()
 		w.mu.Lock()
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"version": wire.Version, "build": wire.Identity(), "busy": w.active != "", "active_task_id": w.active, "instance_id": w.db.InstanceID, "evidence_bytes": used}, nil
+		v := map[string]any{"version": wire.Version, "build": wire.Identity(), "busy": w.active != "" || len(executor.Active) > 0, "active_task_id": w.active, "instance_id": w.db.InstanceID, "evidence_bytes": used, "executor": executor}
+		if executorErr != nil {
+			v["executor_error"] = wire.Safe(executorErr)
+		}
+		return v, nil
 	}
 	if a.InstanceID != w.db.InstanceID {
 		return nil, wire.Fail("worker_instance_changed", "Worker storage identity differs; resource release requires administrator reconciliation")
@@ -238,7 +264,7 @@ func (w *Worker) Call(method string, a Request) (any, error) {
 			}
 			return public(old), nil
 		}
-		if w.active != "" {
+		if w.closing || w.active != "" {
 			return nil, wire.Fail("resource_busy", "Worker requires cleanup or is executing")
 		}
 		system := runtime.GOARCH + "-linux"
@@ -255,7 +281,7 @@ func (w *Worker) Call(method string, a Request) (any, error) {
 			return nil, wire.Fail("invalid_argument", "Expected controller-issued cache path")
 		}
 		now := time.Now().UTC()
-		j := &Job{Request: a, State: "importing", Cleanup: "pending", Execution: &wire.NixExecution{Stage: "import"}, Outputs: map[string]string{}, Files: []File{}, Started: now, Deadline: now.Add(time.Duration(a.TimeoutSeconds) * time.Second)}
+		j := &Job{Request: a, State: "importing", Cleanup: "pending", Execution: &wire.NixExecution{Stage: "session", Resources: wire.NixResources{State: "unallocated"}, Evidence: wire.NixEvidence{State: "pending"}}, Outputs: map[string]string{}, Files: []File{}, Started: now, Deadline: now.Add(time.Duration(a.TimeoutSeconds) * time.Second)}
 		if e = w.root.MkdirAll(a.TaskID, 0700); e != nil {
 			return nil, e
 		}
@@ -280,8 +306,16 @@ func (w *Worker) Call(method string, a Request) (any, error) {
 		}
 	}
 	if j == nil {
-		if method == "cleanup" {
-			return map[string]any{"cleanup": "complete", "never_accepted": true}, nil
+		if method == "resources" || method == "resources_retry" {
+			now := time.Now().UTC()
+			j = &Job{Request: a, State: "interrupted", Cleanup: "complete", Started: now, Deadline: now, HandoffComplete: true, CopiesReleased: true, HandoffFinished: &now, Execution: &wire.NixExecution{Finished: &now, Resources: wire.NixResources{State: "unallocated"}, Evidence: wire.NixEvidence{State: "complete"}}}
+			if err := w.save(j); err != nil {
+				return nil, err
+			}
+			w.jobs[a.TaskID] = j
+			v := public(j)
+			v["never_accepted"] = true
+			return v, nil
 		}
 		return nil, wire.Fail("not_found", "Worker task not found")
 	}
@@ -292,20 +326,56 @@ func (w *Worker) Call(method string, a Request) (any, error) {
 		}
 		return w.filePage(a.TaskID, a.Cursor)
 	case "handoff":
-		return w.handoff(j, a.ManifestDigest)
+		w.mu.Unlock()
+		v, err := w.handoff(j, a.ManifestDigest)
+		w.mu.Lock()
+		return v, err
 	case "extend":
 		if (j.State != "importing" && j.State != "building") || a.Deadline == nil || a.Deadline.Before(j.Deadline) || a.Deadline.After(j.Started.Add(24*time.Hour)) {
 			return nil, wire.Fail("invalid_state", "Worker deadline cannot be extended")
 		}
+		if j.Session.Executor == nil {
+			return nil, wire.Fail("invalid_state", "Session admission is still in progress")
+		}
+		req := w.sessionRequest(j, "")
+		req.Deadline = a.Deadline
+		w.mu.Unlock()
+		var session nixexecutor.Session
+		err := w.executor.Call(context.Background(), "extend", req, &session)
+		w.mu.Lock()
+		if err != nil {
+			return nil, err
+		}
+		if j.Execution.Finished != nil {
+			return public(j), nil
+		}
+		j.Session.Executor = &session
 		j.Deadline = a.Deadline.UTC()
 		return public(j), w.save(j)
 	case "status":
 		return public(j), nil
-	case "cleanup", "cancel":
+	case "resources", "resources_retry", "cancel":
+		if method == "resources_retry" && j.Cleanup != "complete" {
+			j.recoverResources = true
+			j.Execution.Resources.State, j.Execution.Resources.Error = "releasing", nil
+			j.Cleanup = "pending"
+		}
+		if j.Execution.Finished == nil {
+			j.Session.StopReason = "cancelled"
+		}
 		if cancel := w.cancel[a.TaskID]; cancel != nil {
 			cancel()
 		}
+		w.observeLocked(j)
 		return public(j), nil
+	case "evidence", "evidence_retry":
+		if method == "evidence_retry" && j.Execution.Evidence.State == "blocked" {
+			j.Execution.Evidence.State = "pending"
+			j.Execution.Evidence.Error = nil
+			j.Execution.Evidence.Attempts = 0
+		}
+		w.collectLocked(j)
+		return public(j), w.save(j)
 	case "log":
 		return w.readFile(filepath.Join(w.root.Path, a.TaskID), "task.log", a.Offset)
 	default:
@@ -316,7 +386,9 @@ func public(j *Job) map[string]any {
 	v := map[string]any{"state": j.State, "cleanup": j.Cleanup, "artifact_count": len(j.Files), "handoff_complete": j.HandoffComplete}
 	if j.Execution != nil {
 		// Copy under the worker mutex; JSON encoding happens after Call returns.
-		v["execution"] = *j.Execution
+		var snapshot wire.NixExecution
+		_ = json.Unmarshal(wire.JSON(j.Execution), &snapshot)
+		v["execution"] = snapshot
 	}
 	return v
 }
@@ -409,6 +481,8 @@ func (w *Worker) run(ctx context.Context, j *Job) {
 			case <-tick.C:
 				w.mu.Lock()
 				if !time.Now().Before(j.Deadline) {
+					j.Session.StopReason = "deadline"
+					w.observeLocked(j)
 					if cancel := w.cancel[j.Request.TaskID]; cancel != nil {
 						cancel()
 					}
@@ -433,12 +507,24 @@ func (w *Worker) run(ctx context.Context, j *Job) {
 	}
 	defer log.Close()
 	logs := &capped{w: log, max: 64 << 20}
+	if e = w.admit(ctx, j); e == nil {
+		e = w.checkSession(ctx, j, logs)
+	}
+	if e != nil {
+		fmt.Fprintln(log, e)
+		w.complete(j, e, false)
+		return
+	}
+	if e = w.stage(j, "import"); e != nil {
+		w.complete(j, e, false)
+		return
+	}
 	cacheURL := strings.TrimRight(w.cfg.CacheURL, "/") + j.Request.Cache
 	importLogs := &importLog{w: logs, secret: cacheURL}
-	copy := w.command(ctx, "copy", "--from", cacheURL, "--to", "daemon", "--derivation", j.Request.Derivation)
+	copy := w.command(ctx, "copy", "--from", cacheURL, "--to", w.store(j), "--derivation", j.Request.Derivation)
 	copy.Stdout = importLogs
 	copy.Stderr = importLogs
-	e = copy.Run()
+	e = w.runClient(j, copy)
 	if err := importLogs.Flush(); e == nil {
 		e = err
 	}
@@ -465,20 +551,17 @@ func (w *Worker) run(ctx context.Context, j *Job) {
 		return
 	}
 	out := &strings.Builder{}
-	build := w.command(ctx, "build", "--store", "daemon", "--builders", "", "--option", "sandbox", "true", "--option", "sandbox-fallback", "false", "--option", "always-allow-substitutes", "false", "--out-link", filepath.Join(w.root.Path, task, "result"), "--json", "--timeout", strconv.Itoa(86400), "-L", j.Request.Derivation+"^*")
+	build := w.command(ctx, "build", "--store", w.store(j), "--builders", "", "--option", "sandbox", "true", "--option", "sandbox-fallback", "false", "--option", "always-allow-substitutes", "false", "--out-link", filepath.Join(w.root.Path, task, "result"), "--json", "--timeout", strconv.Itoa(86400), "-L", j.Request.Derivation+"^*")
 	if w.cfg.KeepFailed {
 		build.Args = append(build.Args, "--keep-failed")
 	}
 	build.Stdout = &capped{w: out, max: 4 << 20}
 	build.Stderr = logs
-	e = build.Run()
+	e = w.runClient(j, build)
 	w.processResult(j, "build", build)
 	interrupted := ctx.Err() != nil || (build.ProcessState != nil && build.ProcessState.ExitCode() < 0)
 	result := &Job{Outputs: map[string]string{}, Files: []File{}}
 	if e == nil {
-		w.mu.Lock()
-		j.Execution.Stage = "collect"
-		w.mu.Unlock()
 		var results []struct {
 			Outputs map[string]string `json:"outputs"`
 		}
@@ -494,23 +577,17 @@ func (w *Worker) run(ctx context.Context, j *Job) {
 				}
 			}
 		}
-		if e == nil {
-			e = w.indexFiles(result)
-		}
 	}
 	w.mu.Lock()
 	j.Outputs, j.Files = result.Outputs, result.Files
 	w.mu.Unlock()
-	if err := log.Sync(); e == nil {
-		e = err
-	}
 	w.complete(j, e, interrupted)
 }
 func (w *Worker) validateDerivation(ctx context.Context, j *Job) error {
-	c := w.command(ctx, "derivation", "show", j.Request.Derivation)
+	c := w.command(ctx, "derivation", "show", "--store", w.store(j), j.Request.Derivation)
 	var output strings.Builder
 	c.Stdout = &capped{w: &output, max: (4 << 20) + 1}
-	e := c.Run()
+	e := w.runClient(j, c)
 	w.processResult(j, "validate", c)
 	if e != nil {
 		return e
@@ -605,6 +682,9 @@ func derivationPolicy(b []byte, a Request) error {
 	return nil
 }
 func (w *Worker) indexFiles(j *Job) error {
+	return w.indexFilesContext(context.Background(), j)
+}
+func (w *Worker) indexFilesContext(ctx context.Context, j *Job) error {
 	for name, root := range j.Outputs {
 		fi, e := os.Lstat(root)
 		if e != nil {
@@ -621,6 +701,9 @@ func (w *Worker) indexFiles(j *Job) error {
 			continue
 		}
 		e = filepath.WalkDir(root, func(p string, d os.DirEntry, e error) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if e != nil {
 				return e
 			}
@@ -663,7 +746,7 @@ func (w *Worker) indexFiles(j *Job) error {
 			return err
 		}
 		hash := sha256.New()
-		n, err := io.Copy(hash, file)
+		n, err := io.Copy(hash, contextReader{ctx: ctx, reader: file})
 		file.Close()
 		root.Close()
 		if err != nil {
@@ -676,28 +759,12 @@ func (w *Worker) indexFiles(j *Job) error {
 	}
 	return nil
 }
-func (w *Worker) complete(j *Job, e error, uncertain bool) {
+func (w *Worker) complete(j *Job, e error, interrupted bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if file, err := w.root.OpenFile(path.Join(j.Request.TaskID, "task.log"), os.O_RDWR, 0600); err == nil {
-		if syncErr := file.Sync(); syncErr != nil && e == nil {
-			e = syncErr
-		}
-		info, statErr := file.Stat()
-		file.Close()
-		if statErr == nil {
-			logJob := &Job{Files: []File{{ID: wire.ID(), Name: "task.log", Root: filepath.Join(w.root.Path, j.Request.TaskID), Relative: "task.log", Size: info.Size()}}}
-			if err = w.indexFiles(logJob); err == nil {
-				j.Files = append(j.Files, logJob.Files...)
-			} else if e == nil {
-				e = err
-			}
-		}
-	}
 	j.State = "succeeded"
-	j.Cleanup = "complete"
 	if j.Execution == nil {
-		j.Execution = &wire.NixExecution{Stage: "unknown"}
+		j.Execution = &wire.NixExecution{Resources: wire.NixResources{State: "unallocated"}, Evidence: wire.NixEvidence{State: "pending"}}
 	}
 	now := time.Now().UTC()
 	j.Execution.Finished = &now
@@ -705,52 +772,19 @@ func (w *Worker) complete(j *Job, e error, uncertain bool) {
 		j.State = "failed"
 		j.Execution.Error = wire.Safe(e)
 	}
-	if uncertain {
-		j.State = "cleanup_required"
-		j.Cleanup = "required"
-	}
-	j.Execution.ResourcesReleased = !uncertain
-	if !uncertain {
-		j.Execution.ResourceConfirmation = "nix_client_returned"
+	if interrupted {
+		j.State = "interrupted"
 	}
 	if cancel := w.cancel[j.Request.TaskID]; cancel != nil {
 		cancel()
 		delete(w.cancel, j.Request.TaskID)
 	}
+	j.Cleanup = "pending"
 	if err := w.save(j); err != nil {
-		// Keep the scheduler occupied when the terminal record is not durable.
-		// A previous building record also requires reconciliation after restart.
-		j.State, j.Cleanup = "cleanup_required", "required"
 		j.Execution.PersistenceError = wire.Safe(wire.Fail("terminal_write", "Nix execution result could not be persisted"))
-		w.active = j.Request.TaskID
-	} else if !uncertain {
-		w.active = ""
+		j.Cleanup = "required"
 	}
-}
-func (w *Worker) Reconcile(id string) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	j := w.jobs[id]
-	if j == nil {
-		return wire.Fail("not_found", "Task not found")
-	}
-	if j.State != "cleanup_required" {
-		return wire.Fail("invalid_state", "Only unresolved daemon cleanup can be reconciled")
-	}
-	next := *j
-	next.State, next.Cleanup = "interrupted", "complete"
-	if next.Execution != nil {
-		v := *next.Execution
-		v.ResourcesReleased = true
-		v.ResourceConfirmation = "administrator_verified"
-		next.Execution = &v
-	}
-	if err := w.save(&next); err != nil {
-		return err
-	}
-	*j = next
-	w.active = ""
-	return nil
+	w.observeLocked(j)
 }
 
 type peerKey struct{}

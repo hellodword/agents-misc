@@ -31,7 +31,7 @@ func compactResult(name string, result any) any {
 	}
 	var out any
 	switch name {
-	case "command_start", "command_cancel", "upload_create", "lab_finish", "lab_cancel", "nix_job_cancel", "lab_cleanup", "nix_job_cleanup", "lab_extend", "nix_job_extend":
+	case "command_start", "command_cancel", "upload_create", "lab_finish", "lab_cancel", "nix_job_cancel", "lab_cleanup", "nix_job_recover", "lab_extend", "nix_job_extend":
 		out = &resourceReceipt{}
 	case "endpoint_open", "endpoint_close":
 		out = &endpointReceipt{}

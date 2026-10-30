@@ -65,7 +65,7 @@ let
   };
   goBase = {
     pname = "vm-test-mcp";
-    version = "0.13.0";
+    version = "0.14.0";
     src = source;
     vendorHash = "sha256-utwEeEeOIhFTZl66lwO+ErGwa1gl+rkJL0qMAlUOx8k=";
     tags = [ "sqlite_omit_load_extension" ];
@@ -87,6 +87,7 @@ let
       subPackages = [
         "cmd/vm-test-mcp"
         "cmd/vm-test-nix-worker"
+        "cmd/vm-test-nix-executor"
         "cmd/vm-test-submit"
         "cmd/vm-test-guest"
         "cmd/vm-test-router-helper"

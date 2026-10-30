@@ -5,6 +5,8 @@ import "github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 // JobState is controller-owned Nix execution and handoff state, independent of
 // the worker's process ledger and the shared scheduler envelope.
 type JobState struct {
+	Dispatched      bool               `json:"dispatched"`
+	Evidence        wire.NixEvidence   `json:"evidence"`
 	ManifestDigest  string             `json:"manifest_digest"`
 	WorkerInstance  string             `json:"worker_instance"`
 	CacheID         string             `json:"cache_id,omitempty"`

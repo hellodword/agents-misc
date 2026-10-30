@@ -56,7 +56,7 @@ func constrainSchema(t reflect.Type, schema schemaMap) {
 	case reflect.TypeFor[WaitTarget]():
 		enum("kind", "lab", "nix_job", "command", "operation", "upload")
 		field("id", schemaMap{"pattern": wire.IDPattern.String()})
-		enum("condition", "ready", "started", "complete", "cleaned", "changed", "output", "input_delivered", "input_written")
+		enum("condition", "ready", "started", "complete", "cleaned", "resources_released", "evidence_complete", "changed", "output", "input_delivered", "input_written")
 		field("seen_revision", schemaMap{"minimum": 0})
 	case reflect.TypeFor[ListRequest](), reflect.TypeFor[EventsRequest]():
 		field("cursor", schemaMap{"minimum": 0})
@@ -85,6 +85,8 @@ func constrainSchema(t reflect.Type, schema schemaMap) {
 		field("reason", schemaMap{"minLength": 1, "maxLength": 1024, "x-maxBytes": 1024, "pattern": "\\S", "description": "Actual continued work and its purpose; effective total limit comes from service_get."})
 	case reflect.TypeFor[NixRequest]():
 		rangeOf("timeout_seconds", 0, 86400)
+	case reflect.TypeFor[JobRecoverRequest]():
+		enum("scope", "resources", "evidence")
 	case reflect.TypeFor[StartRequest]():
 		enum("mode", "finite", "service", "interactive")
 		field("mode", schemaMap{"default": "finite", "description": "finite waits for process-group exit and output; service/interactive waits for confirmed start."})

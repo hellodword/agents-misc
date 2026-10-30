@@ -20,6 +20,7 @@ import (
 )
 
 type Server struct {
+	nixEvidenceActive  int
 	pending            []pendingDispatch
 	mu                 sync.Mutex
 	retentionMu        sync.Mutex
@@ -93,6 +94,10 @@ func New(cfg config.Config, b Backend) (*Server, error) {
 					return fail(e)
 				}
 				t.repository = db
+				if t.Kind == "nixos" && oneOf(t.nix().Evidence.State, "collecting", "transferring") && t.nix().Evidence.Attempts >= 3 {
+					t.nix().Evidence.State = "blocked"
+					t.nix().Evidence.Error = nixLifecycleError(&t, "evidence", wire.Fail("controller_restarted", "Final evidence attempt was interrupted"))
+				}
 				s.tasks = append(s.tasks, &t)
 			case "operation":
 				var o Operation
@@ -286,6 +291,7 @@ func (s *Server) schedule() {
 		case <-tick.C:
 			s.expireRetention()
 			s.mu.Lock()
+			s.nixLifecycleLocked()
 			if s.active != "" || s.closed || s.storageBlocked {
 				s.mu.Unlock()
 				continue
@@ -384,6 +390,9 @@ func (s *Server) execute(t *Task) {
 		err = s.prepare(t, r)
 	} else {
 		s.mu.Lock()
+		t.nix().Dispatched = true
+		t.nix().Evidence = wire.NixEvidence{State: "pending"}
+		s.save(t)
 		snapshot := t.executionSnapshot()
 		s.mu.Unlock()
 		_, err = s.backend.Nix(r.ctx, "start", snapshot)
@@ -601,6 +610,11 @@ func (s *Server) observe(t *Task, r *Runtime) {
 				healthy = false
 			}
 			if kind == "nixos" {
+				poll("nix_logs", func() {
+					ctx, stop := context.WithTimeout(r.ctx, 5*time.Second)
+					defer stop()
+					_, _ = s.backend.Nix(ctx, "logs", snapshot)
+				})
 				raw, e := s.backend.Nix(r.ctx, "status", snapshot)
 				if e != nil {
 					continue

@@ -75,7 +75,7 @@ func (s *Server) query(ctx context.Context, name string, args any) (result any, 
 			backends[kind] = view
 		}
 		s.mu.Lock()
-		return map[string]any{"version": wire.Version, "build": wire.Identity(), "performance": s.performance.Latest(), "templates": templates, "backends": backends, "active_execution_id": s.active, "limits": map[string]any{"minimum_codex_version": "0.163.0", "wait_seconds": 600, "tool_timeout_sec": 660, "heartbeat_seconds": 15, "storage": s.cfg.Storage, "storage_blocked": s.storageBlocked, "default_seconds": s.cfg.Tasks.DefaultTimeout.Seconds(), "max_seconds": s.cfg.Tasks.MaxDuration.Seconds(), "max_upload_bytes": s.cfg.Storage.MaxUploadBytes, "max_nodes": 64, "startup_timeout": s.cfg.VirtualBox.StartupTimeout.Value().String(), "startup_parallelism": s.cfg.VirtualBox.StartupParallelism, "shutdown_timeout": s.cfg.VirtualBox.ShutdownTimeout.Value().String(), "cleanup_timeout": s.cfg.Tasks.CleanupTimeout.Value().String(), "probe_interval": probeInterval.String(), "probe_timeout": probeTimeout.String(), "unavailable_after": s.cfg.VirtualBox.UnavailableAfter.Value().String(), "failure_threshold": 3, "recovery_successes": 2, "diagnostic_timeout": diagnosticBudget.String(), "node_exec_default_seconds": 10, "node_exec_max_seconds": 30, "max_active_endpoints_per_lab": 128, "command_protocol": wire.CommandProtocol, "stdin_packet_bytes": wire.InputPacketLimit, "stdin_packets": wire.InputPacketCount, "stdin_bytes": wire.CommandInputLimit, "output_bytes_per_stream": wire.CommandOutputLimit, "guest_read_bytes_per_stream": wire.CommandReadLimit}, "endpoint_address": s.cfg.VirtualBox.Network.Listen}, nil
+		return map[string]any{"version": wire.Version, "build": wire.Identity(), "performance": s.performance.Latest(), "templates": templates, "backends": backends, "active_execution_id": s.active, "limits": map[string]any{"minimum_codex_version": "0.163.0", "wait_seconds": 600, "tool_timeout_sec": 660, "heartbeat_seconds": 15, "storage": s.cfg.Storage, "storage_blocked": s.storageBlocked, "default_seconds": s.cfg.Tasks.DefaultTimeout.Seconds(), "max_seconds": s.cfg.Tasks.MaxDuration.Seconds(), "max_upload_bytes": s.cfg.Storage.MaxUploadBytes, "max_nodes": 64, "startup_timeout": s.cfg.VirtualBox.StartupTimeout.Value().String(), "startup_parallelism": s.cfg.VirtualBox.StartupParallelism, "shutdown_timeout": s.cfg.VirtualBox.ShutdownTimeout.Value().String(), "cleanup_timeout": s.cfg.Tasks.CleanupTimeout.Value().String(), "evidence_timeout": s.cfg.Tasks.EvidenceTimeout.Value().String(), "probe_interval": probeInterval.String(), "probe_timeout": probeTimeout.String(), "unavailable_after": s.cfg.VirtualBox.UnavailableAfter.Value().String(), "failure_threshold": 3, "recovery_successes": 2, "diagnostic_timeout": diagnosticBudget.String(), "node_exec_default_seconds": 10, "node_exec_max_seconds": 30, "max_active_endpoints_per_lab": 128, "command_protocol": wire.CommandProtocol, "stdin_packet_bytes": wire.InputPacketLimit, "stdin_packets": wire.InputPacketCount, "stdin_bytes": wire.CommandInputLimit, "output_bytes_per_stream": wire.CommandOutputLimit, "guest_read_bytes_per_stream": wire.CommandReadLimit}, "endpoint_address": s.cfg.VirtualBox.Network.Listen}, nil
 	case TaskListRequest:
 		return s.listTasksKind(a, name)
 	case TaskID:
@@ -90,9 +90,6 @@ func (s *Server) query(ctx context.Context, name string, args any) (result any, 
 		if name != "lab_inspect" {
 			v = t.summaryView()
 			v["revision"] = s.revision(map[bool]string{true: "lab", false: "nix_job"}[t.Kind == "lab"]+"/"+t.ID, taskCondition(t))
-			if t.Kind == "nixos" {
-				v["execution"] = t.nix().NixExecution
-			}
 		}
 		s.queueView(t, v)
 		if until := s.performancePending[t.ID]; !until.IsZero() {
@@ -265,8 +262,10 @@ func (s *Server) mutate(name string, args any, op *Operation) (any, error) {
 		r.cancel()
 		s.save(t)
 		return t.Public(), nil
+	case RecoverNixRequest:
+		return s.recoverNix(a.TaskID.TaskID, a.Scope)
 	case TaskChange:
-		if name == "lab_cleanup" || name == "nix_job_cleanup" {
+		if name == "lab_cleanup" {
 			return s.cleanupTask(a.TaskID.TaskID)
 		}
 		if name == "network_recover" {
@@ -442,7 +441,7 @@ func newTask(kind string, seconds int) *Task {
 	if kind == "lab" {
 		t.domain = &LabState{Nodes: []*Node{}, Commands: []*Command{}, Endpoints: []*Endpoint{}, Captures: []*Capture{}}
 	} else {
-		t.domain = &NixJobState{}
+		t.domain = &NixJobState{Evidence: wire.NixEvidence{State: "pending"}}
 	}
 	return t
 }
@@ -1101,7 +1100,7 @@ func (s *Server) media(a MediaRequest) (any, error) {
 	return result, err
 }
 func (s *Server) purge(t *Task) error {
-	if !t.Terminal() || t.Cleanup != "complete" {
+	if !t.settled() {
 		return wire.Fail("invalid_state", "Execution and resource cleanup must be complete")
 	}
 	delete(s.performancePending, t.ID)

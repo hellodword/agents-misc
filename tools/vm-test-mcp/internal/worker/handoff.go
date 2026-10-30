@@ -9,11 +9,18 @@ import (
 // An acknowledgement is accepted only after controller publication and durable
 // indexing. Every retry finishes both filesystem and index cleanup.
 func (w *Worker) handoff(j *Job, digest string) (any, error) {
+	j.io.Lock()
+	defer j.io.Unlock()
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.streams[j.Request.TaskID] > 0 {
 		return nil, wire.Fail("resource_busy", "Evidence transfer is still active")
 	}
 	if j.Cleanup != "complete" {
 		return nil, wire.Fail("cleanup_required", "Resources must be released before evidence handoff")
+	}
+	if j.Execution.Evidence.State != "transferring" && j.Execution.Evidence.State != "complete" {
+		return nil, wire.Fail("invalid_state", "Evidence manifest is not ready for acknowledgement")
 	}
 	if j.HandoffComplete {
 		if j.ManifestDigest != digest {
@@ -34,7 +41,10 @@ func (w *Worker) handoff(j *Job, digest string) (any, error) {
 			return nil, err
 		}
 	}
-	if err := w.root.RemoveAll(j.Request.TaskID); err != nil {
+	w.mu.Unlock()
+	err := w.root.RemoveAll(j.Request.TaskID)
+	w.mu.Lock()
+	if err != nil {
 		return nil, err
 	}
 	if _, err := w.db.ExecContext(context.Background(), "DELETE FROM worker_files WHERE task_id=?", j.Request.TaskID); err != nil {
@@ -43,6 +53,7 @@ func (w *Worker) handoff(j *Job, digest string) (any, error) {
 	j.Files = nil
 	j.Outputs = nil
 	j.CopiesReleased = true
+	j.Execution.Evidence.State, j.Execution.Evidence.Error = "complete", nil
 	if j.HandoffFinished == nil {
 		now := time.Now().UTC()
 		j.HandoffFinished = &now

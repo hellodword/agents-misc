@@ -1,4 +1,4 @@
-# VM Test MCP 0.13.0
+# VM Test MCP 0.14.0
 
 One Go module, one public MCP service, with separate VirtualBox and Nix domains
 for disposable Windows/Linux VirtualBox labs and strict NixOS sandbox
@@ -8,9 +8,10 @@ lab run concurrently. HTTP disconnects do not cancel tasks.
 
 The controller runs as the VirtualBox owner. The Nix worker runs as an
 ordinary Nix client outside `trusted-users`, authenticating its controller's UID
-on a Unix socket. Both processes may use the same account. Administrator
-configuration, these processes, VirtualBox
-isolation and the Nix daemon sandbox form the trusted boundary. Requests, uploads
+on a Unix socket. Both processes may use the same account. A root executor
+creates a private Nix daemon endpoint and delegated cgroup for each job, using
+the existing host store. Administrator configuration, these processes, VirtualBox
+isolation and the Nix sandbox form the trusted boundary. Requests, uploads
 and test code are untrusted. Guest escapes through VirtualBox vulnerabilities are
 outside this design.
 
@@ -39,7 +40,7 @@ and the router ISO is `vm-test-router.iso`. It also retains both packages' licen
 and source references. From `tools/vm-test-mcp`, the same command is `just build-all`.
 
 These outputs target `x86_64-linux`. The service package includes the controller,
-worker, container submission helper, Linux/Windows amd64 guest supervisors and
+worker, root executor, container submission helper, Linux/Windows amd64 guest supervisors and
 native VirtualBox API helper, and the xorriso seed-ISO builder. The router output is a
 diskless NixOS Live ISO, built with ordinary files without mounts or KVM. It reads
 squashfs on demand, uses tmpfs for writable state, and targets **1 vCPU / 256 MiB**.
@@ -47,9 +48,11 @@ The router uses the firmware framebuffer without native GPU modesetting. Its
 primary serial console retains kernel, initrd and service output for diagnostics;
 the framebuffer remains available for screenshots.
 
-Follow [administrator preparation](preparation.md). Both services read the same
+Follow [administrator preparation](preparation.md). All three services read the same
 [annotated YAML](config.example.yaml) outside the Nix store. There is no config-file
-permission requirement. Top-level `state_dir` owns the role directories
+permission requirement. Explicit sudo startup authorizes the current build and
+the shared file's `executor` policy, which stays fixed for that process lifetime.
+Top-level `state_dir` owns the role directories
 `controller/` and `nix-worker/`; `nix.state_dir` optionally overrides the worker root.
 The roots can be identical while each role retains its own private directory,
 lock and database.
@@ -62,19 +65,29 @@ cache.
 
 ## Start and use
 
-From the repository root, use separate host terminals. Both commands may use the
-same ordinary account outside Nix `trusted-users`:
+From the repository root, use separate host terminals. Build as the ordinary
+account; the executor recipe explicitly uses sudo for its transient service:
 
 ```sh
 just --justfile tools/vm-test-mcp/justfile serve       # Host: controller account.
-just --justfile tools/vm-test-mcp/justfile nix-worker  # Host: ordinary Nix worker account.
+just --justfile tools/vm-test-mcp/justfile nix-executor # Host: sudo, delegated transient service.
+just --justfile tools/vm-test-mcp/justfile nix-worker   # Host: ordinary Nix worker account.
 ```
 
-Both commands build the package as needed, run in the foreground and read
-`tools/vm-test-mcp/config.yaml`. Override with `--config /absolute/config.yaml`.
-They use the current account; account/socket/KVM preparation follows the
-[administrator guide](preparation.md). They do not switch users or install services.
-From `tools/vm-test-mcp`, use `just serve`, `just nix-worker` or `just nixos-test`.
+All commands build the package as needed, remain in the foreground and read
+`tools/vm-test-mcp/config.yaml`; override with `--config /absolute/config.yaml`.
+Fill in `executor.worker_uid` and `executor.executable` in that shared file.
+The recipe passes its absolute path to the transient service. The administrator
+trusts this configuration when invoking sudo; edits take effect after restart.
+It requires systemd 254+, cgroup v2 and delegated cgroup support. Its recipe uses
+`systemd-run --service-type=exec --pty --wait --collect`, `Delegate=yes`,
+`DelegateSubgroup=supervisor`, `KillMode=mixed`, `TimeoutStopSec=6min`, `Restart=no`
+and `UMask=0077`. No permanent unit is installed. `--collect` removes transient
+unit metadata; executor records remain in its private state directory. Ctrl+C
+runs bounded session shutdown; abnormal MainPID exit lets systemd terminate the
+service's remaining processes. Restart reconciles the durable session receipts.
+From `tools/vm-test-mcp`, use `just serve`, `just nix-executor`, `just nix-worker`
+and `just nixos-test`.
 
 For an installed package, the equivalent service commands are:
 
@@ -104,8 +117,8 @@ tool_timeout_sec = 660
 The [Codex MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)
 defines this timeout setting. SSE carries structured results and 15-second
 transport heartbeats. Disconnects, timeout and MCP cancellation end observation;
-explicit business cancellation ends execution. Use empty controller/worker state
-for this release; old schemas/configuration are intentionally incompatible.
+explicit business cancellation ends execution. Use empty controller, worker and
+executor state for initial installation of this release; old schemas/configuration are intentionally incompatible.
 
 1. Prepare scripts and dependencies locally. Allocate file inputs with `upload_create`,
    PUT their immutable manifests and bytes, and wait for automatic `ready` state.
@@ -124,7 +137,9 @@ for this release; old schemas/configuration are intentionally incompatible.
    same lab. Read fresh capabilities with `upload_get`. Collect files or guest tar
    archives with `guest_file_get`, and retrieve evidence through `evidence_get`.
 6. Submit `passed`, `failed` or `inconclusive` and a summary through `lab_finish`.
-   Wait for `cleanup.state: complete` before lengthy local edits or reporting;
+   Confirm `cleanup.state: complete` before the next executor batch. Report an
+   administrator blocker with its concrete resource cause and continue independent
+   local edits, analysis or reporting;
    evidence defaults to 1 day for success or 7 days otherwise; pin needed evidence. Abandon queued/preparing tasks
    with `lab_cancel`. Later batches use a new execution identity. Extend only for
    concrete continued work using `lab_extend(seconds=…, reason=…)`.
@@ -231,18 +246,24 @@ Use `command_start` for ordinary workloads and process-group supervision.
 Cleanup closes published entries immediately, limits evidence collection and
 records resource steps and retry counts. `lab_cleanup` retries remaining
 resources of an ended VirtualBox task. A `blocked` cleanup keeps the FIFO occupied;
-inspect its resource errors before a new retry. Nix daemon teardown still uses the
-administrator's local verification procedure. Task results and evidence remain
-available after resource cleanup.
+inspect its resource errors before a new retry. Nix jobs expose `result`,
+`resources` and `evidence` independently. The executor seals the private endpoint,
+interrupts its daemons, uses `cgroup.kill` after the 30-second grace period, and
+confirms an empty group within a five-minute resource budget. The worker also
+confirms client exit. Resource release frees the execution slot while evidence
+indexing and verified handoff continue. `nix_job_recover(scope="resources"|"evidence")`
+recovers the original job without rebuilding it. Manual blockers return actionable
+`attention` and leave automatic wait continuations.
 
 The annotated config groups deadlines under `tasks`, backend/router/network policy
-under `virtualbox`, worker settings under `nix`, and retention/upload limits under
+under `virtualbox`, worker settings under `nix`, privileged session policy under
+`executor`, and retention/upload limits under
 `storage`. Timeouts use units such as `30s`, `10m` and `1h`. `service_get` exposes the
 effective probe, diagnosis and cleanup limits.
 
 ## NixOS submissions
 
-With both host processes running, execute from the repository root in the development container:
+With the controller, worker and executor running, execute from the repository root in the development container:
 
 ```sh
 just --justfile tools/vm-test-mcp/justfile nixos-test
@@ -266,7 +287,8 @@ Uploading or uncertain acceptance retains the cache; an expired input confirmed
 unaccepted releases its cache before a fresh attempt. Local deletion failures are
 reported on stderr and retried on resume without changing the job result.
 An unsuccessful test or
-unresolved cleanup exits 1; only `passed` with `cleanup.state: complete` exits 0.
+blocked resources or evidence exit 1; only `passed` with released resources and
+`evidence.state: complete` exits 0.
 
 ```sh
 # Resume the original task, including after an interrupted/lost submission reply.
@@ -308,8 +330,11 @@ policy; signature checking stays enabled. Build outputs have worker-owned GC roo
 and are exported only as ordinary files under registered output roots. Verified durable handoff releases worker copies
 and roots; the host Nix store has its own GC policy.
 
-An interrupted daemon build keeps scheduler occupancy until local administrator
-[recovery](preparation.md#recovery). Nix daemon cleanup attestation is a local administrator operation.
+An interrupted build retains scheduler occupancy until the executor and worker
+confirm resource release. Evidence attempts have a separate five-minute budget,
+with up to three attempts for transient failures and 1s/5s retry delays. Pending or
+blocked evidence remains protected from deletion and retention reclamation. See
+[recovery](preparation.md#recovery) for resource identity and handoff recovery.
 
 ## Development and verification
 

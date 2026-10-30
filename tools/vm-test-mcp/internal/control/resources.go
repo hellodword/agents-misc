@@ -16,6 +16,8 @@ func (s *Server) resolveArguments(name string, args any) (any, error) {
 		return TaskID{a.JobID}, nil
 	case JobChange:
 		return TaskChange{a.Change, TaskID{a.JobID.JobID}}, nil
+	case JobRecoverRequest:
+		return RecoverNixRequest{TaskChange{a.Change, TaskID{a.JobID.JobID}}, a.Scope}, nil
 	case JobExtendRequest:
 		return ExtendRequest{TaskChange{a.Change, TaskID{a.JobID.JobID}}, a.Seconds, a.Reason}, nil
 	case ExecutionChange:

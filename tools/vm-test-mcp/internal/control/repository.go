@@ -56,7 +56,7 @@ func (d *repository) transaction(ctx context.Context, records []record, change f
 func (t *Task) store(ctx context.Context, tx *sql.Tx) error {
 	t.PrepareSave()
 	header := wire.JSON(t.executionRecord)
-	_, err := tx.ExecContext(ctx, `INSERT INTO executions(id,kind,state,cleanup,created,ended,revision,body) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state,cleanup=excluded.cleanup,ended=excluded.ended,revision=excluded.revision,body=excluded.body WHERE executions.body<>excluded.body`, t.ID, t.Kind, t.State, t.Cleanup, t.Created.Format(time.RFC3339Nano), dbTime(t.Ended), t.Revision, header)
+	_, err := tx.ExecContext(ctx, `INSERT INTO executions(id,kind,state,cleanup,settled,created,ended,revision,body) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state,cleanup=excluded.cleanup,settled=excluded.settled,ended=excluded.ended,revision=excluded.revision,body=excluded.body WHERE executions.body<>excluded.body`, t.ID, t.Kind, t.State, t.Cleanup, t.settled(), t.Created.Format(time.RFC3339Nano), dbTime(t.Ended), t.Revision, header)
 	if err != nil {
 		return err
 	}
@@ -114,7 +114,7 @@ func (t *Task) store(ctx context.Context, tx *sql.Tx) error {
 			return err
 		}
 	}
-	if t.Cleanup == "complete" && t.DetailExpires != nil {
+	if t.settled() && t.DetailExpires != nil {
 		if _, err = tx.ExecContext(ctx, "UPDATE evidence SET protected=0,expires=?,success=? WHERE task_id=? AND protected=1", dbTime(t.DetailExpires), t.State == "finished" && t.Conclusion == "passed", t.ID); err != nil {
 			return err
 		}
@@ -242,7 +242,7 @@ func (d *repository) Load(ctx context.Context, kind, id string, target any) erro
 	return json.Unmarshal(body, target)
 }
 func (d *repository) Active(ctx context.Context, kind string) ([][]byte, error) {
-	table, where := "executions", "cleanup<>'complete'"
+	table, where := "executions", "settled=0"
 	switch kind {
 	case "operation":
 		table, where = "operations", "state='pending'"

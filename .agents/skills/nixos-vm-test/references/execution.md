@@ -1,8 +1,8 @@
 # Executing NixOS VM tests
 
 Evaluate in the development container using the tested project's locked nixpkgs.
-The prepared VM Test MCP 0.13 worker submits the derivation to the physical host's
-Nix daemon; QEMU nodes run directly on host KVM inside its strict sandbox.
+The prepared VM Test MCP 0.14 worker submits the derivation through a task-specific
+Nix daemon owned by the host executor; QEMU nodes run directly on host KVM inside its strict sandbox.
 
 ## Submission
 
@@ -63,7 +63,7 @@ For example, a 15-minute execution uses ten minutes plus one five-minute continu
 SSE sends invisible transport heartbeats every 15 seconds. HTTP disconnect, tool
 timeout and MCP cancellation stop observation only. Use `nix_job_get`,
 `execution_events` and byte-offset `execution_log` for explicit diagnosis.
-`nix_job_get(job_id=…)` separates `phase`, `result` and `cleanup.state`; completion is
+`nix_job_get(job_id=…)` separates `phase`, `result`, `resources.state` and `evidence.state`; completion is
 `phase: ended`, with the build conclusion under `result`. Logs are base64 bytes
 with `next_offset`. The FIFO queue is shared with VirtualBox
 labs. The daemon owns build parallelism; test definitions own node CPUs/RAM.
@@ -82,12 +82,22 @@ history and its sequence cursor for paging. Queue details identify occupied or
 blocked cleanup without exposing another task's command inputs.
 
 `nix_job_cancel` requests cancellation, including abandonment while queued.
-Wait for `cleanup.state: complete` before lengthy local edits or reporting;
-the next execution rejoins the queue. An interrupted daemon build can have
-`cleanup.state: blocked`; this continues to occupy the scheduler until the administrator
-verifies teardown and performs local reconciliation. Reconnect to the original
-task after HTTP loss. `execution_delete` is accepted only after terminal state and
-complete cleanup. Defaults retain successful evidence for 1 day, other evidence
+Wait for `resources.state: released` or `unallocated` before the next execution
+batch. `resources.state: blocked` retains scheduler ownership and includes the
+cause, session identity and required actor. Report that blocker and continue
+independent local edits, analysis or reporting. The executor keeps observing a
+known session; later confirmed release updates the original job automatically.
+Use `nix_job_recover(job_id=…, scope="resources")` after resolving a resource
+problem, or `scope="evidence"` for evidence collection/transfer. Neither rebuilds
+the test. Evidence failure keeps its files and roots for recovery, independently
+of the execution slot. Reconnect to the original job after HTTP loss.
+
+The wait conditions are `resources_released`, `evidence_complete` and `complete`;
+`complete` requires the result, released resources and complete evidence. A manual
+blocker returns `attention` and is excluded from `continue`. Read its cause before
+recovering; repeated waits do not resolve an administrator prerequisite.
+`execution_delete` requires a terminal result, released resources and complete
+evidence. Defaults retain successful evidence for 1 day, other evidence
 for 7 days, and compact summaries/receipts for 30 days. Use `evidence_pin`/`evidence_unpin`
 for longer retention. Pins do not retain the executor. Evidence budgets are 40 GiB
 with reclamation to 32 GiB; protected data can block new admission. Input staging

@@ -11,7 +11,7 @@ controller requests cannot select host programs, directories or devices.
 | Development container | `vm-test-submit`, Nix with `nix-command` and `flakes`, the tested project's inputs, and HTTP access to the controller             |
 | Physical Linux host   | Hardware virtualization, sufficient RAM and disk, VirtualBox for labs, and multi-user Nix with working `/dev/kvm` for NixOS tests |
 | MCP controller        | The service package and the VirtualBox owner account when labs are enabled                                                        |
-| Nix worker            | An ordinary account, the worker package, Nix CLI, daemon socket access and a separate private state directory                     |
+| Nix worker            | An ordinary account, the worker package, Nix CLI, executor socket access and a separate private state directory                   |
 | NixOS test nodes      | Driver and guest packages supplied by the tested project's locked nixpkgs                                                         |
 
 ## Accounts and shared configuration
@@ -28,7 +28,7 @@ Neither needs guest Python. `iso_builder` is **host** xorriso: it writes each
 lab's credential/configuration seed ISO, not an OS installation image. The router
 OS ISO is a separate `.#vm-test-router` build product.
 
-Both processes read the same [annotated YAML](config.example.yaml), outside the
+All three processes read the same [annotated YAML](config.example.yaml), outside the
 Nix store. There is no configuration-file permission requirement. Local
 `config.yaml` is Git-ignored. The mandatory token authenticates MCP requests.
 Omitted or empty `service.hosts` / `service.origins` allow any value; nonempty
@@ -247,11 +247,15 @@ port bindings before restoring declared state. It does not restore a RAM snapsho
 of the previous router. The dnsmasq memory cap is 32 MiB and volatile logs are
 bounded to 8 MiB.
 
-## Nix daemon and cache trust
+## Nix executor and cache trust
 
-Use multi-user Nix with dedicated build users. Configure the **running daemon**
-with strict sandboxing, no fallback, local KVM access for builders, and trusted
-cache keys. The worker uses the existing host store and daemon; store contents
+Use multi-user Nix with dedicated build users, systemd 254+ and cgroup v2.
+The root executor starts task-specific `nix daemon --stdio --force-untrusted
+--store local` processes inside each job cgroup. Enable `nix-command` and
+`daemon-trust-override` support in the selected Nix executable. The executor fixes
+strict sandboxing, no fallback, local builds and signature verification; configure
+local KVM access for builders and trusted cache keys in the host Nix policy.
+The worker uses the existing host store through its task endpoint; store contents
 remain readable task inputs. Nix treats trusted users as effectively root-equivalent,
 so the worker's ordinary account remains outside `trusted-users`.
 
@@ -271,16 +275,31 @@ cache and virtualization settings:
 }
 ```
 
-Worker startup checks that its account is non-root and its client configuration
-sets `sandbox = true` and `sandbox-fallback = false`. It then runs
-`nix store info --store daemon --json` to verify that the daemon is reachable and
-reports this client as untrusted. A failed connection or missing trust status
-stops startup. The client's `build-users-group` may be empty: Nix uses different
-defaults for an ordinary client and the root daemon. Build-user selection and
-trust are not inferred from the client's configuration dump.
+In the shared `config.yaml`, set `executor.worker_uid` to the ordinary worker's
+numeric UID and `executor.executable` to the administrator-selected absolute Nix
+executable. The explicit sudo launch authorizes the current build and this
+configuration. The executor reads it once at startup; later edits require a
+restart. Host users who can change the checkout or configuration belong to this
+administrative trust boundary. Runtime worker requests cannot change the policy.
 
-Startup does not run a build or start a VM. Verify the daemon's build identities,
-effective sandbox isolation and KVM access during administrator acceptance.
+The default `executor.state_dir` is `/var/lib/vm-test-nix-executor` and
+`executor.socket` is `/run/vm-test-nix-executor/control.sock`. The worker reads
+that same socket field. State and socket-directory ancestors must be root-owned real directories
+without write access for other accounts. The executor creates its private state
+with mode `0700` and its dedicated socket directory with mode `0711`; socket
+files grant access only to the configured worker UID. For custom socket locations,
+prepare the parent directories and allow the worker to traverse them.
+The root service accepts only job/session identities and bounded deadlines,
+never caller-supplied commands, PIDs, cgroup paths or environment settings.
+
+Worker startup checks its non-root identity, client sandbox settings and executor
+availability. Before importing each job it uses that job's endpoint for
+`nix store info --json` and verifies `trusted=false`. Import, derivation inspection
+and build all use the same endpoint. The executor uses the local store directly;
+it does not forward builds to the shared host daemon. The client's
+`build-users-group` may be empty because root daemon defaults own build identities.
+Startup does not run a build or start a VM. Verify sandbox isolation, build-user
+identity, complete descendant containment and KVM access during acceptance.
 
 Review `trusted-users`, `build-users-group`, `sandbox-paths` and
 `extra-sandbox-paths`. Expose `/dev/kvm` only as needed; do not expose home directories,
@@ -326,41 +345,48 @@ under their administrator's control.
 
 ## Service supervision
 
-For an initial foreground run, enter `tools/vm-test-mcp` and use `just serve` and
-`just nix-worker` in separate terminals. Both may run under the same ordinary account.
-Both default to the shared `config.yaml`; append `--config /absolute/config.yaml`
-when needed. Run `just nixos-test` from the same directory in the container once they are available.
-These commands build/run the package without changing accounts or provisioning the
-host. The worker's socket must be accessible to the controller; with different
-accounts, place it outside the worker's private `0700` state directory.
+Enter `tools/vm-test-mcp` and use separate host terminals:
 
-When Nix is configured, run the worker alongside the controller. If it becomes
-unavailable, storage accounting is unknown and new labs/jobs/uploads and queued
-starts pause. Existing execution, controls, diagnostics and cleanup remain usable.
-For a system service using the same `vm-owner` account as the controller:
-
-```ini
-[Service]
-User=vm-owner
-ExecStart=/opt/vm-test-mcp/bin/vm-test-nix-worker --config /etc/vm-test/config.yaml
-UMask=0077
-Restart=on-failure
+```sh
+just nix-executor
+just nix-worker
+just serve
 ```
+
+`just nix-executor` builds as the current ordinary account, then explicitly runs
+`sudo systemd-run` with the complete transient-service properties documented in
+[Start and use](README.md#start-and-use). Its PTY stays attached. Ctrl+C starts
+executor shutdown, bounded by its five-minute release budget plus five seconds
+for shutdown completion. `systemctl stop vm-test-nix-executor.service` uses the
+service's independent six-minute stop budget and mixed termination policy.
+No permanent unit or automatic restart policy is installed. A direct bare root
+executor invocation cannot provide the delegated supervisor boundary.
+
+The three recipes use this directory's `config.yaml`; `just nix-executor` passes
+its absolute path through sudo to the service. `just nix-worker` and `just serve`
+run as ordinary foreground processes. The worker's socket must be accessible to the controller; separate
+accounts need a socket outside the worker's private directory. Run `just nixos-test`
+in the container after the host services are available. An offline worker makes
+storage accounting unknown and pauses new admission; control and recovery remain
+available for accepted jobs.
 
 For GUI support, use a user service in the VM owner's graphical session with its
 display/session environment. Its command is
 `/opt/vm-test-mcp/bin/vm-test-mcp --config /etc/vm-test/config.yaml`, also with
 `UMask=0077` and `Restart=on-failure`. A headless-only controller can use ordinary
-account supervision. Use `--check-config --config /etc/vm-test/config.yaml` on either program to validate its role without starting it or creating state. Configuration is loaded at startup. Restart after tasks finish
-when changing policy or paths.
+account supervision. Use `--check-config --config /etc/vm-test/config.yaml` on
+each of the three programs to validate configuration values without starting
+services or creating state. The executor checks host directory ownership and
+cgroup delegation at startup, before creating state or sockets. Configuration
+is loaded at startup. Restart after tasks finish when changing policy or paths.
 
-This release requires new configuration and empty controller **and worker** state
-with fresh schema-21 databases. The user must stop the old services, confirm all
+This release requires new configuration and empty controller, worker and executor state
+with fresh schema-22 databases. The user must stop the old services, confirm all
 old VM/daemon/port resources are released, and clear or retire the old state before
 starting. Preserve any required old evidence in private offline backups first.
 Do not run the new binary against a live old state or attempt an in-place schema
-migration. Guest protocol 2 requires rebuilding and preparing both Linux and
-Windows baseline executables; Windows also requires the matching resident service.
+migration. Guest protocol remains 2; prepared baselines with the configured matching
+supervisor identities can continue to use that protocol.
 Keep the new state for subsequent restart/recovery acceptance. VirtualBox baselines and host Nix-store contents remain independent.
 Old private backups can contain credentials and command inputs; keep them outside
 version control and the Nix store.
@@ -394,19 +420,38 @@ vm-test-mcp --config /etc/vm-test/config.yaml --reconcile TASK_ID
 This command cannot waive the ownership/path checks. It also restores the recorded global `GUI/MaxGuestResolution`; if another application changed that value, inspect the recorded original/expected values and resolve the conflict locally before retrying. Preserve baselines and unrelated
 VMs; never substitute names or paths printed by untrusted test code as deletion authority.
 
-For an interrupted Nix build, stop the worker and inspect daemon build processes,
-build-user activity and the recorded derivation. Only after verifying teardown,
-run as the worker identity:
+For Nix jobs, inspect `result`, `resources`, `evidence` and their structured
+causes separately. The executor closes admission before signalling, waits the
+configured grace period, kills remaining descendants, and persists release only
+after `cgroup.events` reports `populated 0`. The worker confirms its client exit.
+The executor's deadline remains authoritative while the worker is disconnected.
+Known groups remain observed after a release-budget blocker; later release can
+free the slot without another job submission.
 
-```sh
-vm-test-nix-worker --config /etc/vm-test/config.yaml --reconcile TASK_ID
-```
+Restart the executor or worker with the same state. Boot identity, systemd
+invocation, durable executor/worker identities and cgroup inode bind recovery to
+the original resources. A new boot or disappearance of the previous invocation's
+recorded cgroup can prove release. A mismatched or unknown identity requires
+administrator inspection; a blank database cannot attest to a previous session.
+After resolving the reported resource problem, use
+`nix_job_recover(job_id=…, scope="resources")`. The worker has no blanket cleanup
+attestation command.
 
-This is a local administrator attestation, unavailable through the Unix protocol
-or MCP. Restart the worker, reconcile/restart the controller, and check the original
-task's cleanup before submitting another task. Default builds omit `--keep-failed`. Any explicitly retained failed build
-directory is administrator-managed. Output GC roots are released after the
-controller confirms durable size/hash-verified evidence handoff.
+For evidence, use `scope="evidence"`. Indexing and handoff run independently of
+resource release. Each attempt is bounded; transient errors retry at most three
+times with 1s/5s delays. Permission, storage-capacity, integrity and identity
+failures report the actor and required action without repeated automatic replay.
+The manifest and acknowledgement are durable, so retries reuse verified objects.
+Worker copies and GC roots remain until controller publication and acknowledgement
+are complete. Pending handoff remains protected from TTL, pressure reclaim and
+explicit deletion. Default builds omit `--keep-failed`; explicitly retained failed
+build directories remain administrator-managed.
+
+A manual blocker is a reportable outcome. Retain its job/session identities and
+cause, continue independent local work, and confirm runtime release before another
+executor batch. Initial rollout may retire old state only after the administrator
+has stopped old physical resources and retained any required evidence. Normal
+restart recovery keeps all three state directories.
 
 ## Acceptance
 

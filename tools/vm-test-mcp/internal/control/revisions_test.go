@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -123,7 +124,7 @@ func (f *nixExecutionBackend) Nix(_ context.Context, action string, _ *Task) (js
 	if action == "start" || f.cancelled && action == "status" {
 		return wire.JSON(map[string]any{"state": "building", "cleanup": "pending"}), nil
 	}
-	execution := &wire.NixExecution{Stage: "build", Process: &wire.NixProcessResult{Stage: "build", Source: "nix_client_wait", Exited: true, ExitCode: new(23)}, Error: wire.Safe(wire.Fail("backend_error", "Synthetic Nix build failed"))}
+	execution := &wire.NixExecution{Resources: wire.NixResources{State: "released"}, Evidence: wire.NixEvidence{State: "transferring"}, Stage: "build", Process: &wire.NixProcessResult{Stage: "build", Source: "nix_client_wait", Exited: true, ExitCode: new(23)}, Error: wire.Safe(wire.Fail("backend_error", "Synthetic Nix build failed"))}
 	return wire.JSON(map[string]any{"state": "failed", "cleanup": "complete", "execution": execution}), nil
 }
 
@@ -379,13 +380,14 @@ func TestGuestStatusRefreshesWithoutPowerStateChange(t *testing.T) {
 }
 
 type delayedNixStatusBackend struct {
+	first sync.Once
 	*nixExecutionBackend
 	entered, release chan struct{}
 }
 
 func (f *delayedNixStatusBackend) Nix(ctx context.Context, action string, task *Task) (json.RawMessage, error) {
 	if action == "status" {
-		close(f.entered)
+		f.first.Do(func() { close(f.entered) })
 		<-f.release
 	}
 	return f.nixExecutionBackend.Nix(ctx, action, task)

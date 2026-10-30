@@ -27,7 +27,7 @@ func (s *Server) sweepExecutionFiles(now time.Time) error {
 		id := entry.Name()
 		var active int
 		if err = s.db.QueryRowContext(s.ctx, `SELECT
-   (SELECT count(*) FROM executions WHERE id=? AND cleanup<>'complete')+
+   (SELECT count(*) FROM executions WHERE id=? AND settled=0)+
    (SELECT count(*) FROM operations WHERE task_id=? AND state='pending')`, id, id).Scan(&active); err != nil {
 			return err
 		}

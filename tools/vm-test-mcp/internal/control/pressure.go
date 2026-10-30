@@ -9,7 +9,7 @@ import (
 func (s *Server) reclaimPressure() error {
 	rows, err := s.db.QueryContext(s.ctx, `SELECT id,kind FROM (
  SELECT id,'execution' AS kind,(state='finished' AND json_extract(body,'$.conclusion')='passed') AS success,julianday(ended) AS age
- FROM executions e WHERE cleanup='complete' AND ended IS NOT NULL
+ FROM executions e WHERE settled=1 AND ended IS NOT NULL
  AND (COALESCE(json_extract(body,'$.purged'),0)=0 OR EXISTS(SELECT 1 FROM evidence a WHERE a.task_id=e.id AND a.pinned=0))
  UNION ALL
  SELECT id,'evidence' AS kind,success,julianday(expires)-CASE WHEN success=1 THEN ? ELSE ? END AS age FROM evidence a

@@ -98,7 +98,7 @@ func (f *runFixture) tool(_ context.Context, r *mcp.CallToolRequest) (*mcp.CallT
 		} else if f.polls == 2 {
 			cleanup = "running"
 		}
-		value = map[string]any{"id": strings.Repeat("b", 32), "phase": map[bool]string{true: "queued", false: "ended"}[state == "queued"], "result": map[string]any{"termination": state, "conclusion": "passed"}, "cleanup": map[string]any{"state": cleanup}, "artifacts": []any{map[string]any{"id": strings.Repeat("e", 32), "name": "test.log"}}}
+		value = map[string]any{"id": strings.Repeat("b", 32), "phase": map[bool]string{true: "queued", false: "ended"}[state == "queued"], "result": map[string]any{"termination": state, "conclusion": "passed"}, "resources": map[string]any{"state": map[string]string{"complete": "released", "blocked": "blocked", "running": "releasing", "pending": "unallocated"}[cleanup]}, "evidence": map[string]any{"state": map[string]string{"complete": "complete", "blocked": "pending", "running": "pending", "pending": "pending"}[cleanup]}, "artifacts": []any{map[string]any{"id": strings.Repeat("e", 32), "name": "test.log"}}}
 	case "execution_log":
 		if f.polls == 1 {
 			value, failed = map[string]any{"error": wire.Fail("not_found", "Log not created")}, true
@@ -231,7 +231,7 @@ func TestAutomaticRunReportsRequiredCleanup(t *testing.T) {
 	f, options, _ := newRunFixture(t)
 	f.cleanup = "blocked"
 	result, err := Run(context.Background(), options)
-	if err == nil || !strings.Contains(err.Error(), "cleanup=blocked") || !bytes.Contains(result, []byte(`"state":"blocked"`)) {
+	if err == nil || !strings.Contains(err.Error(), "resources=blocked") || !bytes.Contains(result, []byte(`"state":"blocked"`)) {
 		t.Fatal(string(result), err)
 	}
 	if _, err := os.Stat(filepath.Join(options.WorkDir, "result.json")); err != nil {

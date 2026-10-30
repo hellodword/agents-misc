@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/config"
+	"github.com/hellodword/agents-misc/vm-test-mcp/internal/nixexecutor"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
@@ -20,7 +21,7 @@ func fixture(t *testing.T, uid int) (*Worker, config.Worker) {
 	dir := t.TempDir()
 	os.Chmod(dir, 0700)
 	c := config.Worker{StateDir: dir, Socket: filepath.Join(dir, "worker.sock"), ControllerUID: uid, Nix: "/synthetic/nix", CacheURL: "http://127.0.0.1:8765"}
-	w, e := New(c)
+	w, e := newWorker(c, newExecutorFixture())
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -56,13 +57,13 @@ func TestStorageIdentitySurvivesRestartAndCannotConfirmAnotherStore(t *testing.T
 	if w.db.InstanceID != identity {
 		t.Fatal("restart changed the durable worker identity")
 	}
-	result, err := w.Call("cleanup", Request{TaskID: id, InstanceID: identity})
+	result, err := w.Call("resources", Request{TaskID: id, InstanceID: identity})
 	if err != nil || result.(map[string]any)["never_accepted"] != true {
 		t.Fatal(result, err)
 	}
 	replacement, _ := fixture(t, os.Getuid())
 	defer replacement.Close()
-	if _, err = replacement.Call("cleanup", Request{TaskID: id, InstanceID: identity}); wire.Safe(err).Code != "worker_instance_changed" {
+	if _, err = replacement.Call("resources", Request{TaskID: id, InstanceID: identity}); wire.Safe(err).Code != "worker_instance_changed" {
 		t.Fatal("replacement storage falsely confirmed release", err)
 	}
 }
@@ -76,9 +77,9 @@ func TestExecutionRetainsPhaseAndObservedClientResult(t *testing.T) {
 		{"import failure", "exit 7", "kvm", "exit 0", "import", "import", "failed", "backend_error", 7, false},
 		{"policy rejection", "exit 0", "", "exit 99", "validate", "validate", "failed", "policy_denied", 0, false},
 		{"build failure", "exit 0", "kvm", "exit 23", "build", "build", "failed", "backend_error", 23, false},
-		{"client signal", "exit 0", "kvm", "kill -KILL $$", "build", "build", "cleanup_required", "backend_error", 0, true},
-		{"invalid outputs", "exit 0", "kvm", "printf 'invalid'", "collect", "build", "failed", "backend_error", 0, false},
-		{"success", "exit 0", "kvm", "printf '[]'", "collect", "build", "succeeded", "", 0, false},
+		{"client signal", "exit 0", "kvm", "kill -KILL $$", "build", "build", "interrupted", "backend_error", 0, true},
+		{"invalid outputs", "exit 0", "kvm", "printf 'invalid'", "build", "build", "failed", "backend_error", 0, false},
+		{"success", "exit 0", "kvm", "printf '[]'", "build", "build", "succeeded", "", 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w, cfg := fixture(t, os.Getuid())
@@ -89,7 +90,7 @@ func TestExecutionRetainsPhaseAndObservedClientResult(t *testing.T) {
 			drv := "/nix/store/" + strings.Repeat("0", 32) + "-test.drv"
 			metadata := wire.JSON(map[string]any{drv: map[string]any{"system": "x86_64-linux", "env": map[string]string{"vmTestUploadID": strings.Repeat("a", 32), "allowSubstitutes": "", "requiredSystemFeatures": tc.features}}})
 			w.cfg.Nix = filepath.Join(w.root.Path, "fake-nix")
-			script := fmt.Sprintf("#!%s\ncase \"$1\" in\ncopy) %s;;\nderivation) printf '%%s' '%s';;\nbuild) %s;;\n*) exit 98;;\nesac\n", shell, tc.copy, metadata, tc.build)
+			script := fmt.Sprintf("#!%s\ncase \"$1\" in\nstore) printf '{\"trusted\":false}';;\ncopy) %s;;\nderivation) printf '%%s' '%s';;\nbuild) %s;;\n*) exit 98;;\nesac\n", shell, tc.copy, metadata, tc.build)
 			if err = os.WriteFile(w.cfg.Nix, []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -98,6 +99,7 @@ func TestExecutionRetainsPhaseAndObservedClientResult(t *testing.T) {
 				t.Fatal(err)
 			}
 			waitExecution(t, w, id)
+			waitLifecycle(t, w, id)
 			check := func() {
 				t.Helper()
 				v, err := w.Call("status", Request{InstanceID: w.db.InstanceID, TaskID: id})
@@ -117,7 +119,7 @@ func TestExecutionRetainsPhaseAndObservedClientResult(t *testing.T) {
 					t.Fatal(e.Error)
 				}
 				if tc.signal {
-					if e.Process.ExitCode != nil || e.Process.ExitSignal != "SIGKILL" || e.Process.CoreDumped || j.Cleanup != "required" || w.active != id {
+					if e.Process.ExitCode != nil || e.Process.ExitSignal != "SIGKILL" || e.Process.CoreDumped || j.Cleanup != "complete" || w.active != "" {
 						t.Fatal(v, w.active)
 					}
 				} else if e.Process.ExitCode == nil || *e.Process.ExitCode != tc.exit || e.Process.ExitSignal != "" || j.Cleanup != "complete" {
@@ -152,11 +154,12 @@ func TestTerminalPersistenceFailureRetainsOccupancy(t *testing.T) {
 	}
 	j.Execution.Process = &wire.NixProcessResult{Stage: "build", Source: "nix_client_wait", Exited: true, ExitCode: new(7)}
 	w.complete(j, fmt.Errorf("synthetic build failure"), false)
-	if w.active != id || j.Cleanup != "required" || j.State != "cleanup_required" || j.Execution.PersistenceError == nil || j.Execution.Process.ExitCode == nil || *j.Execution.Process.ExitCode != 7 {
+	if w.active != id || j.Cleanup != "required" || j.State != "failed" || j.Execution.PersistenceError == nil || j.Execution.Process.ExitCode == nil || *j.Execution.Process.ExitCode != 7 {
 		t.Fatal(j, w.active)
 	}
-	if err := w.Reconcile(id); err == nil || w.active != id || j.Cleanup != "required" {
-		t.Fatal("failed reconciliation released ownership", err, w.active, j.Cleanup)
+	w.reconcileResources(j)
+	if w.active != id || j.Cleanup != "required" {
+		t.Fatal("failed persistence released ownership")
 	}
 	w.Close()
 	w, err := New(cfg)
@@ -178,7 +181,7 @@ func TestClientLaunchFailureHasNoInventedExit(t *testing.T) {
 	}
 	waitExecution(t, w, id)
 	e := w.jobs[id].Execution
-	if e == nil || e.Stage != "import" || e.Process == nil || e.Process.Exited || e.Process.ExitCode != nil || e.Process.ExitSignal != "" || e.Process.Source != "unconfirmed" || e.Error == nil {
+	if e == nil || e.Stage != "session" || e.Process == nil || e.Process.Exited || e.Process.ExitCode != nil || e.Process.ExitSignal != "" || e.Process.Source != "unconfirmed" || e.Error == nil {
 		t.Fatal(e)
 	}
 }
@@ -206,12 +209,12 @@ func TestPreflightDaemonAndClientPolicy(t *testing.T) {
 		{name: "relaxed sandbox", setting: "sandbox", value: "relaxed", wantError: "client sandbox must be true"},
 		{name: "sandbox fallback", setting: "sandbox-fallback", value: true, wantError: "client sandbox fallback must be disabled"},
 		{name: "client trust differs from daemon", setting: "trusted-users", value: []string{"*"}},
-		{name: "daemon trusts worker", setting: "build-users-group", value: "nixbld", daemonJSON: `{"trusted":true}`, wantError: "worker must not be a trusted Nix daemon client"},
-		{name: "daemon unavailable", daemonExit: 7, wantError: "inspect Nix daemon"},
-		{name: "missing daemon trust", daemonJSON: `{"url":"daemon"}`, wantError: "Nix daemon did not report client trust"},
-		{name: "null daemon trust", daemonJSON: `{"trusted":null}`, wantError: "Nix daemon did not report client trust"},
-		{name: "invalid daemon trust", daemonJSON: `{"trusted":"false"}`, wantError: "decode Nix daemon information"},
-		{name: "malformed daemon output", daemonJSON: `{`, wantError: "decode Nix daemon information"},
+		{name: "daemon trusts worker", setting: "build-users-group", value: "nixbld", daemonJSON: `{"trusted":true}`, wantError: "worker must not be a trusted Nix session client"},
+		{name: "daemon unavailable", daemonExit: 7, wantError: "inspect Nix session"},
+		{name: "missing daemon trust", daemonJSON: `{"url":"daemon"}`, wantError: "Nix session did not report client trust"},
+		{name: "null daemon trust", daemonJSON: `{"trusted":null}`, wantError: "Nix session did not report client trust"},
+		{name: "invalid daemon trust", daemonJSON: `{"trusted":"false"}`, wantError: "decode Nix session information"},
+		{name: "malformed daemon output", daemonJSON: `{`, wantError: "decode Nix session information"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			uid := os.Getuid()
@@ -240,13 +243,17 @@ func TestPreflightDaemonAndClientPolicy(t *testing.T) {
 			if daemonJSON == "" {
 				daemonJSON = `{"url":"daemon","version":"2.34.8","trusted":false}`
 			}
-			script := fmt.Sprintf("#!%s\ncase \"$*\" in\n'config show --json') printf '%%s\\n' '%s';;\n'store info --store daemon --json') printf '%%s\\n' '%s'; exit %d;;\n*) exit 97;;\nesac\n", shell, wire.JSON(cfg), daemonJSON, tc.daemonExit)
+			script := fmt.Sprintf("#!%s\ncase \"$*\" in\n'config show --json') printf '%%s\\n' '%s';;\n'store info --store unix:///synthetic/session.sock --json') printf '%%s\\n' '%s'; exit %d;;\n*) exit 97;;\nesac\n", shell, wire.JSON(cfg), daemonJSON, tc.daemonExit)
 			if err := os.WriteFile(w.cfg.Nix, []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			err := w.Preflight(ctx)
+			if err == nil {
+				j := &Job{Request: Request{TaskID: wire.ID()}, Execution: &wire.NixExecution{}, Started: time.Now(), Deadline: time.Now().Add(time.Minute), Session: Session{Executor: &nixexecutor.Session{Store: "unix:///synthetic/session.sock"}}}
+				err = w.checkSession(ctx, j)
+			}
 			if tc.wantError == "" {
 				if err != nil {
 					t.Fatal(err)
@@ -278,7 +285,7 @@ func TestFixedDaemonBoundaryAndDerivationPolicy(t *testing.T) {
 			drv := "/nix/store/" + strings.Repeat("0", 32) + "-test.drv"
 			trace := filepath.Join(w.root.Path, "trace")
 			exe := filepath.Join(w.root.Path, "fake-nix")
-			script := "#!" + shell + "\nprintf '%s\\n' \"$@\" >> '" + trace + "'\ncase \"$1\" in\ncopy) exit 0;;\nderivation) printf '%s\\n' '" + string(wire.JSON(map[string]any{drv: map[string]any{"system": "x86_64-linux", "env": map[string]string{"vmTestUploadID": strings.Repeat("a", 32), "allowSubstitutes": "", "requiredSystemFeatures": features}}})) + "';;\nbuild) printf '[]\\n';;\n*) exit 1;;\nesac\n"
+			script := "#!" + shell + "\nprintf '%s\\n' \"$@\" >> '" + trace + "'\ncase \"$1\" in\nstore) printf '{\"trusted\":false}';;\ncopy) exit 0;;\nderivation) printf '%s\\n' '" + string(wire.JSON(map[string]any{drv: map[string]any{"system": "x86_64-linux", "env": map[string]string{"vmTestUploadID": strings.Repeat("a", 32), "allowSubstitutes": "", "requiredSystemFeatures": features}}})) + "';;\nbuild) printf '[]\\n';;\n*) exit 1;;\nesac\n"
 			if scenario.signalled {
 				script = strings.Replace(script, "build) printf '[]\\n'", "build) kill -KILL $$", 1)
 			}
@@ -291,6 +298,7 @@ func TestFixedDaemonBoundaryAndDerivationPolicy(t *testing.T) {
 				t.Fatal(e)
 			}
 			waitExecution(t, w, id)
+			waitLifecycle(t, w, id)
 			w.mu.Lock()
 			state := w.jobs[id].State
 			w.mu.Unlock()
@@ -299,11 +307,11 @@ func TestFixedDaemonBoundaryAndDerivationPolicy(t *testing.T) {
 				t.Fatal(e)
 			}
 			if scenario.signalled {
-				if state != "cleanup_required" || w.active != id {
+				if state != "interrupted" || w.active != "" {
 					t.Fatal("unconfirmed daemon work released", state, w.active)
 				}
 			} else if strings.Contains(features, "kvm") {
-				if state != "succeeded" || !strings.Contains(string(data), "--option\nsandbox\ntrue\n--option\nsandbox-fallback\nfalse") || !strings.Contains(string(data), "--store\ndaemon\n--builders\n\n") {
+				if state != "succeeded" || !strings.Contains(string(data), "--option\nsandbox\ntrue\n--option\nsandbox-fallback\nfalse") || !strings.Contains(string(data), "--store\nunix:///synthetic/") {
 					t.Fatal(state, string(data))
 				}
 			} else if state != "failed" || strings.Contains(string(data), "\nbuild\n") {
@@ -318,7 +326,10 @@ func TestDeadlineExtensionAndMethodArguments(t *testing.T) {
 	defer w.Close()
 	id := wire.ID()
 	now := time.Now().UTC()
-	j := &Job{Request: Request{TaskID: id}, State: "building", Started: now, Deadline: now.Add(time.Minute)}
+	j := &Job{Request: Request{TaskID: id}, State: "building", Started: now, Deadline: now.Add(time.Minute), Execution: &wire.NixExecution{}}
+	if err := w.admit(context.Background(), j); err != nil {
+		t.Fatal(err)
+	}
 	w.jobs[id] = j
 	deadline := now.Add(2 * time.Minute)
 	if _, e := w.Call("extend", Request{InstanceID: w.db.InstanceID, TaskID: id, Deadline: &deadline}); e != nil {
@@ -386,7 +397,7 @@ func TestRestartBlocksDaemonAndConfinesArtifacts(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer w.Close()
-	if w.active != id || w.jobs[id].Cleanup != "required" {
+	if w.active != id || w.jobs[id].Cleanup != "pending" {
 		t.Fatal("daemon occupancy released on restart")
 	}
 	outside := t.TempDir()
@@ -398,8 +409,5 @@ func TestRestartBlocksDaemonAndConfinesArtifacts(t *testing.T) {
 	}
 	if _, e = w.Call("reconcile", Request{TaskID: id}); e == nil {
 		t.Fatal("remote reconciliation exposed")
-	}
-	if e = w.Reconcile(id); e != nil {
-		t.Fatal(e)
 	}
 }

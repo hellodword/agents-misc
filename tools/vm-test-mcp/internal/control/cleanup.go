@@ -2,7 +2,6 @@ package control
 
 import (
 	"context"
-	"encoding/json"
 	"path"
 	"sync"
 	"time"
@@ -33,6 +32,10 @@ func cleanupStep(ctx context.Context, name string, run func() error) error {
 }
 
 func (s *Server) cleanup(t *Task) {
+	if t.Kind == "nixos" {
+		s.releaseNix(t)
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.Tasks.CleanupTimeout.Value())
 	defer cancel()
 	s.mu.Lock()
@@ -87,20 +90,17 @@ func (s *Server) cleanup(t *Task) {
 		s.mu.Lock()
 		snapshot := clone(t)
 		s.mu.Unlock()
-		if snapshot.Kind == "nixos" {
-			errs = append(errs, s.cleanupNix(ctx, t, snapshot)...)
-		} else {
-			// Evidence cannot consume the resource cleanup budget. All collectors
-			// share one deadline, including cancellation and capture retrieval.
-			budget := min(diagnosticBudget, time.Until(deadline(ctx))/3)
-			evidence, stop := context.WithTimeout(ctx, budget)
-			s.cleanupEvidence(evidence, t, r, snapshot)
-			stop()
-			errs = append(errs, s.cleanupNodes(ctx, t, snapshot)...)
-			if snapshot.lab().GUI != nil && !snapshot.lab().GUI.Restored {
-				if err := s.setGUI(ctx, t, "", true); err != nil {
-					errs = append(errs, err)
-				}
+
+		// Evidence cannot consume the resource cleanup budget. All collectors
+		// share one deadline, including cancellation and capture retrieval.
+		budget := min(diagnosticBudget, time.Until(deadline(ctx))/3)
+		evidence, stop := context.WithTimeout(ctx, budget)
+		s.cleanupEvidence(evidence, t, r, snapshot)
+		stop()
+		errs = append(errs, s.cleanupNodes(ctx, t, snapshot)...)
+		if snapshot.lab().GUI != nil && !snapshot.lab().GUI.Restored {
+			if err := s.setGUI(ctx, t, "", true); err != nil {
+				errs = append(errs, err)
 			}
 		}
 		if len(errs) == 0 {
@@ -253,83 +253,6 @@ func (s *Server) cleanupNodes(ctx context.Context, t, snapshot *Task) []error {
 	}
 	wg.Wait()
 	return errs
-}
-
-func (s *Server) cleanupNix(ctx context.Context, t, snapshot *Task) []error {
-	raw, err := s.backend.Nix(ctx, "cleanup", snapshot)
-	if err != nil {
-		return []error{err}
-	}
-	var result struct {
-		NeverAccepted  bool               `json:"never_accepted"`
-		ManifestDigest string             `json:"manifest_digest"`
-		Cleanup        string             `json:"cleanup"`
-		Artifacts      []*Artifact        `json:"artifacts"`
-		EvidenceError  bool               `json:"evidence_error"`
-		Execution      *wire.NixExecution `json:"execution"`
-	}
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return []error{err}
-	}
-	s.mu.Lock()
-	if result.Execution != nil {
-		t.nix().NixExecution, t.Failure = result.Execution, result.Execution.Error
-		if t.Failure == nil {
-			t.Failure = result.Execution.PersistenceError
-		}
-		s.save(t)
-	}
-	s.mu.Unlock()
-	if result.Cleanup != "complete" {
-		return []error{wire.Fail("cleanup_required", "Nix daemon cleanup is not confirmed")}
-	}
-	s.mu.Lock()
-	if result.EvidenceError {
-		s.event(t, "evidence_error", "Some Nix evidence could not be collected; daemon cleanup was confirmed")
-	}
-	for _, a := range result.Artifacts {
-		if wire.IDPattern.MatchString(a.ID) {
-			found := false
-			for _, old := range t.Artifacts {
-				if old.ID == a.ID {
-					found = true
-					break
-				}
-			}
-			if !found {
-				t.Artifacts = append(t.Artifacts, a)
-			}
-		}
-	}
-	if result.ManifestDigest != "" {
-		t.nix().ManifestDigest = result.ManifestDigest
-	}
-	err = s.db.Save(ctx, t)
-	snapshot = clone(t)
-	s.mu.Unlock()
-	if err != nil {
-		return []error{err}
-	}
-	if !snapshot.nix().HandoffComplete {
-		if !result.NeverAccepted {
-			if _, err = s.backend.Nix(ctx, "handoff", snapshot); err != nil {
-				return []error{err}
-			}
-		}
-		s.mu.Lock()
-		t.nix().HandoffComplete = true
-		s.save(t)
-		s.mu.Unlock()
-	}
-	s.mu.Lock()
-	if input, loadErr := s.transfer(t.nix().CacheID); loadErr == nil {
-		err = s.removeTransfer(input)
-	}
-	s.mu.Unlock()
-	if err != nil {
-		return []error{err}
-	}
-	return nil
 }
 
 func (s *Server) cleanupTask(id string) (any, error) {

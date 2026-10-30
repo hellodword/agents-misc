@@ -33,7 +33,7 @@ func (r availabilityRunner) Run(_ context.Context, _ string, args []string, _ io
 type idleWorker struct{}
 
 func (idleWorker) Call(context.Context, string, any) (json.RawMessage, error) {
-	return wire.JSON(map[string]any{"busy": false}), nil
+	return wire.JSON(map[string]any{"busy": false, "executor": map[string]any{"ready": true}}), nil
 }
 
 func TestRouterISOEnablesBackendAndParticipatesInNixExclusion(t *testing.T) {

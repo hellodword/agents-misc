@@ -12,7 +12,7 @@ import (
 func (d *repository) DeleteExecution(ctx context.Context, id string) error {
 	return d.transaction(ctx, nil, func(ctx context.Context, tx *sql.Tx) error {
 		var eligible int
-		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM executions WHERE id=? AND cleanup='complete'", id).Scan(&eligible); err != nil {
+		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM executions WHERE id=? AND settled=1", id).Scan(&eligible); err != nil {
 			return err
 		}
 		if eligible != 1 {
@@ -26,7 +26,7 @@ func (d *repository) DeleteExecution(ctx context.Context, id string) error {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM evidence WHERE task_id=? AND pinned=0", id); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, "DELETE FROM executions WHERE id=? AND cleanup='complete'", id)
+		_, err := tx.ExecContext(ctx, "DELETE FROM executions WHERE id=? AND settled=1", id)
 		return err
 	})
 }

@@ -77,6 +77,7 @@ func TestSharedConfigurationAndPermissions(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "config.yaml")
 	body := fmt.Sprintf("state_dir: %s\nservice:\n  token: synthetic\n  public_url: http://127.0.0.1:8765\nnix:\n  socket: %s/worker.sock\n  state_dir: %s\n  executable: /fixture/nix\n  controller_uid: %d\n", dir, dir, dir, os.Getuid())
+	body += "executor:\n  worker_uid: 1000\n  executable: /fixture/nix-daemon\n  socket: /run/vm-test-config-fixture/control.sock\n"
 	if err := os.WriteFile(p, []byte(body), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -90,6 +91,10 @@ func TestSharedConfigurationAndPermissions(t *testing.T) {
 	}
 	if c.Nix.Socket != w.Socket || w.CacheURL != c.Service.PublicURL || len(c.Service.Hosts) != 0 || len(c.Service.Origins) != 0 {
 		t.Fatal("shared configuration or defaults differ")
+	}
+	executor, err := LoadExecutor(p)
+	if err != nil || executor.WorkerUID != 1000 || executor.Nix != "/fixture/nix-daemon" || executor.Socket != w.ExecutorSocket || executor.StopGrace.Value() != 30*time.Second {
+		t.Fatal("shared executor policy differs", executor, err)
 	}
 	st, _ := os.Stat(p)
 	if st.Mode().Perm() != 0644 {

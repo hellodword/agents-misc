@@ -45,9 +45,10 @@ func (d *Duration) UnmarshalYAML(data []byte) error {
 func (d Duration) MarshalYAML() (any, error) { return d.Value().String(), nil }
 
 type Tasks struct {
-	DefaultTimeout Duration `yaml:"default_timeout"`
-	MaxDuration    Duration `yaml:"max_duration"`
-	CleanupTimeout Duration `yaml:"cleanup_timeout"`
+	DefaultTimeout  Duration `yaml:"default_timeout"`
+	MaxDuration     Duration `yaml:"max_duration"`
+	CleanupTimeout  Duration `yaml:"cleanup_timeout"`
+	EvidenceTimeout Duration `yaml:"evidence_timeout"`
 }
 type Media struct {
 	Camera       bool `yaml:"camera" json:"camera,omitempty"`
@@ -124,6 +125,7 @@ type Config struct {
 	VirtualBox VirtualBox `yaml:"virtualbox"`
 	Storage    Storage    `yaml:"storage"`
 	Nix        Nix        `yaml:"nix"`
+	Executor   Executor   `yaml:"executor"`
 }
 
 func (c Config) VirtualBoxEnabled() bool {
@@ -133,10 +135,11 @@ func (c Config) VirtualBoxEnabled() bool {
 func Defaults() Config {
 	return Config{
 		Service: Service{Listen: "127.0.0.1:8765"},
-		Tasks:   Tasks{DefaultTimeout: Duration(time.Hour), MaxDuration: Duration(24 * time.Hour), CleanupTimeout: Duration(5 * time.Minute)},
+		Tasks:   Tasks{DefaultTimeout: Duration(time.Hour), MaxDuration: Duration(24 * time.Hour), CleanupTimeout: Duration(5 * time.Minute), EvidenceTimeout: Duration(5 * time.Minute)},
 		VirtualBox: VirtualBox{StartupParallelism: 1, StartupTimeout: Duration(10 * time.Minute), ShutdownTimeout: Duration(time.Minute), UnavailableAfter: Duration(30 * time.Second),
 			Network: Network{LAN: "10.77.0.0/24", WAN: "10.0.2.0/24", DNS: []string{"1.1.1.1", "9.9.9.9"}, Listen: "127.0.0.1", Sources: []string{"127.0.0.1/32"}, PortMin: 20000, PortMax: 29999, LeaseSeconds: 15}},
 		Nix: Worker{ControllerUID: -1, Nix: "nix"}, Storage: Storage{SuccessDays: 1, FailureDays: 7, SummaryDays: 30, EvidenceBytes: 40 << 30, LowWaterBytes: 32 << 30, InputBytes: 16 << 30, UploadIdle: Duration(time.Hour), MaxUploadBytes: 8 << 30},
+		Executor: executorDefaults(),
 	}
 }
 func decode(file string, v any) error {
@@ -204,6 +207,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Tasks.DefaultTimeout < Duration(time.Second) || c.Tasks.MaxDuration < c.Tasks.DefaultTimeout || c.Tasks.MaxDuration > Duration(24*time.Hour) || c.Tasks.CleanupTimeout < Duration(time.Second) || c.Tasks.CleanupTimeout > Duration(time.Hour) {
 		return bad("deadline limits")
+	}
+	if c.Tasks.EvidenceTimeout < Duration(time.Second) || c.Tasks.EvidenceTimeout > Duration(time.Hour) {
+		return bad("evidence_timeout must be between 1s and 1h")
 	}
 	if c.Storage.SuccessDays < 1 || c.Storage.FailureDays < c.Storage.SuccessDays || c.Storage.SummaryDays < c.Storage.FailureDays || c.Storage.MaxUploadBytes < 1 || c.Storage.MaxUploadBytes > 8<<30 || c.Storage.InputBytes < c.Storage.MaxUploadBytes || c.Storage.LowWaterBytes < 1 || c.Storage.EvidenceBytes <= c.Storage.LowWaterBytes || c.Storage.UploadIdle < Duration(time.Second) {
 		return bad("retention limits")
@@ -346,12 +352,13 @@ func PrivateLAN(p netip.Prefix) bool {
 }
 
 type Worker struct {
-	KeepFailed    bool   `yaml:"keep_failed"`
-	StateDir      string `yaml:"state_dir"`
-	Socket        string `yaml:"socket"`
-	ControllerUID int    `yaml:"controller_uid"`
-	Nix           string `yaml:"executable"`
-	CacheURL      string `yaml:"cache_url"`
+	ExecutorSocket string `yaml:"-"`
+	KeepFailed     bool   `yaml:"keep_failed"`
+	StateDir       string `yaml:"state_dir"`
+	Socket         string `yaml:"socket"`
+	ControllerUID  int    `yaml:"controller_uid"`
+	Nix            string `yaml:"executable"`
+	CacheURL       string `yaml:"cache_url"`
 }
 
 func LoadWorker(file string) (Worker, error) {
@@ -363,6 +370,7 @@ func LoadWorker(file string) (Worker, error) {
 		return shared.Nix, err
 	}
 	c := shared.Nix
+	c.ExecutorSocket = shared.Executor.Socket
 	if c.StateDir == "" {
 		c.StateDir = shared.StateDir
 	}
@@ -379,6 +387,9 @@ func LoadWorker(file string) (Worker, error) {
 	}
 	if !absolute(c.Socket) {
 		return c, fmt.Errorf("nix.socket must be a canonical absolute path")
+	}
+	if !absolute(c.ExecutorSocket) {
+		return c, fmt.Errorf("executor.socket must be a canonical absolute path")
 	}
 	if !absolute(c.Nix) {
 		return c, fmt.Errorf("nix.executable must resolve to a canonical absolute path; ensure nix is in PATH or configure an absolute executable")

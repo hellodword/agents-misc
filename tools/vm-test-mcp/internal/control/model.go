@@ -245,8 +245,16 @@ func (t *Task) summaryView() map[string]any {
 		"result": nil, "revision": t.Revision,
 	}
 	if t.Kind == "nixos" {
-		v["execution"] = t.nix().NixExecution
-		v["handoff_complete"] = t.nix().HandoffComplete
+		delete(v, "cleanup")
+		var execution *wire.NixExecution
+		if observed := t.nix().NixExecution; observed != nil {
+			current := *observed
+			current.Resources, current.Evidence = t.nixResources(), t.nix().Evidence
+			execution = &current
+		}
+		v["execution"] = execution
+		v["resources"] = t.nixResources()
+		v["evidence"] = t.nix().Evidence
 	}
 	if t.Terminal() {
 		v["result"] = map[string]any{"termination": t.State, "conclusion": t.Conclusion, "reason": t.Reason}
@@ -305,7 +313,9 @@ func (t *Task) Public() any {
 	v["timeout_seconds"] = t.TimeoutSeconds
 	if t.Kind != "lab" {
 		v["result"] = t.result()
-		return v
+		snapshot := map[string]any{}
+		decodeMap(v, snapshot)
+		return snapshot
 	}
 	v["lan"], v["dhcp"], v["dns"] = t.lab().LAN, t.lab().DHCP, t.lab().DNS
 	v["internet"] = t.lab().Internet
@@ -384,13 +394,15 @@ type Transfer struct {
 }
 type Object = state.TransferObject
 type Runtime struct {
-	ctx         context.Context
-	cancel      context.CancelFunc
-	gate        sync.RWMutex
-	nodes       sync.Map
-	relays      map[string]*Relay
-	cleanup     sync.Mutex
-	diagnostics sync.Mutex
+	nixObserving, nixCollecting bool
+	nixNextObservation          time.Time
+	ctx                         context.Context
+	cancel                      context.CancelFunc
+	gate                        sync.RWMutex
+	nodes                       sync.Map
+	relays                      map[string]*Relay
+	cleanup                     sync.Mutex
+	diagnostics                 sync.Mutex
 }
 type NodeAction struct {
 	RequestID      string            `json:"-"`
@@ -495,4 +507,17 @@ func (l *LabState) condition() any {
 	}
 	return []any{l.Network, nodes}
 }
-func (j *NixJobState) condition() any { return []any{j.NixExecution, j.HandoffComplete} }
+func (j *NixJobState) condition() any { return []any{j.NixExecution, j.Evidence, j.HandoffComplete} }
+
+func (t *Task) nixResources() wire.NixResources {
+	if t.nix().NixExecution != nil {
+		return t.nix().NixExecution.Resources
+	}
+	if !t.nix().Dispatched {
+		return wire.NixResources{State: "unallocated"}
+	}
+	return wire.NixResources{State: "owned"}
+}
+func (t *Task) settled() bool {
+	return t.Terminal() && t.Cleanup == "complete" && (t.Kind == "lab" || t.nix().Evidence.State == "complete")
+}

@@ -1,7 +1,8 @@
-# VM Test MCP 0.13：控制服务和 Nix worker 共用此文件。
+# VM Test MCP 0.14：controller、Nix worker 和 root executor 共用此文件。
 # 新契约只接受空 state / 新数据库；旧服务与资源必须先由用户停止、清理。
 # Codex CLI >=0.163.0，MCP tool_timeout_sec=660；服务等待窗口 600s，SSE 心跳 15s。
-# 两个程序均使用 --config /绝对路径/config.yaml；配置文件不要求特定权限。
+# 三个程序均使用 --config /绝对路径/config.yaml；配置文件不要求特定权限。
+# 显式 sudo 启动 executor 表示管理员信任当前构建和此配置；executor 启动时读取并固定策略。
 # config.yaml 被 Git 忽略；本示例只使用合成值。两个进程可共用账户和 state 根目录。
 # YAML 拒绝未知字段、重复字段及多个文档。不展开 ~、环境变量或命令替换。
 # 宿主路径使用规范化绝对路径；Windows guest 路径可用单引号保留反斜杠。
@@ -34,8 +35,10 @@ service:
 #   default_timeout: 1h
 #   # 默认 24h，范围 default_timeout..24h，包含显式延长的时间。
 #   max_duration: 24h
-#   # 默认 5m，范围 1s..1h。单次任务清理的总预算，包含等待锁、取证和有限重试。
+#   # 默认 5m，范围 1s..1h。资源释放预算；Nix 证据交接使用独立预算。
 #   cleanup_timeout: 5m
+#   # Nix 证据每次尝试的预算；暂时性错误最多尝试 3 次。
+#   evidence_timeout: 5m
 
 # 可选。配置 virtualbox.router.iso 即启用 VirtualBox；templates 可留空，先验证路由器。
 # virtualbox:
@@ -151,6 +154,18 @@ service:
 #     port_max: 29999
 #     # 默认 15，5..60 秒。心跳约每三分之一周期续租；过期须 network_recover。
 #     lease_seconds: 15
+
+# 启动 root executor 时填写；worker_uid 是普通 worker 账号的 UID。
+# executable 必须是管理员选择的宿主 Nix 绝对路径。
+# executor:
+#   worker_uid: 1000
+#   executable: /nix/var/nix/profiles/default/bin/nix
+#   # root 的私有状态目录，独立于顶层 state_dir；目录及祖先由 root 控制。
+#   state_dir: /var/lib/vm-test-nix-executor
+#   # worker 自动从同一字段读取连接位置。
+#   socket: /run/vm-test-nix-executor/control.sock
+#   stop_grace: 30s
+#   release_timeout: 5m
 
 # 可选。控制服务和 worker 从同一文件读取此块；worker 不在线时存储占用未知，暂停新提交和排队启动；现有控制、诊断和清理继续可用。
 # nix:
