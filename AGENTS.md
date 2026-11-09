@@ -24,9 +24,10 @@ Shared technology preferences apply to new unconstrained choices and projects th
 
 ## Project context
 
-- Use `.project-agent/project.md` for concise scoped requirements and navigation to existing authoritative sources. No README or fixed documentation layout is required. Prefer links over duplicating versions, dependencies, or commands owned by another source.
-- Create or update project context when useful to the task and based on confirmed, durable facts, requirements, decisions, or navigation. Keep temporary progress, investigations, and unconfirmed assumptions in task records. Do not scaffold an entry merely because it is absent.
-- Record authorization already established by the user or applicable project policy. Do not edit instructions to grant yourself authorization for an otherwise blocked operation. Ordinary task-scoped documentation maintenance needs no separate approval; the specific authorization and exception sources below still apply.
+- Create `.project-agent/` or add files within it only when the user explicitly instructs you to, and stay within that instruction's scope.
+- When `.project-agent/project.md` exists, use it for concise scoped requirements and navigation. Follow the project's established documentation layout and link to authoritative sources for versions, dependencies, and commands.
+- Maintain existing project-context files as part of authorized work when changes reflect confirmed, durable facts, requirements, decisions, or navigation. Keep temporary progress, investigations, and unconfirmed assumptions in task records.
+- Record authorization already established by the user or applicable project policy. Do not edit instructions to grant yourself authorization for an otherwise blocked operation. The specific authorization and exception sources below apply.
 
 ## Targeted loading
 
@@ -48,6 +49,11 @@ Never infer unseen instructions from a filename or directory name.
 5. Investigate failures as introduced, pre-existing, or environment-caused. Retry after a relevant change or to gather useful evidence; avoid unchanged retries that teach nothing.
 6. Review the final diff and repository state.
 7. Report changed files, validation results, known limitations, and commit status.
+
+## Writing and content
+
+- Describe current behavior directly in documentation and comments, integrating revisions into the relevant sections. Include change history, correction notes, or migration guidance when the task requests them or readers need them to act correctly.
+- Include negative statements and caveats only when they explain a material constraint, risk, or diagnostic fact. Keep safety, authorization, compatibility, and validation limits precise; otherwise state the intended behavior directly.
 
 ## Safety and authorization
 
