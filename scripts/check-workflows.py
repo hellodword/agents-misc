@@ -11,22 +11,12 @@ from typing import Any
 
 import yaml
 
-
 WORKFLOWS = {
     "check-agent-rules.yml": (),
-    "build-codex.yml": (("build", "verify"),),
-    "build-agents-viewer.yml": (("build", "verify"),),
     "publish-codex-config-atlas-pages.yml": (
         ("build", "verify"),
         ("deploy", "verify"),
     ),
-}
-VIEWER_RUNNERS = {
-    "ubuntu-24.04",
-    "ubuntu-24.04-arm",
-    "windows-2025",
-    "windows-11-arm",
-    "macos-15",
 }
 LOCAL_NIX_ACTION = "./.github/actions/setup-nix"
 OFFICIAL_ACTION = re.compile(
@@ -120,24 +110,6 @@ def _check_nix_setup(path: Path, jobs: dict[str, Any], errors: list[str]) -> Non
             )
 
 
-def _check_viewer_matrix(path: Path, jobs: dict[str, Any], errors: list[str]) -> None:
-    build = jobs.get("build")
-    if not isinstance(build, dict):
-        return
-    strategy = build.get("strategy", {})
-    matrix = strategy.get("matrix", {}) if isinstance(strategy, dict) else {}
-    include = matrix.get("include", []) if isinstance(matrix, dict) else []
-    runners = {
-        item.get("runner")
-        for item in include
-        if isinstance(item, dict) and isinstance(item.get("runner"), str)
-    }
-    if runners != VIEWER_RUNNERS:
-        errors.append(
-            f"{path}: native Viewer runner matrix mismatch: expected={sorted(VIEWER_RUNNERS)}, actual={sorted(runners)}"
-        )
-
-
 def _check_composite_action(root: Path, errors: list[str]) -> None:
     path = root / ".github" / "actions" / "setup-nix" / "action.yml"
     value = _load_yaml(path, errors)
@@ -176,8 +148,6 @@ def check_repository(root: Path) -> list[str]:
                 )
         _check_action_refs(path, jobs, errors)
         _check_nix_setup(path, jobs, errors)
-        if filename == "build-agents-viewer.yml":
-            _check_viewer_matrix(path, jobs, errors)
     _check_composite_action(root, errors)
     return errors
 

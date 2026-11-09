@@ -1,14 +1,14 @@
-{
-  pkgs,
-  codexVersion,
-  minVersion ? "0.129.0",
-}:
+{ pkgs }:
 
 let
-  codexTag = "rust-v${codexVersion}";
   toolSource = ../tools/codex-config-atlas;
   schemasSource = toolSource + "/schemas";
   webSource = toolSource + "/web";
+  schemaManifest = builtins.fromJSON (builtins.readFile (schemasSource + "/manifest.json"));
+  currentSchema = pkgs.lib.last schemaManifest.versions;
+  codexVersion = currentSchema.version;
+  codexTag = currentSchema.tag;
+  inherit (schemaManifest) minVersion;
 
   codexConfigAtlasPackage = pkgs.python3Packages.buildPythonApplication {
     pname = "codex-config-atlas";

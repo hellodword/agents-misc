@@ -4,28 +4,17 @@ Agent Rules Kit is a small, project-scoped instruction payload for coding agents
 
 ## Repository map
 
-This repository also contains several independent Codex tools. Each component
+This repository contains the following components. Each component
 has one authoritative input boundary and one primary verification entrypoint:
 
-| Component                                                | Purpose                                                                   | Authoritative inputs                                            | Primary maintenance entry                                            |
-| -------------------------------------------------------- | ------------------------------------------------------------------------- | --------------------------------------------------------------- | -------------------------------------------------------------------- |
-| [Agent Rules Kit](AGENTS.md)                             | Shared agent rules and reusable workflow skills                           | `AGENTS.md`, `.agents/**`                                       | `just check-agent-rules`                                             |
-| [VM Test MCP](tools/vm-test-mcp/README.md)               | Disposable Windows/Linux labs and sandboxed NixOS VM tests                | `tools/vm-test-mcp/**`                                          | `just --justfile tools/vm-test-mcp/justfile test`                    |
-| [Codex patches](codex/README.md)                         | Reproducible patches over one pinned upstream Codex revision              | `codex/upstream.toml`, `codex/series.toml`, current patch files | `just codex-test`                                                    |
-| [Codex hook helpers](tools/codex-hooks/README.md)        | Bounded local forwarding and notification helpers for patched hook events | helper source and the patch-owned hook schemas                  | `nix build --no-link .#checks.x86_64-linux.codex-hooks`              |
-| [Codex Config Atlas](tools/codex-config-atlas/README.md) | Versioned upstream schema registry, CLI, and static comparison site       | tracked schema registry and Web source                          | `nix build --no-link .#checks.x86_64-linux.codex-config-atlas-tests` |
-| [Agents Viewer](tools/agents-viewer/README.md)           | Read-only local rollout index, API, and Web reader                        | rollout fixtures, Rust DTOs, Rust/Web source                    | `just agents-viewer-verify`                                          |
+| Component                                                | Purpose                                                             | Authoritative inputs                   | Primary maintenance entry                                            |
+| -------------------------------------------------------- | ------------------------------------------------------------------- | -------------------------------------- | -------------------------------------------------------------------- |
+| [Agent Rules Kit](AGENTS.md)                             | Shared agent rules and reusable workflow skills                     | `AGENTS.md`, `.agents/**`              | `just check-agent-rules`                                             |
+| [VM Test MCP](tools/vm-test-mcp/README.md)               | Disposable Windows/Linux labs and sandboxed NixOS VM tests          | `tools/vm-test-mcp/**`                 | `just --justfile tools/vm-test-mcp/justfile test`                    |
+| [Codex Config Atlas](tools/codex-config-atlas/README.md) | Versioned upstream schema registry, CLI, and static comparison site | tracked schema registry and Web source | `nix build --no-link .#checks.x86_64-linux.codex-config-atlas-tests` |
 
-Maintenance of the Codex patch set and Agents Viewer is paused at their current
-upstream baselines. Their source, Nix packages, and verification commands remain
-available; their CI workflows run only on manual dispatch. The patched CLI is
-available as `codex-patched` and can be installed alongside llm-agents.nix's
-`codex`. Agent Rules Kit and Codex Config Atlas maintenance continues.
-
-Generated ownership is explicit. Codex generated contracts live exclusively
-inside the final patch in `codex/series.toml`; Atlas data and site trees are
-Nix outputs; Viewer's `web/src/generated/api.ts` is the only checked-in
-Rust-to-TypeScript binding. No other generated tree is a durable source input.
+Atlas data and site trees are generated Nix outputs. Its tracked schema registry
+and Web source are the durable inputs.
 
 ## Distribution boundary
 
@@ -33,7 +22,7 @@ Only [AGENTS.md](AGENTS.md) and `.agents/**` are distributed. Consuming reposito
 
 The payload includes the [Agent Rules Kit MIT license notice](.agents/LICENSE.agent-rules-kit), a real-file copy of this repository's authoritative [LICENSE](LICENSE). It covers this kit, not the consuming project or independently added rules and skills. Keep the notice with redistributed copies; do not replace a consuming project's license with it.
 
-Repository maintenance files such as `.project-agent/**`, the checker, tests, Just recipes, and Nix checks are not part of the payload. The separately maintained `codex/**`, `tools/**`, and `.github/**` trees are outside the distributed rules-kit payload; their own guides define their contracts.
+Repository maintenance files such as `.project-agent/**`, the checker, tests, Just recipes, and Nix checks are not part of the payload. The separately maintained `tools/**` and `.github/**` trees are outside the distributed rules-kit payload; their own guides define their contracts.
 
 ## Loading model
 

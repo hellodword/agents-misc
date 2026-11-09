@@ -1,1 +1,0 @@
-"""Codex patch maintenance package."""

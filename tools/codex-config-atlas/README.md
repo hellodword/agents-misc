@@ -41,10 +41,6 @@ the browser implementation of the shared golden diff contract. The tracked
 cross-language golden cases are the compatibility boundary; temporary data and
 site trees are disposable build products.
 
-The unpatched registry here is separate from the patched schema hunk owned by
-`0006-generated-contracts.patch`. That hunk is reproduced from the local
-patched upstream tree and belongs to patch validation.
-
 ## Layout
 
 ```text
@@ -81,7 +77,7 @@ nix run .#codex-config-atlas -- gen-toml --schemas tools/codex-config-atlas/sche
 
 The CLI exposes these subcommands:
 
-- `current`: print the current patched Codex package version injected by Nix.
+- `current`: print the latest version in `schemas/manifest.json`, injected by Nix.
 - `sync-schema`: fetch and register one tagged upstream schema.
 - `check-registry`: validate manifest ordering, metadata, paths, and hashes.
 - `gen-toml`: render default, reference, or opt-in example TOML for a registered version.
@@ -135,8 +131,8 @@ does not write to the user's Codex configuration.
 The registry includes every published, non-draft, non-prerelease GitHub release
 whose tag matches `rust-v<major>.<minor>.<patch>`, starting at `rust-v0.129.0`.
 Patch releases are included even when their schema bytes match a neighboring
-version. The supported inventory is owned by `schemas/manifest.json`; it is
-independent of the paused patched Codex package's current version.
+version. The supported inventory and current version are owned by
+`schemas/manifest.json`.
 
 When refreshing, enumerate the upstream
 [release list](https://github.com/openai/codex/releases) with pagination, exclude
@@ -153,11 +149,6 @@ nix run .#codex-config-atlas -- sync-schema --schemas tools/codex-config-atlas/s
 Review the new schema and metadata together, then compare it with the previous
 version and build the registry-backed outputs. Do not infer a target from a
 floating branch and do not rewrite older registered schemas.
-
-When a local Codex patch changes configuration, refresh the patch-owned schema
-through the workflow documented in the
-[Codex patch workspace](../../codex/README.md); do not copy that patched schema
-into this unpatched upstream registry.
 
 ## Site, build, and validation
 

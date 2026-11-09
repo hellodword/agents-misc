@@ -6,7 +6,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "check-workflows.py"
 SPEC = importlib.util.spec_from_file_location("check_workflows", SCRIPT)
@@ -72,8 +71,8 @@ class CheckWorkflowsTests(unittest.TestCase):
                     )
                 )
 
-    def test_codex_cache_job_without_verification_fails(self) -> None:
-        self.replace("build-codex.yml", "    needs: verify\n", "")
+    def test_pages_build_without_verification_fails(self) -> None:
+        self.replace("publish-codex-config-atlas-pages.yml", "    needs: verify\n", "")
         self.assertTrue(
             any("job 'build' must depend" in error for error in self.errors())
         )
@@ -90,7 +89,7 @@ class CheckWorkflowsTests(unittest.TestCase):
 
     def test_action_commit_sha_is_rejected(self) -> None:
         self.replace(
-            "build-codex.yml",
+            "check-agent-rules.yml",
             "actions/checkout@v7",
             "actions/checkout@0123456789abcdef0123456789abcdef01234567",
         )
@@ -98,23 +97,11 @@ class CheckWorkflowsTests(unittest.TestCase):
 
     def test_inline_nix_installer_is_rejected(self) -> None:
         self.replace(
-            "build-codex.yml",
+            "check-agent-rules.yml",
             "          set -euo pipefail\n",
             "          set -euo pipefail\n          curl https://nixos.org/nix/install\n",
         )
         self.assertTrue(any("installer inline" in error for error in self.errors()))
-
-    def test_missing_native_viewer_runner_fails(self) -> None:
-        self.replace(
-            "build-agents-viewer.yml",
-            "          - artifact: agents-viewer-windows-aarch64\n"
-            "            runner: windows-11-arm\n"
-            "            executable: tools/agents-viewer/target/release/agents-viewer.exe\n",
-            "",
-        )
-        self.assertTrue(
-            any("runner matrix mismatch" in error for error in self.errors())
-        )
 
 
 if __name__ == "__main__":

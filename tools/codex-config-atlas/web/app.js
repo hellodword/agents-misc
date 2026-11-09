@@ -92,8 +92,7 @@ function writeLocation(push = false) {
       url.searchParams.set("category", state.category);
   } else {
     url.searchParams.set("version", state.version);
-    if (state.section !== "all")
-      url.searchParams.set("section", state.section);
+    if (state.section !== "all") url.searchParams.set("section", state.section);
   }
   history[push ? "pushState" : "replaceState"](null, "", url);
 }

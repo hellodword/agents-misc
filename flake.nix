@@ -13,50 +13,30 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
-    llm-agents = {
-      url = "github:numtide/llm-agents.nix";
+    treefmt-nix = {
+      url = "github:numtide/treefmt-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
     };
-
-    treefmt-nix.follows = "llm-agents/treefmt-nix";
   };
 
   outputs =
     {
       nixpkgs,
-      llm-agents,
       treefmt-nix,
       ...
     }:
     let
       inherit (nixpkgs) lib;
 
-      codexProject = import ./nix/codex.nix {
-        inherit lib llm-agents nixpkgs;
-      };
-
-      inherit (codexProject)
-        codexBaseFor
-        codexFor
-        patchOrder
-        supportedSystems
-        upstream
-        ;
+      supportedSystems = [
+        "aarch64-darwin"
+        "aarch64-linux"
+        "x86_64-linux"
+      ];
 
       codexConfigAtlasFor =
         system:
-        let
-          codex = codexFor system;
-          codexVersion = codex.version or (builtins.parseDrvName codex.name).version;
-        in
         import ./nix/codex-config-atlas.nix {
-          inherit codexVersion;
-          pkgs = import nixpkgs { inherit system; };
-        };
-
-      agentsViewerFor =
-        system:
-        import ./nix/agents-viewer.nix {
-          inherit lib;
           pkgs = import nixpkgs { inherit system; };
         };
 
@@ -81,8 +61,6 @@
         inherit
           lib
           codexConfigAtlasFor
-          codexFor
-          agentsViewerFor
           supportedSystems
           ;
       };
@@ -92,8 +70,6 @@
         inherit
           lib
           codexConfigAtlasFor
-          codexFor
-          agentsViewerFor
           supportedSystems
           ;
       };
@@ -104,7 +80,6 @@
           lib
           nixpkgs
           codexConfigAtlasFor
-          agentsViewerFor
           supportedSystems
           ;
         formattingCheckFor = system: treefmtProject.checks.${system};
@@ -114,27 +89,10 @@
         inherit
           lib
           nixpkgs
-          codexBaseFor
           supportedSystems
           ;
       };
 
       formatter = treefmtProject.formatter;
-
-      overlays.default = final: _prev: {
-        agents-misc = {
-          codex-patched = codexFor final.stdenv.hostPlatform.system;
-          agents-viewer =
-            (import ./nix/agents-viewer.nix {
-              inherit (final) lib;
-              pkgs = final;
-            }).package;
-        };
-      };
-
-      lib.codexMaintenance = {
-        inherit patchOrder;
-        inherit (upstream) ref revision;
-      };
     };
 }

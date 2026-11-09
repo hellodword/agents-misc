@@ -2,12 +2,7 @@
 {
   projectRootFile = "flake.nix";
 
-  settings.global.excludes = [
-    "tools/agents-viewer/web/src/generated/api.ts"
-  ];
-
   programs.nixfmt.enable = true;
-  programs.rustfmt.enable = true;
   programs.gofmt.enable = true;
 
   programs.prettier = {
