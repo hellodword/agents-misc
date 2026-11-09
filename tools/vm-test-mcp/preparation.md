@@ -381,7 +381,7 @@ cgroup delegation at startup, before creating state or sockets. Configuration
 is loaded at startup. Restart after tasks finish when changing policy or paths.
 
 This release requires new configuration and empty controller, worker and executor state
-with fresh schema-22 databases. The user must stop the old services, confirm all
+with fresh schema-23 databases. The user must stop the old services, confirm all
 old VM/daemon/port resources are released, and clear or retire the old state before
 starting. Preserve any required old evidence in private offline backups first.
 Do not run the new binary against a live old state or attempt an in-place schema
@@ -404,8 +404,8 @@ finishes/cancels or the task deadline expires. Startup failure collects what is
 available within its evidence budget and cleans the lab.
 
 For an ended VirtualBox task with `cleanup.state: blocked`, inspect each resource's
-steps and error, resolve the reported host problem, then call `lab_cleanup` with
-a new request ID. It retries recorded ownership and verifies deletion before
+steps and error, resolve the reported host problem, then call
+`execution_recover(execution_id=…, scope="resources")` with a new request ID. It retries recorded ownership and verifies deletion before
 releasing the scheduler. If MCP is unavailable, stop the controller before local
 reconciliation; its private-directory lock prevents two owners. Review the SQLite
 task/resource records and VirtualBox state under the VM owner's account. Verify
@@ -434,7 +434,7 @@ the original resources. A new boot or disappearance of the previous invocation's
 recorded cgroup can prove release. A mismatched or unknown identity requires
 administrator inspection; a blank database cannot attest to a previous session.
 After resolving the reported resource problem, use
-`nix_job_recover(job_id=…, scope="resources")`. The worker has no blanket cleanup
+`execution_recover(execution_id=…, scope="resources")`. The worker has no blanket cleanup
 attestation command.
 
 For evidence, use `scope="evidence"`. Indexing and handoff run independently of
@@ -444,8 +444,15 @@ failures report the actor and required action without repeated automatic replay.
 The manifest and acknowledgement are durable, so retries reuse verified objects.
 Worker copies and GC roots remain until controller publication and acknowledgement
 are complete. Pending handoff remains protected from TTL, pressure reclaim and
-explicit deletion. Default builds omit `--keep-failed`; explicitly retained failed
-build directories remain administrator-managed.
+explicit deletion. Each executor session has its own build directory and enables
+`keep-failed`. Resource release seals its files; the worker retrieves ordinary
+driver-evidence files by opaque identity, then the controller verifies and publishes
+them. Acknowledgement releases the session build directory. Successful output links
+also survive a lost worker response and supply the original evidence on recovery.
+
+VirtualBox diagnostic events retain captured files before publication. An ended
+lab with blocked evidence uses the same `execution_recover` evidence scope.
+Recovery publishes the retained bytes; resource retries preserve completed capture.
 
 A manual blocker is a reportable outcome. Retain its job/session identities and
 cause, continue independent local work, and confirm runtime release before another

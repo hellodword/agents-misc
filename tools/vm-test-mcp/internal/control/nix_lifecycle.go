@@ -82,6 +82,7 @@ func (s *Server) applyNixResources(t *Task, raw []byte, err error) {
 		r.State, r.Error = "blocked", nixLifecycleError(t, "resources", err)
 	} else {
 		t.nix().NixExecution = v.Execution
+		t.applyNixTestResult()
 		if v.Execution.Resources.Released() && v.Cleanup != "complete" {
 			t.nix().NixExecution.Resources.State = "releasing"
 		}
@@ -210,6 +211,10 @@ func (s *Server) transferNixEvidence(ctx context.Context, t *Task) error {
 			return err
 		}
 		s.mu.Lock()
+		if v.Execution != nil {
+			t.nix().NixExecution = v.Execution
+			t.applyNixTestResult()
+		}
 		if v.ManifestDigest != "" {
 			t.nix().ManifestDigest = v.ManifestDigest
 		}
@@ -239,8 +244,35 @@ func (s *Server) transferNixEvidence(ctx context.Context, t *Task) error {
 	return nil
 }
 
+func (t *Task) applyNixTestResult() {
+	observed := t.nix().NixExecution
+	if observed == nil || observed.Test == nil {
+		return
+	}
+	if observed.Error != nil {
+		t.Failure = observed.Error
+	}
+	terminationRecorded := oneOf(t.State, "cancelled", "timed_out", "interrupted")
+	switch observed.Test.Outcome {
+	case "passed":
+		t.Conclusion = "passed"
+	case "failed":
+		t.Conclusion = "failed"
+		if !terminationRecorded {
+			t.State = "failed"
+		}
+	case "timed_out":
+		t.Conclusion = "inconclusive"
+		if !terminationRecorded {
+			t.State = "timed_out"
+		}
+	default:
+		t.Conclusion = "inconclusive"
+	}
+}
+
 func nixLifecycleError(t *Task, stage string, err error) *wire.Error {
-	return &wire.Error{Code: stage + "_blocked", Category: "execution", Message: "Nix " + stage + " requires recovery", Retry: "reconcile", NextAction: "Resolve the recorded cause, then call nix_job_recover for this scope", Details: map[string]any{"stage": stage, "job_id": t.ID, "worker_instance": t.nix().WorkerInstance, "session_id": t.nixResources().SessionID, "cause": wire.LifecycleCause(err), "required_actor": "administrator", "observed": time.Now().UTC()}}
+	return &wire.Error{Code: stage + "_blocked", Category: "execution", Message: "Nix " + stage + " requires recovery", Retry: "reconcile", NextAction: "Resolve the recorded cause, then call execution_recover for this scope", Details: map[string]any{"stage": stage, "job_id": t.ID, "worker_instance": t.nix().WorkerInstance, "session_id": t.nixResources().SessionID, "cause": wire.LifecycleCause(err), "required_actor": "administrator", "observed": time.Now().UTC()}}
 }
 
 func (s *Server) recoverNix(id, scope string) (any, error) {

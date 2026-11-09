@@ -1,0 +1,3 @@
+# vm-test-submit connection configuration, kept outside the Nix store.
+endpoint: http://127.0.0.1:8765/mcp
+token: replace-with-service-token

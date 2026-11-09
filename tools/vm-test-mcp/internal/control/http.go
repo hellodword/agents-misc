@@ -19,7 +19,7 @@ import (
 func (s *Server) Handler() http.Handler {
 	server := mcp.NewServer(&mcp.Implementation{Name: "vm-test-mcp", Version: wire.Version}, nil)
 	for _, d := range Definitions {
-		server.AddTool(&mcp.Tool{Name: d.Name, Description: d.Description, InputSchema: Schema(reflect.TypeOf(d.Args))}, func(ctx context.Context, r *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		server.AddTool(&mcp.Tool{Name: d.Name, Description: d.Description, InputSchema: Schema(reflect.TypeOf(d.Args)), OutputSchema: outputSchema(d.Name)}, func(ctx context.Context, r *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			if stream, ok := ctx.Value(heartbeatKey{}).(*heartbeatWriter); ok {
 				stream.start()
 			}

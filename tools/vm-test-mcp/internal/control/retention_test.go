@@ -195,17 +195,14 @@ func TestRetainedInputsStayReadableAndExpireAfterRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	id, _ := fileUpload(t, s, "reusable input")
 	task := retainedFixture(t, s, time.Now().UTC().Add(-2*24*time.Hour), true, false)
-	input := &Transfer{ID: wire.ID(), TaskID: task.ID, Kind: "file", State: "retained", Created: time.Now().UTC(), Updated: time.Now().UTC(), Objects: map[string]state.TransferObject{}}
-	relative := "transfers/" + input.ID + "/blob"
-	size, hash, err := s.root.Write(relative, strings.NewReader("reusable input"), 100)
-	if err != nil {
+	input := s.transfers[id]
+	input.TaskID, input.State = task.ID, "retained"
+	if err = s.db.Save(context.Background(), input); err != nil {
 		t.Fatal(err)
 	}
-	input.Objects["blob"] = state.TransferObject{File: "blob", Size: size, SHA256: hash}
-	if err = s.db.CreateTransfer(context.Background(), input, input.Objects); err != nil {
-		t.Fatal(err)
-	}
+	relative := "transfers/" + input.ID
 	s.Close()
 	s, err = New(cfg, &fakeBackend{})
 	if err != nil {

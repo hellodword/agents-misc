@@ -9,7 +9,6 @@ import (
 	"os"
 	"path"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -34,6 +33,21 @@ func (s *Server) query(ctx context.Context, name string, args any) (result any, 
 	case CommandInputReadRequest:
 		return s.inputHistory(a)
 	case UploadObjectsRequest:
+		if a.Missing && a.Cursor == "" {
+			t, err := s.transfer(a.TransferID)
+			if err != nil {
+				return nil, err
+			}
+			if err = s.reuseInputObjects(ctx, t); err != nil {
+				return nil, err
+			}
+			s.mu.Unlock()
+			err = s.completeUpload(t)
+			s.mu.Lock()
+			if err != nil {
+				return nil, err
+			}
+		}
 		return s.uploadObjects(a)
 	case ObserveRequest:
 		if a.Seconds == 0 {
@@ -45,37 +59,9 @@ func (s *Server) query(ctx context.Context, name string, args any) (result any, 
 		now := time.Now().UTC()
 		return s.performance.Window(now.Add(-time.Duration(a.Seconds)*time.Second), now), nil
 	case struct{}:
-		templates := map[string]any{}
-		for name, template := range s.cfg.VirtualBox.Templates {
-			var v map[string]any
-			_ = json.Unmarshal(wire.JSON(template), &v)
-			cameras := []string{}
-			for id := range template.Cameras {
-				cameras = append(cameras, id)
-			}
-			sort.Strings(cameras)
-			v["cameras"] = cameras
-			v["identity"] = map[string]any{"state": "configured", "configured_sha256": configuredTemplateIdentity(template), "observed": "node_get.identity after cloning; guest.build after probe"}
-			v["optional_capabilities"] = map[string]any{"os_sleep": "unsupported", "os_hibernation": "unsupported", "hypervisor_pause_resume": "supported", "new_user_secret_service": "unverified", "scope": "No template acceptance is inferred from backend availability or command readiness"}
-			templates[name] = v
-		}
-		backends := map[string]any{}
-		s.mu.Unlock()
-		for _, kind := range []string{"lab", "nixos"} {
-			c, cancel := context.WithTimeout(ctx, 3*time.Second)
-			reason, e := s.backend.Available(c, kind)
-			cancel()
-			view := map[string]any{"available": e == nil && reason == "", "waiting_reason": reason, "scope": "Current admission prerequisites, not execution or optional capability acceptance"}
-			if provider, ok := s.backend.(interface{ BackendIdentity(string) any }); ok {
-				view["identity"] = provider.BackendIdentity(kind)
-			}
-			if e != nil {
-				view["error"] = wire.Safe(e)
-			}
-			backends[kind] = view
-		}
-		s.mu.Lock()
-		return map[string]any{"version": wire.Version, "build": wire.Identity(), "performance": s.performance.Latest(), "templates": templates, "backends": backends, "active_execution_id": s.active, "limits": map[string]any{"minimum_codex_version": "0.163.0", "wait_seconds": 600, "tool_timeout_sec": 660, "heartbeat_seconds": 15, "storage": s.cfg.Storage, "storage_blocked": s.storageBlocked, "default_seconds": s.cfg.Tasks.DefaultTimeout.Seconds(), "max_seconds": s.cfg.Tasks.MaxDuration.Seconds(), "max_upload_bytes": s.cfg.Storage.MaxUploadBytes, "max_nodes": 64, "startup_timeout": s.cfg.VirtualBox.StartupTimeout.Value().String(), "startup_parallelism": s.cfg.VirtualBox.StartupParallelism, "shutdown_timeout": s.cfg.VirtualBox.ShutdownTimeout.Value().String(), "cleanup_timeout": s.cfg.Tasks.CleanupTimeout.Value().String(), "evidence_timeout": s.cfg.Tasks.EvidenceTimeout.Value().String(), "probe_interval": probeInterval.String(), "probe_timeout": probeTimeout.String(), "unavailable_after": s.cfg.VirtualBox.UnavailableAfter.Value().String(), "failure_threshold": 3, "recovery_successes": 2, "diagnostic_timeout": diagnosticBudget.String(), "node_exec_default_seconds": 10, "node_exec_max_seconds": 30, "max_active_endpoints_per_lab": 128, "command_protocol": wire.CommandProtocol, "stdin_packet_bytes": wire.InputPacketLimit, "stdin_packets": wire.InputPacketCount, "stdin_bytes": wire.CommandInputLimit, "output_bytes_per_stream": wire.CommandOutputLimit, "guest_read_bytes_per_stream": wire.CommandReadLimit}, "endpoint_address": s.cfg.VirtualBox.Network.Listen}, nil
+		return s.serviceView(ctx), nil
+	case TemplateListRequest:
+		return s.templateList(a), nil
 	case TaskListRequest:
 		return s.listTasksKind(a, name)
 	case TaskID:
@@ -263,7 +249,7 @@ func (s *Server) mutate(name string, args any, op *Operation) (any, error) {
 		s.save(t)
 		return t.Public(), nil
 	case RecoverNixRequest:
-		return s.recoverNix(a.TaskID.TaskID, a.Scope)
+		return s.recoverExecution(a.TaskID.TaskID, a.Scope)
 	case TaskChange:
 		if name == "lab_cleanup" {
 			return s.cleanupTask(a.TaskID.TaskID)
@@ -555,6 +541,7 @@ func (s *Server) buildNix(a NixRequest, op *Operation) (*Task, *Transfer, error)
 	t := newTask("nixos", seconds)
 	t.Created, t.ID, t.nix().WorkerInstance = op.Created, op.TaskID, op.WorkerInstance
 	t.nix().CacheID, t.nix().Derivation, t.nix().System = a.CacheID, cache.Derivation, cache.System
+	t.nix().RunID = cache.RunID
 	attached := *cache
 	attached.TaskID = t.ID
 	return t, &attached, nil
@@ -716,7 +703,7 @@ func (s *Server) startCommand(a StartRequest, op *Operation) (any, error) {
 	}
 	now := time.Now().UTC()
 	statusDeadline := now.Add(120*time.Second + commandStatusGrace)
-	c := &Command{ID: id, NodeID: a.NodeID.NodeID, CommandStatus: wire.CommandStatus{State: "starting", Stage: "submitting"}, StatusDeadline: &statusDeadline, Retained: RetainedOutput{Stdout: RetainedStream{State: "pending"}, Stderr: RetainedStream{State: "pending"}}, Created: now}
+	c := &Command{ID: id, NodeID: a.NodeID.NodeID, ExpectedExitCodes: expectedExitCodes(a.ExpectedExitCodes), CommandStatus: wire.CommandStatus{State: "starting", Stage: "submitting"}, StatusDeadline: &statusDeadline, Retained: RetainedOutput{Stdout: RetainedStream{State: "pending"}, Stderr: RetainedStream{State: "pending"}}, Created: now}
 	t.lab().Commands = append(t.lab().Commands, c)
 	e = s.db.CreateCommandReference(context.Background(), t, id, op.Intent)
 	if e != nil {
@@ -1101,7 +1088,7 @@ func (s *Server) media(a MediaRequest) (any, error) {
 }
 func (s *Server) purge(t *Task) error {
 	if !t.settled() {
-		return wire.Fail("invalid_state", "Execution and resource cleanup must be complete")
+		return wire.Fail("invalid_state", "Execution, resource release and evidence handoff must be complete")
 	}
 	delete(s.performancePending, t.ID)
 	for id, x := range s.transfers {

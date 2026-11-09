@@ -17,9 +17,12 @@ type DiagnosticItem struct {
 	State      string      `json:"state"`
 	Result     any         `json:"result,omitempty"`
 	ArtifactID string      `json:"evidence_id,omitempty"`
+	Size       int64       `json:"size,omitempty"`
+	SHA256     string      `json:"sha256,omitempty"`
 	Error      *wire.Error `json:"error,omitempty"`
 }
 type DiagnosticReport struct {
+	EventID     string           `json:"event_id,omitempty"`
 	Started     time.Time        `json:"started"`
 	Finished    time.Time        `json:"finished"`
 	Items       []DiagnosticItem `json:"items"`
@@ -70,7 +73,7 @@ func (s *Server) writeJSONArtifact(t *Task, name string, data []byte) (*Artifact
 	}
 	return a, nil
 }
-func (s *Server) diagnose(parent context.Context, taskID string, ids []string, automatic bool) (any, error) {
+func (s *Server) diagnose(parent context.Context, taskID string, ids []string, automatic bool, eventID ...string) (any, error) {
 	ctx, cancel := context.WithTimeout(parent, diagnosticBudget)
 	defer cancel()
 	s.mu.Lock()
@@ -132,15 +135,25 @@ func (s *Server) diagnose(parent context.Context, taskID string, ids []string, a
 	if deleting {
 		return nil, wire.Fail("invalid_state", "Resource cleanup is in progress")
 	}
-	return s.collectDiagnostics(ctx, t, snapshot, nodes)
+	return s.collectDiagnostics(ctx, t, snapshot, nodes, eventID...)
 }
 
 func windowsDiagnostic(script string) NodeAction {
 	return NodeAction{Action: "node_exec", TimeoutSeconds: 10, Argv: []string{`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, "-NoProfile", "-NonInteractive", "-Command", "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); " + script}}
 }
 
-func (s *Server) collectDiagnostics(ctx context.Context, t, snapshot *Task, nodes []*Node) (any, error) {
+func (s *Server) collectDiagnostics(ctx context.Context, t, snapshot *Task, nodes []*Node, eventID ...string) (any, error) {
 	report := DiagnosticReport{Started: time.Now().UTC(), Items: []DiagnosticItem{}}
+	if len(eventID) > 0 {
+		report.EventID = eventID[0]
+		report.ArtifactID = diagnosticArtifactID(t.ID, eventID[0], "report")
+		if data, err := s.root.Read(path.Join("tasks", t.ID, "artifacts", report.ArtifactID), 32<<20); err == nil {
+			if err = json.Unmarshal(data, &report); err != nil {
+				return report, err
+			}
+			return report, nil
+		}
+	}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	slots := make(chan struct{}, 4)
@@ -215,6 +228,17 @@ func (s *Server) collectDiagnostics(ctx context.Context, t, snapshot *Task, node
 				var err error
 				if oneOf(action.Action, "diagnostics", "screenshot", "boot_log") {
 					artifact, action.Local, err = s.newArtifact(t, n.Name+"-"+entry.name)
+					if err == nil && report.EventID != "" {
+						artifact.ID = diagnosticArtifactID(t.ID, report.EventID, n.ID+"/"+entry.name)
+						artifact.Path = path.Join("tasks", t.ID, "artifacts", artifact.ID)
+						action.Local = path.Join(s.root.Path, artifact.Path)
+						if retained, lookupErr := s.db.evidence(ctx, artifact.ID); lookupErr == nil {
+							item.ArtifactID = retained.ID
+							item.Size, item.SHA256 = retained.Size, retained.SHA256
+							items = append(items, item)
+							continue
+						}
+					}
 				}
 				budget := 5 * time.Second
 				if action.TimeoutSeconds > 0 {
@@ -230,9 +254,22 @@ func (s *Server) collectDiagnostics(ctx context.Context, t, snapshot *Task, node
 					_ = json.Unmarshal(raw, &item.Result)
 				}
 				if err == nil && artifact != nil {
-					err = s.retainArtifact(t, artifact)
+					if report.EventID == "" {
+						err = s.retainArtifact(t, artifact)
+					} else {
+						var f interface {
+							Read([]byte) (int, error)
+							Close() error
+						}
+						f, err = s.root.Regular(artifact.Path)
+						if err == nil {
+							artifact.Size, artifact.SHA256, err = hashFile(uploadReader{ctx, f}, s.cfg.Storage.MaxUploadBytes)
+							f.Close()
+						}
+					}
 					if err == nil {
 						item.ArtifactID = artifact.ID
+						item.Size, item.SHA256 = artifact.Size, artifact.SHA256
 					}
 				}
 				if result, ok := item.Result.(map[string]any); ok && result["state"] == "uncertain" {
@@ -261,8 +298,17 @@ func (s *Server) collectDiagnostics(ctx context.Context, t, snapshot *Task, node
 	})
 	report.Finished = time.Now().UTC()
 	report.Performance = s.performance.Window(report.Started.Add(-30*time.Second), report.Finished)
-	a, err := s.jsonArtifact(t, "diagnostics.json", report)
+	var a *Artifact
+	var err error
+	if report.EventID == "" {
+		a, err = s.jsonArtifact(t, "diagnostics.json", report)
+	} else {
+		a = &Artifact{ID: report.ArtifactID, Name: "diagnostics.json", Created: time.Now().UTC()}
+		a.Path = path.Join("tasks", t.ID, "artifacts", a.ID)
+		a.Size, a.SHA256, err = s.root.Write(a.Path, bytesReader(wire.JSON(report)), 32<<20)
+	}
 	if err != nil {
+		report.ArtifactID = ""
 		return report, err
 	}
 	report.ArtifactID = a.ID
@@ -290,6 +336,19 @@ func (s *Server) execNode(a ExecRequest) (any, error) {
 	s.mu.Lock()
 	t, _ := s.task(a.TaskID.TaskID)
 	s.mu.Unlock()
+	if result, ok := value.(map[string]any); ok {
+		expected := expectedExitCodes(a.ExpectedExitCodes)
+		result["expected_exit_codes"] = expected
+		result["outcome"] = directOutcome(result, expected)
+		if diagnosticOutcome(result["outcome"].(string)) {
+			s.mu.Lock()
+			queueErr := s.queueDiagnostic(t, "node-exec/"+a.RequestID, "node_exec_"+result["outcome"].(string), []string{a.NodeID.NodeID})
+			s.mu.Unlock()
+			if queueErr != nil {
+				return nil, queueErr
+			}
+		}
+	}
 	artifact, err := s.jsonArtifact(t, "node-exec.json", value)
 	if err != nil {
 		return nil, err

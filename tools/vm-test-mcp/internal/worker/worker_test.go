@@ -74,9 +74,9 @@ func TestExecutionRetainsPhaseAndObservedClientResult(t *testing.T) {
 		exit                                                          int
 		signal                                                        bool
 	}{
-		{"import failure", "exit 7", "kvm", "exit 0", "import", "import", "failed", "backend_error", 7, false},
+		{"import failure", "exit 7", "kvm", "exit 0", "import", "import", "failed", "input_failed", 7, false},
 		{"policy rejection", "exit 0", "", "exit 99", "validate", "validate", "failed", "policy_denied", 0, false},
-		{"build failure", "exit 0", "kvm", "exit 23", "build", "build", "failed", "backend_error", 23, false},
+		{"build failure", "exit 0", "kvm", "exit 23", "build", "build", "failed", "build_failed", 23, false},
 		{"client signal", "exit 0", "kvm", "kill -KILL $$", "build", "build", "interrupted", "backend_error", 0, true},
 		{"invalid outputs", "exit 0", "kvm", "printf 'invalid'", "build", "build", "failed", "backend_error", 0, false},
 		{"success", "exit 0", "kvm", "printf '[]'", "build", "build", "succeeded", "", 0, false},
@@ -88,14 +88,14 @@ func TestExecutionRetainsPhaseAndObservedClientResult(t *testing.T) {
 				t.Fatal(err)
 			}
 			drv := "/nix/store/" + strings.Repeat("0", 32) + "-test.drv"
-			metadata := wire.JSON(map[string]any{drv: map[string]any{"system": "x86_64-linux", "env": map[string]string{"vmTestUploadID": strings.Repeat("a", 32), "allowSubstitutes": "", "requiredSystemFeatures": tc.features}}})
+			metadata := wire.JSON(map[string]any{drv: map[string]any{"system": "x86_64-linux", "env": map[string]string{"vmTestRunID": strings.Repeat("a", 32), "vmTestAdapterVersion": "1", "allowSubstitutes": "", "requiredSystemFeatures": tc.features}}})
 			w.cfg.Nix = filepath.Join(w.root.Path, "fake-nix")
 			script := fmt.Sprintf("#!%s\ncase \"$1\" in\nstore) printf '{\"trusted\":false}';;\ncopy) %s;;\nderivation) printf '%%s' '%s';;\nbuild) %s;;\n*) exit 98;;\nesac\n", shell, tc.copy, metadata, tc.build)
 			if err = os.WriteFile(w.cfg.Nix, []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
 			id := wire.ID()
-			if _, err = w.Call("start", Request{UploadID: strings.Repeat("a", 32), InstanceID: w.db.InstanceID, TaskID: id, Derivation: drv, System: "x86_64-linux", Cache: "/files/synthetic-private-capability", TimeoutSeconds: 60}); err != nil {
+			if _, err = w.Call("start", Request{RunID: strings.Repeat("a", 32), UploadID: strings.Repeat("a", 32), InstanceID: w.db.InstanceID, TaskID: id, Derivation: drv, System: "x86_64-linux", Cache: "/files/synthetic-private-capability", TimeoutSeconds: 60}); err != nil {
 				t.Fatal(err)
 			}
 			waitExecution(t, w, id)
@@ -108,6 +108,12 @@ func TestExecutionRetainsPhaseAndObservedClientResult(t *testing.T) {
 				}
 				j := w.jobs[id]
 				e := j.Execution
+				if e.Test == nil || e.Test.Started != nil && *e.Test.Started || tc.code == "input_failed" && e.Test.Outcome != "not_started" || (tc.code == "" || tc.code == "build_failed") && (e.Test.Outcome != "unconfirmed" || e.Test.Started != nil) {
+					t.Fatal("Nix client outcome was used as a test assertion result", v)
+				}
+				if tc.stage != "build" && (e.Test.Started == nil || *e.Test.Started || e.Test.Outcome != "not_started") {
+					t.Fatal("pre-build termination lost the confirmed unstarted test state", v)
+				}
 				if j.State != tc.state || e == nil || e.Stage != tc.stage || e.Finished == nil || e.Process == nil || e.Process.Stage != tc.processStage || !e.Process.Exited || e.Process.Source != "nix_client_wait" {
 					t.Fatal(v)
 				}
@@ -154,19 +160,25 @@ func TestTerminalPersistenceFailureRetainsOccupancy(t *testing.T) {
 	}
 	j.Execution.Process = &wire.NixProcessResult{Stage: "build", Source: "nix_client_wait", Exited: true, ExitCode: new(7)}
 	w.complete(j, fmt.Errorf("synthetic build failure"), false)
-	if w.active != id || j.Cleanup != "required" || j.State != "failed" || j.Execution.PersistenceError == nil || j.Execution.Process.ExitCode == nil || *j.Execution.Process.ExitCode != 7 {
-		t.Fatal(j, w.active)
+	checkOccupancy := func() {
+		t.Helper()
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		if w.active != id || j.Cleanup != "required" || j.State != "failed" || j.Execution.PersistenceError == nil || j.Execution.Process.ExitCode == nil || *j.Execution.Process.ExitCode != 7 {
+			t.Fatal("failed persistence released ownership or lost the process result", j, w.active)
+		}
 	}
+	checkOccupancy()
 	w.reconcileResources(j)
-	if w.active != id || j.Cleanup != "required" {
-		t.Fatal("failed persistence released ownership")
-	}
+	checkOccupancy()
 	w.Close()
 	w, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer w.Close()
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.active != id || w.jobs[id].Execution.Error.Code != "worker_restarted" || w.jobs[id].Execution.Process != nil {
 		t.Fatal("restart invented an unpersisted result", w.jobs[id])
 	}
@@ -176,7 +188,7 @@ func TestClientLaunchFailureHasNoInventedExit(t *testing.T) {
 	w, _ := fixture(t, os.Getuid())
 	defer w.Close()
 	id := wire.ID()
-	if _, err := w.Call("start", Request{UploadID: strings.Repeat("a", 32), InstanceID: w.db.InstanceID, TaskID: id, Derivation: "/nix/store/" + strings.Repeat("0", 32) + "-test.drv", System: "x86_64-linux", Cache: "/files/synthetic", TimeoutSeconds: 30}); err != nil {
+	if _, err := w.Call("start", Request{RunID: strings.Repeat("a", 32), UploadID: strings.Repeat("a", 32), InstanceID: w.db.InstanceID, TaskID: id, Derivation: "/nix/store/" + strings.Repeat("0", 32) + "-test.drv", System: "x86_64-linux", Cache: "/files/synthetic", TimeoutSeconds: 30}); err != nil {
 		t.Fatal(err)
 	}
 	waitExecution(t, w, id)
@@ -285,7 +297,7 @@ func TestFixedDaemonBoundaryAndDerivationPolicy(t *testing.T) {
 			drv := "/nix/store/" + strings.Repeat("0", 32) + "-test.drv"
 			trace := filepath.Join(w.root.Path, "trace")
 			exe := filepath.Join(w.root.Path, "fake-nix")
-			script := "#!" + shell + "\nprintf '%s\\n' \"$@\" >> '" + trace + "'\ncase \"$1\" in\nstore) printf '{\"trusted\":false}';;\ncopy) exit 0;;\nderivation) printf '%s\\n' '" + string(wire.JSON(map[string]any{drv: map[string]any{"system": "x86_64-linux", "env": map[string]string{"vmTestUploadID": strings.Repeat("a", 32), "allowSubstitutes": "", "requiredSystemFeatures": features}}})) + "';;\nbuild) printf '[]\\n';;\n*) exit 1;;\nesac\n"
+			script := "#!" + shell + "\nprintf '%s\\n' \"$@\" >> '" + trace + "'\ncase \"$1\" in\nstore) printf '{\"trusted\":false}';;\ncopy) exit 0;;\nderivation) printf '%s\\n' '" + string(wire.JSON(map[string]any{drv: map[string]any{"system": "x86_64-linux", "env": map[string]string{"vmTestRunID": strings.Repeat("a", 32), "vmTestAdapterVersion": "1", "allowSubstitutes": "", "requiredSystemFeatures": features}}})) + "';;\nbuild) printf '[]\\n';;\n*) exit 1;;\nesac\n"
 			if scenario.signalled {
 				script = strings.Replace(script, "build) printf '[]\\n'", "build) kill -KILL $$", 1)
 			}
@@ -294,7 +306,7 @@ func TestFixedDaemonBoundaryAndDerivationPolicy(t *testing.T) {
 			}
 			w.cfg.Nix = exe
 			id := wire.ID()
-			if _, e = w.Call("start", Request{UploadID: strings.Repeat("a", 32), InstanceID: w.db.InstanceID, TaskID: id, Derivation: drv, System: "x86_64-linux", Cache: "/files/synthetic-capability", TimeoutSeconds: 60}); e != nil {
+			if _, e = w.Call("start", Request{RunID: strings.Repeat("a", 32), UploadID: strings.Repeat("a", 32), InstanceID: w.db.InstanceID, TaskID: id, Derivation: drv, System: "x86_64-linux", Cache: "/files/synthetic-capability", TimeoutSeconds: 60}); e != nil {
 				t.Fatal(e)
 			}
 			waitExecution(t, w, id)
@@ -349,12 +361,12 @@ func TestDeadlineExtensionAndMethodArguments(t *testing.T) {
 func TestVersionedDerivationJSON(t *testing.T) {
 	drv := "/nix/store/" + strings.Repeat("0", 32) + "-test.drv"
 	for _, noChroot := range []bool{false, true} {
-		env := map[string]string{"vmTestUploadID": strings.Repeat("a", 32), "allowSubstitutes": "", "requiredSystemFeatures": "kvm nixos-test"}
+		env := map[string]string{"vmTestRunID": strings.Repeat("a", 32), "vmTestAdapterVersion": "1", "allowSubstitutes": "", "requiredSystemFeatures": "kvm nixos-test"}
 		if noChroot {
 			env["__json"] = `{"__noChroot":true,"requiredSystemFeatures":["kvm"]}`
 		}
 		data := wire.JSON(map[string]any{"version": 4, "derivations": map[string]any{filepath.Base(drv): map[string]any{"system": "x86_64-linux", "env": env}}})
-		e := derivationPolicy(data, Request{UploadID: strings.Repeat("a", 32), Derivation: drv, System: "x86_64-linux"})
+		e := derivationPolicy(data, Request{RunID: strings.Repeat("a", 32), UploadID: strings.Repeat("a", 32), Derivation: drv, System: "x86_64-linux"})
 		if (e != nil) != noChroot {
 			t.Fatal(noChroot, e)
 		}

@@ -81,7 +81,7 @@ func TestFaultWindowSurvivesReleaseAndDoesNotResurrectPurgedEvidence(t *testing.
 	deadline := time.Now().Add(time.Second)
 	for {
 		s.mu.Lock()
-		pending := !s.performancePending[task.ID].IsZero()
+		pending := !s.performancePending[task.ID].IsZero() || !task.settled()
 		s.mu.Unlock()
 		if !pending {
 			break
@@ -132,9 +132,11 @@ func TestPurgeCancelsPendingFaultEvidence(t *testing.T) {
 	r.cancel()
 	s.mu.Unlock()
 	s.cleanup(task)
+	waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return task.settled() })
 	s.mu.Lock()
 	s.retainPerformanceWindow(task, "controlled_delay", 20*time.Millisecond)
 	if e := s.purge(task); e != nil {
+		s.mu.Unlock()
 		t.Fatal(e)
 	}
 	s.mu.Unlock()

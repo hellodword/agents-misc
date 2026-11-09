@@ -1,7 +1,7 @@
 package state
 
 // Each role starts with a new database when this contract changes.
-const SchemaVersion = 22
+const SchemaVersion = 23
 
 const controllerSchema = `
 PRAGMA auto_vacuum=INCREMENTAL;
@@ -28,6 +28,9 @@ CREATE TABLE evidence (sequence INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NU
 CREATE INDEX evidence_execution ON evidence(task_id,position);
 CREATE INDEX evidence_pins ON evidence(pinned,task_id);
 CREATE INDEX evidence_retention ON evidence(protected,pinned,success,expires);
+CREATE TABLE diagnostic_events (task_id TEXT NOT NULL REFERENCES executions(id) ON DELETE CASCADE,
+ event_id TEXT NOT NULL,state TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(task_id,event_id));
+CREATE INDEX diagnostic_events_pending ON diagnostic_events(state,task_id,event_id);
 CREATE TABLE operations (
  sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, request_id TEXT NOT NULL UNIQUE,
  task_id TEXT NOT NULL, state TEXT NOT NULL, created TEXT NOT NULL, ended TEXT,revision INTEGER NOT NULL,intent_stage TEXT NOT NULL,intent_file TEXT NOT NULL,intent_size INTEGER NOT NULL,intent_sha256 TEXT NOT NULL, body BLOB NOT NULL);
@@ -35,10 +38,26 @@ CREATE INDEX operations_execution ON operations(task_id,state);
 CREATE INDEX operations_retention ON operations(state,ended);
 CREATE INDEX operations_recovery ON operations(state,sequence);
 CREATE TABLE transfers (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
- task_id TEXT NOT NULL, state TEXT NOT NULL, updated TEXT NOT NULL, revision INTEGER NOT NULL, body BLOB NOT NULL);
+ task_id TEXT NOT NULL, state TEXT NOT NULL, updated TEXT NOT NULL, revision INTEGER NOT NULL, remaining INTEGER NOT NULL DEFAULT 0, body BLOB NOT NULL);
 CREATE INDEX transfers_lifecycle ON transfers(task_id,state,updated);
+CREATE TABLE input_objects (sha256 TEXT PRIMARY KEY, size INTEGER NOT NULL, updated TEXT NOT NULL, body BLOB);
+CREATE INDEX input_objects_recency ON input_objects(updated);
 CREATE TABLE transfer_objects (transfer_id TEXT NOT NULL REFERENCES transfers(id) ON DELETE CASCADE,
  name TEXT NOT NULL, expected_size INTEGER NOT NULL, expected_sha256 TEXT NOT NULL, body BLOB, PRIMARY KEY(transfer_id,name));
+CREATE INDEX transfer_objects_digest ON transfer_objects(expected_sha256);
+CREATE INDEX transfer_objects_missing ON transfer_objects(transfer_id,name) WHERE body IS NULL;
+CREATE TRIGGER transfer_object_insert AFTER INSERT ON transfer_objects WHEN new.body IS NULL BEGIN
+ UPDATE transfers SET remaining=remaining+1 WHERE id=new.transfer_id;
+END;
+CREATE TRIGGER transfer_object_publish AFTER UPDATE OF body ON transfer_objects WHEN old.body IS NULL AND new.body IS NOT NULL BEGIN
+ UPDATE transfers SET remaining=remaining-1 WHERE id=new.transfer_id;
+END;
+CREATE TRIGGER transfer_object_release AFTER UPDATE OF body ON transfer_objects WHEN old.body IS NOT NULL AND new.body IS NULL BEGIN
+ UPDATE transfers SET remaining=remaining+1 WHERE id=new.transfer_id;
+END;
+CREATE TRIGGER transfer_object_delete AFTER DELETE ON transfer_objects WHEN old.body IS NULL BEGIN
+ UPDATE transfers SET remaining=remaining-1 WHERE id=old.transfer_id;
+END;
 CREATE TABLE command_inputs (task_id TEXT NOT NULL, command_id TEXT NOT NULL, sequence INTEGER NOT NULL,
  file TEXT NOT NULL, size INTEGER NOT NULL, sha256 TEXT NOT NULL, eof INTEGER NOT NULL,
  delivered INTEGER NOT NULL DEFAULT 0, written INTEGER NOT NULL DEFAULT 0,
@@ -64,7 +83,7 @@ CREATE INDEX worker_files_execution ON worker_files(task_id,sequence);
 
 const metadataSchema = `
 CREATE TABLE store (singleton INTEGER PRIMARY KEY CHECK(singleton=1), role TEXT NOT NULL, instance_id TEXT NOT NULL);
-PRAGMA user_version=22;
+PRAGMA user_version=23;
 `
 
 const executorSchema = `

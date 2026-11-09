@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http/httptest"
@@ -42,6 +43,7 @@ func declareUpload(t *testing.T, s *Server, id, url, drv string, objects map[str
 	t.Helper()
 	m := wire.UploadManifest{UploadID: id, Derivation: drv, Objects: []wire.UploadObject{}}
 	if drv != "" {
+		m.RunID = id
 		m.System = "x86_64-linux"
 	}
 	for name, data := range objects {
@@ -146,7 +148,7 @@ func TestQueuedInputsReuseAndRetention(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("cleanup left duplicate upload blocked")
 	}
-	waitFor(t, func() bool { return taskView(t, s, labID)["cleanup"].(map[string]any)["state"] == "complete" })
+	waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); task, _ := s.task(labID); return task.settled() })
 	if got := transferHTTP(t, s, "GET", url+"/blob", "", 200); got != "complete original" {
 		t.Fatal(got)
 	}
@@ -282,5 +284,86 @@ func TestUploadInventorySQLCursorSurvivesDeletion(t *testing.T) {
 	}
 	if len(page.(map[string]any)["items"].([]any)) != 2 {
 		t.Fatal("cursor depended on previous rows")
+	}
+}
+
+func TestInputReuseReservationAndCollection(t *testing.T) {
+	s, _ := testServer(t)
+	s.cfg.Storage.InputBytes = 12
+	s.cfg.Storage.MaxUploadBytes = 8
+	first, url := newUpload(t, s, "file")
+	second, next := newUpload(t, s, "file")
+	declareUpload(t, s, first, url, "", map[string]string{"blob": "12345678"})
+	declareUpload(t, s, second, next, "", map[string]string{"blob": "12345678"})
+	transferHTTP(t, s, "PUT", url+"/blob", "12345678", 200)
+	// The second manifest was declared before the shared bytes arrived.
+	var missing struct {
+		Items []wire.UploadObject `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(transferHTTP(t, s, "GET", next+"/missing", "", 200)), &missing); err != nil || len(missing.Items) != 0 {
+		t.Fatal(missing, err)
+	}
+	if readUpload(t, s, second)["state"] != "ready" {
+		t.Fatal("shared object did not complete second manifest")
+	}
+	var bytes, objects int64
+	if err := s.db.QueryRow("SELECT COALESCE(SUM(size),0),COUNT(*) FROM input_objects").Scan(&bytes, &objects); err != nil || bytes != 8 || objects != 1 {
+		t.Fatal("duplicate physical reservation", bytes, objects, err)
+	}
+	third, last := newUpload(t, s, "file")
+	hash := sha256.Sum256([]byte("abcde"))
+	m := wire.UploadManifest{UploadID: third, Objects: []wire.UploadObject{{Name: "blob", Size: 5, SHA256: hex.EncodeToString(hash[:])}}}
+	transferHTTP(t, s, "PUT", last+"/manifest", string(wire.JSON(m)), 409)
+	for _, id := range []string{first, second} {
+		successful(t, s, "upload_delete", UploadDeleteRequest{Change: Change{wire.ID()}, TransferGetRequest: TransferGetRequest{id}})
+	}
+	transferHTTP(t, s, "PUT", last+"/manifest", string(wire.JSON(m)), 200)
+	transferHTTP(t, s, "PUT", last+"/blob", "abcde", 200)
+	if err := s.db.QueryRow("SELECT COALESCE(SUM(size),0),COUNT(*) FROM input_objects").Scan(&bytes, &objects); err != nil || bytes != 5 || objects != 1 {
+		t.Fatal("unreferenced objects survived pressure", bytes, objects, err)
+	}
+}
+
+func TestDistinctInputBodiesStreamConcurrently(t *testing.T) {
+	s, _ := testServer(t)
+	id, url := newUpload(t, s, "cache")
+	drv, objects := cacheObjects()
+	objects["nar/second.nar"] = "another object"
+	declareUpload(t, s, id, url, drv, objects)
+	rd, wr := io.Pipe()
+	defer rd.Close()
+	defer wr.Close()
+	response := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.Handler().ServeHTTP(response, httptest.NewRequest("PUT", url+"/nar/fixture.nar", rd))
+	}()
+	body := objects["nar/fixture.nar"]
+	if _, err := wr.Write([]byte(body[:4])); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	other := httptest.NewRecorder()
+	s.Handler().ServeHTTP(other, httptest.NewRequest("PUT", url+"/nar/second.nar", strings.NewReader(objects["nar/second.nar"])).WithContext(ctx))
+	if other.Code != 200 {
+		t.Fatal("one body blocked another digest", other.Code, other.Body.String())
+	}
+	if _, err := wr.Write([]byte(body[4:])); err != nil {
+		t.Fatal(err)
+	}
+	wr.Close()
+	<-done
+	if response.Code != 200 {
+		t.Fatal(response.Code, response.Body.String())
+	}
+	delete(objects, "nar/fixture.nar")
+	delete(objects, "nar/second.nar")
+	for name, data := range objects {
+		transferHTTP(t, s, "PUT", url+"/"+name, data, 200)
+	}
+	if readUpload(t, s, id)["state"] != "ready" {
+		t.Fatal("concurrent publication lost completion")
 	}
 }

@@ -10,7 +10,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
@@ -46,7 +45,7 @@ func (s *Server) uploadManifest(w http.ResponseWriter, r *http.Request, t *Trans
 		httpError(w, 400, wire.Fail("invalid_manifest", "File input requires one blob object"))
 		return
 	}
-	if t.Kind == "cache" && (!wire.StorePattern.MatchString(m.Derivation) || !strings.HasSuffix(m.Derivation, ".drv") || !oneOf(m.System, "x86_64-linux", "aarch64-linux")) {
+	if t.Kind == "cache" && (!wire.IDPattern.MatchString(m.RunID) || !wire.StorePattern.MatchString(m.Derivation) || !strings.HasSuffix(m.Derivation, ".drv") || !oneOf(m.System, "x86_64-linux", "aarch64-linux")) {
 		httpError(w, 400, wire.Fail("invalid_manifest", "Nix input requires its derivation and system"))
 		return
 	}
@@ -79,20 +78,19 @@ func (s *Server) uploadManifest(w http.ResponseWriter, r *http.Request, t *Trans
 			httpError(w, 409, wire.Fail("manifest_conflict", "Upload manifest is immutable"))
 			return
 		}
+		if err = s.checkUploadLocked(t); err != nil {
+			httpError(w, 409, err)
+			return
+		}
 		w.WriteHeader(200)
 		return
 	}
-	if err = s.uploadAllowed(t); err == nil && total > s.cfg.Storage.InputBytes-s.inputUsage() {
-		err = wire.Fail("quota_exceeded", "Input reservation exceeds the staging budget")
-	}
+	err = s.uploadAllowed(t)
+	s.mu.Unlock()
 	if err != nil {
-		s.mu.Unlock()
 		httpError(w, 409, err)
 		return
 	}
-	// Reserve before file IO; release the provisional reservation on any failure.
-	t.ReservedBytes = total
-	s.mu.Unlock()
 	_, _, err = s.root.Write(path.Join("transfers", t.ID, "manifest.json"), strings.NewReader(string(canonical)), wire.MaxManifestBytes)
 	s.mu.Lock()
 	if err == nil {
@@ -102,20 +100,26 @@ func (s *Server) uploadManifest(w http.ResponseWriter, r *http.Request, t *Trans
 		err = s.uploadAllowed(t)
 	}
 	if err == nil {
+		err = s.reserveInputSpace(r.Context(), m.Objects)
+	}
+	if err == nil {
 		declared := *t
 		declared.ManifestDigest = digest
 		declared.Derivation = m.Derivation
+		declared.RunID = m.RunID
 		declared.System = m.System
 		declared.Updated = time.Now().UTC()
+		declared.ReservedBytes = total
 		err = s.db.DeclareUpload(r.Context(), &declared, m.Objects)
 		if err == nil {
 			*t = declared
+			err = s.reuseInputObjects(r.Context(), t)
 		}
 	}
-	if err != nil {
-		t.ReservedBytes = 0
-	}
 	s.mu.Unlock()
+	if err == nil {
+		err = s.checkUploadLocked(t)
+	}
 	if err != nil {
 		httpError(w, 409, err)
 		return
@@ -149,12 +153,11 @@ func (s *Server) deleteUpload(id string) (any, error) {
 			return nil, s.ctx.Err()
 		}
 	}
-	v, _ := s.transferLocks.LoadOrStore(id, &sync.Mutex{})
-	lock := v.(*sync.Mutex)
-	if err = lockContext(s.ctx, lock); err != nil {
+	release, err := s.transferLocks.acquire(s.ctx, id, 1)
+	if err != nil {
 		return nil, err
 	}
-	defer lock.Unlock()
+	defer release()
 	if err = s.root.RemoveAll(path.Join("transfers", id)); err != nil {
 		return nil, err
 	}

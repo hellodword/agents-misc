@@ -60,6 +60,8 @@ func classifyError(original *Error) *Error {
 	}
 	e.Category, e.Retry, e.NextAction = "unknown", "inspect", "Inspect the operation receipt, live task state and bounded diagnostics before another mutation"
 	switch e.Code {
+	case "input_failed", "build_failed", "test_failed", "test_timeout", "driver_failed", "driver_protocol_error":
+		e.Category, e.Retry, e.NextAction = "execution", "after_change", "Inspect the driver result and retained evidence; correct the reported cause before a fresh execution"
 	case "executor_unavailable", "executor_identity", "executor_setup", "executor_persistence", "resource_release_unconfirmed", "client_identity", "resources_blocked", "evidence_blocked":
 		e.Category, e.Retry, e.NextAction = "execution", "reconcile", "Inspect the recorded cause and required actor, then recover the existing job"
 	case "invalid_argument":

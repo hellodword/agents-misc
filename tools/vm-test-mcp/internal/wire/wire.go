@@ -17,12 +17,14 @@ import (
 	"time"
 )
 
-const Version = "0.14.0"
+const Version = "0.15.0"
 const MaxJSON = 1 << 20
 
 // NixExecution reports worker execution independently of scheduler and daemon
 // cleanup. Process results describe the local Nix client, not a QEMU exit.
 type NixExecution struct {
+	Test             *NixTestResult    `json:"test,omitempty"`
+	Collection       CollectionStatus  `json:"collection"`
 	Resources        NixResources      `json:"resources"`
 	Evidence         NixEvidence       `json:"evidence"`
 	Imported         bool              `json:"imported"`
@@ -31,6 +33,16 @@ type NixExecution struct {
 	Error            *Error            `json:"error,omitempty"`
 	PersistenceError *Error            `json:"persistence_error,omitempty"`
 	Finished         *time.Time        `json:"finished,omitempty"`
+}
+
+type NixTestResult struct {
+	Version    int              `json:"version"`
+	RunID      string           `json:"test_run_id"`
+	Phase      string           `json:"phase"`
+	Started    *bool            `json:"test_started"`
+	Outcome    string           `json:"outcome"`
+	Collection CollectionStatus `json:"collection"`
+	Updated    *time.Time       `json:"updated,omitempty"`
 }
 
 // NixResources is a durable observation of a sealed executor session. A client

@@ -18,6 +18,7 @@ type Backends struct {
 
 func (b *Backends) Nix(ctx context.Context, action string, t *Task) (json.RawMessage, error) {
 	req := &nixos.Request{ManifestDigest: t.nix().ManifestDigest, ID: t.ID, InstanceID: t.nix().WorkerInstance, CacheID: t.nix().CacheID, Derivation: t.nix().Derivation, System: t.nix().System, TimeoutSeconds: t.TimeoutSeconds, Deadline: t.Deadline}
+	req.RunID = t.nix().RunID
 
 	return b.NixBackend.Call(ctx, action, req)
 }
@@ -42,7 +43,9 @@ func (b *Backends) Available(ctx context.Context, kind string) (string, error) {
 			return "worker_unavailable", e
 		}
 		identity := backendIdentity{State: "observed", Observed: time.Now().UTC(), Build: v.Build, InstanceID: v.InstanceID}
-		identity.Executor = v.Executor
+		if v.Executor != nil {
+			identity.Executor = &executorIdentity{Build: v.Executor.Build, InstanceID: v.Executor.InstanceID, Ready: v.Executor.Ready, ActiveSessions: len(v.Executor.Active), StopGrace: v.Executor.StopGrace, ReleaseTimeout: v.Executor.ReleaseTimeout}
+		}
 		if v.Build == nil {
 			identity.State = "build_unavailable"
 		}
@@ -88,10 +91,14 @@ func (b *Backends) EvidenceUsage(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	var v struct {
-		EvidenceBytes *int64 `json:"evidence_bytes"`
+		EvidenceBytes *int64      `json:"evidence_bytes"`
+		ExecutorError *wire.Error `json:"executor_error"`
 	}
 	if err = json.Unmarshal(raw, &v); err != nil {
 		return 0, err
+	}
+	if v.ExecutorError != nil {
+		return 0, v.ExecutorError
 	}
 	if v.EvidenceBytes == nil {
 		return 0, wire.Fail("worker_protocol_error", "Worker did not report retained evidence usage")

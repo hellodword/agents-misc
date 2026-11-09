@@ -8,12 +8,15 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
 type Request struct {
+	ArtifactID     string     `json:"artifact_id,omitempty"`
+	Cursor         int        `json:"cursor,omitempty"`
 	WorkerInstance string     `json:"worker_instance,omitempty"`
 	TaskID         string     `json:"task_id,omitempty"`
 	SessionID      string     `json:"session_id,omitempty"`
@@ -22,23 +25,26 @@ type Request struct {
 }
 
 type Session struct {
-	DaemonError      *wire.Error       `json:"daemon_error,omitempty"`
-	ID               string            `json:"id"`
-	ExecutorInstance string            `json:"executor_instance"`
-	WorkerInstance   string            `json:"worker_instance"`
-	TaskID           string            `json:"task_id"`
-	Store            string            `json:"store"`
-	BootID           string            `json:"boot_id"`
-	Invocation       string            `json:"invocation"`
-	Group            string            `json:"group"`
-	GroupInode       uint64            `json:"group_inode"`
-	Created          time.Time         `json:"created"`
-	Deadline         time.Time         `json:"deadline"`
-	Stopping         *time.Time        `json:"stopping,omitempty"`
-	Resources        wire.NixResources `json:"resources"`
+	ArtifactsReleased bool              `json:"artifacts_released"`
+	DaemonError       *wire.Error       `json:"daemon_error,omitempty"`
+	ID                string            `json:"id"`
+	ExecutorInstance  string            `json:"executor_instance"`
+	WorkerInstance    string            `json:"worker_instance"`
+	TaskID            string            `json:"task_id"`
+	Store             string            `json:"store"`
+	BootID            string            `json:"boot_id"`
+	Invocation        string            `json:"invocation"`
+	Group             string            `json:"group"`
+	GroupInode        uint64            `json:"group_inode"`
+	Created           time.Time         `json:"created"`
+	Deadline          time.Time         `json:"deadline"`
+	Stopping          *time.Time        `json:"stopping,omitempty"`
+	Resources         wire.NixResources `json:"resources"`
 }
 
 type Description struct {
+	EvidenceBytes  int64              `json:"evidence_bytes"`
+	EvidenceError  *wire.Error        `json:"evidence_error,omitempty"`
 	Build          wire.BuildIdentity `json:"build"`
 	InstanceID     string             `json:"instance_id"`
 	Ready          bool               `json:"ready"`
@@ -49,6 +55,19 @@ type Description struct {
 
 type Caller interface {
 	Call(context.Context, string, Request, any) error
+}
+
+type Artifact struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+}
+type ArtifactPage struct {
+	Files      []Artifact `json:"files"`
+	NextCursor int        `json:"next_cursor,omitempty"`
+}
+type ArtifactReader interface {
+	ReadArtifact(context.Context, Request) (io.ReadCloser, error)
 }
 
 type Client struct{ http *http.Client }
@@ -89,6 +108,23 @@ func (c *Client) Call(ctx context.Context, method string, params Request, result
 		return body.Error
 	}
 	return wire.Decode(data, result)
+}
+
+func (c *Client) ReadArtifact(ctx context.Context, a Request) (io.ReadCloser, error) {
+	query := url.Values{"worker_instance": {a.WorkerInstance}, "task_id": {a.TaskID}, "session_id": {a.SessionID}, "artifact_id": {a.ArtifactID}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://executor/evidence?"+query.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	response, err := c.http.Do(req)
+	if err != nil {
+		return nil, unavailable("evidence_read")
+	}
+	if response.StatusCode != http.StatusOK {
+		response.Body.Close()
+		return nil, unavailable("evidence_read")
+	}
+	return response.Body, nil
 }
 
 func unavailable(method string) error {

@@ -33,6 +33,7 @@ import (
 )
 
 type Request struct {
+	RunID          string     `json:"test_run_id,omitempty"`
 	UploadID       string     `json:"upload_id,omitempty"`
 	InstanceID     string     `json:"instance_id,omitempty"`
 	ManifestDigest string     `json:"manifest_digest,omitempty"`
@@ -92,6 +93,12 @@ func New(c config.Worker) (*Worker, error) {
 	return newWorker(c, nixexecutor.NewClient(c.ExecutorSocket))
 }
 func newWorker(c config.Worker, executor nixexecutor.Caller) (*Worker, error) {
+	if c.EvidenceTimeout == 0 {
+		c.EvidenceTimeout = config.Duration(5 * time.Minute)
+	}
+	if c.MaxEvidenceBytes == 0 {
+		c.MaxEvidenceBytes = 40 << 30
+	}
 	root, e := safefs.Private(c.Directory(), true)
 	if e != nil {
 		return nil, e
@@ -210,6 +217,7 @@ func (w *Worker) Call(method string, a Request) (any, error) {
 	case "describe":
 		allowed = Request{}
 	case "start":
+		allowed.RunID = a.RunID
 		allowed.UploadID = a.UploadID
 		allowed.Derivation, allowed.System, allowed.Cache, allowed.TimeoutSeconds = a.Derivation, a.System, a.Cache, a.TimeoutSeconds
 	case "extend":
@@ -237,6 +245,12 @@ func (w *Worker) Call(method string, a Request) (any, error) {
 		w.mu.Lock()
 		if err != nil {
 			return nil, err
+		}
+		if executorErr == nil {
+			used += executor.EvidenceBytes
+			if executor.EvidenceError != nil {
+				return nil, executor.EvidenceError
+			}
 		}
 		v := map[string]any{"version": wire.Version, "build": wire.Identity(), "busy": w.active != "" || len(executor.Active) > 0, "active_task_id": w.active, "instance_id": w.db.InstanceID, "evidence_bytes": used, "executor": executor}
 		if executorErr != nil {
@@ -273,7 +287,7 @@ func (w *Worker) Call(method string, a Request) (any, error) {
 		} else if runtime.GOARCH == "arm64" {
 			system = "aarch64-linux"
 		}
-		if !wire.IDPattern.MatchString(a.UploadID) || a.System != system || !wire.StorePattern.MatchString(a.Derivation) || !strings.HasSuffix(a.Derivation, ".drv") || a.TimeoutSeconds < 1 || a.TimeoutSeconds > 86400 {
+		if !wire.IDPattern.MatchString(a.RunID) || !wire.IDPattern.MatchString(a.UploadID) || a.System != system || !wire.StorePattern.MatchString(a.Derivation) || !strings.HasSuffix(a.Derivation, ".drv") || a.TimeoutSeconds < 1 || a.TimeoutSeconds > 86400 {
 			return nil, wire.Fail("invalid_argument", "Invalid Nix request")
 		}
 		u, e := url.Parse(a.Cache)
@@ -552,9 +566,7 @@ func (w *Worker) run(ctx context.Context, j *Job) {
 	}
 	out := &strings.Builder{}
 	build := w.command(ctx, "build", "--store", w.store(j), "--builders", "", "--option", "sandbox", "true", "--option", "sandbox-fallback", "false", "--option", "always-allow-substitutes", "false", "--out-link", filepath.Join(w.root.Path, task, "result"), "--json", "--timeout", strconv.Itoa(86400), "-L", j.Request.Derivation+"^*")
-	if w.cfg.KeepFailed {
-		build.Args = append(build.Args, "--keep-failed")
-	}
+	build.Args = append(build.Args, "--keep-failed")
 	build.Stdout = &capped{w: out, max: 4 << 20}
 	build.Stderr = logs
 	e = w.runClient(j, build)
@@ -658,13 +670,15 @@ func derivationPolicy(b []byte, a Request) error {
 	v, ok := all[key]
 	features := strings.Fields(v.Env["requiredSystemFeatures"])
 	noChroot := v.Env["__noChroot"] != "" && v.Env["__noChroot"] != "0"
-	binding := v.Env["vmTestUploadID"]
+	binding := v.Env["vmTestRunID"]
+	adapterVersion := v.Env["vmTestAdapterVersion"]
 	substitute, declared := v.Env["allowSubstitutes"]
 	noSubstitute := declared && substitute == ""
 	if raw := v.Env["__json"]; raw != "" {
 		var attrs struct {
 			NoChroot         bool     `json:"__noChroot"`
-			UploadID         string   `json:"vmTestUploadID"`
+			RunID            string   `json:"vmTestRunID"`
+			AdapterVersion   string   `json:"vmTestAdapterVersion"`
 			AllowSubstitutes *bool    `json:"allowSubstitutes"`
 			Features         []string `json:"requiredSystemFeatures"`
 		}
@@ -672,11 +686,12 @@ func derivationPolicy(b []byte, a Request) error {
 			return e
 		}
 		noChroot = noChroot || attrs.NoChroot
-		binding = attrs.UploadID
+		binding = attrs.RunID
+		adapterVersion = attrs.AdapterVersion
 		noSubstitute = attrs.AllowSubstitutes != nil && !*attrs.AllowSubstitutes
 		features = append(features, attrs.Features...)
 	}
-	if !ok || binding != a.UploadID || !wire.IDPattern.MatchString(binding) || !noSubstitute || v.System != a.System || noChroot || !slices.Contains(features, "kvm") {
+	if !ok || binding != a.RunID || adapterVersion != "1" || !wire.IDPattern.MatchString(binding) || !noSubstitute || v.System != a.System || noChroot || !slices.Contains(features, "kvm") {
 		return wire.Fail("policy_denied", "Expected a sandboxed KVM test derivation")
 	}
 	return nil
@@ -734,8 +749,13 @@ func (w *Worker) indexFilesContext(ctx context.Context, j *Job) error {
 			return e
 		}
 	}
+	var total int64
 	for i := range j.Files {
 		f := &j.Files[i]
+		if f.Size < 0 || f.Size > w.cfg.MaxEvidenceBytes-total {
+			return wire.Fail("quota_exceeded", "Retained evidence exceeds the worker budget")
+		}
+		total += f.Size
 		root, err := os.OpenRoot(f.Root)
 		if err != nil {
 			return err

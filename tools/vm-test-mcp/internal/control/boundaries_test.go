@@ -267,7 +267,7 @@ func TestDeadlineExtensionNetworkAndPurge(t *testing.T) {
 	waitFor(t, func() bool {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		return task.State == "timed_out" && task.Cleanup == "complete"
+		return task.State == "timed_out" && task.settled()
 	})
 	successful(t, s, "execution_delete", ExecutionChange{Change: Change{"purge"}, ExecutionID: lab.ID})
 	s.mu.Lock()
@@ -505,7 +505,7 @@ func TestPurgeRemovesPayloadFromReceipts(t *testing.T) {
 	a := StartRequest{NodeChange: NodeChange{Change: Change{"payload-command"}, NodeID: NodeID{TaskID: TaskID{lab.ID}, NodeID: lab.lab().Nodes[0].ID}}, Argv: []string{"app", marker}, Env: map[string]string{"SYNTHETIC": marker}}
 	successful(t, s, "command_start", a)
 	successful(t, s, "lab_finish", FinishRequest{TaskChange: TaskChange{Change: Change{"payload-finish"}, TaskID: TaskID{lab.ID}}, Conclusion: "inconclusive", Summary: "synthetic retention check"})
-	waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); v, _ := s.task(lab.ID); return v.Cleanup == "complete" })
+	waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); v, _ := s.task(lab.ID); return v.settled() })
 	successful(t, s, "execution_delete", ExecutionChange{Change: Change{"payload-purge"}, ExecutionID: lab.ID})
 	for _, kind := range []string{"task", "operation"} {
 		rows, e := s.db.List(context.Background(), kind)

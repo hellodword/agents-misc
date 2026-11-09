@@ -4,6 +4,7 @@
   nixpkgs,
 }:
 let
+  submit = import ./vm-test-submit.nix { inherit pkgs lib; };
   source = lib.fileset.toSource {
     root = ../tools/vm-test-mcp;
     fileset = lib.fileset.unions [
@@ -65,7 +66,7 @@ let
   };
   goBase = {
     pname = "vm-test-mcp";
-    version = "0.14.0";
+    version = "0.15.0";
     src = source;
     vendorHash = "sha256-utwEeEeOIhFTZl66lwO+ErGwa1gl+rkJL0qMAlUOx8k=";
     tags = [ "sqlite_omit_load_extension" ];
@@ -88,7 +89,6 @@ let
         "cmd/vm-test-mcp"
         "cmd/vm-test-nix-worker"
         "cmd/vm-test-nix-executor"
-        "cmd/vm-test-submit"
         "cmd/vm-test-guest"
         "cmd/vm-test-router-helper"
       ];
@@ -107,6 +107,8 @@ let
         mkdir -p $out/share/vm-test-mcp/guest $out/share/licenses/vm-test-mcp
         cp vm-test-guest-windows-amd64.exe vm-test-guest-linux-amd64 $out/share/vm-test-mcp/guest/
         cp ${../.agents/skills/nixos-vm-test/assets/vm-smoke.nix} $out/share/vm-test-mcp/vm-smoke.nix
+        ln -s ${submit}/bin/vm-test-submit $out/bin/vm-test-submit
+        ln -s ${submit}/share/licenses/vm-test-submit $out/share/licenses/vm-test-submit
         ln -s ${native}/bin/vbox-api-helper $out/bin/vbox-api-helper
         ln -s ${pkgs.xorriso}/bin/xorriso $out/bin/xorriso
         ln -s ${pkgs.xorriso.src} $out/share/licenses/vm-test-mcp/xorriso-source
@@ -137,7 +139,12 @@ let
   };
 in
 {
-  inherit package native router;
+  inherit
+    package
+    native
+    router
+    submit
+    ;
   all = pkgs.symlinkJoin {
     name = "vm-test-all-${package.version}";
     paths = [

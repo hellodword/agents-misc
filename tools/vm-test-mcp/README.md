@@ -1,4 +1,4 @@
-# VM Test MCP 0.14.0
+# VM Test MCP 0.15.0
 
 One Go module, one public MCP service, with separate VirtualBox and Nix domains
 for disposable Windows/Linux VirtualBox labs and strict NixOS sandbox
@@ -19,6 +19,7 @@ outside this design.
 
 ```sh
 nix build .#vm-test-mcp --out-link result-vm-test-mcp
+nix build .#vm-test-submit
 nix build .#vm-test-router
 ```
 
@@ -122,8 +123,8 @@ executor state for initial installation of this release; old schemas/configurati
 
 1. Prepare scripts and dependencies locally. Allocate file inputs with `upload_create`,
    PUT their immutable manifests and bytes, and wait for automatic `ready` state.
-   Call `service_get` for templates,
-   backend status and limits, and `lab_list` for compact active/queued summaries.
+   Call `service_get` for protocol capabilities, backend status and effective limits,
+   `template_list` for template pages, and `lab_list` for compact active/queued summaries.
 2. Call `lab_create` with a fresh `request_id`, a fixed list of named nodes and optional ready `upload_ids`.
    Select a deadline for one continuous test batch. Reusing a template creates
    independent clones with separate UUIDs, MACs and disks.
@@ -132,7 +133,8 @@ executor state for initial installation of this release; old schemas/configurati
    node IDs. Identical retries reuse the receipt; changed parameters conflict.
 4. Use `command_start` with guest argv (finite mode waits for completion; explicit
    service/interactive mode waits for start), `command_read` for output and `command_input`
-   for numbered stdin packets/EOF. A nonzero exit finishes only that command.
+   for numbered stdin packets/EOF. `expected_exit_codes` defaults to `[0]`. Unexpected
+   exits schedule diagnostics for the affected node; the caller supplies the lab conclusion.
 5. Deliver ready inputs through `guest_file_put`; reuse them across nodes in the
    same lab. Read fresh capabilities with `upload_get`. Collect files or guest tar
    archives with `guest_file_get`, and retrieve evidence through `evidence_get`.
@@ -239,20 +241,21 @@ Use `lab_diagnose(lab_id, node_ids?)` during preparation or execution. Omitting
 node IDs collects the whole lab, including its router. Available evidence is kept
 even if other collectors time out. `node_exec` executes a short absolute guest
 argv directly through Guest Control, independently of command-service readiness;
-its default budget is 10 seconds and maximum is 30 seconds. The receipt retains
-bounded stdout/stderr and an artifact. An unconfirmed result stays `uncertain`.
+its default budget is 10 seconds and maximum is 30 seconds. The receipt reports
+the expected-exit judgment, observed exit code or range, termination and evidence
+ID. The artifact retains bounded stdout/stderr. Unconfirmed termination stays `uncertain`.
 Use `command_start` for ordinary workloads and process-group supervision.
 
 Cleanup closes published entries immediately, limits evidence collection and
-records resource steps and retry counts. `lab_cleanup` retries remaining
-resources of an ended VirtualBox task. A `blocked` cleanup keeps the FIFO occupied;
+records resource steps and retry counts. `execution_recover(execution_id=…, scope="resources")` retries remaining
+resources of an ended task. A `blocked` cleanup keeps the FIFO occupied;
 inspect its resource errors before a new retry. Nix jobs expose `result`,
 `resources` and `evidence` independently. The executor seals the private endpoint,
 interrupts its daemons, uses `cgroup.kill` after the 30-second grace period, and
 confirms an empty group within a five-minute resource budget. The worker also
 confirms client exit. Resource release frees the execution slot while evidence
-indexing and verified handoff continue. `nix_job_recover(scope="resources"|"evidence")`
-recovers the original job without rebuilding it. Manual blockers return actionable
+indexing and verified handoff continue. `execution_recover(execution_id=…, scope="resources"|"evidence")`
+resumes the original execution’s release or evidence handoff. Manual blockers return actionable
 `attention` and leave automatic wait continuations.
 
 The annotated config groups deadlines under `tasks`, backend/router/network policy
@@ -263,78 +266,88 @@ effective probe, diagnosis and cleanup limits.
 
 ## NixOS submissions
 
-With the controller, worker and executor running, execute from the repository root in the development container:
+`packages.x86_64-linux.vm-test-submit` is an independent client package with its
+own source identity and checks. External flakes can select
+`inputs.vm-tests.packages.x86_64-linux.vm-test-submit`, or invoke it directly:
 
 ```sh
-just --justfile tools/vm-test-mcp/justfile nixos-test
+nix run github:hellodword/agents-misc#vm-test-submit -- \
+  --config /absolute/client.yaml --test '.#checks.x86_64-linux.integration'
 ```
 
-This authenticates with the shared config, evaluates the bundled smoke module using
-this project's locked nixpkgs, reserves an upload, evaluates its bound derivation, uploads the cache and submits a fresh job and
-waits for its result and cleanup. The smoke test starts three KVM nodes, each with
-2 vCPUs and 1024 MiB RAM, checks their CPU counts and pings between the nodes. It
-does not use VirtualBox or the router ISO. Host daemon sandbox policy still needs
-administrator verification.
-If VirtualBox or another Nix task is running, submission joins the FIFO queue and
-waits for that task's cleanup before execution.
+The [client configuration](client.example.yaml) contains `endpoint` and `token`.
+The tested project supplies its locked Nix environment. In this repository,
+`just --justfile tools/vm-test-mcp/justfile nixos-test` uses
+`tools/vm-test-mcp/client.yaml` and the bundled three-node KVM smoke module.
+The smoke module starts three nodes with 2 vCPUs and 1024 MiB RAM each and checks
+CPU counts and inter-node connectivity.
 
-Progress, task ID and live logs go to stderr; stdout is the final task JSON. Evidence
-and inputs stay on the server. The printed local workspace, by default
-`tmp/agent/vm-test-runs/ID`, retains `run.json`, per-upload `inputs/ID/submission.json`,
-`task.log` and `result.json` (including artifact metadata). The helper releases each
-local binary cache after the accepted job ID is persisted, including on resume.
-Uploading or uncertain acceptance retains the cache; an expired input confirmed
-unaccepted releases its cache before a fresh attempt. Local deletion failures are
-reported on stderr and retried on resume without changing the job result.
-An unsuccessful test or
-blocked resources or evidence exit 1; only `passed` with released resources and
-`evidence.state: complete` exits 0.
+Automatic submission allocates an input, evaluates and retains the test derivation,
+exports its closure, uploads missing objects, submits the job and observes its
+result. Progress summaries go to stderr; full preparation and task logs are files.
+Stdout contains one final JSON result. The local workspace defaults to
+`tmp/agent/vm-test-runs/ID` and retains `run.json`, `inputs/submission.json`,
+`inputs/prepare.log`, `task.log`, `result.json` and `evidence.json`.
+
+Registered evidence downloads by default, with size/SHA-256 verification and
+resumption of partial downloads. `--evidence manifest` retains the inventory for
+later retrieval. `result.json` separates the remote result from local `downloads`.
+A passed test with released resources, complete handoff and the requested local
+evidence mode exits 0. Execution, transport or evidence failures exit 1; invalid
+usage or client configuration exits 2.
 
 ```sh
-# Resume the original task, including after an interrupted/lost submission reply.
-just --justfile tools/vm-test-mcp/justfile nixos-test --work-dir /absolute/printed/workspace
-# Run an existing project test; preserve these arguments when resuming it.
-just --justfile tools/vm-test-mcp/justfile nixos-test --test '.#checks.x86_64-linux.integration'
-# Optional task deadline and administrator-approved cache signing key.
-just --justfile tools/vm-test-mcp/justfile nixos-test --timeout-seconds 3600 --signing-key /absolute/key
+vm-test-submit --config /absolute/client.yaml --work-dir /absolute/retained/workspace
+vm-test-submit --config /absolute/client.yaml --test '.#checks.x86_64-linux.integration' \
+  --timeout-seconds 3600 --evidence manifest
 ```
 
-Ctrl-C stops the submitting/observing client; an accepted remote task keeps its
-deadline. Resume using the same workspace, or use `nix_job_cancel(job_id=…)` through MCP. A new
-invocation without a workspace or request ID creates a new execution. `--project`
-selects the locked project for the bundled smoke module; `--config` selects the
-shared config. No bearer token or upload capability is written to `run.json`. The journal
-reconciles the original request before regenerating an expired unbound input;
-accepted jobs keep their identity across retries.
+The same workspace resumes its recorded request, evaluated derivation and accepted
+job even after checkout changes or an interrupted reply. An expired unaccepted
+upload gets a new reservation for that saved derivation. A fresh workspace and
+request produce a fresh test run. `--timeout-seconds` applies in both call forms;
+0 selects the server default. Ctrl-C stops local observation while the remote
+task keeps its deadline. Explicit `nix_job_cancel` ends the remote job.
 
-The packaged equivalent is `vm-test-submit --config /absolute/config.yaml`.
-Without `--config`, the helper retains its upload-only interface for MCP clients:
-
-Allocate a cache with `upload_create(kind="cache")`, then run inside the
-development container with the project's locked Nix environment:
+For submission through an MCP tool, allocate `upload_create(kind="cache")` and run:
 
 ```sh
 vm-test-submit --test '.#checks.x86_64-linux.integration' \
   --request-id integration-001 --upload-id UPLOAD_ID --upload-url UPLOAD_URL \
-  --work-dir /absolute/ignored/task-workspace
+  --work-dir /absolute/ignored/task-workspace --timeout-seconds 3600
 ```
 
-The helper checks QEMU nodes and `qemu.forceAccel`, creates a unique top-level
-derivation bound to the upload ID with substitution disabled, retains it for retries, copies the closure to a standard local binary
-cache and PUTs the manifest and objects. Submit stdout JSON (`request_id`, `upload_id`) to `nix_job_create`.
-In upload-only mode, retain `cache/` until the accepted job identity is recorded,
-then remove that directory; retain `submission.json` and needed logs/results for review.
-Optional
-`--signing-key /absolute/private/key` signs content under the administrator's trust
-policy; signature checking stays enabled. Build outputs have worker-owned GC roots
-and are exported only as ordinary files under registered output roots. Verified durable handoff releases worker copies
-and roots; the host Nix store has its own GC policy.
+Stdout is the public argument object for `nix_job_create`: `request_id`, `upload_id`
+and an explicitly supplied `timeout_seconds`. The manifest binds the derivation,
+system and test run identity. Keep the workspace’s `derivation` GC-root link until
+the accepted job ID is recorded, then remove that link. Automatic mode performs
+this release after journaling acceptance. Keep metadata and useful logs for review.
 
-An interrupted build retains scheduler occupancy until the executor and worker
-confirm resource release. Evidence attempts have a separate five-minute budget,
-with up to three attempts for transient failures and 1s/5s retry delays. Pending or
-blocked evidence remains protected from deletion and retention reclamation. See
-[recovery](preparation.md#recovery) for resource identity and handoff recovery.
+The shared local export cache defaults to the user cache directory with a 16 GiB
+retained budget; `--cache-dir` and `--cache-bytes` select its location and budget.
+Unchanged object digests and dependency exports are reused. The client queries the
+missing-object inventory and uploads at most four objects concurrently. Cache
+reclamation preserves the current upload. The server shares immutable input
+objects across uploads and backends and reserves physical bytes once per digest.
+
+The driver adapter uses the consuming project’s locked framework, node definitions,
+script checks and dependencies. Its fresh top-level derivation disables substitution.
+`driver-result.json` records initialization, script outcome and global timeout;
+`driver-diagnostics.json`, original output, logs and available final screenshots
+record collection quality. Diagnostics share 30 seconds across nodes before release.
+Nix client exits remain process observations. `execution.test` supplies the driver
+outcome. Failure before the build phase records `test_started: false`; an unavailable
+driver receipt records `test_started: null` and an unconfirmed test outcome.
+
+The executor retains each job’s build directory with `keep-failed`, seals it after
+its cgroup is empty, and exposes task-bound ordinary-file evidence. The worker
+indexes successful outputs and retained failed evidence. Each handoff attempt has
+a five-minute budget. Controller size/hash verification and durable publication
+precede acknowledgement; acknowledgement releases temporary build directories,
+worker copies and output GC roots. The host Nix store keeps its own GC policy.
+`resources`, `collection`, `evidence` and local `downloads` are independent states.
+Use `execution_recover` on the original execution for resource or handoff recovery.
+See [recovery](preparation.md#recovery) for host ownership and recovery procedures.
 
 ## Development and verification
 
@@ -349,6 +362,9 @@ nix flake check --no-build --no-write-lock-file
 The default tests inject synthetic virtualization adapters and use local HTTP/Unix
 sockets. They run Go vet, the race detector and supervisor cross compilation.
 SQLite extension loading is compiled out with `sqlite_omit_load_extension`.
+The standalone client package evaluates its generated observer through Nix and
+runs the locked NixOS driver through success, assertion failure, initialization
+failure and global timeout.
 SDK ABI tests load a synthetic C API library. Router builds inspect EFI boot content, squashfs, initialization units and bundled tools. The reproducible Codex transport check uses actual 0.163.0 and 0.165.0 binaries:
 
 ```sh

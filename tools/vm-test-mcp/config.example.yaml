@@ -1,4 +1,4 @@
-# VM Test MCP 0.14：controller、Nix worker 和 root executor 共用此文件。
+# VM Test MCP 0.15：controller、Nix worker 和 root executor 共用此文件。
 # 新契约只接受空 state / 新数据库；旧服务与资源必须先由用户停止、清理。
 # Codex CLI >=0.163.0，MCP tool_timeout_sec=660；服务等待窗口 600s，SSE 心跳 15s。
 # 三个程序均使用 --config /绝对路径/config.yaml；配置文件不要求特定权限。
@@ -169,8 +169,6 @@ service:
 
 # 可选。控制服务和 worker 从同一文件读取此块；worker 不在线时存储占用未知，暂停新提交和排队启动；现有控制、诊断和清理继续可用。
 # nix:
-#   # 默认 false；管理员诊断选项，启用后自行负责失败构建目录的清理。
-#   keep_failed: false
 #   # 控制服务可省略或设 "" 来关闭 Nix 后端；启动 worker 时必填绝对路径。
 #   # 同账户运行时可放在 worker 状态目录内；分账户时使用共享组目录，参见 preparation.md。
 #   socket: /home/vm-owner/.local/state/vm-test-mcp/nix-worker/worker.sock

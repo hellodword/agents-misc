@@ -51,8 +51,13 @@ func compactResult(name string, result any) any {
 		out = &struct {
 			ID                   string `json:"evidence_id"`
 			State                string `json:"state"`
+			Outcome              string `json:"outcome"`
+			ExpectedExitCodes    []int  `json:"expected_exit_codes"`
+			Termination          string `json:"termination"`
 			TerminationConfirmed bool   `json:"termination_confirmed"`
+			TimedOut             bool   `json:"timed_out"`
 			ExitCode             *int   `json:"exit_code,omitempty"`
+			ExitCodeMinimum      *int   `json:"exit_code_min,omitempty"`
 		}{}
 	case "command_input":
 		out = &struct {

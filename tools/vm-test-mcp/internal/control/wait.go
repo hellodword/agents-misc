@@ -75,6 +75,10 @@ func (s *Server) targetLocked(target WaitTarget, business bool) (TargetState, er
 		s.queueView(t, out.Summary.(map[string]any))
 		out.Revision = s.revision(key, taskCondition(t))
 		out.Attention = t.cleanupState() == "blocked" || t.Failure != nil || t.Terminal() && t.Conclusion != "passed" || t.Kind == "lab" && t.lab().Network == "degraded"
+		if t.Kind == "lab" {
+			out.Manual = t.labEvidenceState() == "blocked"
+			out.Attention = out.Attention || out.Manual
+		}
 		if t.Kind == "nixos" {
 			out.Manual = t.nixResources().State == "blocked" || t.nix().Evidence.State == "blocked"
 			out.Attention = out.Attention || out.Manual
@@ -90,6 +94,9 @@ func (s *Server) targetLocked(target WaitTarget, business bool) (TargetState, er
 		case "ready":
 			out.Satisfied = t.State == "running"
 		case "complete", "cleaned":
+			if business && t.Terminal() {
+				out.Attention = out.Manual || t.cleanupState() == "blocked"
+			}
 			if t.Kind == "nixos" {
 				if target.Condition == "cleaned" {
 					return out, wire.Fail("invalid_argument", "Nix jobs use resources_released, evidence_complete or complete")
@@ -101,16 +108,20 @@ func (s *Server) targetLocked(target WaitTarget, business bool) (TargetState, er
 				out.Attention = t.cleanupState() == "blocked"
 			}
 			out.Satisfied = t.Terminal() && t.Cleanup == "complete"
-		case "resources_released", "evidence_complete":
-			if t.Kind != "nixos" {
-				return out, wire.Fail("invalid_argument", "This condition requires a Nix job")
+			if target.Condition == "complete" {
+				out.Satisfied = t.settled()
 			}
+		case "resources_released", "evidence_complete":
 			out.Satisfied = t.Terminal() && t.Cleanup == "complete"
-			out.Attention = t.nixResources().State == "blocked"
+			out.Attention = t.cleanupState() == "blocked"
 			out.Manual = out.Attention
 			if target.Condition == "evidence_complete" {
-				out.Satisfied = out.Satisfied && t.nix().Evidence.State == "complete"
-				out.Manual = out.Manual || t.nix().Evidence.State == "blocked"
+				state := t.labEvidenceState()
+				if t.Kind == "nixos" {
+					state = t.nix().Evidence.State
+				}
+				out.Satisfied = t.Terminal() && state == "complete"
+				out.Manual = state == "blocked"
 				out.Attention = out.Manual
 			}
 		case "changed":
@@ -150,7 +161,7 @@ func (s *Server) targetLocked(target WaitTarget, business bool) (TargetState, er
 		c := command
 		out.Summary = c.publicStatus()
 		out.Revision = s.revision(key, commandCondition(c))
-		out.Attention = c.State == "uncertain" || c.State == "failed" || c.State == "cancelled" || c.State == "timed_out" || c.Observation.State == "unavailable" || c.Retained.Stdout.State == "incomplete" || c.Retained.Stderr.State == "incomplete" || c.ExitCode != nil && *c.ExitCode != 0
+		out.Attention = c.State == "uncertain" || c.State == "failed" || c.State == "cancelled" || c.State == "timed_out" || c.Observation.State == "unavailable" || c.Retained.Stdout.State == "incomplete" || c.Retained.Stderr.State == "incomplete" || diagnosticOutcome(c.outcome())
 		if business && c.Final && !oneOf(c.State, "failed", "uncertain") {
 			out.Attention = c.Observation.State == "unavailable" || c.Retained.Stdout.State == "incomplete" || c.Retained.Stderr.State == "incomplete"
 		}
@@ -331,13 +342,27 @@ func (s *Server) Call(ctx context.Context, name string, raw []byte) (any, error)
 			target = WaitTarget{Kind: "lab", ID: op.TaskID, Condition: "ready"}
 		case "nix_job_create":
 			target = WaitTarget{Kind: "nix_job", ID: op.TaskID, Condition: "complete"}
+		case "execution_recover":
+			s.mu.Lock()
+			execution, err := s.task(op.TaskID)
+			kind := "lab"
+			if err == nil && execution.Kind == "nixos" {
+				kind = "nix_job"
+			}
+			s.mu.Unlock()
+			target = WaitTarget{Kind: kind, ID: op.TaskID, Condition: "resources_released"}
+			if args.Scope == "evidence" {
+				target.Condition = "evidence_complete"
+			}
 		case "nix_job_cancel", "nix_job_recover":
 			target = WaitTarget{Kind: "nix_job", ID: op.TaskID, Condition: "resources_released"}
 			if args.Scope == "evidence" {
 				target.Condition = "evidence_complete"
 			}
-		case "lab_finish", "lab_cancel", "lab_cleanup":
-			target = WaitTarget{Kind: "lab", ID: op.TaskID, Condition: "cleaned"}
+		case "lab_finish", "lab_cancel":
+			target = WaitTarget{Kind: "lab", ID: op.TaskID, Condition: "complete"}
+		case "lab_cleanup":
+			target = WaitTarget{Kind: "lab", ID: op.TaskID, Condition: "resources_released"}
 		case "command_input":
 			target = WaitTarget{Kind: "command", ID: args.CommandID, Condition: "input_delivered", Sequence: &args.Sequence}
 		case "command_start", "command_cancel":

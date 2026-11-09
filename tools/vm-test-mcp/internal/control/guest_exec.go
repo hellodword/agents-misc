@@ -45,7 +45,7 @@ func execView(result hostexec.Result, err error) map[string]any {
 			}
 		}
 	}
-	return map[string]any{"state": state, "stdout": base64.StdEncoding.EncodeToString(result.Stdout), "stderr": base64.StdEncoding.EncodeToString(result.Stderr), "stdout_truncated": result.StdoutTruncated, "stderr_truncated": result.StderrTruncated, "backend_exit_code": result.ExitCode, "exit_code": exitCode, "exit_code_min": exitMinimum, "termination": termination, "termination_confirmed": state == "completed", "error": failure}
+	return map[string]any{"state": state, "stdout": base64.StdEncoding.EncodeToString(result.Stdout), "stderr": base64.StdEncoding.EncodeToString(result.Stderr), "stdout_truncated": result.StdoutTruncated, "stderr_truncated": result.StderrTruncated, "backend_exit_code": result.ExitCode, "exit_code": exitCode, "exit_code_min": exitMinimum, "termination": termination, "termination_confirmed": state == "completed", "timed_out": result.TimedOut || result.ExitCode == 20, "error": failure}
 }
 
 func (b *VBoxBackend) guestCommand(ctx context.Context, t *Task, n *Node, argv []string, cwd string, env map[string]string) (hostexec.Result, error) {

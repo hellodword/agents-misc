@@ -54,6 +54,7 @@ type Node struct {
 	CleanupSteps  map[string]*CleanupStep `json:"cleanup_steps,omitempty"`
 }
 type Command struct {
+	ExpectedExitCodes []int `json:"expected_exit_codes"`
 	VersionState
 	ID     string `json:"id"`
 	NodeID string `json:"node_id"`
@@ -151,11 +152,7 @@ type Task struct {
 }
 
 // Hold explains an explicit extension; it is not an idle-detection lease.
-type Hold struct {
-	Reason  string    `json:"reason"`
-	Updated time.Time `json:"updated"`
-	Until   time.Time `json:"until"`
-}
+type Hold = wire.ExecutionHold
 
 // Execution adapters need resource identity and status, not artifact history.
 // Command payloads live in immutable files and are loaded by explicit detail reads.
@@ -187,18 +184,20 @@ func (n *Node) resourceState(ended bool) string {
 
 func (c *Command) publicStatus() any {
 	return struct {
-		ID             string           `json:"id"`
-		NodeID         string           `json:"node_id"`
-		Created        time.Time        `json:"created"`
-		Observation    Observation      `json:"observation"`
-		Cancellation   string           `json:"cancellation,omitempty"`
-		Release        *CommandRelease  `json:"release,omitempty"`
-		StatusDeadline *time.Time       `json:"status_deadline,omitempty"`
-		Retained       RetainedOutput   `json:"retained_output"`
-		Schedule       PollSchedule     `json:"polling"`
-		Stdin          state.InputQueue `json:"stdin"`
+		ExpectedExitCodes []int            `json:"expected_exit_codes"`
+		Outcome           string           `json:"outcome"`
+		ID                string           `json:"id"`
+		NodeID            string           `json:"node_id"`
+		Created           time.Time        `json:"created"`
+		Observation       Observation      `json:"observation"`
+		Cancellation      string           `json:"cancellation,omitempty"`
+		Release           *CommandRelease  `json:"release,omitempty"`
+		StatusDeadline    *time.Time       `json:"status_deadline,omitempty"`
+		Retained          RetainedOutput   `json:"retained_output"`
+		Schedule          PollSchedule     `json:"polling"`
+		Stdin             state.InputQueue `json:"stdin"`
 		wire.CommandStatus
-	}{c.ID, c.NodeID, c.Created, c.Observation, c.Cancellation, c.Release, c.StatusDeadline, c.Retained, c.Schedule, c.Stdin, c.CommandStatus}
+	}{expectedExitCodes(c.ExpectedExitCodes), c.outcome(), c.ID, c.NodeID, c.Created, c.Observation, c.Cancellation, c.Release, c.StatusDeadline, c.Retained, c.Schedule, c.Stdin, c.CommandStatus}
 }
 
 func (t *Task) activity() map[string]int {
@@ -237,28 +236,45 @@ func (t *Task) summaryView() map[string]any {
 			}
 		}
 	}
-	v := map[string]any{
-		"id": t.ID, "kind": t.Kind, "phase": t.phase(), "created": t.Created,
-		"started": t.Started, "deadline": t.Deadline, "ended": t.Ended,
-		"cleanup":  map[string]any{"state": t.cleanupState(), "resources": resources},
-		"activity": t.activity(), "purged": t.Purged, "hold": t.Hold,
-		"result": nil, "revision": t.Revision,
+	view := wire.ExecutionView{
+		ID: t.ID, Kind: t.Kind, Phase: t.phase(), Created: t.Created, Started: t.Started, Deadline: t.Deadline, Ended: t.Ended,
+		TimeoutSeconds: t.TimeoutSeconds, Revision: t.Revision, Result: t.result(), Activity: t.activity(), Purged: t.Purged, Hold: t.Hold,
 	}
 	if t.Kind == "nixos" {
-		delete(v, "cleanup")
-		var execution *wire.NixExecution
 		if observed := t.nix().NixExecution; observed != nil {
 			current := *observed
 			current.Resources, current.Evidence = t.nixResources(), t.nix().Evidence
-			execution = &current
+			view.Execution = &current
+			view.Collection = current.Collection
 		}
-		v["execution"] = execution
-		v["resources"] = t.nixResources()
-		v["evidence"] = t.nix().Evidence
+		r, e := t.nixResources(), t.nix().Evidence
+		view.Resources, view.Evidence = &r, &e
+	} else {
+		view.Cleanup = &wire.CleanupSummary{State: t.cleanupState(), Resources: resources}
+		state := "owned"
+		if t.State == "queued" {
+			state = "unallocated"
+		}
+		if t.Cleanup == "running" {
+			state = "releasing"
+		} else if t.Cleanup == "required" {
+			state = "blocked"
+		} else if t.Cleanup == "complete" {
+			state = "released"
+		}
+		view.Resources = &wire.NixResources{State: state}
+		evidence := t.lab().Evidence
+		if evidence.State == "" {
+			evidence.State = "complete"
+		}
+		view.Evidence = &evidence
+		view.Collection = t.lab().Collection
+		if view.Collection.State == "" {
+			view.Collection.State = "idle"
+		}
 	}
-	if t.Terminal() {
-		v["result"] = map[string]any{"termination": t.State, "conclusion": t.Conclusion, "reason": t.Reason}
-	}
+	v := map[string]any{}
+	decodeMap(view, v)
 	return v
 }
 
@@ -294,11 +310,11 @@ func (t *Task) phase() string {
 	}
 	return t.State
 }
-func (t *Task) result() any {
+func (t *Task) result() *wire.ExecutionResult {
 	if !t.Terminal() {
 		return nil
 	}
-	return map[string]any{"conclusion": t.Conclusion, "summary": t.Summary, "reason": t.Reason, "termination": t.State, "error": t.Failure}
+	return &wire.ExecutionResult{Conclusion: t.Conclusion, Summary: t.Summary, Reason: t.Reason, Termination: t.State, Error: t.Failure}
 }
 func (t *Task) cleanupState() string {
 	if t.Cleanup == "required" {
@@ -377,6 +393,7 @@ type Operation struct {
 	Error          *wire.Error `json:"error,omitempty"`
 }
 type Transfer struct {
+	RunID string `json:"test_run_id,omitempty"`
 	VersionState
 	ManifestDigest string `json:"manifest_digest,omitempty"`
 	ReservedBytes  int64  `json:"reserved_bytes"`
@@ -394,6 +411,7 @@ type Transfer struct {
 }
 type Object = state.TransferObject
 type Runtime struct {
+	diagnosticActive            bool
 	nixObserving, nixCollecting bool
 	nixNextObservation          time.Time
 	ctx                         context.Context
@@ -505,7 +523,7 @@ func (l *LabState) condition() any {
 			nodes = append(nodes, []any{n.ID, n.State, n.Preparation.Stage, n.Health.VirtualBox.State, n.Health.GuestControl.State, n.Health.Commands.State, n.Cleaned, n.CleanupSteps})
 		}
 	}
-	return []any{l.Network, nodes}
+	return []any{l.Network, nodes, l.Collection, l.Evidence}
 }
 func (j *NixJobState) condition() any { return []any{j.NixExecution, j.Evidence, j.HandoffComplete} }
 
@@ -519,5 +537,21 @@ func (t *Task) nixResources() wire.NixResources {
 	return wire.NixResources{State: "owned"}
 }
 func (t *Task) settled() bool {
-	return t.Terminal() && t.Cleanup == "complete" && (t.Kind == "lab" || t.nix().Evidence.State == "complete")
+	if !t.Terminal() || t.Cleanup != "complete" {
+		return false
+	}
+	if t.Kind == "lab" {
+		return oneOf(t.lab().Evidence.State, "", "complete")
+	}
+	return t.nix().Evidence.State == "complete"
+}
+
+func (t *Task) labEvidenceState() string {
+	if t.Kind != "lab" {
+		return "pending"
+	}
+	if t.lab().Evidence.State == "" {
+		return "complete"
+	}
+	return t.lab().Evidence.State
 }

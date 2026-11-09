@@ -120,6 +120,7 @@ type faultBackend struct {
 	deletionAttempts map[string]int
 	uncertainExec    bool
 	status           *NodeStatus
+	diagnosticCalls  map[string]int
 }
 
 func (f *faultBackend) Delete(ctx context.Context, task *Task, node *Node) error {
@@ -137,6 +138,12 @@ func (f *faultBackend) Delete(ctx context.Context, task *Task, node *Node) error
 }
 func (f *faultBackend) Action(ctx context.Context, task *Task, node *Node, action NodeAction) (json.RawMessage, error) {
 	f.faultMu.Lock()
+	if action.Action == "vm_info" {
+		if f.diagnosticCalls == nil {
+			f.diagnosticCalls = map[string]int{}
+		}
+		f.diagnosticCalls[node.ID]++
+	}
 	hang, uncertain, status := f.hangDiagnostics, f.uncertainExec, clone(f.status)
 	f.faultMu.Unlock()
 	if hang && oneOf(action.Action, "vm_info", "diagnostics", "screenshot", "node_exec") {
@@ -194,10 +201,14 @@ func TestCleanupBudgetPartialProgressAndExplicitRetry(t *testing.T) {
 	if task.Cleanup != "required" || !task.lab().Nodes[1].Cleaned || !task.lab().Router.Cleaned || task.lab().Nodes[0].Cleaned || s.active != task.ID {
 		t.Fatal(task.Public())
 	}
+	waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return task.labEvidenceState() == "complete" })
 	if len(evidenceForTest(t, s, task.ID)) == 0 || task.lab().Nodes[0].CleanupSteps["delete"].Attempts != 3 {
 		t.Fatal("missing partial evidence or retry journal", task.Public())
 	}
 	ended := *task.Ended
+	f.faultMu.Lock()
+	captured := f.diagnosticCalls[task.lab().Nodes[0].ID]
+	f.faultMu.Unlock()
 	f.faultMu.Lock()
 	f.failNode = ""
 	f.hangDiagnostics = false
@@ -213,6 +224,104 @@ func TestCleanupBudgetPartialProgressAndExplicitRetry(t *testing.T) {
 	}
 	if f.deletionAttempts[task.lab().Nodes[1].ID] != 1 {
 		t.Fatal("retried an already released resource")
+	}
+	if f.diagnosticCalls[task.lab().Nodes[0].ID] != captured {
+		t.Fatal("resource retry repeated the final diagnostic event")
+	}
+}
+
+func TestUnexpectedExitRetainsDiagnosticsAcrossPublicationFailureAndRestart(t *testing.T) {
+	f := &faultBackend{}
+	s, task, runtime := fixtureLab(t, f, 2*time.Second)
+	cfg := s.cfg
+	node := task.lab().Nodes[0].ID
+	if _, err := s.db.Exec(`CREATE TRIGGER synthetic_publication_failure BEFORE INSERT ON evidence WHEN json_extract(NEW.body,'$.name')='diagnostics.json' BEGIN SELECT RAISE(ABORT,'synthetic publication unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	op := successful(t, s, "command_start", StartRequest{NodeChange: NodeChange{Change: Change{"unexpected-exit"}, NodeID: NodeID{TaskID: TaskID{task.ID}, NodeID: node}}, Argv: []string{"cmd", "/c", "exit", "7"}, ExpectedExitCodes: []int{0, 2}})
+	id := op.Result.(map[string]any)["id"].(string)
+	f.mu.Lock()
+	f.commandState[id] = wire.CommandStatus{State: "exited", ExitCode: new(7), Final: true, Finished: new(time.Now().UTC())}
+	f.mu.Unlock()
+	s.pollCommand(task, runtime, id)
+	s.pollCommand(task, runtime, id)
+	waitFor(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return task.lab().Evidence.State == "blocked" && s.diagnosticPublishing == 0
+	})
+	s.mu.Lock()
+	command, err := task.Command(id)
+	if err != nil || command.outcome() != "unexpected_exit" || task.State != "running" || task.Conclusion != "" || task.lab().Evidence.Error == nil {
+		t.Fatal("command, lab conclusion and publication failure were conflated", err, task.Public())
+	}
+	s.mu.Unlock()
+	f.faultMu.Lock()
+	if f.diagnosticCalls[node] != 1 {
+		t.Fatal("repeated observations recaptured diagnostics", f.diagnosticCalls)
+	}
+	f.faultMu.Unlock()
+	successful(t, s, "lab_finish", FinishRequest{TaskChange: TaskChange{Change: Change{"finish-with-evidence"}, TaskID: TaskID{task.ID}}, Conclusion: "failed", Summary: "Observed exit 7"})
+	s.cleanup(task)
+	s.mu.Lock()
+	s.releaseScheduler(task)
+	s.mu.Unlock()
+	waitFor(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return task.Cleanup == "complete" && s.diagnosticPublishing == 0 && task.lab().Evidence.State == "blocked"
+	})
+	s.mu.Lock()
+	if s.active != "" {
+		t.Fatal("publication failure held the execution slot")
+	}
+	s.mu.Unlock()
+	f.faultMu.Lock()
+	captured := f.diagnosticCalls[node]
+	f.faultMu.Unlock()
+	if captured != 2 {
+		t.Fatal("expected one command event and one final event", captured)
+	}
+	if _, err := s.db.Exec("DROP TRIGGER synthetic_publication_failure"); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s, err = New(cfg, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.recoverExecution(task.ID, "evidence"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		current, err := s.task(task.ID)
+		return err == nil && current.settled()
+	})
+	f.faultMu.Lock()
+	if f.diagnosticCalls[node] != captured {
+		t.Fatal("publication recovery recaptured released VMs")
+	}
+	f.faultMu.Unlock()
+	var reports int
+	for _, artifact := range evidenceForTest(t, s, task.ID) {
+		file, err := s.root.Regular(artifact.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		size, digest, err := hashFile(file, artifact.Size)
+		file.Close()
+		if err != nil || size != artifact.Size || digest != artifact.SHA256 {
+			t.Fatal("published evidence differs from captured bytes", artifact.ID, err)
+		}
+		if artifact.Name == "diagnostics.json" {
+			reports++
+		}
+	}
+	if reports != 2 {
+		t.Fatal("durable diagnostic events were lost or duplicated", reports)
 	}
 }
 
@@ -234,6 +343,9 @@ func TestDiagnosticsAndDirectExecDuringPreparation(t *testing.T) {
 	result := op.Result.(map[string]any)
 	if result["termination_confirmed"] != false || result["stdout"] != nil || result["evidence_id"] == nil {
 		t.Fatal(result)
+	}
+	if result["outcome"] != "unconfirmed" || string(wire.JSON(result["expected_exit_codes"])) != "[0]" {
+		t.Fatal("direct command receipt lost its expected-exit judgment", result)
 	}
 	var output map[string]any
 	for _, a := range evidenceForTest(t, s, task.ID) {
@@ -467,7 +579,11 @@ func TestPreparingLabSupportsReadyPeerAndEndsAfterInitializationFailure(t *testi
 	}
 	s.mu.Unlock()
 	close(f.fail)
-	waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return task.Cleanup == "complete" && s.active == "" })
+	waitFor(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return task.Cleanup == "complete" && s.active == "" && task.labEvidenceState() == "complete"
+	})
 	s.mu.Lock()
 	if task.State != "failed" || task.Failure.Code != "initialization_failed" || len(evidenceForTest(t, s, task.ID)) == 0 {
 		t.Fatal(task.Public())

@@ -27,6 +27,7 @@ import (
 )
 
 type runtimeSession struct {
+	artifacts     sync.Mutex
 	killAttempted bool
 	session       *Session
 	group         *group
@@ -209,6 +210,9 @@ func (e *Executor) lookup(a Request) (*runtimeSession, error) {
 }
 
 func (e *Executor) Call(method string, a Request) (any, error) {
+	if oneOf(method, "evidence_list", "evidence_release") {
+		return e.artifactCall(method, a)
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if method == "describe" {
@@ -218,6 +222,13 @@ func (e *Executor) Call(method string, a Request) (any, error) {
 				v.Active = append(v.Active, cloneSession(r.session))
 			}
 		}
+		e.mu.Unlock()
+		used, err := e.retainedBuildBytes()
+		v.EvidenceBytes = used
+		if err != nil {
+			v.EvidenceError = wire.Safe(err)
+		}
+		e.mu.Lock()
 		return v, nil
 	}
 	if !wire.IDPattern.MatchString(a.WorkerInstance) || !wire.IDPattern.MatchString(a.TaskID) || a.SessionID != "" && !wire.IDPattern.MatchString(a.SessionID) {
@@ -229,6 +240,7 @@ func (e *Executor) Call(method string, a Request) (any, error) {
 		// A delayed create with the same durable identity returns this receipt.
 		now, id := time.Now().UTC(), wire.ID()
 		s := &Session{ID: id, ExecutorInstance: e.db.InstanceID, WorkerInstance: a.WorkerInstance, TaskID: a.TaskID, BootID: e.boot, Invocation: e.invocation, Created: now, Deadline: now, Stopping: &now, Resources: wire.NixResources{State: "released", Confirmation: "never_admitted", Reason: a.Reason, Observed: &now, SessionID: id, ExecutorInstance: e.db.InstanceID}}
+		s.ArtifactsReleased = true
 		if err := e.save(s); err != nil {
 			return nil, err
 		}
@@ -255,7 +267,11 @@ func (e *Executor) Call(method string, a Request) (any, error) {
 		}
 		r = &runtimeSession{session: s, children: map[*exec.Cmd]bool{}}
 		e.sessions[id] = r
-		if err = os.Mkdir(s.Group, 0755); err == nil {
+		err = e.root.MkdirAll(filepath.Join("builds", id), 0700)
+		if err == nil {
+			err = os.Mkdir(s.Group, 0755)
+		}
+		if err == nil {
 			r.group, err = openGroup(s.Group)
 		}
 		if err == nil {
@@ -350,6 +366,7 @@ func (e *Executor) accept(r *runtimeSession) {
 		if err == nil {
 			log := &daemonLog{}
 			c := exec.Command(e.cfg.Nix, "daemon", "--stdio", "--force-untrusted", "--store", "local", "--extra-experimental-features", "nix-command daemon-trust-override", "--option", "sandbox", "true", "--option", "sandbox-fallback", "false", "--option", "builders", "", "--option", "require-sigs", "true")
+			c.Args = append(c.Args, "--option", "build-dir", filepath.Join(e.root.Path, "builds", r.session.ID), "--option", "keep-failed", "true")
 			c.Env = []string{"HOME=/root", "USER=root", "PATH=" + filepath.Dir(e.cfg.Nix), "LC_ALL=C"}
 			c.Stdin, c.Stdout, c.Stderr = file, file, log
 			c.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: int(r.group.fd.Fd()), Setsid: true}
@@ -528,11 +545,11 @@ func (e *Executor) deadlines() {
 			}
 			if now.Sub(lastRetention) >= time.Minute {
 				for id, r := range e.sessions {
-					if r.session.Resources.Released() && !r.monitoring {
+					if r.session.Resources.Released() && r.session.ArtifactsReleased && !r.monitoring {
 						delete(e.sessions, id)
 					}
 				}
-				_, _ = e.db.Exec(`DELETE FROM executor_sessions WHERE id IN (SELECT id FROM executor_sessions WHERE state='released' AND json_extract(body,'$.resources.observed')<? LIMIT 128)`, now.Add(-30*24*time.Hour).UTC().Format(time.RFC3339Nano))
+				_, _ = e.db.Exec(`DELETE FROM executor_sessions WHERE id IN (SELECT id FROM executor_sessions WHERE state='released' AND json_extract(body,'$.artifacts_released')=1 AND json_extract(body,'$.resources.observed')<? LIMIT 128)`, now.Add(-30*24*time.Hour).UTC().Format(time.RFC3339Nano))
 				lastRetention = now
 			}
 			e.mu.Unlock()
@@ -607,6 +624,10 @@ func (e *Executor) HTTPServer() *http.Server {
 			uid, _ := r.Context().Value(peerKey{}).(int)
 			if uid != e.cfg.WorkerUID && uid != 0 {
 				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			if r.Method == http.MethodGet && r.URL.Path == "/evidence" {
+				e.serveArtifact(w, r)
 				return
 			}
 			if r.Method != http.MethodPost || r.URL.Path != "/call" {

@@ -145,6 +145,7 @@ func (s *Server) cleanup(t *Task) {
 		s.event(t, "cleanup_complete", "Task resources were released")
 	}
 	s.save(t)
+	s.diagnosticLifecycleLocked()
 }
 
 func deadline(ctx context.Context) time.Time { d, _ := ctx.Deadline(); return d }
@@ -171,7 +172,7 @@ func (s *Server) cleanupEvidence(ctx context.Context, t *Task, r *Runtime, snaps
 		s.pollCommandContext(cctx, t, c.ID, false)
 		stop()
 	}
-	_, _ = s.collectDiagnostics(ctx, t, snapshot, append(append([]*Node{}, snapshot.lab().Nodes...), snapshot.lab().Router))
+	s.collectFinalDiagnostics(ctx, t, snapshot, append(append([]*Node{}, snapshot.lab().Nodes...), snapshot.lab().Router))
 }
 
 func (s *Server) cleanupNodes(ctx context.Context, t, snapshot *Task) []error {

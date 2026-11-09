@@ -7,14 +7,15 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path"
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
@@ -28,10 +29,13 @@ type capability struct {
 }
 
 const uploadBudget = 5 * time.Minute
+const uploadConcurrency = 4
+const globalUploadConcurrency = 16
 
 type Upload struct {
-	cancel context.CancelFunc
-	done   chan struct{}
+	cancel  context.CancelFunc
+	done    chan struct{}
+	writers map[string]context.CancelFunc
 }
 type uploadReader struct {
 	ctx context.Context
@@ -140,9 +144,6 @@ func (s *Server) createTransfer(a TransferRequest, id string) (any, error) {
 	if err := s.admission(); err != nil {
 		return nil, err
 	}
-	if s.inputUsage() >= s.cfg.Storage.InputBytes {
-		return nil, wire.Fail("quota_exceeded", "Input staging budget is full")
-	}
 	t := &Transfer{ID: id, Kind: a.Kind, State: "open", Created: time.Now().UTC(), Updated: time.Now().UTC(), Objects: map[string]Object{}}
 	if e := s.root.MkdirAll(path.Join("transfers", t.ID), 0700); e != nil {
 		return nil, e
@@ -240,11 +241,26 @@ func parseNarInfo(name string, data []byte) (narInfo, error) {
 	return n, nil
 }
 
-// The caller serializes this upload. Cache verification may read many narinfo
-// objects and deliberately runs outside the controller mutex.
+// Only the final publication validates the closure. This lock serializes that
+// validation with another completion attempt, independently of incoming bodies.
 func (s *Server) completeUpload(t *Transfer) error {
+	release, err := s.transferLocks.acquire(s.ctx, t.ID, 1)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return s.checkUploadLocked(t)
+}
+func (s *Server) checkUploadLocked(t *Transfer) error {
 	s.mu.Lock()
+	var remaining int
+	err := s.db.QueryRowContext(s.ctx, "SELECT remaining FROM transfers WHERE id=?", t.ID).Scan(&remaining)
+	if err != nil || remaining != 0 || t.State == "ready" {
+		s.mu.Unlock()
+		return err
+	}
 	snapshot := *t
+	snapshot.Objects = maps.Clone(t.Objects)
 	s.mu.Unlock()
 	return s.verifyUpload(t, &snapshot)
 }
@@ -256,7 +272,7 @@ func (s *Server) verifyUpload(target, t *Transfer) error {
 		return wire.Fail("conflict", "Transfer is unavailable or upload is still in progress")
 	}
 	var missing int
-	if err := s.db.QueryRowContext(s.ctx, "SELECT COUNT(*) FROM transfer_objects WHERE transfer_id=? AND body IS NULL", t.ID).Scan(&missing); err != nil {
+	if err := s.db.QueryRowContext(s.ctx, "SELECT remaining FROM transfers WHERE id=?", t.ID).Scan(&missing); err != nil {
 		return err
 	}
 	if missing != 0 {
@@ -273,7 +289,7 @@ func (s *Server) verifyUpload(target, t *Transfer) error {
 				continue
 			}
 			count++
-			data, e := s.root.Read(path.Join("transfers", t.ID, object.File), 65536)
+			data, e := s.root.Read(object.File, 65536)
 			if e != nil {
 				return e
 			}
@@ -338,7 +354,7 @@ func (s *Server) putGuest(a PutRequest) (any, error) {
 	if e != nil {
 		return nil, e
 	}
-	return s.action(a.NodeID, NodeAction{Action: "file_put", Path: a.Path, Local: path.Join(s.root.Path, "transfers", t.ID, t.Objects["blob"].File)})
+	return s.action(a.NodeID, NodeAction{Action: "file_put", Path: a.Path, Local: path.Join(s.root.Path, t.Objects["blob"].File)})
 }
 func httpError(w http.ResponseWriter, status int, e error) {
 	w.Header().Set("Content-Type", "application/json")
@@ -378,47 +394,102 @@ func (s *Server) Files(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 404, wire.Fail("not_found", "Object not found"))
 		return
 	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), uploadBudget)
 	defer cancel()
 	stopService := context.AfterFunc(s.ctx, cancel)
 	defer stopService()
-	v, _ := s.transferLocks.LoadOrStore(cap.ID, &sync.Mutex{})
-	lock := v.(*sync.Mutex)
-	if err := lockContext(ctx, lock); err != nil {
-		httpError(w, 408, err)
-		return
+	r = r.WithContext(ctx)
+	if r.Method == "PUT" {
+		release, err := s.transferSlots.acquire(ctx, cap.ID, uploadConcurrency)
+		if err != nil {
+			httpError(w, 408, err)
+			return
+		}
+		defer release()
+		select {
+		case s.uploadSlots <- struct{}{}:
+			defer func() { <-s.uploadSlots }()
+		case <-ctx.Done():
+			httpError(w, 408, ctx.Err())
+			return
+		}
 	}
-	defer lock.Unlock()
 	s.mu.Lock()
 	t, loadErr := s.transfer(cap.ID)
-	if loadErr != nil || (name != "manifest" && !objectName(t.Kind, name)) {
+	if loadErr != nil || (name != "manifest" && name != "missing" && !objectName(t.Kind, name)) {
 		s.mu.Unlock()
 		httpError(w, 404, wire.Fail("not_found", "Object not found"))
 		return
 	}
 	if r.Method == "PUT" {
-		if cap.Right != "write" || s.closed || !oneOf(t.State, "open", "ready") {
+		if cap.Right != "write" || s.closed || !oneOf(t.State, "open", "ready") || name == "missing" {
 			s.mu.Unlock()
 			httpError(w, 409, wire.Fail("immutable", "Upload is read-only"))
 			return
 		}
-		upload := &Upload{cancel: cancel, done: make(chan struct{})}
-		s.uploading[t.ID] = upload
+		upload := s.uploading[t.ID]
+		if upload == nil {
+			upload = &Upload{done: make(chan struct{}), writers: map[string]context.CancelFunc{}}
+			upload.cancel = func() {
+				for _, cancel := range upload.writers {
+					cancel()
+				}
+			}
+			s.uploading[t.ID] = upload
+		}
+		writerID := wire.ID()
+		upload.writers[writerID] = cancel
 		s.wg.Add(1)
 		stopBody := context.AfterFunc(ctx, func() { _ = http.NewResponseController(w).SetReadDeadline(time.Now()); _ = r.Body.Close() })
 		defer func() {
 			stopBody()
 			s.mu.Lock()
-			delete(s.uploading, t.ID)
-			close(upload.done)
+			delete(upload.writers, writerID)
+			if len(upload.writers) == 0 {
+				delete(s.uploading, t.ID)
+				close(upload.done)
+			}
 			s.mu.Unlock()
 			s.wg.Done()
 		}()
 	}
-	r = r.WithContext(ctx)
 	if name == "manifest" {
 		s.mu.Unlock()
+		release, err := s.transferLocks.acquire(ctx, t.ID, 1)
+		if err != nil {
+			httpError(w, 408, err)
+			return
+		}
+		defer release()
 		s.uploadManifest(w, r, t, cap.Right)
+		return
+	}
+	if name == "missing" {
+		if r.Method != "GET" {
+			s.mu.Unlock()
+			httpError(w, 405, wire.Fail("method_not_allowed", "Use GET for missing objects"))
+			return
+		}
+		cursor := r.URL.Query().Get("cursor")
+		var err error
+		if cursor == "" {
+			err = s.reuseInputObjects(ctx, t)
+		}
+		var result any
+		if err == nil {
+			result, err = s.uploadObjects(UploadObjectsRequest{TransferGetRequest: TransferGetRequest{t.ID}, Cursor: cursor, Limit: 200, Missing: true})
+		}
+		s.mu.Unlock()
+		if err == nil {
+			err = s.completeUpload(t)
+		}
+		if err != nil {
+			httpError(w, 409, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(wire.JSON(result))
 		return
 	}
 	if r.Method != "PUT" {
@@ -428,12 +499,7 @@ func (s *Server) Files(w http.ResponseWriter, r *http.Request) {
 			httpError(w, 404, wire.Fail("not_found", "Object not found"))
 			return
 		}
-		s.serveFile(w, r, path.Join("transfers", t.ID, object.File))
-		return
-	}
-	if cap.Right != "write" {
-		s.mu.Unlock()
-		httpError(w, 409, wire.Fail("immutable", "Upload capability is read-only"))
+		s.serveFile(w, r, object.File)
 		return
 	}
 	expectedSize, expectedHash, expectedErr := s.db.ExpectedObject(ctx, t.ID, name)
@@ -442,36 +508,65 @@ func (s *Server) Files(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 409, wire.Fail("manifest_required", "Object must be declared in the immutable manifest"))
 		return
 	}
+	s.mu.Unlock()
+	// Different digests stream concurrently. A digest has one writer even when
+	// several manifests reference it, so temporary copies cannot multiply it.
+	release, err := s.objectLocks.acquire(ctx, expectedHash, 1)
+	if err != nil {
+		httpError(w, 408, err)
+		return
+	}
+	defer release()
+	s.mu.Lock()
 	if err := s.uploadAllowed(t); err != nil && t.State != "ready" {
 		s.mu.Unlock()
 		httpError(w, 409, err)
 		return
 	}
-	previous, exists := t.Objects[name]
-	quota := expectedSize
-	if !exists && r.ContentLength >= 0 && r.ContentLength != quota {
-		s.mu.Unlock()
-		httpError(w, 400, wire.Fail("size_mismatch", "Object length differs from manifest"))
+	var retained []byte
+	e = s.db.QueryRowContext(ctx, "SELECT body FROM input_objects WHERE sha256=? AND size=?", expectedHash, expectedSize).Scan(&retained)
+	s.mu.Unlock()
+	if e != nil {
+		httpError(w, 409, e)
 		return
 	}
-	s.mu.Unlock()
-	if exists {
-		n, h, err := hashFile(uploadReader{ctx, r.Body}, expectedSize)
-		if err != nil || n != previous.Size || h != previous.SHA256 {
-			httpError(w, 409, wire.Fail("object_conflict", "Published upload bytes are immutable"))
-			return
+	if len(retained) > 0 {
+		var object Object
+		if e = json.Unmarshal(retained, &object); e == nil {
+			var n int64
+			var h string
+			n, h, e = hashFile(uploadReader{ctx, r.Body}, expectedSize)
+			if e == nil && (n != object.Size || h != object.SHA256) {
+				e = wire.Fail("object_conflict", "Published upload bytes are immutable")
+			}
 		}
-		err = s.completeUpload(t)
-		if err != nil {
-			httpError(w, 409, err)
+		if e == nil {
+			s.mu.Lock()
+			if e = ctx.Err(); e == nil && t.State != "ready" {
+				e = s.uploadAllowed(t)
+			}
+			if e == nil {
+				e = s.publishTransferObject(ctx, t, name, object)
+			}
+			s.mu.Unlock()
+		}
+		if e == nil {
+			e = s.completeUpload(t)
+		}
+		if e != nil {
+			httpError(w, 409, e)
 			return
 		}
 		w.WriteHeader(200)
 		return
 	}
+	if r.ContentLength >= 0 && r.ContentLength != expectedSize {
+		httpError(w, 400, wire.Fail("size_mismatch", "Object length differs from manifest"))
+		return
+	}
 	var reader io.Reader = uploadReader{ctx, r.Body}
 	if strings.HasSuffix(name, ".narinfo") || name == "nix-cache-info" {
-		data, err := io.ReadAll(io.LimitReader(reader, quota+1))
+		data, err := io.ReadAll(io.LimitReader(reader, min(expectedSize, 65536)+1))
 		e = err
 		if e == nil && name != "nix-cache-info" {
 			_, e = parseNarInfo(name, data)
@@ -485,16 +580,9 @@ func (s *Server) Files(w http.ResponseWriter, r *http.Request) {
 		}
 		reader = bytesReader(data)
 	}
-	// SQLite publishes the immutable object only after its file is fully synced.
-	storageName := ".object-" + wire.ID()
-	staged := path.Join("transfers", t.ID, storageName)
-	published := false
-	defer func() {
-		if !published {
-			_ = s.root.Remove(staged)
-		}
-	}()
-	n, h, e := s.root.Write(staged, reader, quota)
+	staged := path.Join("input-objects", ".object-"+wire.ID())
+	defer s.root.Remove(staged)
+	n, h, e := s.root.Write(staged, reader, expectedSize)
 	if e != nil {
 		if ctx.Err() != nil {
 			httpError(w, 408, wire.Fail("upload_cancelled", "Upload ended before publication"))
@@ -507,14 +595,17 @@ func (s *Server) Files(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, wire.Fail("integrity_mismatch", "Object size or SHA-256 differs from manifest"))
 		return
 	}
+	object := Object{Size: n, SHA256: h, File: inputObjectFile(h)}
 	s.mu.Lock()
 	e = ctx.Err()
 	if e == nil {
 		e = s.uploadAllowed(t)
 	}
 	if e == nil {
-		e = s.publishTransferObject(ctx, t, name, Object{Size: n, SHA256: h, File: storageName})
-		published = e == nil
+		e = s.root.Publish(staged, object.File)
+	}
+	if e == nil {
+		e = s.publishTransferObject(ctx, t, name, object)
 	}
 	s.mu.Unlock()
 	if e == nil {
@@ -527,17 +618,21 @@ func (s *Server) Files(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(200)
 }
 
-// The caller holds s.mu and the transfer lock. The index is the publication boundary.
+// The caller holds s.mu. The index is the publication boundary.
 func (s *Server) publishTransferObject(ctx context.Context, t *Transfer, name string, object Object) error {
+	if old, ok := t.Objects[name]; ok {
+		if old != object {
+			return wire.Fail("object_conflict", "Upload object differs from publication")
+		}
+		return nil
+	}
 	if err := s.db.StoreTransferObject(ctx, t.ID, name, object); err != nil {
 		return err
 	}
 	t.Bytes += object.Size
 	t.Objects[name] = object
 	t.Updated = time.Now().UTC()
-	s.persist(t)
-
-	return nil
+	return s.db.Save(ctx, t)
 }
 
 var transferScratch = regexp.MustCompile(`^\.(object|upload)-[a-f0-9]{32}(\.[a-f0-9]{32}\.partial)?$`)
@@ -551,7 +646,7 @@ func (s *Server) recoverTransfer(ctx context.Context, t *Transfer) error {
 	}
 	referenced := make(map[string]bool, len(t.Objects))
 	for name, object := range t.Objects {
-		if !objectName(t.Kind, name) || !(object.File == name || strings.HasPrefix(object.File, ".object-") && wire.IDPattern.MatchString(strings.TrimPrefix(object.File, ".object-"))) {
+		if !objectName(t.Kind, name) || (!sha256Pattern.MatchString(object.SHA256) || object.File != inputObjectFile(object.SHA256)) {
 			return wire.Fail("invalid_transfer", "Invalid retained transfer object path")
 		}
 		referenced[object.File] = true

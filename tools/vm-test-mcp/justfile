@@ -33,8 +33,8 @@ nix-executor *args:
 nixos-test *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    vm_test_package="$(nix build --no-link --print-out-paths --no-write-lock-file .#vm-test-mcp)"
-    exec "$vm_test_package/bin/vm-test-submit" --config tools/vm-test-mcp/config.yaml "$@"
+    vm_test_package="$(nix build --no-link --print-out-paths --no-write-lock-file .#vm-test-submit)"
+    exec "$vm_test_package/bin/vm-test-submit" --config tools/vm-test-mcp/client.yaml "$@"
 
 test:
     nix develop .#vm-test-mcp --command bash tools/vm-test-mcp/scripts/check.sh

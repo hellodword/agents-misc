@@ -5,6 +5,7 @@ package control
 func normalizeArguments(args any) any {
 	switch a := args.(type) {
 	case StartRequest:
+		a.ExpectedExitCodes = expectedExitCodes(a.ExpectedExitCodes)
 		if a.Context == "" {
 			a.Context = "service"
 		}
@@ -13,6 +14,7 @@ func normalizeArguments(args any) any {
 		}
 		return a
 	case ExecRequest:
+		a.ExpectedExitCodes = expectedExitCodes(a.ExpectedExitCodes)
 		if a.TimeoutSeconds == 0 {
 			a.TimeoutSeconds = 10
 		}

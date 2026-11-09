@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -146,14 +147,18 @@ func TestDeletedTargetPreservesReceiptAndOtherWaitTargets(t *testing.T) {
 	if err != nil || string(wire.JSON(again.(map[string]any)["operation"])) != string(wire.JSON(ended.(map[string]any)["operation"])) {
 		t.Fatal("deleted target lost its idempotency receipt", again, err)
 	}
-	s.mu.Lock()
-	pending := newTask("lab", 60)
-	s.tasks = append(s.tasks, pending)
-	s.save(pending)
-	s.mu.Unlock()
-	result, err := s.wait(ctx, WaitRequest{Targets: []WaitTarget{{Kind: "lab", ID: id, Condition: "complete"}, {Kind: "lab", ID: pending.ID, Condition: "complete"}}}, time.Second)
-	if err != nil || result.Reason != "unavailable" || result.Targets[0].Unavailable == nil || len(result.Continue) != 1 || result.Continue[0].ID != pending.ID {
+	other, err := s.Call(ctx, "lab_create", wire.JSON(LabRequest{RequestID: "remaining-target", Nodes: []NodeRequest{}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherID := other.(map[string]any)["wait"].(WaitResult).Targets[0].ID
+	result, err := s.wait(ctx, WaitRequest{Targets: []WaitTarget{{Kind: "lab", ID: id, Condition: "complete"}, {Kind: "lab", ID: otherID, Condition: "complete"}}}, time.Second)
+	if err != nil || result.Reason != "unavailable" || result.Targets[0].Unavailable == nil || len(result.Continue) != 1 || result.Continue[0].ID != otherID {
 		t.Fatal(result, err)
+	}
+	finished, err := s.Call(ctx, "lab_cancel", wire.JSON(TaskChange{Change: Change{"remaining-stop"}, TaskID: TaskID{otherID}}))
+	if err != nil || !finished.(map[string]any)["wait"].(WaitResult).Targets[0].Satisfied {
+		t.Fatal(finished, err)
 	}
 }
 
@@ -284,7 +289,7 @@ func TestCodexTransportFixture(t *testing.T) {
 func TestFiniteCommandsWaitForGroupAndRetainedOutput(t *testing.T) {
 	s, f := testServer(t)
 	lab := createLab(t, s, "finite-lab")
-	args := StartRequest{NodeChange: NodeChange{Change: Change{"finite-work"}, NodeID: NodeID{TaskID: TaskID{lab.ID}, NodeID: lab.lab().Nodes[0].ID}}, Argv: []string{"example"}}
+	args := StartRequest{NodeChange: NodeChange{Change: Change{"finite-work"}, NodeID: NodeID{TaskID: TaskID{lab.ID}, NodeID: lab.lab().Nodes[0].ID}}, Argv: []string{"example"}, ExpectedExitCodes: []int{7}}
 	result := make(chan any, 1)
 	failure := make(chan error, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
@@ -316,13 +321,13 @@ func TestFiniteCommandsWaitForGroupAndRetainedOutput(t *testing.T) {
 		t.Fatal(err)
 	case <-time.After(150 * time.Millisecond):
 	}
-	zero := 0
+	zero := 7
 	f.mu.Lock()
 	f.commandState[id] = wire.CommandStatus{State: "exited", Final: true, ExitCode: &zero, Termination: &wire.Termination{GroupStopped: true, ProcessExited: true, Source: "guest_supervisor"}}
 	f.mu.Unlock()
 	select {
 	case v := <-result:
-		if !v.(map[string]any)["wait"].(WaitResult).Targets[0].Satisfied {
+		if state := v.(map[string]any)["wait"].(WaitResult).Targets[0]; !state.Satisfied || state.Attention || !strings.Contains(string(wire.JSON(state.Summary)), `"outcome":"expected_exit"`) {
 			t.Fatal(v)
 		}
 	case err := <-failure:

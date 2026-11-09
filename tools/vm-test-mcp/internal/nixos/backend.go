@@ -16,6 +16,7 @@ type Client interface {
 	OpenArtifact(context.Context, string, string, string) (io.ReadCloser, error)
 }
 type Request struct {
+	RunID                                       string
 	ManifestDigest                              string
 	ID, InstanceID, CacheID, Derivation, System string
 	TimeoutSeconds                              int
@@ -41,6 +42,7 @@ func (b *Backend) Call(ctx context.Context, action string, t *Request) (json.Raw
 		req["deadline"] = t.Deadline
 	}
 	if action == "start" {
+		req["test_run_id"] = t.RunID
 		req["upload_id"] = t.CacheID
 		req["derivation"] = t.Derivation
 		req["system"] = t.System

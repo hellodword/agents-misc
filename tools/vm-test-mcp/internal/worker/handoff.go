@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"github.com/hellodword/agents-misc/vm-test-mcp/internal/nixexecutor"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 	"time"
 )
@@ -42,7 +43,14 @@ func (w *Worker) handoff(j *Job, digest string) (any, error) {
 		}
 	}
 	w.mu.Unlock()
-	err := w.root.RemoveAll(j.Request.TaskID)
+	var err error
+	if j.Session.Executor != nil {
+		var released nixexecutor.Session
+		err = w.executor.Call(context.Background(), "evidence_release", w.sessionRequest(j, ""), &released)
+	}
+	if err == nil {
+		err = w.root.RemoveAll(j.Request.TaskID)
+	}
 	w.mu.Lock()
 	if err != nil {
 		return nil, err

@@ -3,6 +3,7 @@ package wire
 const MaxManifestBytes = 32 << 20
 
 type UploadManifest struct {
+	RunID      string         `json:"test_run_id,omitempty"`
 	UploadID   string         `json:"upload_id"`
 	Derivation string         `json:"derivation,omitempty"`
 	System     string         `json:"system,omitempty"`

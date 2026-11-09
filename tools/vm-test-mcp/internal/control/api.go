@@ -77,7 +77,8 @@ type NixRequest struct {
 	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
 }
 type StartRequest struct {
-	Mode string `json:"mode,omitempty"`
+	Mode              string `json:"mode,omitempty"`
+	ExpectedExitCodes []int  `json:"expected_exit_codes,omitempty"`
 	NodeChange
 	Argv           []string          `json:"argv"`
 	Context        string            `json:"context,omitempty"`
@@ -119,6 +120,10 @@ type JobExtendRequest struct {
 type ExecutionChange struct {
 	Change
 	ExecutionID string `json:"execution_id"`
+}
+type ExecutionRecoverRequest struct {
+	ExecutionChange
+	Scope string `json:"scope"`
 }
 type CollectionRequest struct {
 	LabID  string `json:"lab_id,omitempty"`
@@ -258,10 +263,11 @@ type DiagnoseRequest struct {
 }
 type ExecRequest struct {
 	NodeChange
-	Argv           []string          `json:"argv"`
-	Cwd            string            `json:"cwd,omitempty"`
-	Env            map[string]string `json:"env,omitempty"`
-	TimeoutSeconds int               `json:"timeout_seconds,omitempty"`
+	ExpectedExitCodes []int             `json:"expected_exit_codes,omitempty"`
+	Argv              []string          `json:"argv"`
+	Cwd               string            `json:"cwd,omitempty"`
+	Env               map[string]string `json:"env,omitempty"`
+	TimeoutSeconds    int               `json:"timeout_seconds,omitempty"`
 }
 type Definition struct {
 	Name, Description string
@@ -270,6 +276,8 @@ type Definition struct {
 }
 
 var Definitions = []Definition{
+	{"execution_recover", "Retry resource release or publication of captured evidence for an ended execution", ExecutionRecoverRequest{}, true},
+	{"template_list", "Page configured VirtualBox templates and their input limits", TemplateListRequest{}, false},
 	{"wait", "Wait up to 600 seconds for any business condition or new failure; transport heartbeats stay outside tool results", WaitRequest{}, false},
 	{"nix_job_get", "Read Nix result, resource release and evidence progress", JobID{}, false},
 	{"nix_job_list", "Page through Nix jobs", TaskListRequest{}, false},
@@ -288,7 +296,7 @@ var Definitions = []Definition{
 	{"evidence_delete", "Delete unpinned evidence after confirmed resource cleanup", EvidenceChange{}, true},
 	{"upload_delete", "Delete an unbound upload after active writes settle", UploadDeleteRequest{}, true},
 	{"upload_objects", "Read a page of immutable upload object metadata", UploadObjectsRequest{}, false},
-	{"service_get", "Describe templates, backend availability and effective limits", struct{}{}, false},
+	{"service_get", "Describe protocol capabilities, backend availability, admission and effective limits", struct{}{}, false},
 	{"service_observe", "Read bounded host pressure, controller cgroup quotas and call timings from the last 1..240 seconds (default 30); missing data is explicit and no argv, environment or output is included", ObserveRequest{}, false},
 	{"lab_create", "Queue independent linked-clone nodes and a private router", LabRequest{}, true},
 	{"nix_job_create", "Queue an uploaded derivation closure for sandboxed host KVM execution", NixRequest{}, true},
@@ -624,8 +632,9 @@ type EvidenceChange struct {
 }
 type UploadObjectsRequest struct {
 	TransferGetRequest
-	Cursor string `json:"cursor,omitempty"`
-	Limit  int    `json:"limit,omitempty"`
+	Cursor  string `json:"cursor,omitempty"`
+	Limit   int    `json:"limit,omitempty"`
+	Missing bool   `json:"missing,omitempty"`
 }
 
 type UploadDeleteRequest struct {

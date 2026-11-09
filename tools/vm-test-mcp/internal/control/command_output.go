@@ -228,6 +228,11 @@ func (s *Server) readCommand(ctx context.Context, t *Task, id string, sendInput 
 	s.mu.Lock()
 	changed := previous.State != status.State || previous.Stage != status.Stage || previous.Final != status.Final || previous.WrittenInput != status.WrittenInput || previous.InputClosed != status.InputClosed || c.Retained.Stdout.Bytes != retained.Stdout.Bytes || c.Retained.Stderr.Bytes != retained.Stderr.Bytes
 	c.CommandStatus, c.Retained = status, retained
+	if status.Final && diagnosticOutcome(c.outcome()) && t.Cleanup != "running" && t.Cleanup != "complete" {
+		if err := s.queueDiagnostic(t, "command/"+id+"/exit", "command_"+c.outcome(), []string{c.NodeID}); err != nil {
+			s.event(t, "evidence_queue_failed", wire.Safe(err).Message)
+		}
+	}
 	c.Stdin.Written = status.WrittenInput
 	c.Stdin.Delivered = max(c.Stdin.Delivered, status.WrittenInput)
 	c.successfulPoll(now, changed)

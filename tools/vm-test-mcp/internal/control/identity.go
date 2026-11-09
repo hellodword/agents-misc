@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/config"
-	"github.com/hellodword/agents-misc/vm-test-mcp/internal/nixexecutor"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
@@ -37,13 +36,22 @@ func cloneIdentity(template config.Template, source string, info map[string]stri
 	return &NodeIdentity{State: "observed_clone", Observed: time.Now().UTC(), ConfiguredSHA256: configuredTemplateIdentity(template), SourceSHA256: identityHash([]string{source, template.Snapshot}), Hardware: hardware, HardwareSHA256: identityHash(hardware)}
 }
 
+type executorIdentity struct {
+	Build          wire.BuildIdentity `json:"build"`
+	InstanceID     string             `json:"instance_id"`
+	Ready          bool               `json:"ready"`
+	ActiveSessions int                `json:"active_sessions"`
+	StopGrace      int                `json:"stop_grace_seconds"`
+	ReleaseTimeout int                `json:"release_timeout_seconds"`
+}
+
 type backendIdentity struct {
-	Executor       *nixexecutor.Description `json:"executor,omitempty"`
-	InstanceID     string                   `json:"instance_id,omitempty"`
-	State          string                   `json:"state"`
-	Observed       time.Time                `json:"observed"`
-	Build          *wire.BuildIdentity      `json:"build,omitempty"`
-	RuntimeVersion string                   `json:"runtime_version,omitempty"`
+	Executor       *executorIdentity   `json:"executor,omitempty"`
+	InstanceID     string              `json:"instance_id,omitempty"`
+	State          string              `json:"state"`
+	Observed       time.Time           `json:"observed"`
+	Build          *wire.BuildIdentity `json:"build,omitempty"`
+	RuntimeVersion string              `json:"runtime_version,omitempty"`
 }
 
 func (b *VBoxBackend) BackendIdentity(kind string) any {

@@ -110,15 +110,6 @@ func (s *Server) evidenceUsage() (int64, error) {
 	}
 	return size, nil
 }
-func (s *Server) inputUsage() int64 {
-	var n int64
-	for _, t := range s.transfers {
-		if t.State != "retained" {
-			n += max(t.Bytes, t.ReservedBytes)
-		}
-	}
-	return n
-}
 
 // Admission reads the last completed storage sample. Scans and reclamation run
 // independently of the control mutex, including while the executor is occupied.
@@ -349,7 +340,6 @@ func (s *Server) removeTransfer(t *Transfer) error {
 		return err
 	}
 	delete(s.transfers, t.ID)
-	s.transferLocks.Delete(t.ID)
 	return nil
 }
 func (s *Server) changeEvidence(name string, a EvidenceChange) (any, error) {
@@ -399,7 +389,11 @@ func (s *Server) uploadObjects(a UploadObjectsRequest) (any, error) {
 	if limit == 0 {
 		limit = 50
 	}
-	rows, err := s.db.QueryContext(s.ctx, "SELECT name,expected_size,expected_sha256,body IS NOT NULL FROM transfer_objects WHERE transfer_id=? AND name>? ORDER BY name LIMIT ?", a.TransferID, a.Cursor, limit)
+	filter := ""
+	if a.Missing {
+		filter = " AND body IS NULL"
+	}
+	rows, err := s.db.QueryContext(s.ctx, "SELECT name,expected_size,expected_sha256,body IS NOT NULL FROM transfer_objects WHERE transfer_id=? AND name>?"+filter+" ORDER BY name LIMIT ?", a.TransferID, a.Cursor, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -493,7 +487,11 @@ func (s *Server) listStoredTasks(a TaskListRequest, kind string) (any, error) {
 				return nil, err
 			}
 		}
-		view := t.summaryView()
+		// Lists carry the conclusion and lifecycle; detail reads and waits carry
+		// the complete result receipt, including its summary and failure context.
+		listed := *t
+		listed.Summary, listed.Failure = "", nil
+		view := listed.summaryView()
 		var commands, endpoints, captures int
 		if err = s.db.QueryRowContext(s.ctx, "SELECT (SELECT COUNT(*) FROM commands WHERE task_id=? AND needs_poll=1),(SELECT COUNT(*) FROM endpoints WHERE task_id=? AND state='open'),(SELECT COUNT(*) FROM captures WHERE task_id=? AND state NOT IN ('stopped','released'))", t.ID, t.ID, t.ID).Scan(&commands, &endpoints, &captures); err != nil {
 			return nil, err

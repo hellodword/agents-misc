@@ -11,11 +11,34 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
+	"time"
 
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
+
+func TestGeneratedDriverLifecycle(t *testing.T) {
+	if os.Getenv("VM_TEST_DRIVER_INTEGRATION") != "1" {
+		t.Skip("enabled by the vm-test-submit package check with Nix and the locked driver")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "nix", "--extra-experimental-features", "nix-command", "eval", "--store", "dummy://", "--raw", "--expr", nixString(driverObserver))
+	generated, err := cmd.Output()
+	if err != nil {
+		t.Fatal("evaluate generated driver observer", err)
+	}
+	observer := t.TempDir()
+	if err := os.WriteFile(filepath.Join(observer, "sitecustomize.py"), generated, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.CommandContext(ctx, "python3", "-B", "../../tests/test_driver_observer.py")
+	cmd.Env = append(os.Environ(), "VM_TEST_OBSERVER="+observer)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("generated observer lifecycle: %v\n%s", err, output)
+	}
+}
 
 func TestCacheUploadReportsServerRejectionAndBoundsResponse(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "input.nar")
@@ -74,62 +97,33 @@ func TestCacheUploadTimeoutOmitsCapability(t *testing.T) {
 }
 
 func TestRetryReusesEvaluationAndUploadsStandardCache(t *testing.T) {
-	dir := t.TempDir()
-	exe := filepath.Join(dir, "fake-nix")
-	trace := filepath.Join(dir, "trace")
-	shell, e := exec.LookPath("sh")
-	if e != nil {
-		t.Fatal(e)
-	}
-	drv := "/nix/store/" + strings.Repeat("0", 32) + "-test-run.drv"
-	meta := Metadata{Derivation: drv, System: "x86_64-linux", ForceAccel: true, Nodes: []string{"one", "two"}, Containers: []string{}}
-	script := "#!" + shell + "\nprintf '%s\\n' \"$1\" >> '" + trace + "'\ncase \"$1\" in\neval) printf '%s\\n' '" + string(wire.JSON(meta)) + "';;\ncopy) exit 0;;\n*) exit 1;;\nesac\n"
-	if e = os.WriteFile(exe, []byte(script), 0700); e != nil {
-		t.Fatal(e)
-	}
-	cache := filepath.Join(dir, "cache")
-	if e = os.MkdirAll(filepath.Join(cache, "nar"), 0700); e != nil {
-		t.Fatal(e)
-	}
-	os.WriteFile(filepath.Join(cache, "nix-cache-info"), []byte("StoreDir: /nix/store\n"), 0600)
-	os.WriteFile(filepath.Join(cache, strings.Repeat("0", 32)+".narinfo"), []byte("synthetic narinfo"), 0600)
-	os.WriteFile(filepath.Join(cache, "nar", "test.nar.xz"), []byte("synthetic NAR"), 0600)
-	var mu sync.Mutex
-	uploads := map[string]int{}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "PUT" {
-			t.Error(r.Method)
-		}
-		_, _ = io.Copy(io.Discard, r.Body)
-		mu.Lock()
-		uploads[r.URL.Path]++
-		mu.Unlock()
-		w.WriteHeader(200)
-	}))
-	defer server.Close()
-	o := Options{Nix: exe, Test: ".#checks.x86_64-linux.test", RequestID: "same-run", CacheID: wire.ID(), CacheURL: server.URL + "/files/synthetic-token", WorkDir: dir}
+	f, run, trace := newRunFixture(t)
+	o := run.Options
+	o.RequestID = "manual-run"
+	o.CacheID = wire.ID()
+	o.CacheURL = f.url + "/files/capability-secret"
 	for range 2 {
-		result, e := Prepare(context.Background(), o)
-		if e != nil || result["upload_id"] != o.CacheID {
-			t.Fatal(result, e)
+		result, err := Prepare(context.Background(), o)
+		if err != nil || result["upload_id"] != o.CacheID {
+			t.Fatal(result, err)
 		}
+		o.CacheID = wire.ID()
 	}
-	data, e := os.ReadFile(trace)
-	if e != nil || string(data) != "eval\ncopy\ncopy\n" {
-		t.Fatal(string(data), e)
+	data, err := os.ReadFile(trace)
+	if err != nil || string(data) != "eval\nbuild\npath-info\ncopy\npath-info\ncopy\n" {
+		t.Fatal(string(data), err)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(uploads) != 4 {
-		t.Fatal(uploads)
+	f.mu.Lock()
+	uploads := f.uploads
+	f.mu.Unlock()
+	if uploads != 5 {
+		t.Fatal("second manifest did not reuse verified objects", uploads)
 	}
-	for _, count := range uploads {
-		if count != 2 {
-			t.Fatal(uploads)
-		}
+	if _, err = os.Lstat(filepath.Join(o.WorkDir, "derivation")); err != nil {
+		t.Fatal("manual preparation lost its GC root", err)
 	}
 	o.RequestID = "other-run"
-	if _, e = Prepare(context.Background(), o); e == nil {
+	if _, err = Prepare(context.Background(), o); err == nil {
 		t.Fatal("submission identity replaced")
 	}
 }

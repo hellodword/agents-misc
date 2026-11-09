@@ -20,34 +20,38 @@ import (
 )
 
 type Server struct {
-	nixEvidenceActive  int
-	pending            []pendingDispatch
-	mu                 sync.Mutex
-	retentionMu        sync.Mutex
-	evidenceMu         sync.Mutex
-	evidenceBytes      int64
-	lastRetention      time.Time
-	storageBlocked     bool
-	wg                 sync.WaitGroup
-	cfg                config.Config
-	root               *safefs.Root
-	db                 *repository
-	backend            Backend
-	tasks              []*Task
-	recovering         []*Task
-	operations         map[string]*Operation
-	requests           map[string]*Operation
-	transfers          map[string]*Transfer
-	runtime            map[string]*Runtime
-	active             string
-	ctx                context.Context
-	cancel             context.CancelFunc
-	closed             bool
-	secret             []byte
-	transferLocks      sync.Map
-	uploading          map[string]*Upload
-	performance        *telemetry.Monitor
-	performancePending map[string]time.Time
+	nixEvidenceActive    int
+	pending              []pendingDispatch
+	mu                   sync.Mutex
+	retentionMu          sync.Mutex
+	evidenceMu           sync.Mutex
+	evidenceBytes        int64
+	lastRetention        time.Time
+	storageBlocked       bool
+	diagnosticPublishing int
+	wg                   sync.WaitGroup
+	cfg                  config.Config
+	root                 *safefs.Root
+	db                   *repository
+	backend              Backend
+	tasks                []*Task
+	recovering           []*Task
+	operations           map[string]*Operation
+	requests             map[string]*Operation
+	transfers            map[string]*Transfer
+	runtime              map[string]*Runtime
+	active               string
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	closed               bool
+	secret               []byte
+	transferLocks        keyedSlots
+	objectLocks          keyedSlots
+	transferSlots        keyedSlots
+	uploadSlots          chan struct{}
+	uploading            map[string]*Upload
+	performance          *telemetry.Monitor
+	performancePending   map[string]time.Time
 }
 
 func New(cfg config.Config, b Backend) (*Server, error) {
@@ -66,6 +70,7 @@ func New(cfg config.Config, b Backend) (*Server, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{cfg: cfg, root: root, db: db, backend: b, ctx: ctx, cancel: cancel, operations: map[string]*Operation{}, requests: map[string]*Operation{}, transfers: map[string]*Transfer{}, runtime: map[string]*Runtime{}, uploading: map[string]*Upload{}}
 	s.performance = telemetry.New()
+	s.uploadSlots = make(chan struct{}, globalUploadConcurrency)
 	s.performancePending = map[string]time.Time{}
 	if backends, ok := b.(*Backends); ok {
 		backends.Performance = s.performance
@@ -79,6 +84,12 @@ func New(cfg config.Config, b Backend) (*Server, error) {
 		_, _, e = root.Write("capability-key", bytesReader(s.secret), 128)
 	}
 	if e != nil {
+		return fail(e)
+	}
+	if e = s.recoverInputObjects(ctx); e != nil {
+		return fail(e)
+	}
+	if _, e = db.ExecContext(ctx, `UPDATE diagnostic_events SET state='pending',body=json_set(body,'$.state','pending') WHERE state='collecting'; UPDATE diagnostic_events SET state='captured',body=json_set(body,'$.state','captured') WHERE state='publishing'`); e != nil {
 		return fail(e)
 	}
 	for _, kind := range []string{"task", "operation", "transfer"} {
@@ -147,6 +158,13 @@ func New(cfg config.Config, b Backend) (*Server, error) {
 					}
 				}
 				s.transfers[t.ID] = &t
+			}
+		}
+	}
+	for _, t := range s.tasks {
+		if t.Kind == "lab" {
+			if e = s.refreshDiagnosticState(t); e != nil {
+				return fail(e)
 			}
 		}
 	}
@@ -292,6 +310,7 @@ func (s *Server) schedule() {
 			s.expireRetention()
 			s.mu.Lock()
 			s.nixLifecycleLocked()
+			s.diagnosticLifecycleLocked()
 			if s.active != "" || s.closed || s.storageBlocked {
 				s.mu.Unlock()
 				continue
@@ -654,14 +673,14 @@ func (s *Server) observe(t *Task, r *Runtime) {
 						return
 					}
 					t.State = "finished"
-					t.Conclusion = "passed"
+					t.Conclusion = "inconclusive"
 					if v.State != "succeeded" {
 						t.State = "failed"
-						t.Conclusion = "failed"
 					}
 					if v.State == "interrupted" {
 						t.State, t.Conclusion = "interrupted", "inconclusive"
 					}
+					t.applyNixTestResult()
 					s.save(t)
 					s.mu.Unlock()
 					return
@@ -739,13 +758,13 @@ func (s *Server) pollNode(t *Task, r *Runtime, id string) {
 	if before && n.Health.VirtualBox.State == "available" && n.Health.GuestControl.State == "available" && n.Health.Commands.State == "available" {
 		s.event(t, "node_recovered", "Node "+n.Name+" capabilities recovered")
 	}
-	s.save(t)
 	if incident && !s.closed {
-		// Collect the lab's evidence on an independent job. Slow collection
-		// must not postpone the next health observation or recovery signal.
-		s.wg.Add(1)
-		go func() { defer s.wg.Done(); _, _ = s.diagnose(r.ctx, t.ID, nil, true) }()
+		if err := s.queueDiagnostic(t, "node/"+n.ID+"/"+time.Now().UTC().Format(time.RFC3339Nano), "node_unavailable", []string{n.ID}); err != nil {
+			s.event(t, "evidence_queue_failed", wire.Safe(err).Message)
+		}
 	}
+	s.save(t)
+
 	s.mu.Unlock()
 }
 func (s *Server) pollCommand(t *Task, r *Runtime, id string) {

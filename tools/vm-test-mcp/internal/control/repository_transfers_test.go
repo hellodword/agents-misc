@@ -46,34 +46,49 @@ func TestTransferIndexCommitAndRestart(t *testing.T) {
 	}
 }
 
+// Measure complete manifest publication rather than repeated idempotent writes.
+// The remaining-count read is the readiness check on each incoming object.
 func BenchmarkObjectPersistence(b *testing.B) {
-	for _, count := range []int{0, 10000} {
+	for _, count := range []int{1000, 20000} {
 		b.Run(fmt.Sprintf("%d_objects", count), func(b *testing.B) {
 			d, err := openRepository(b.TempDir())
 			if err != nil {
 				b.Fatal(err)
 			}
 			defer d.Close()
-			objects := make(map[string]Object, count)
-			object := Object{Size: 256, SHA256: strings.Repeat("a", 64), File: ".object-" + strings.Repeat("b", 32)}
-			for i := range count {
-				objects[fmt.Sprintf("nar/%d.nar", i)] = object
-			}
 			ctx := context.Background()
-			if err := d.CreateTransfer(ctx, &Transfer{ID: "cache", State: "open"}, objects); err != nil {
-				b.Fatal(err)
-			}
-			if err := d.DeclareUpload(ctx, &Transfer{ID: "cache", State: "open"}, []wire.UploadObject{{Name: "nar/new.nar", Size: object.Size, SHA256: object.SHA256}}); err != nil {
-				b.Fatal(err)
+			items := make([]wire.UploadObject, count)
+			for i := range items {
+				items[i] = wire.UploadObject{Name: fmt.Sprintf("nar/%d.nar", i), Size: 256, SHA256: fmt.Sprintf("%064x", i)}
 			}
 			b.ReportAllocs()
 			b.ResetTimer()
 			for b.Loop() {
-				if err := d.StoreTransferObject(ctx, "cache", "nar/new.nar", object); err != nil {
+				doc := &Transfer{ID: wire.ID(), State: "open"}
+				if err = d.CreateTransfer(ctx, doc, nil); err != nil {
+					b.Fatal(err)
+				}
+				if err = d.DeclareUpload(ctx, doc, items); err != nil {
+					b.Fatal(err)
+				}
+				for i, item := range items {
+					object := Object{Size: item.Size, SHA256: item.SHA256, File: inputObjectFile(item.SHA256)}
+					if err = d.StoreTransferObject(ctx, doc.ID, item.Name, object); err != nil {
+						b.Fatal(err)
+					}
+					var remaining int
+					if err = d.QueryRow("SELECT remaining FROM transfers WHERE id=?", doc.ID).Scan(&remaining); err != nil || remaining != count-i-1 {
+						b.Fatal(remaining, err)
+					}
+				}
+				if _, err = d.Exec("DELETE FROM transfers WHERE id=?", doc.ID); err != nil {
+					b.Fatal(err)
+				}
+				if _, err = d.Exec("DELETE FROM input_objects"); err != nil {
 					b.Fatal(err)
 				}
 			}
-			b.ReportMetric(float64(len(wire.JSON(object))), "metadata-B/op")
+			b.ReportMetric(float64(count), "objects/op")
 		})
 	}
 }

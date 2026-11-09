@@ -50,6 +50,9 @@ func constrainSchema(t reflect.Type, schema schemaMap) {
 	if _, ok := p["env"]; ok {
 		field("env", schemaMap{"propertyNames": schemaMap{"minLength": 1, "pattern": "^[^=\\x00]*$"}, "additionalProperties": schemaMap{"type": "string", "maxLength": 32768, "x-maxBytes": 32768, "pattern": "^[^\\x00]*$"}, "description": "Per-command overrides, without changing template settings; Windows names are case-insensitive."})
 	}
+	if _, ok := p["expected_exit_codes"]; ok {
+		field("expected_exit_codes", schemaMap{"minItems": 1, "maxItems": 64, "uniqueItems": true, "items": schemaMap{"type": "integer", "minimum": 0, "maximum": 4294967295}, "default": []int{0}, "description": "Expected normal process exit codes. Signals, timeouts and unconfirmed exits have separate outcomes; the lab conclusion remains caller supplied."})
+	}
 	switch t {
 	case reflect.TypeFor[WaitRequest]():
 		field("targets", schemaMap{"minItems": 1, "maxItems": 64})
@@ -85,7 +88,7 @@ func constrainSchema(t reflect.Type, schema schemaMap) {
 		field("reason", schemaMap{"minLength": 1, "maxLength": 1024, "x-maxBytes": 1024, "pattern": "\\S", "description": "Actual continued work and its purpose; effective total limit comes from service_get."})
 	case reflect.TypeFor[NixRequest]():
 		rangeOf("timeout_seconds", 0, 86400)
-	case reflect.TypeFor[JobRecoverRequest]():
+	case reflect.TypeFor[JobRecoverRequest](), reflect.TypeFor[ExecutionRecoverRequest]():
 		enum("scope", "resources", "evidence")
 	case reflect.TypeFor[StartRequest]():
 		enum("mode", "finite", "service", "interactive")
@@ -97,6 +100,10 @@ func constrainSchema(t reflect.Type, schema schemaMap) {
 	case reflect.TypeFor[ExecRequest]():
 		rangeOf("timeout_seconds", 0, 30)
 		field("timeout_seconds", schemaMap{"default": 10, "description": "0 or omission uses 10 seconds. Diagnostic Guest Control execution, without durable supervisor semantics."})
+	case reflect.TypeFor[TemplateListRequest]():
+		rangeOf("limit", 0, 200)
+		field("limit", schemaMap{"default": 50})
+		field("cursor", schemaMap{"description": "Last template name from next_cursor; omit for the first page."})
 	case reflect.TypeFor[UploadObjectsRequest]():
 		rangeOf("limit", 0, 200)
 		field("cursor", schemaMap{"description": "Last object name from next_cursor; omit for the first page."})
@@ -154,11 +161,11 @@ func constrainSchema(t reflect.Type, schema schemaMap) {
 		field("upload_ids", schemaMap{"maxItems": 256, "uniqueItems": true, "items": schemaMap{"type": "string", "pattern": wire.IDPattern.String()}})
 		field("nodes", schemaMap{"maxItems": 64, "description": "0..64 independent nodes; [] creates a router-only lab. Effective resource limits are in service_get."})
 		rangeOf("timeout_seconds", 0, 86400)
-		field("lan", schemaMap{"description": "Private IPv4 CIDR; omitted uses service_get defaults."})
+		field("lan", schemaMap{"description": "Private IPv4 CIDR; omitted uses the configured lab subnet."})
 	case reflect.TypeFor[NodeRequest]():
 		field("name", schemaMap{"pattern": wire.NamePattern.String()})
-		field("template", schemaMap{"pattern": wire.NamePattern.String(), "description": "Template alias from service_get; availability does not attest optional platform capabilities."})
-		field("cpus", schemaMap{"minimum": 0, "description": "0/omission uses template default; maximum from service_get."})
+		field("template", schemaMap{"pattern": wire.NamePattern.String(), "description": "Template alias from template_list."})
+		field("cpus", schemaMap{"minimum": 0, "description": "0/omission uses template default; maximum from template_list."})
 		field("memory_mib", schemaMap{"minimum": 0, "description": "0/omission uses template default; effective value >=128 and <= template maximum."})
 	}
 }

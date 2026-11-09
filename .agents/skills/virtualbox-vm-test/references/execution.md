@@ -1,8 +1,9 @@
 # Executing VirtualBox labs
 
-Use a prepared VM Test MCP 0.14 executor. `service_get` reports templates,
-resource/media policy, backend availability, endpoint address and limits. Its
-token holders share task authority. Use the advertised tool schemas; do not infer
+Use a prepared VM Test MCP 0.15 executor. `service_get` reports protocol
+capabilities, backend availability, endpoint address and effective limits.
+`template_list` pages template resources, media policy and input intervals.
+Service token holders share task authority. Use the advertised tool schemas; do not infer
 host paths, VM UUIDs or executable options from guest data.
 
 ## Create and observe
@@ -59,9 +60,10 @@ never created have `state=never_allocated`, distinct from `released`.
 
 ## Commands, files and Compose
 
-Prepare inputs before acquiring the execution slot. Use `upload_create(kind="file")`,
+Prepare inputs before acquiring the execution slot. Immutable input objects are
+shared across uploads and backends; new uploads can reuse verified bytes. Use `upload_create(kind="file")`,
 then PUT `URL/manifest` with `upload_id` and `objects: [{name:"blob", size, sha256}]`,
-followed by PUT `URL/blob`. The manifest is immutable; repeated identical PUTs are
+then GET `URL/missing` and PUT missing objects to `URL/blob`. The manifest is immutable; repeated identical PUTs are
 safe and completion makes the input ready automatically, including empty files.
 Bind ready `upload_ids` in `lab_create` or on the first `guest_file_put(node_id,
 upload_id, path)` to an absolute guest path. Reuse that upload across the lab's
@@ -69,7 +71,8 @@ nodes without retained duplicate host copies. `upload_get` returns fresh URLs an
 state; `upload_objects` pages declarations/checksums. `upload_delete` settles writes
 and deletes unbound inputs. Lab cleanup settles all writes before release.
 `command_start` takes argv, optional absolute guest cwd/environment and an independent
-timeout. Default `mode="finite"` waits for exit, process-group stop and output
+timeout. `expected_exit_codes` defaults to `[0]`; select codes accepted by the
+test. Unexpected exits schedule a bounded diagnostic event for that node. Default `mode="finite"` waits for exit, process-group stop and output
 collection; choose `mode="service"` or `"interactive"` explicitly to return after
 confirmed start. `context` defaults to `service`: Linux root or Windows LocalSystem.
 Windows GUI workloads select `context="desktop"`, which requires a logged-in
@@ -173,14 +176,16 @@ with `evidence_get` or `upload_get`; no mutation or receipt is needed.
 Submit the caller's `passed`, `failed` or `inconclusive` conclusion and a summary
 through `lab_finish`. Cancellation and timeout use the same cleanup path. Wait
 for `cleanup.state: complete`. An ended task with `cleanup.state: blocked` retains
-resource step errors; inspect them and use a new `lab_cleanup` request for a retry. Evidence
+resource step errors; inspect them and use
+`execution_recover(execution_id=…, scope="resources")` for a retry. Evidence
 and reproduction inputs default to 1 day after success or 7 days after other
 terminal outcomes; summaries/receipts last 30 days. `evidence_pin` retains selected
 files until `evidence_unpin` without extending VM occupancy. Evidence budgets are
 40 GiB with reclamation to 32 GiB, including pins/protected data. Protected pressure
 blocks new labs/jobs/uploads while control and cleanup remain available. Input
-staging is 16 GiB total and 8 GiB per transfer; unbound idle uploads expire after
-one hour. `execution_delete(execution_id=…)` removes a cleaned summary and unpinned detail;
+staging reserves 16 GiB of unique object bytes and allows 8 GiB per manifest; unbound idle uploads expire after
+one hour. `execution_delete(execution_id=…)` requires resource release and completed evidence
+handoff, then removes a cleaned summary and unpinned detail;
 independent pins and receipts remain available. Confirm resource release before the next executor batch. An administrator blocker
 requires retained task identity, ownership evidence and a concrete report; independent
 local edits, analysis and reporting can continue. A later batch uses a new request and task. Keep capability URLs private.
@@ -202,7 +207,12 @@ operations supersede earlier pending observations.
 observations, including last success, failure duration and error. `lab_diagnose`
 collects available metadata, VBox logs, screenshots and guest initialization/system
 logs within a shared 30-second budget. It accepts selected test-node IDs; omission
-collects the full lab including its router. Retain partial evidence and the manifest.
+collects the full lab including its router. Retain partial evidence and the manifest. Automatic collection has a durable event
+identity for an unexpected command exit, node incident or execution end. Repeated
+observations reuse that event. Captures happen before release; verification and
+registration continue independently afterward. `collection` reports capture
+quality and `evidence` reports handoff. Recover blocked publication with
+`execution_recover(execution_id=…, scope="evidence")` using captured files.
 
 For control latency or network lease faults, use `service_observe` and the retained
 `performance.json` window to compare host pressure, controller quota/throttling,
@@ -213,7 +223,9 @@ on a shared executor. Fault-window collection continues after VM release.
 
 Use `node_exec` for short absolute guest argv when ordinary command supervision is
 not ready. It defaults to 10 seconds, caps at 30, and retains bounded base64 output,
-exit information and an artifact. Delivery/termination uncertainty remains in its
+exit information and an artifact. `expected_exit_codes` also applies here.
+A bounded exit-code range remains a range; `outcome: unconfirmed` preserves
+ambiguity about whether it matched an expected code. Delivery/termination uncertainty remains in its
 receipt; inspect it before deciding on another command. Use supervised commands for
 ordinary workloads. A command's observation failure does not establish its exit,
 and a requested command cancellation requires a guest terminal record with its

@@ -21,6 +21,7 @@ import (
 type RunOptions struct {
 	Options
 	Endpoint, Token string
+	Evidence        string
 	TimeoutSeconds  int
 	Progress        io.Writer
 }
@@ -36,7 +37,7 @@ type runRecord struct {
 	CacheID        string         `json:"upload_id,omitempty"`
 	Submission     map[string]any `json:"submission,omitempty"`
 	TaskID         string         `json:"job_id,omitempty"`
-	CleanupInputs  []string       `json:"cleanup_inputs,omitempty"`
+	ReleaseInputs  bool           `json:"release_inputs,omitempty"`
 }
 
 type receipt struct {
@@ -135,7 +136,16 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 		o.Progress = io.Discard
 	}
 	if o.TimeoutSeconds < 0 || o.TimeoutSeconds > 86400 {
-		return nil, fmt.Errorf("timeout-seconds must be between 0 and 86400")
+		return nil, usage("timeout-seconds must be between 0 and 86400")
+	}
+	if o.WorkDir != "" && !filepath.IsAbs(o.WorkDir) {
+		return nil, usage("work-dir must be an absolute task-owned directory")
+	}
+	if o.SigningKey != "" && !filepath.IsAbs(o.SigningKey) {
+		return nil, usage("signing-key must be absolute")
+	}
+	if o.CacheDir != "" && !filepath.IsAbs(o.CacheDir) {
+		return nil, usage("cache-dir must be absolute")
 	}
 	if o.WorkDir == "" {
 		if o.RequestID == "" {
@@ -143,7 +153,7 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 		}
 		// IDs become a directory component only after validation.
 		if !requestIDPattern.MatchString(o.RequestID) {
-			return nil, fmt.Errorf("invalid request ID")
+			return nil, usage("invalid request ID")
 		}
 		var err error
 		o.WorkDir, err = filepath.Abs(filepath.Join("tmp", "agent", "vm-test-runs", o.RequestID))
@@ -164,8 +174,11 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 		if o.TimeoutSeconds == 0 {
 			o.TimeoutSeconds = j.TimeoutSeconds
 		}
+		if o.Test == "" && o.SmokeProject == "" {
+			o.Test, o.SmokeProject = j.Test, j.SmokeProject
+		}
 		if j.Endpoint != o.Endpoint || j.Test != o.Test || j.SmokeProject != o.SmokeProject || j.TimeoutSeconds != o.TimeoutSeconds || o.RequestID != "" && j.RequestID != o.RequestID {
-			return nil, fmt.Errorf("work-dir belongs to a different submission; reuse its original arguments")
+			return nil, usage("work-dir belongs to a different submission; reuse its original arguments")
 		}
 	} else if !os.IsNotExist(err) {
 		return nil, err
@@ -174,7 +187,7 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 		j.RequestID = "nixos-" + wire.ID()
 	}
 	if !requestIDPattern.MatchString(j.RequestID) {
-		return nil, fmt.Errorf("invalid request ID")
+		return nil, usage("invalid request ID")
 	}
 	o.RequestID = j.RequestID
 	save := func() error {
@@ -185,25 +198,17 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 		return nil, err
 	}
 	cleanupInputs := func() {
-		if len(j.CleanupInputs) == 0 {
+		if !j.ReleaseInputs {
 			return
 		}
-		remaining := []string{}
-		for _, id := range j.CleanupInputs {
-			var err error
-			if !wire.IDPattern.MatchString(id) {
-				err = fmt.Errorf("invalid upload identity in cleanup record")
-			} else {
-				err = root.RemoveAll(filepath.Join("inputs", id, "cache"))
-			}
-			if err != nil {
-				fmt.Fprintf(o.Progress, "Local input cache cleanup pending for %s: %v; retry by resuming this workspace\n", id, err)
-				remaining = append(remaining, id)
-			}
+		err := root.Remove("inputs/derivation")
+		if err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(o.Progress, "Local derivation root cleanup pending: %v; resume this workspace\n", err)
+			return
 		}
-		j.CleanupInputs = remaining
-		if err := save(); err != nil {
-			fmt.Fprintf(o.Progress, "Local cache cleanup journal update failed: %v; resume this workspace to reconcile\n", err)
+		j.ReleaseInputs = false
+		if err = save(); err != nil {
+			fmt.Fprintf(o.Progress, "Local cleanup journal update: %v; resume this workspace\n", err)
 		}
 	}
 	cleanupInputs()
@@ -220,12 +225,16 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 	for j.TaskID == "" {
 		if j.Submission == nil {
 			var description struct {
+				Protocol wire.Protocol `json:"protocol"`
 				Backends map[string]struct {
 					Available bool   `json:"available"`
 					Reason    string `json:"waiting_reason"`
 				} `json:"backends"`
 			}
 			if err := call(ctx, session, "service_get", map[string]any{}, &description); err != nil {
+				return nil, err
+			}
+			if err := wire.RequireProtocol(description.Protocol, "input_objects", "failure_evidence", "evidence_collection"); err != nil {
 				return nil, err
 			}
 			// Busy execution resources can accept queued work. The controller
@@ -254,8 +263,7 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 			if err := call(ctx, session, "upload_get", map[string]any{"upload_id": j.CacheID}, &transfer); err != nil {
 				if failure, ok := err.(*wire.Error); ok && failure.Code == "not_found" {
 					// No submission was journaled, so this input was never sent
-					// to nix_job_create. Reserve a fresh input and evaluation.
-					j.CleanupInputs = append(j.CleanupInputs, j.CacheID)
+					// to nix_job_create. Reserve a fresh input for the saved derivation.
 					j.CacheID = ""
 					j.CacheAttempt++
 					if err = save(); err != nil {
@@ -272,7 +280,8 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 			o.CacheID, o.CacheURL = j.CacheID, transfer.URL
 			fmt.Fprintln(o.Progress, "Evaluating and uploading the test closure…")
 			inputOptions := o.Options
-			inputOptions.WorkDir = filepath.Join(o.WorkDir, "inputs", j.CacheID)
+			inputOptions.WorkDir = filepath.Join(o.WorkDir, "inputs")
+			inputOptions.Progress = o.Progress
 			j.Submission, err = Prepare(ctx, inputOptions)
 			if err != nil {
 				return nil, err
@@ -293,7 +302,6 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 			// Admission checks the retained request receipt before its upload.
 			// A missing input therefore proves this request was not accepted.
 			if failure, ok := err.(*wire.Error); ok && failure.Code == "not_found" {
-				j.CleanupInputs = append(j.CleanupInputs, j.CacheID)
 				j.Submission = nil
 				j.CacheID = ""
 				j.CacheAttempt++
@@ -309,7 +317,7 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 			return nil, fmt.Errorf("invalid task ID")
 		}
 		j.TaskID = task.ID
-		j.CleanupInputs = append(j.CleanupInputs, j.CacheID)
+		j.ReleaseInputs = true
 		if err := save(); err != nil {
 			return nil, err
 		}
@@ -338,10 +346,10 @@ func observe(ctx context.Context, session *mcp.ClientSession, root *safefs.Root,
 	refs := []waitReference{{Kind: "nix_job", ID: id, Condition: "complete"}}
 	for {
 		var task struct {
-			Phase   string
-			Result  struct{ Termination, Conclusion string }
+			Phase     string
+			Result    struct{ Termination, Conclusion string }
 			Resources struct{ State string }
-			Evidence struct{ State string }
+			Evidence  struct{ State string }
 		}
 		if err := json.Unmarshal(raw, &task); err != nil {
 			return nil, err
@@ -373,7 +381,6 @@ func observe(ctx context.Context, session *mcp.ClientSession, root *safefs.Root,
 				return nil, err
 			}
 			offset = chunk.NextOffset
-			_, _ = o.Progress.Write(data)
 			if chunk.EOF {
 				break
 			}
@@ -381,8 +388,24 @@ func observe(ctx context.Context, session *mcp.ClientSession, root *safefs.Root,
 		terminal := task.Phase == "ended"
 		released := task.Resources.State == "released" || task.Resources.State == "unallocated"
 		if terminal && ((released && task.Evidence.State == "complete") || task.Resources.State == "blocked" || task.Evidence.State == "blocked") {
+			downloads, downloadErr := collectEvidence(ctx, session, root, id, o.Evidence, o.Progress)
+			var result map[string]any
+			if err := json.Unmarshal(raw, &result); err != nil {
+				return nil, err
+			}
+			complete := 0
+			for _, file := range downloads.Files {
+				if file.State == "complete" {
+					complete++
+				}
+			}
+			result["downloads"] = map[string]any{"state": downloads.State, "manifest": downloads.Manifest, "files": len(downloads.Files), "complete": complete}
+			raw = wire.JSON(result)
 			if _, _, err := root.Write("result.json", bytes.NewReader(raw), 4<<20); err != nil {
 				return nil, err
+			}
+			if downloadErr != nil {
+				return raw, fmt.Errorf("task %s evidence download: %w", id, downloadErr)
 			}
 			if task.Result.Termination != "finished" || task.Result.Conclusion != "passed" || !released || task.Evidence.State != "complete" {
 				return raw, fmt.Errorf("task %s: state=%s conclusion=%s resources=%s evidence=%s", id, task.Result.Termination, task.Result.Conclusion, task.Resources.State, task.Evidence.State)

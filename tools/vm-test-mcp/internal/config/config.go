@@ -205,11 +205,11 @@ func (c *Config) Validate() error {
 			return bad("invalid Origin allowlist")
 		}
 	}
-	if c.Tasks.DefaultTimeout < Duration(time.Second) || c.Tasks.MaxDuration < c.Tasks.DefaultTimeout || c.Tasks.MaxDuration > Duration(24*time.Hour) || c.Tasks.CleanupTimeout < Duration(time.Second) || c.Tasks.CleanupTimeout > Duration(time.Hour) {
+	if c.Tasks.DefaultTimeout < Duration(time.Second) || c.Tasks.MaxDuration < c.Tasks.DefaultTimeout || c.Tasks.MaxDuration > Duration(24*time.Hour) || c.Tasks.CleanupTimeout < Duration(time.Second) || c.Tasks.CleanupTimeout > Duration(5*time.Minute) {
 		return bad("deadline limits")
 	}
-	if c.Tasks.EvidenceTimeout < Duration(time.Second) || c.Tasks.EvidenceTimeout > Duration(time.Hour) {
-		return bad("evidence_timeout must be between 1s and 1h")
+	if c.Tasks.EvidenceTimeout < Duration(time.Second) || c.Tasks.EvidenceTimeout > Duration(5*time.Minute) {
+		return bad("evidence_timeout must be between 1s and 5m")
 	}
 	if c.Storage.SuccessDays < 1 || c.Storage.FailureDays < c.Storage.SuccessDays || c.Storage.SummaryDays < c.Storage.FailureDays || c.Storage.MaxUploadBytes < 1 || c.Storage.MaxUploadBytes > 8<<30 || c.Storage.InputBytes < c.Storage.MaxUploadBytes || c.Storage.LowWaterBytes < 1 || c.Storage.EvidenceBytes <= c.Storage.LowWaterBytes || c.Storage.UploadIdle < Duration(time.Second) {
 		return bad("retention limits")
@@ -352,13 +352,14 @@ func PrivateLAN(p netip.Prefix) bool {
 }
 
 type Worker struct {
-	ExecutorSocket string `yaml:"-"`
-	KeepFailed     bool   `yaml:"keep_failed"`
-	StateDir       string `yaml:"state_dir"`
-	Socket         string `yaml:"socket"`
-	ControllerUID  int    `yaml:"controller_uid"`
-	Nix            string `yaml:"executable"`
-	CacheURL       string `yaml:"cache_url"`
+	EvidenceTimeout  Duration `yaml:"-"`
+	MaxEvidenceBytes int64    `yaml:"-"`
+	ExecutorSocket   string   `yaml:"-"`
+	StateDir         string   `yaml:"state_dir"`
+	Socket           string   `yaml:"socket"`
+	ControllerUID    int      `yaml:"controller_uid"`
+	Nix              string   `yaml:"executable"`
+	CacheURL         string   `yaml:"cache_url"`
 }
 
 func LoadWorker(file string) (Worker, error) {
@@ -370,6 +371,8 @@ func LoadWorker(file string) (Worker, error) {
 		return shared.Nix, err
 	}
 	c := shared.Nix
+	c.MaxEvidenceBytes = shared.Storage.EvidenceBytes
+	c.EvidenceTimeout = shared.Tasks.EvidenceTimeout
 	c.ExecutorSocket = shared.Executor.Socket
 	if c.StateDir == "" {
 		c.StateDir = shared.StateDir
