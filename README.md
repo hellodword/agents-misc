@@ -4,12 +4,11 @@ Agent Rules Kit is a small, project-scoped instruction payload for coding agents
 
 ## Repository map
 
-This repository contains the following components. Each component
-has one authoritative input boundary and one primary verification entrypoint:
+This repository contains the following components and maintenance entrypoints:
 
 | Component                                                | Purpose                                                             | Authoritative inputs                   | Primary maintenance entry                                            |
 | -------------------------------------------------------- | ------------------------------------------------------------------- | -------------------------------------- | -------------------------------------------------------------------- |
-| [Agent Rules Kit](AGENTS.md)                             | Shared agent rules and reusable workflow skills                     | `AGENTS.md`, `.agents/**`              | `just check-agent-rules`                                             |
+| [Agent Rules Kit](AGENTS.md)                             | Shared agent rules and reusable workflow skills                     | `AGENTS.md`, `.agents/**`              | [Maintenance guide](.project-agent/rules/maintenance.md)             |
 | [VM Test MCP](tools/vm-test-mcp/README.md)               | Disposable Windows/Linux labs and sandboxed NixOS VM tests          | `tools/vm-test-mcp/**`                 | `just --justfile tools/vm-test-mcp/justfile test`                    |
 | [Codex Config Atlas](tools/codex-config-atlas/README.md) | Versioned upstream schema registry, CLI, and static comparison site | tracked schema registry and Web source | `nix build --no-link .#checks.x86_64-linux.codex-config-atlas-tests` |
 
@@ -22,7 +21,7 @@ Only [AGENTS.md](AGENTS.md) and `.agents/**` are distributed. Consuming reposito
 
 The payload includes the [Agent Rules Kit MIT license notice](.agents/LICENSE.agent-rules-kit), a real-file copy of this repository's authoritative [LICENSE](LICENSE). It covers this kit, not the consuming project or independently added rules and skills. Keep the notice with redistributed copies; do not replace a consuming project's license with it.
 
-Repository maintenance files such as `.project-agent/**`, the checker, tests, Just recipes, and Nix checks are not part of the payload. The separately maintained `tools/**` and `.github/**` trees are outside the distributed rules-kit payload; their own guides define their contracts.
+Repository maintenance lives in `.project-agent/**`, Nix definitions, and CI workflows. The separately maintained `tools/**` and `.github/**` trees have their own component contracts.
 
 ## Loading model
 
@@ -44,7 +43,7 @@ The [project-context policy](AGENTS.md#project-context) defines how to maintain 
 
 ### This repository
 
-The local [.project-agent/project.md](.project-agent/project.md) covers all components in `agents-misc`. It reuses the existing [repository map](#repository-map) to locate component guides and applies the rules-kit maintenance instructions only to that boundary. Shared Just, Nix, and CI files use the guidance and validation of their affected consumers. This repository's README navigation is a local choice; consumers choose their own documentation layout.
+The local [.project-agent/project.md](.project-agent/project.md) covers all components in `agents-misc`. It reuses the existing [repository map](#repository-map) to locate component guides and applies the rules-kit maintenance instructions only to that boundary. Shared Nix and CI files use the guidance and validation of their affected consumers. This repository's README navigation is a local choice; consumers choose their own documentation layout.
 
 ## What belongs where
 
@@ -70,7 +69,6 @@ Keep supporting files beside their owning skill and link them directly from `SKI
 | `generated-artifacts-review`                       | Role-based ownership and proportionate validation in [generated assets](.agents/rules/generated-artifacts.md)                                |
 | `standalone-final-execution-plan` and its template | [long-task-plan](.agents/skills/long-task-plan/SKILL.md), triggered by an explicit request to plan autonomous long execution                 |
 | `nix-browser-e2e` and its helper                   | Browser policy in the [Nix rule](.agents/rules/nix.md#project-owned-playwright-browsers); projects use native Playwright configuration       |
-| Shared GitHub-hosted Nix recipes                   | Removed; runner setup is project-owned, including this repository's existing guarded action                                                  |
 
 Old entrypoints have no forwarding aliases. The kit supplies no dedicated SQLite migration or backup workflow; projects decide those methods. Database and library choices are preferences with justified alternatives, and dependency quality matters more than dependency count.
 
@@ -80,36 +78,22 @@ The [NixOS VM test skill](.agents/skills/nixos-vm-test/SKILL.md) submits locally
 
 ## Maintenance and validation
 
-Read [.project-agent/project.md](.project-agent/project.md) before modifying the kit. Invoke Just from the repository root; recipes enter their declared Nix environment as needed and may also be invoked from an entered shell.
+Read [.project-agent/project.md](.project-agent/project.md) before modifying the kit. Review affected routes, skill descriptions, local links, and distribution boundaries using the [maintenance guide](.project-agent/rules/maintenance.md). Walk through representative tasks when changing routing or authorization behavior.
 
-For rules-kit changes, run `just check-agent-rules` or its equivalent Nix check:
+Validate workflow changes with actionlint and ShellCheck from the development shell:
 
 ```sh
-nix build --no-link .#checks.x86_64-linux.agent-rules
+nix develop .#dev --command actionlint .github/workflows/ci.yml
 ```
 
-The checker validates the distributed entrypoint, license notice, directory layout, skill metadata, index coverage, local links, and resource ownership. It scans distributed `.md` and `.markdown` files case-insensitively and rejects symlinks and duplicate YAML fields. Prescribed entrypoint names remain exact: `AGENTS.md`, `index.md`, and `SKILL.md`. Local references must remain inside `AGENTS.md` and `.agents/**`. It does not validate consumer overlay links, project document chains, or instruction semantics. Its tests use a minimal synthetic payload and do not depend on the other repository components.
+The [CI workflow](.github/workflows/ci.yml) checks formatting, runs the four Atlas checks, and builds the site in a Nix container on pushes to `master` and manual dispatches. The build shares one Nix store and exports the site for GitHub Pages deployment.
 
-Fresh remote KVM acceptance is a separate integration check.
+Public binary caches are declared in [flake.nix](flake.nix). CI reads the shared cache through a loopback `oranc` proxy configured by [nix/cache-config.nix](nix/cache-config.nix), with signature verification. The proxy package is pinned by `flake.lock`. Cache availability affects build reuse; source builds remain available.
 
-Both maintenance entrypoints enable `--check-license-copy` to compare the distributed notice with this repository's root `LICENSE` byte for byte. A standalone invocation of `scripts/check-agent-rules.py --root <consumer>` checks the payload without comparing the consuming project's license.
-
-Use the [supported Markdown link syntax](#supported-markdown-links) for distributed files. Review project navigation separately when changing it.
-
-Workflow validation is independent: use `just check-workflows` or `nix build --no-link .#checks.x86_64-linux.github-workflows` when changing that boundary. Choose the local entrypoint or the equivalent Nix check instead of repeating the same tests through both.
-
-The [Agent Rules CI workflow](.github/workflows/check-agent-rules.yml) runs the same kit check on pushes to `master` and manual dispatches, using the repository-owned Nix setup action.
-
-Format the changed files with the repository formatter. For Nix output or check wiring changes, evaluate the flake with `nix flake check --no-build --no-write-lock-file` and build the affected checks. A full flake check is for changes that need the repository-wide delivery gate; routine rules-kit edits use the focused check above. Accept flake-provided configuration only under the applicable trust policy.
+Format changed files with the repository formatter. For Nix output or check wiring changes, evaluate the flake with `nix flake check --no-build --no-write-lock-file` and build the affected checks. Component guides define their validation commands. Accept flake-provided configuration under the applicable trust policy.
 
 Review the final diff and `git status --short --ignored`. Keep task-created diagnostics out of the payload and follow the [temporary workspace and retention policy](AGENTS.md#temporary-workspace-and-retention).
 
 ## Supported Markdown links
 
-These conventions apply to the distributed Markdown files scanned by `scripts/check-agent-rules.py`:
-
-- Use single-line `[text](path)` links or `![description](path)` images. Local targets are plain paths, optionally followed by `#fragment`.
-- Write paths directly, without whitespace, parentheses, angle brackets, quotes, backslash escapes, percent encoding, query strings, or link titles. Paths are relative to the source document; a leading `/` refers to the repository root. References must point to an existing distributed file or directory.
-- Reference-style definitions, full references such as `[text][id]`, and collapsed references such as `[text][]` are errors; rewrite them as inline links.
-- Put Markdown examples in backtick-delimited inline code or backtick/tilde fenced code blocks so they are excluded from link checking. Skill frontmatter is validated as metadata rather than scanned for links.
-- External URLs, including protocol-relative URLs, are not fetched; fragment identifiers are not checked against headings, and native HTML links are outside the checker scope. `file:` URLs, absolute Windows drive paths, and backslash UNC paths are rejected.
+Distributed Markdown uses single-line `[text](path)` links or `![description](path)` images. Local targets are plain paths relative to the source document, optionally followed by `#fragment`, and resolve to real files or directories within the payload. Put Markdown examples in inline code or fenced code blocks.

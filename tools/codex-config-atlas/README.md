@@ -161,7 +161,7 @@ nix build --no-link .#codex-config-atlas-data
 nix build --no-link .#codex-config-atlas-site
 ```
 
-The GitHub Pages workflow publishes `.#codex-config-atlas-site`. For local
+The [CI workflow](../../.github/workflows/ci.yml) publishes `.#codex-config-atlas-site` after formatting and Atlas checks pass. For local
 inspection, each selected comparison also writes a copyable `新增` / `移除` /
 `变更` diff to the browser developer console. For local validation, use the
 documented CLI commands above followed by:

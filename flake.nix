@@ -3,15 +3,18 @@
 
   nixConfig = {
     extra-substituters = [
-      "https://hellodword-codex.cachix.org"
+      "https://nix-community.cachix.org"
+      "https://cache.numtide.com"
     ];
     extra-trusted-public-keys = [
-      "hellodword-codex.cachix.org-1:0URmcnC9aynWh9+FJ2tf+HQloylGgZzPtrz3sttTTiQ="
+      "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs="
+      "niks3.numtide.com-1:DTx8wZduET09hRmMtKdQDxNNthLQETkc/yaX7M4qK0g="
     ];
   };
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    oranc.url = "github:linyinfeng/oranc";
 
     treefmt-nix = {
       url = "github:numtide/treefmt-nix";
@@ -22,6 +25,7 @@
   outputs =
     {
       nixpkgs,
+      oranc,
       treefmt-nix,
       ...
     }:
@@ -57,7 +61,7 @@
     in
     {
       packages = import ./nix/packages.nix {
-        inherit vmTestFor;
+        inherit oranc vmTestFor;
         inherit
           lib
           codexConfigAtlasFor
@@ -78,7 +82,6 @@
         inherit vmTestFor;
         inherit
           lib
-          nixpkgs
           codexConfigAtlasFor
           supportedSystems
           ;

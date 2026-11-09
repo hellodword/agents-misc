@@ -355,7 +355,6 @@ See [recovery](preparation.md#recovery) for host ownership and recovery procedur
 just --justfile tools/vm-test-mcp/justfile test
 nix build --no-link .#checks.x86_64-linux.vm-test-native
 nix build --no-link .#checks.x86_64-linux.vm-test-router
-just check-agent-rules
 nix flake check --no-build --no-write-lock-file
 ```
 

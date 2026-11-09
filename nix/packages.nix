@@ -1,5 +1,6 @@
 {
   lib,
+  oranc,
   supportedSystems,
   codexConfigAtlasFor,
   vmTestFor,
@@ -17,6 +18,7 @@ lib.genAttrs supportedSystems (
     codex-config-atlas-site = codexConfigAtlas.codexConfigAtlasSite;
   }
   // lib.optionalAttrs (system == "x86_64-linux") {
+    oranc = oranc.packages.${system}.oranc;
     vm-test-mcp = (vmTestFor system).package;
     vm-test-submit = (vmTestFor system).submit;
     vm-test-router = (vmTestFor system).router;

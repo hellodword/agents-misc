@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agents-misc-codex-config-atlas-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and check Atlas
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+    env:
+      NIX_CONTAINER: atlas-ci
+      NIX_CONFIG: |
+        experimental-features = nix-command flakes
+        accept-flake-config = false
+        sandbox = false
+        fallback = true
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Start Nix container
+        run: |
+          mkdir -p "$RUNNER_TEMP/atlas-ci"
+          docker run --detach --name "$NIX_CONTAINER" \
+            --ulimit nofile=65536:65536 \
+            --mount "type=volume,source=$NIX_CONTAINER-store,target=/nix" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/atlas-ci,target=/ci" \
+            --workdir /workspace \
+            --env NIX_CONFIG \
+            --env NIX_USER_CONF_FILES=/ci/nix.conf \
+            docker.io/nixos/nix@sha256:53b5ec518b696373829ea305c3c07a8c870113e44648c88ec484ef078550fd4f \
+            sleep infinity
+          docker exec "$NIX_CONTAINER" git config --global --add safe.directory /workspace
+
+      - name: Configure binary caches
+        run: |
+          docker exec -i "$NIX_CONTAINER" bash -euo pipefail <<'BASH'
+          nix eval --raw --file nix/cache-config.nix public > /ci/nix.conf
+          if oranc=$(nix build --no-link --no-write-lock-file --print-out-paths .#oranc); then
+            listen=$(nix eval --raw --file nix/cache-config.nix listen)
+            substituter=$(nix eval --raw --file nix/cache-config.nix substituter)
+            nohup "$oranc/bin/oranc" server --listen "$listen" > /ci/oranc.log 2>&1 < /dev/null &
+            if curl --fail --silent --show-error --retry 3 --retry-connrefused \
+              --retry-delay 1 --connect-timeout 5 --max-time 15 \
+              "$substituter/nix-cache-info" > /dev/null; then
+              nix eval --raw --file nix/cache-config.nix ci > /ci/nix.conf
+              exit 0
+            fi
+            cat /ci/oranc.log
+          fi
+          printf '%s\n' '::warning::Shared binary cache unavailable; continuing with public caches and source builds.'
+          BASH
+
+      - name: Check and build site
+        run: |
+          docker exec -i "$NIX_CONTAINER" bash -euo pipefail <<'BASH'
+          nix build --no-link --no-write-lock-file --print-build-logs \
+            .#checks.x86_64-linux.formatting \
+            .#checks.x86_64-linux.codex-config-atlas-registry \
+            .#checks.x86_64-linux.codex-config-atlas-data \
+            .#checks.x86_64-linux.codex-config-atlas-site \
+            .#checks.x86_64-linux.codex-config-atlas-tests
+          site=$(nix build --no-link --no-write-lock-file --print-out-paths .#codex-config-atlas-site)
+          mkdir -p /ci/site
+          cp -RL "$site/." /ci/site/
+          BASH
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: ${{ runner.temp }}/atlas-ci/site
+
+      - name: Clean up container
+        if: always()
+        run: |
+          docker rm --force "$NIX_CONTAINER" || true
+          docker volume rm "$NIX_CONTAINER-store" || true
+
+  deploy:
+    name: Deploy Atlas
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - uses: actions/configure-pages@v6
+      - id: deployment
+        uses: actions/deploy-pages@v5

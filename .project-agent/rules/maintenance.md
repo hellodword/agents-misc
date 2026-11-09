@@ -3,8 +3,8 @@
 ## Distribution boundary
 
 - Only `AGENTS.md` and `.agents/**` belong to the distributed payload.
-- Root `LICENSE` is the authoritative license text for this kit. Keep `.agents/LICENSE.agent-rules-kit` as a byte-identical real-file copy; the maintenance entrypoints enable `--check-license-copy`. Default payload validation must remain independent of a consuming repository's license.
-- Use real files and directories; the checker rejects every symlink, including links within the payload. Keep local links within the distribution boundary. Do not link to this repository's maintenance overlay, checker, tests, or Just/Nix checks from the payload.
+- Root `LICENSE` is the authoritative license text for this kit. Keep `.agents/LICENSE.agent-rules-kit` as a byte-identical real-file copy. Consuming repositories retain their own licenses.
+- Use real files and directories, with local links resolving within the distribution boundary.
 
 ## Rules and skills
 
@@ -18,7 +18,7 @@
 
 ## Repository CI
 
-The repository has adopted [.github/actions/setup-nix](../../.github/actions/setup-nix/action.yml) for its Nix workflows, including [Agent Rules CI](../../.github/workflows/check-agent-rules.yml). Its existing use of `apt` and the official Nix installer is authorized only on one-use GitHub-hosted Ubuntu runners. Preserve its environment guards; this authorization does not apply to developer machines or self-hosted runners. Runner setup remains owned by that action, outside the shared payload.
+The [CI workflow](../../.github/workflows/ci.yml) runs formatting and Atlas checks, builds the site in a digest-pinned Nix container, and publishes the exported artifact to GitHub Pages. The build uses one Nix store on a GitHub-hosted Ubuntu runner. Public cache declarations live in [flake.nix](../../flake.nix); [cache configuration](../../nix/cache-config.nix) adds a loopback proxy for read-only access to the shared cache. Cache signatures are verified with the declared public keys.
 
 ## Markdown links
 
@@ -26,11 +26,10 @@ Use single-line inline Markdown links with plain paths. Follow the [supported Ma
 
 ## Validation
 
-- For payload or checker changes, run `just check-agent-rules` or `nix build --no-link .#checks.x86_64-linux.agent-rules`. Do not repeat the same tests through both entrypoints.
-- Keep workflow validation separate: run `just check-workflows` or its `github-workflows` Nix check when that boundary changes.
+- For payload changes, review the affected links, distribution boundary, skill descriptions, and routes together.
+- For workflow changes, run `nix develop .#dev --command actionlint .github/workflows/ci.yml`; the shell supplies ShellCheck for embedded commands.
 - Format changed files with the repository formatter and review its diff.
 - For changed Nix output or check wiring, run `nix flake check --no-build --no-write-lock-file` and build the affected checks. Use the full repository gate when the changed boundaries require it.
-- Review skill descriptions and routes together. Check only structural invariants mechanically; do not test prose or source-code spelling.
 - For routing or authorization changes, walk through representative tasks to check intended decisions and exclusions. Treat that review as static evidence, not a measured improvement in agent behavior.
 
 Review the final diff and `git status --short --ignored`. Follow the [temporary workspace and retention policy](../../AGENTS.md#temporary-workspace-and-retention) for diagnostics. Preserve and disclose relevant pre-existing ignored work.

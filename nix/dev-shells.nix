@@ -8,9 +8,6 @@ lib.genAttrs supportedSystems (
   system:
   let
     pkgs = import nixpkgs { inherit system; };
-    agentRulesPython = pkgs.python3.withPackages (pythonPackages: [
-      pythonPackages.pyyaml
-    ]);
     devShell = pkgs.mkShell {
       packages = with pkgs; [
         actionlint
@@ -21,8 +18,8 @@ lib.genAttrs supportedSystems (
         nixfmt
         openssh
         ruff
+        shellcheck
         sshpass
-        agentRulesPython
       ];
     };
     atlasShell = pkgs.mkShell (
