@@ -53,7 +53,7 @@ func New(cfg config.Executor) (*Executor, error) {
 	if os.Geteuid() != 0 {
 		return nil, fmt.Errorf("executor requires root; use just nix-executor")
 	}
-	for _, dir := range []string{cfg.StateDir, filepath.Dir(cfg.Socket)} {
+	for _, dir := range []string{config.ExecutorStateDir, filepath.Dir(config.ExecutorSocket)} {
 		if err := executorDirectory(dir); err != nil {
 			return nil, err
 		}
@@ -70,7 +70,7 @@ func New(cfg config.Executor) (*Executor, error) {
 	if !wire.IDPattern.MatchString(invocation) {
 		return nil, fmt.Errorf("executor requires a systemd service invocation identity")
 	}
-	r, err := safefs.Private(cfg.StateDir, true)
+	r, err := safefs.Private(config.ExecutorStateDir, true)
 	if err != nil {
 		return nil, err
 	}
@@ -261,7 +261,7 @@ func (e *Executor) Call(method string, a Request) (any, error) {
 		}
 		id, now := wire.ID(), time.Now().UTC()
 		s := &Session{ID: id, ExecutorInstance: e.db.InstanceID, WorkerInstance: a.WorkerInstance, TaskID: a.TaskID, BootID: e.boot, Invocation: e.invocation, Group: filepath.Join(e.groups, "job-"+id), Created: now, Deadline: a.Deadline.UTC(), Resources: wire.NixResources{State: "owned", SessionID: id, ExecutorInstance: e.db.InstanceID, Observed: &now}}
-		s.Store = "unix://" + filepath.Join(filepath.Dir(e.cfg.Socket), id+".sock")
+		s.Store = "unix://" + filepath.Join(filepath.Dir(config.ExecutorSocket), id+".sock")
 		if err = e.save(s); err != nil {
 			return nil, err
 		}
@@ -480,7 +480,7 @@ func (e *Executor) released(r *runtimeSession, confirmation string) error {
 		return err
 	}
 	*r.session = next
-	socket := filepath.Join(filepath.Dir(e.cfg.Socket), next.ID+".sock")
+	socket := filepath.Join(filepath.Dir(config.ExecutorSocket), next.ID+".sock")
 	if next.Store == "unix://"+socket {
 		if info, err := os.Lstat(socket); err == nil && info.Mode()&os.ModeSocket != 0 {
 			_ = os.Remove(socket)
@@ -656,7 +656,7 @@ func (e *Executor) HTTPServer() *http.Server {
 }
 
 func (e *Executor) Listen() (net.Listener, error) {
-	dir := filepath.Dir(e.cfg.Socket)
+	dir := filepath.Dir(config.ExecutorSocket)
 	if err := os.Mkdir(dir, 0711); err == nil {
 		// systemd starts us with UMask=0077. Allow the worker to traverse this
 		// dedicated directory; each socket itself is restricted to its UID.
@@ -673,20 +673,20 @@ func (e *Executor) Listen() (net.Listener, error) {
 	if !info.IsDir() || info.Sys().(*syscall.Stat_t).Uid != 0 || info.Mode().Perm()&0022 != 0 {
 		return nil, fmt.Errorf("executor socket directory must be root-owned and not writable by other users")
 	}
-	if info, err := os.Lstat(e.cfg.Socket); err == nil {
+	if info, err := os.Lstat(config.ExecutorSocket); err == nil {
 		if info.Mode()&os.ModeSocket == 0 {
 			return nil, fmt.Errorf("executor socket path is not a socket")
 		}
-		if err = os.Remove(e.cfg.Socket); err != nil {
+		if err = os.Remove(config.ExecutorSocket); err != nil {
 			return nil, err
 		}
 	}
-	l, err := net.Listen("unix", e.cfg.Socket)
+	l, err := net.Listen("unix", config.ExecutorSocket)
 	if err != nil {
 		return nil, err
 	}
-	if err = os.Chown(e.cfg.Socket, e.cfg.WorkerUID, -1); err == nil {
-		err = os.Chmod(e.cfg.Socket, 0600)
+	if err = os.Chown(config.ExecutorSocket, e.cfg.WorkerUID, -1); err == nil {
+		err = os.Chmod(config.ExecutorSocket, 0600)
 	}
 	if err != nil {
 		l.Close()

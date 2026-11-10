@@ -36,22 +36,13 @@ lists apply exact matching. Configure HTTP and published-service listeners
 separately; `virtualbox.network.source_cidrs` limits only TCP/UDP entry clients. Register
 host public/NAT addresses and extra management ranges for egress protection.
 
-Run the controller as the VirtualBox owner. Run the worker as an ordinary account
-outside Nix `trusted-users`, including trusted groups. Both processes may use the
-same account. Top-level `state_dir` is a root with `controller/` and `nix-worker/`
-role directories. Optional `nix.state_dir` overrides the worker root; it can equal
-the controller root. Each role has its own database and lock in a real,
-owner-matched `0700` directory without symlink components. For separate accounts
-sharing a root, prepare parent traversal permissions and each role directory
-before startup. Final role directories must not overlap or nest. Set `nix.controller_uid` to the controller
-account's UID (`id -u` when using the same account); connections are checked using
-`SO_PEERCRED`.
-
-With one account, the socket may reside inside the worker's state directory. If
-using different accounts, give them a dedicated socket group and place the socket
-outside either private state directory. A worker-owned `0750` directory such as
-`/run/vm-test-bridge`, with that group also used by the worker process, lets the
-controller access the `0660` socket.
+Run the controller and worker as the same ordinary account: the VirtualBox owner,
+outside Nix `trusted-users` and trusted groups. Top-level `state_dir` contains the
+fixed `controller/` and `nix-worker/` role directories. Each role has its own
+database and lock in an owner-matched `0700` directory with real directory
+components. The worker listens at `<state_dir>/nix-worker/worker.sock`, inside its
+private directory. Set `nix.enabled: true` and set `nix.controller_uid` to this
+account's UID (`id -u`); connections are authenticated using `SO_PEERCRED`.
 
 ## Windows baseline
 
@@ -282,13 +273,12 @@ configuration. The executor reads it once at startup; later edits require a
 restart. Host users who can change the checkout or configuration belong to this
 administrative trust boundary. Runtime worker requests cannot change the policy.
 
-The default `executor.state_dir` is `/var/lib/vm-test-nix-executor` and
-`executor.socket` is `/run/vm-test-nix-executor/control.sock`. The worker reads
-that same socket field. State and socket-directory ancestors must be root-owned real directories
+The executor stores state at `/var/lib/vm-test-nix-executor` and listens at
+`/run/vm-test-nix-executor/control.sock`. Both paths are fixed, and the worker
+connects to that socket. State and socket-directory ancestors must be root-owned real directories
 without write access for other accounts. The executor creates its private state
 with mode `0700` and its dedicated socket directory with mode `0711`; socket
-files grant access only to the configured worker UID. For custom socket locations,
-prepare the parent directories and allow the worker to traverse them.
+files grant access only to the configured worker UID.
 The root service accepts only job/session identities and bounded deadlines,
 never caller-supplied commands, PIDs, cgroup paths or environment settings.
 
@@ -364,8 +354,8 @@ executor invocation cannot provide the delegated supervisor boundary.
 
 The three recipes use this directory's `config.yaml`; `just nix-executor` passes
 its absolute path through sudo to the service. `just nix-worker` and `just serve`
-run as ordinary foreground processes. The worker's socket must be accessible to the controller; separate
-accounts need a socket outside the worker's private directory. Run `just nixos-test`
+run as foreground processes under the same ordinary account. The worker's private
+directory contains its socket. Run `just nixos-test`
 in the container after the host services are available. An offline worker makes
 storage accounting unknown and pauses new admission; control and recovery remain
 available for accepted jobs.
@@ -379,6 +369,11 @@ each of the three programs to validate configuration values without starting
 services or creating state. The executor checks host directory ownership and
 cgroup delegation at startup, before creating state or sockets. Configuration
 is loaded at startup. Restart after tasks finish when changing policy or paths.
+
+When relocating existing schema-23 state, finish resource release and evidence
+handoff, then stop the services. Move the complete role directory to its required
+location, preserving ownership, permissions, database identity and evidence.
+Retain any previous destination as a separate offline backup.
 
 This release requires new configuration and empty controller, worker and executor state
 with fresh schema-23 databases. The user must stop the old services, confirm all

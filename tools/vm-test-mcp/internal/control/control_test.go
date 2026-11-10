@@ -401,13 +401,12 @@ func evidenceForTest(t *testing.T, s *Server, id string) []*Artifact {
 
 func TestControllerAndWorkerShareStateRoot(t *testing.T) {
 	cfg := testConfig(t)
-	cfg.Nix.StateDir = cfg.StateDir
 	controller, err := New(cfg, &fakeBackend{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer controller.Close()
-	w, err := worker.New(config.Worker{StateDir: cfg.StateDir, Socket: filepath.Join(cfg.WorkerDir(), "worker.sock"), ControllerUID: os.Getuid()})
+	w, err := worker.New(config.Worker{StateDir: cfg.StateDir, ControllerUID: os.Getuid()})
 	if err != nil {
 		t.Fatal(err)
 	}

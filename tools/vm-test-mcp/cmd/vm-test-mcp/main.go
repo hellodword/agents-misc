@@ -48,8 +48,8 @@ func run() int {
 		return 0
 	}
 	b := &control.Backends{VBoxBackend: &control.VBoxBackend{Config: cfg, Runner: hostexec.Exec{}}, NixBackend: &nixos.Backend{StateDir: cfg.ControllerDir(), MaxEvidenceBytes: cfg.Storage.MaxUploadBytes}}
-	if cfg.Nix.Socket != "" {
-		b.NixBackend.Client = worker.NewClient(cfg.Nix.Socket)
+	if cfg.Nix.Enabled {
+		b.NixBackend.Client = worker.NewClient(cfg.Nix.Socket())
 	}
 	s, e := control.New(cfg, b)
 	if e != nil {

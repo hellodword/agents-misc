@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -22,7 +23,7 @@ func TestDurationConfigurationAndAnnotatedExample(t *testing.T) {
 		t.Fatal("duration or nested configuration differs")
 	}
 	example, err := Load("../../config.example.yaml")
-	if err != nil || example.VirtualBox.StartupParallelism != 1 {
+	if err != nil || example.VirtualBox.StartupParallelism != 1 || example.Nix.Enabled {
 		t.Fatal("example startup default", example.VirtualBox.StartupParallelism, err)
 	}
 }
@@ -76,8 +77,8 @@ func TestRouterWithoutTemplatesValidatesISOAndPrograms(t *testing.T) {
 func TestSharedConfigurationAndPermissions(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "config.yaml")
-	body := fmt.Sprintf("state_dir: %s\nservice:\n  token: synthetic\n  public_url: http://127.0.0.1:8765\nnix:\n  socket: %s/worker.sock\n  state_dir: %s\n  executable: /fixture/nix\n  controller_uid: %d\n", dir, dir, dir, os.Getuid())
-	body += "executor:\n  worker_uid: 1000\n  executable: /fixture/nix-daemon\n  socket: /run/vm-test-config-fixture/control.sock\n"
+	body := fmt.Sprintf("state_dir: %s\nservice:\n  token: synthetic\n  public_url: http://127.0.0.1:8765\nnix:\n  enabled: true\n  executable: /fixture/nix\n  controller_uid: %d\n", dir, os.Getuid())
+	body += "executor:\n  worker_uid: 1000\n  executable: /fixture/nix-daemon\n"
 	if err := os.WriteFile(p, []byte(body), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -89,11 +90,11 @@ func TestSharedConfigurationAndPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Nix.Socket != w.Socket || w.CacheURL != c.Service.PublicURL || len(c.Service.Hosts) != 0 || len(c.Service.Origins) != 0 {
+	if !c.Nix.Enabled || c.Nix.Socket() != w.Socket() || w.StateDir != c.StateDir || w.Directory() != c.WorkerDir() || w.Socket() != filepath.Join(dir, "nix-worker", "worker.sock") || w.CacheURL != c.Service.PublicURL || len(c.Service.Hosts) != 0 || len(c.Service.Origins) != 0 {
 		t.Fatal("shared configuration or defaults differ")
 	}
 	executor, err := LoadExecutor(p)
-	if err != nil || executor.WorkerUID != 1000 || executor.Nix != "/fixture/nix-daemon" || executor.Socket != w.ExecutorSocket || executor.StopGrace.Value() != 30*time.Second {
+	if err != nil || executor.WorkerUID != 1000 || executor.Nix != "/fixture/nix-daemon" || executor.StopGrace.Value() != 30*time.Second {
 		t.Fatal("shared executor policy differs", executor, err)
 	}
 	st, _ := os.Stat(p)
@@ -105,6 +106,15 @@ func TestSharedConfigurationAndPermissions(t *testing.T) {
 	}
 	if _, err = LoadWorker(p); err == nil {
 		t.Fatal("worker accepted unknown shared field")
+	}
+	if err = os.WriteFile(p, []byte(strings.Replace(body, "enabled: true", "enabled: false", 1)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if c, err = Load(p); err != nil || c.Nix.Enabled {
+		t.Fatal("controller configuration with Nix disabled", err)
+	}
+	if _, err = LoadWorker(p); err == nil || !strings.Contains(err.Error(), "nix.enabled") {
+		t.Fatal("worker configuration with Nix disabled", err)
 	}
 }
 
@@ -161,35 +171,5 @@ func TestTemplateDefaultsAndUnboundedHTTPHosts(t *testing.T) {
 	c.VirtualBox.Templates["linux"] = v
 	if c.Validate() == nil {
 		t.Fatal("non-root Linux template accepted")
-	}
-}
-
-func TestRoleDirectories(t *testing.T) {
-	root := t.TempDir()
-	for _, override := range []string{"", root, filepath.Join(root, "separate")} {
-		c := Defaults()
-		c.StateDir, c.Nix.StateDir = root, override
-		if err := c.validateStateDirs(); err != nil {
-			t.Fatal(err)
-		}
-		if c.ControllerDir() != filepath.Join(root, "controller") {
-			t.Fatal(c.ControllerDir())
-		}
-		expectedRoot := override
-		if expectedRoot == "" {
-			expectedRoot = root
-		}
-		if c.WorkerDir() != filepath.Join(expectedRoot, "nix-worker") {
-			t.Fatal(c.WorkerDir())
-		}
-	}
-	c := Defaults()
-	c.StateDir, c.Nix.StateDir = root, filepath.Join(root, "controller")
-	if c.validateStateDirs() == nil {
-		t.Fatal("nested role directory accepted")
-	}
-	c.StateDir, c.Nix.StateDir = filepath.Join(root, "nix-worker"), root
-	if c.validateStateDirs() == nil {
-		t.Fatal("reverse nesting accepted")
 	}
 }

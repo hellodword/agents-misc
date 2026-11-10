@@ -54,12 +54,15 @@ Follow [administrator preparation](preparation.md). All three services read the 
 permission requirement. Explicit sudo startup authorizes the current build and
 the shared file's `executor` policy, which stays fixed for that process lifetime.
 Top-level `state_dir` owns the role directories
-`controller/` and `nix-worker/`; `nix.state_dir` optionally overrides the worker root.
-The roots can be identical while each role retains its own private directory,
-lock and database.
+`controller/` and `nix-worker/`. The controller and worker run as the same ordinary
+account, with separate private directories, locks and databases. The worker socket
+is `<state_dir>/nix-worker/worker.sock`. The root executor stores its state at
+`/var/lib/vm-test-nix-executor` and listens at
+`/run/vm-test-nix-executor/control.sock`; these paths are fixed.
 Local `config.yaml` is Git-ignored. Optional backend blocks are commented
 out until their administrator-owned inputs are ready. Configuring `virtualbox.router.iso`
-enables VirtualBox even before templates are registered; `lab_create(nodes=[])`
+enables VirtualBox even before templates are registered; `nix.enabled: true`
+enables the Nix backend. `lab_create(nodes=[])`
 starts just the router for boot and dynamic policy checks. Templates reference powered-off
 snapshots directly; the service never modifies a source VM or creates a preparation
 cache.
@@ -77,7 +80,8 @@ just --justfile tools/vm-test-mcp/justfile nix-worker   # Host: ordinary Nix wor
 
 All commands build the package as needed, remain in the foreground and read
 `tools/vm-test-mcp/config.yaml`; override with `--config /absolute/config.yaml`.
-Fill in `executor.worker_uid` and `executor.executable` in that shared file.
+Set `nix.enabled: true`, fill in the shared ordinary account's UID for
+`nix.controller_uid` and `executor.worker_uid`, and set `executor.executable`.
 The recipe passes its absolute path to the transient service. The administrator
 trusts this configuration when invoking sudo; edits take effect after restart.
 It requires systemd 254+, cgroup v2 and delegated cgroup support. Its recipe uses

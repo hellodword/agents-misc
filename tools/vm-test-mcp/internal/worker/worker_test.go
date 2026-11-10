@@ -20,7 +20,7 @@ func fixture(t *testing.T, uid int) (*Worker, config.Worker) {
 	t.Helper()
 	dir := t.TempDir()
 	os.Chmod(dir, 0700)
-	c := config.Worker{StateDir: dir, Socket: filepath.Join(dir, "worker.sock"), ControllerUID: uid, Nix: "/synthetic/nix", CacheURL: "http://127.0.0.1:8765"}
+	c := config.Worker{StateDir: dir, ControllerUID: uid, Nix: "/synthetic/nix", CacheURL: "http://127.0.0.1:8765"}
 	w, e := newWorker(c, newExecutorFixture())
 	if e != nil {
 		t.Fatal(e)
@@ -214,7 +214,7 @@ func TestPreflightDaemonAndClientPolicy(t *testing.T) {
 		daemonExit               int
 	}{
 		{name: "NixOS client defaults"},
-		{name: "different account", otherAccount: true},
+		{name: "different account", otherAccount: true, wantError: "controller and worker must run under the same account"},
 		{name: "explicit build users", setting: "build-users-group", value: "nixbld"},
 		{name: "absent client build users", setting: "build-users-group", value: nil},
 		{name: "sandbox disabled", setting: "sandbox", value: false, wantError: "client sandbox must be true"},
@@ -382,7 +382,7 @@ func TestUnixPeerCredential(t *testing.T) {
 		server := w.HTTPServer()
 		done := make(chan error, 1)
 		go func() { done <- server.Serve(listener) }()
-		client := NewClient(w.cfg.Socket)
+		client := NewClient(w.cfg.Socket())
 		_, e = client.Call(context.Background(), "describe", struct{}{})
 		if (uid == os.Getuid()) != (e == nil) {
 			t.Fatalf("UID %d: %v", uid, e)

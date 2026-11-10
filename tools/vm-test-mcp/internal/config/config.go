@@ -184,9 +184,7 @@ func (c *Config) Validate() error {
 	if c.Service.Token == "" || strings.ContainsAny(c.Service.Token, "\r\n") || !absolute(c.StateDir) {
 		return bad("service token and canonical absolute state_dir are required")
 	}
-	if err := c.validateStateDirs(); err != nil {
-		return err
-	}
+	c.Nix.StateDir = c.StateDir
 	host, port, e := net.SplitHostPort(c.Service.Listen)
 	number, portError := strconv.Atoi(port)
 	if e != nil || portError != nil || number < 1 || number > 65535 || net.ParseIP(host).To4() == nil {
@@ -304,9 +302,6 @@ func (c *Config) Validate() error {
 			return bad("virtualbox.router.iso must be an absolute Live ISO path")
 		}
 	}
-	if c.Nix.Socket != "" && !absolute(c.Nix.Socket) {
-		return bad("worker socket")
-	}
 	lan, e := netip.ParsePrefix(c.VirtualBox.Network.LAN)
 	if e != nil || !PrivateLAN(lan) {
 		return bad("LAN must be a canonical RFC1918 IPv4 subnet /8 through /29")
@@ -352,11 +347,10 @@ func PrivateLAN(p netip.Prefix) bool {
 }
 
 type Worker struct {
+	Enabled          bool     `yaml:"enabled"`
 	EvidenceTimeout  Duration `yaml:"-"`
 	MaxEvidenceBytes int64    `yaml:"-"`
-	ExecutorSocket   string   `yaml:"-"`
-	StateDir         string   `yaml:"state_dir"`
-	Socket           string   `yaml:"socket"`
+	StateDir         string   `yaml:"-"`
 	ControllerUID    int      `yaml:"controller_uid"`
 	Nix              string   `yaml:"executable"`
 	CacheURL         string   `yaml:"cache_url"`
@@ -367,16 +361,16 @@ func LoadWorker(file string) (Worker, error) {
 	if e := decode(file, &shared); e != nil {
 		return shared.Nix, e
 	}
-	if err := shared.validateStateDirs(); err != nil {
-		return shared.Nix, err
+	if !absolute(shared.StateDir) {
+		return shared.Nix, fmt.Errorf("state_dir must be a canonical absolute path")
 	}
 	c := shared.Nix
+	if !c.Enabled {
+		return c, fmt.Errorf("set nix.enabled to true to run the worker")
+	}
 	c.MaxEvidenceBytes = shared.Storage.EvidenceBytes
 	c.EvidenceTimeout = shared.Tasks.EvidenceTimeout
-	c.ExecutorSocket = shared.Executor.Socket
-	if c.StateDir == "" {
-		c.StateDir = shared.StateDir
-	}
+	c.StateDir = shared.StateDir
 	if c.CacheURL == "" {
 		c.CacheURL = shared.Service.PublicURL
 	}
@@ -384,15 +378,6 @@ func LoadWorker(file string) (Worker, error) {
 		if p, e := exec.LookPath(c.Nix); e == nil {
 			c.Nix = p
 		}
-	}
-	if !absolute(c.StateDir) {
-		return c, fmt.Errorf("nix.state_dir must be a canonical absolute path")
-	}
-	if !absolute(c.Socket) {
-		return c, fmt.Errorf("nix.socket must be a canonical absolute path")
-	}
-	if !absolute(c.ExecutorSocket) {
-		return c, fmt.Errorf("executor.socket must be a canonical absolute path")
 	}
 	if !absolute(c.Nix) {
 		return c, fmt.Errorf("nix.executable must resolve to a canonical absolute path; ensure nix is in PATH or configure an absolute executable")

@@ -358,8 +358,9 @@ UID. Responses are session snapshots or `{error:{code,message,details,...}}`.
 No RPC accepts executable paths, environment, PIDs, cgroup paths or sudo commands.
 The three services share one YAML file. Explicit sudo startup authorizes the
 build and its `executor` configuration; the executor reads that policy once.
-The configured worker UID, executable, state and socket paths, grace period and
-release budget stay fixed until restart. Runtime state and socket directories
+The configured worker UID, executable, grace period and release budget stay fixed
+until restart. Executor state lives at `/var/lib/vm-test-nix-executor` and its
+control socket is `/run/vm-test-nix-executor/control.sock`. These fixed paths
 remain under root control independently of configuration-file ownership.
 Session intent is durable before process creation. Deadlines are persisted at the
 executor, extend monotonically within 24h, and never reopen a stopped session.
@@ -753,12 +754,13 @@ and unreferenced publication files are reclaimable without changing accepted
 objects. A manifest holds at most 100000 objects. File access uses directory
 handles and rejects symlinks. Guest archives remain opaque on the host.
 
-Top-level `state_dir` is a root: controller data lives in `controller/`, worker data
-in `nix-worker/`. Optional `nix.state_dir` overrides the worker's root, retaining
-its role suffix. Both roots may be the same path. Each role owns its private 0700
-directory, lock, SQLite database and files; overlapping final directories and
-symlink boundaries are rejected. Different service accounts need an administrator
-prepared parent directory and correctly owned role children. Worker database
+Top-level `state_dir` contains the fixed `controller/` and `nix-worker/` role
+directories. Controller and worker run as the same ordinary account. Each role
+owns its private 0700 directory, lock, SQLite database and files; directory
+components must be real directories. The worker socket is
+`<state_dir>/nix-worker/worker.sock`. `nix.enabled` defaults to false and selects
+whether the controller uses the Nix backend; running the worker requires true.
+Worker database
 identity persists across restarts and is bound into accepted Nix jobs. A replacement
 worker database cannot confirm that an old execution was never accepted.
 

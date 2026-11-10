@@ -90,7 +90,7 @@ type Worker struct {
 }
 
 func New(c config.Worker) (*Worker, error) {
-	return newWorker(c, nixexecutor.NewClient(c.ExecutorSocket))
+	return newWorker(c, nixexecutor.NewClient(config.ExecutorSocket))
 }
 func newWorker(c config.Worker, executor nixexecutor.Caller) (*Worker, error) {
 	if c.EvidenceTimeout == 0 {
@@ -182,6 +182,9 @@ func (w *Worker) command(ctx context.Context, args ...string) *exec.Cmd {
 func (w *Worker) Preflight(ctx context.Context) error {
 	if os.Getuid() == 0 {
 		return fmt.Errorf("worker requires a non-root identity")
+	}
+	if w.cfg.ControllerUID != os.Getuid() {
+		return fmt.Errorf("controller and worker must run under the same account")
 	}
 	raw, e := w.command(ctx, "config", "show", "--json").Output()
 	if e != nil {
@@ -858,24 +861,25 @@ func (w *Worker) HTTPServer() *http.Server {
 	})}
 }
 func (w *Worker) Listen() (net.Listener, error) {
-	if fi, e := os.Lstat(w.cfg.Socket); e == nil {
+	socket := w.cfg.Socket()
+	if fi, e := os.Lstat(socket); e == nil {
 		if fi.Mode()&os.ModeSocket == 0 {
 			return nil, fmt.Errorf("socket path is not a socket")
 		}
-		c, e := net.DialTimeout("unix", w.cfg.Socket, time.Second)
+		c, e := net.DialTimeout("unix", socket, time.Second)
 		if e == nil {
 			c.Close()
 			return nil, fmt.Errorf("worker socket already active")
 		}
-		if e = os.Remove(w.cfg.Socket); e != nil {
+		if e = os.Remove(socket); e != nil {
 			return nil, e
 		}
 	}
-	l, e := net.Listen("unix", w.cfg.Socket)
+	l, e := net.Listen("unix", socket)
 	if e != nil {
 		return nil, e
 	}
-	if e = os.Chmod(w.cfg.Socket, 0660); e != nil {
+	if e = os.Chmod(socket, 0660); e != nil {
 		l.Close()
 		return nil, e
 	}
