@@ -6,13 +6,13 @@ Agent Rules Kit is a compact instruction payload for coding agents. It uses the 
 
 This repository maintains the shared Agent Rules Kit alongside standalone engineering tools:
 
-| Component                                                | Purpose                                                             | Authoritative inputs                   | Primary maintenance entry                                            |
-| -------------------------------------------------------- | ------------------------------------------------------------------- | -------------------------------------- | -------------------------------------------------------------------- |
-| [Agent Rules Kit](AGENTS.md)                             | Shared agent rules and reusable workflow skills                     | `AGENTS.md`, `.agents/**`              | [Maintenance and validation](#maintenance-and-validation)            |
-| [VM Test MCP](tools/vm-test-mcp/README.md)               | Disposable Windows/Linux labs and sandboxed NixOS VM tests          | `tools/vm-test-mcp/**`                 | `just --justfile tools/vm-test-mcp/justfile test`                    |
-| [Codex Config Atlas](tools/codex-config-atlas/README.md) | Versioned upstream schema registry, CLI, and static comparison site | tracked schema registry and Web source | `nix build --no-link .#checks.x86_64-linux.codex-config-atlas-tests` |
-| [Tokscale Sandbox](tools/tokscale-sandbox/README.md)     | Offline `runsc`-isolated token analytics across local coding agents | `tools/tokscale-sandbox/**`            | [Component guide](tools/tokscale-sandbox/README.md)                  |
-| [AGY Meter](tools/agy-meter/README.md)                   | Real-time TTFT/TPS status line and SQLite telemetry for `agy`       | `tools/agy-meter/**`                   | [Component guide](tools/agy-meter/README.md)                         |
+| Component                                                | Purpose                                                             | Authoritative inputs                   | Primary maintenance entry                                  |
+| -------------------------------------------------------- | ------------------------------------------------------------------- | -------------------------------------- | ---------------------------------------------------------- |
+| [Agent Rules Kit](AGENTS.md)                             | Shared agent rules and reusable workflow skills                     | `AGENTS.md`, `.agents/**`              | [Maintenance and validation](#maintenance-and-validation)  |
+| [VM Test MCP](tools/vm-test-mcp/README.md)               | Disposable Windows/Linux labs and sandboxed NixOS VM tests          | `tools/vm-test-mcp/**`                 | `just --justfile tools/vm-test-mcp/justfile test`          |
+| [Codex Config Atlas](tools/codex-config-atlas/README.md) | Versioned upstream schema registry, CLI, and static comparison site | tracked schema registry and Web source | [Maintenance SOP](tools/codex-config-atlas/MAINTENANCE.md) |
+| [Tokscale Sandbox](tools/tokscale-sandbox/README.md)     | Offline `runsc`-isolated token analytics across local coding agents | `tools/tokscale-sandbox/**`            | [Component guide](tools/tokscale-sandbox/README.md)        |
+| [AGY Meter](tools/agy-meter/README.md)                   | Real-time TTFT/TPS status line and SQLite telemetry for `agy`       | `tools/agy-meter/**`                   | [Component guide](tools/agy-meter/README.md)               |
 
 Atlas data and site trees are generated Nix outputs; its tracked schema registry and Web source are the durable inputs.
 

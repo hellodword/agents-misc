@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-from contextlib import redirect_stdout
-from copy import deepcopy
 import io
 import json
-from pathlib import Path
 import unittest
+from contextlib import redirect_stdout
+from copy import deepcopy
+from pathlib import Path
 from unittest.mock import patch
 
 from codex_config_atlas.cli import main as cli_main
 from codex_config_atlas.json_value import canonical_json_key
 from codex_config_atlas.schema_diff import build_schema_diff
-
 
 MISSING = object()
 GOLDEN_PATH = Path(__file__).parent / "fixtures" / "schema-diff-golden.json"

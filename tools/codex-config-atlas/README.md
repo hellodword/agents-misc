@@ -1,5 +1,7 @@
 # Codex Config Atlas
 
+> **Routine release updates:** Follow the step-by-step [Maintenance SOP](MAINTENANCE.md) (`sync-releases` + `scripts/verify.sh`).
+
 ## Why this exists
 
 Codex configuration changes with each upstream release, but the upstream JSON
@@ -67,29 +69,32 @@ Nix packaging and generated-output checks live in
 Run the packaged CLI through its flake app:
 
 ```bash
-nix run .#codex-config-atlas -- current
-nix run .#codex-config-atlas -- check-registry --schemas tools/codex-config-atlas/schemas
-nix run .#codex-config-atlas -- diff --schemas tools/codex-config-atlas/schemas --from 0.143.0 --to 0.144.1
-nix run .#codex-config-atlas -- diff-defaults --schemas tools/codex-config-atlas/schemas --from 0.143.0 --to 0.144.1
-nix run .#codex-config-atlas -- gen-toml --schemas tools/codex-config-atlas/schemas --version 0.144.1 --mode reference
-nix run .#codex-config-atlas -- gen-toml --schemas tools/codex-config-atlas/schemas --version 0.160.0 --mode example --out example.config.toml
+nix run --accept-flake-config .#codex-config-atlas -- current
+nix run --accept-flake-config .#codex-config-atlas -- sync-releases --repo . --dry-run
+nix run --accept-flake-config .#codex-config-atlas -- check-registry --schemas tools/codex-config-atlas/schemas
+nix run --accept-flake-config .#codex-config-atlas -- diff --schemas tools/codex-config-atlas/schemas --from 0.143.0 --to 0.144.1
+nix run --accept-flake-config .#codex-config-atlas -- diff-defaults --schemas tools/codex-config-atlas/schemas --from 0.143.0 --to 0.144.1
+nix run --accept-flake-config .#codex-config-atlas -- gen-toml --schemas tools/codex-config-atlas/schemas --version 0.144.1 --mode reference
+nix run --accept-flake-config .#codex-config-atlas -- gen-toml --schemas tools/codex-config-atlas/schemas --version 0.160.0 --mode example
 ```
 
 The CLI exposes these subcommands:
 
 - `current`: print the latest version in `schemas/manifest.json`, injected by Nix.
-- `sync-schema`: fetch and register one tagged upstream schema.
+- `sync-releases`: paginate upstream GitHub Releases, filter stable `rust-v<major>.<minor>.<patch>` releases, preflight each candidate schema, and sync missing versions progressively.
+- `sync-schema`: fetch, preflight, and register one explicit upstream version.
 - `check-registry`: validate manifest ordering, metadata, paths, and hashes.
 - `gen-toml`: render default, reference, or opt-in example TOML for a registered version.
 - `diff`: render a schema diff as Markdown or JSON.
 - `diff-defaults`: render default-value changes as Markdown or JSON.
-- `build-data`: generate normalized version payloads for the site.
-- `build-site`: combine tracked Web assets with generated data.
+- `build-data`: internal Nix build helper generating normalized version payloads.
+- `build-site`: internal Nix build helper combining tracked Web assets with generated data.
 
 Machine-readable output and generated content are written to stdout or the
 requested `--out` path. Diagnostics are written to stderr and failures return a
-non-zero exit status. `sync-schema` is the only command that accesses the
-network.
+non-zero exit status. `sync-releases` and `sync-schema` are the only commands
+that access the network; both honor an optional `GITHUB_TOKEN` or `GH_TOKEN`
+strictly for `api.github.com` requests.
 
 Schema diffs omit a `profiles.<name>.<path>` event only when the corresponding
 `<path>` event has the same semantic change. Profile-only changes and profile
@@ -140,17 +145,34 @@ drafts and prereleases, and compare the resulting stable tags to the manifest.
 Do not infer missing patch numbers: a tag must have an official release. Resolve
 annotated tags to their peeled commit when supplying `--expected-commit`.
 
-Register an explicit upstream version:
+Sync all missing stable releases (following the [Maintenance SOP](MAINTENANCE.md)):
 
 ```bash
-nix run .#codex-config-atlas -- sync-schema --schemas tools/codex-config-atlas/schemas --version 0.148.0
+nix run --accept-flake-config .#codex-config-atlas -- sync-releases --repo . --intent-to-add
+bash tools/codex-config-atlas/scripts/verify.sh
 ```
 
-Review the new schema and metadata together, then compare it with the previous
-version and build the registry-backed outputs. Do not infer a target from a
-floating branch and do not rewrite older registered schemas.
+Or register one explicit upstream version:
+
+```bash
+nix run --accept-flake-config .#codex-config-atlas -- sync-schema --schemas tools/codex-config-atlas/schemas --version 0.148.0 --intent-to-add
+```
+
+Each candidate schema is preflight-checked (normalization, TOML determinism,
+opt-in example generation, and neighbor diffs) before replacing `schemas/`. If an
+upstream release introduces an incompatible schema construct, synchronization
+preserves earlier passing versions, discards the failing candidate, and emits an
+`ESCALATION REQUIRED` diagnostic so code changes are handled separately from
+routine registry updates. Do not infer a target from a floating branch and do not
+rewrite older registered schemas.
 
 ## Site, build, and validation
+
+Run the full CI-equivalent acceptance gate (formatting plus all four Atlas Nix checks for the current platform):
+
+```bash
+bash tools/codex-config-atlas/scripts/verify.sh
+```
 
 Build the individual products without creating result links:
 

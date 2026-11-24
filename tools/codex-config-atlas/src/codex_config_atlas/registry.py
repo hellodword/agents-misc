@@ -110,7 +110,8 @@ def normalize_manifest(
 ) -> dict[str, Any]:
     if set(manifest) != MANIFEST_KEYS:
         raise ValueError(
-            f"manifest keys must be exactly {sorted(MANIFEST_KEYS)}; got {sorted(manifest)}"
+            f"manifest keys must be exactly {sorted(MANIFEST_KEYS)}; "
+            f"got {sorted(manifest)}"
         )
     versions = manifest.get("versions", [])
     if not isinstance(versions, list):
@@ -120,7 +121,8 @@ def normalize_manifest(
         if not isinstance(item, dict) or set(item) != MANIFEST_ENTRY_KEYS:
             actual = sorted(item) if isinstance(item, dict) else type(item).__name__
             raise ValueError(
-                f"manifest version keys must be exactly {sorted(MANIFEST_ENTRY_KEYS)}; got {actual}"
+                f"manifest version keys must be exactly {sorted(MANIFEST_ENTRY_KEYS)}; "
+                f"got {actual}"
             )
         version = item["version"]
         normalized.append(
@@ -240,7 +242,8 @@ def validate_manifest(
     manifest_min_version = normalized["minVersion"]
     if min_version is not None and manifest_min_version != min_version:
         raise ValueError(
-            f"manifest minVersion {manifest_min_version} does not match expected {min_version}"
+            f"manifest minVersion {manifest_min_version} "
+            f"does not match expected {min_version}"
         )
 
     for item in versions:
@@ -279,7 +282,8 @@ def validate_manifest(
                 else type(metadata).__name__
             )
             raise ValueError(
-                f"metadata keys are invalid for {version}: expected {sorted(METADATA_KEYS)}, got {actual}"
+                f"metadata keys are invalid for {version}: "
+                f"expected {sorted(METADATA_KEYS)}, got {actual}"
             )
         schema_bytes = schema_file.read_bytes()
         try:
@@ -303,7 +307,8 @@ def validate_manifest(
 
     if current_version is not None and current_version not in seen:
         raise ValueError(
-            f"current Codex version {current_version} is not present in {manifest_path(schemas_dir)}"
+            f"current Codex version {current_version} is not present "
+            f"in {manifest_path(schemas_dir)}"
         )
 
     return normalized

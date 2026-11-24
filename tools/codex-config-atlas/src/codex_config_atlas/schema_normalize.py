@@ -6,7 +6,6 @@ from typing import Any
 
 from .json_value import canonical_json_key
 
-
 PLACEHOLDER_KEY = "<name>"
 EXAMPLE_KEY = "example"
 REQUIRED_ALWAYS = "always"
@@ -178,8 +177,8 @@ class SchemaResolver:
                 raise ValueError(f"$ref must be a string at {pointer}")
             target_node = self.resolve_pointer(ref)
             if ref in ref_stack:
-                # Keep the recursive field itself useful (type, description, and so on), but
-                # do not dereference its descendants again.
+                # Keep the recursive field itself useful (type, description, etc.),
+                # without dereferencing its descendants again.
                 target = deepcopy(target_node)
                 target.pop("$ref", None)
                 resolved_target = _ResolvedNode(target, ref, ref_stack, True)
@@ -331,7 +330,8 @@ class SchemaResolver:
                 )
             else:
                 raise ValueError(
-                    f"additionalProperties must be a schema or boolean at {additional_pointer}"
+                    "additionalProperties must be a schema or boolean "
+                    f"at {additional_pointer}"
                 )
 
         if "deprecated" in base or "deprecated" in overlay:
@@ -392,8 +392,8 @@ class SchemaResolver:
                 if base[key] == overlay[key] or key in annotation_keys:
                     merged[key] = deepcopy(base[key])
                 else:
-                    # Keep both constraints. The first remains directly visible to the
-                    # normalizer and every other distinct constraint stays as a conjunct.
+                    # Keep both constraints: the first stays directly visible to the
+                    # normalizer and distinct constraints stay as conjuncts.
                     merged[key] = deepcopy(base[key])
                     preserved.append({key: deepcopy(overlay[key])})
             elif key in base:

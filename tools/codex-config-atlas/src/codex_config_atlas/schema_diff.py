@@ -5,7 +5,6 @@ from typing import Any
 
 from .json_value import canonical_json_key
 
-
 CATEGORY_LABELS = {
     "breakingLike": "Breaking-like",
     "review": "Needs review",
@@ -38,7 +37,8 @@ def _required_state(field: dict[str, Any]) -> str:
     state = field.get("required")
     if state not in {"always", "conditional", "never"}:
         raise ValueError(
-            f"field {field.get('path', '<unknown>')} has invalid required state: {state!r}"
+            f"field {field.get('path', '<unknown>')} has invalid "
+            f"required state: {state!r}"
         )
     return state
 

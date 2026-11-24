@@ -1,20 +1,19 @@
 from __future__ import annotations
 
 import hashlib
-import os
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
-import tomllib
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import tomlkit
-
+import tomllib
 from codex_config_atlas.atomic_output import build_directory_atomically
 from codex_config_atlas.build_data import build_data
 from codex_config_atlas.build_site import build_site
+from codex_config_atlas.json_value import canonical_json_key
 from codex_config_atlas.registry import (
     json_load,
     list_entries,
@@ -23,15 +22,12 @@ from codex_config_atlas.registry import (
 )
 from codex_config_atlas.schema_diff import build_schema_diff
 from codex_config_atlas.schema_normalize import normalize_schema
-from codex_config_atlas.toml_generate import generate_toml
 from codex_config_atlas.toml_example import generate_example_toml
-from codex_config_atlas.json_value import canonical_json_key
-
+from codex_config_atlas.toml_generate import generate_toml
 
 TOOL_ROOT = Path(__file__).parents[1]
 SCHEMAS = TOOL_ROOT / "schemas"
 STATIC = TOOL_ROOT / "web"
-CURRENT_VERSION = "0.148.0"
 MIN_VERSION = "0.129.0"
 
 
@@ -50,10 +46,12 @@ def tree_digest(root: Path) -> tuple[list[str], str]:
 class HistoricalGenerationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        raw_manifest = load_manifest(SCHEMAS, min_version=MIN_VERSION)
+        cls.current_version = raw_manifest["versions"][-1]["version"]
         cls.manifest = validate_manifest(
             SCHEMAS,
-            load_manifest(SCHEMAS, min_version=MIN_VERSION),
-            current_version=CURRENT_VERSION,
+            raw_manifest,
+            current_version=cls.current_version,
             min_version=MIN_VERSION,
         )
         cls.entries = list_entries(cls.manifest)
@@ -127,12 +125,12 @@ class HistoricalGenerationTests(unittest.TestCase):
             data = root / "data"
             site = root / "site"
 
-            build_data(SCHEMAS, CURRENT_VERSION, MIN_VERSION, data)
+            build_data(SCHEMAS, self.current_version, MIN_VERSION, data)
             for entry in self.entries:
                 example = data / "versions" / entry.version / "example.toml"
                 self.assertEqual(tomllib.loads(example.read_text()), {})
             first_data = tree_digest(data)
-            build_data(SCHEMAS, CURRENT_VERSION, MIN_VERSION, data)
+            build_data(SCHEMAS, self.current_version, MIN_VERSION, data)
             self.assertEqual(tree_digest(data), first_data)
 
             build_site(STATIC, data, site)
@@ -160,7 +158,7 @@ class HistoricalGenerationTests(unittest.TestCase):
                 ),
                 self.assertRaisesRegex(OSError, "injected data write failure"),
             ):
-                build_data(SCHEMAS, CURRENT_VERSION, MIN_VERSION, data)
+                build_data(SCHEMAS, self.current_version, MIN_VERSION, data)
             self.assertEqual(tree_digest(data), first_data)
 
             with (

@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-import unittest
-import tomllib
 import io
-from pathlib import Path
 import tempfile
+import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import tomlkit
-
-from codex_config_atlas.toml_generate import generate_toml
+import tomllib
 from codex_config_atlas.toml_example import generate_example_toml
-
+from codex_config_atlas.toml_generate import generate_toml
 
 MISSING = object()
 

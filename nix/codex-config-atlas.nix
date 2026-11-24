@@ -36,6 +36,7 @@ let
     runtimeInputs = [
       codexConfigAtlasPackage
       pkgs.coreutils
+      pkgs.git
     ];
 
     text = ''
@@ -141,6 +142,7 @@ let
       {
         nativeBuildInputs = [
           pkgs.coreutils
+          pkgs.git
           pkgs.nodejs_24
           (pkgs.python3.withPackages (pythonPackages: [
             pythonPackages.packaging

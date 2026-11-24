@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import argparse
-from functools import partial
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
-import tomllib
 from urllib.parse import parse_qs, urlsplit
 
+import tomllib
 from playwright.sync_api import expect, sync_playwright
 
 
@@ -145,7 +145,7 @@ def smoke(site: Path, screenshots: Path | None) -> None:
                 "category": "compatible",
             }
             assert url_parameters() == diff_parameters
-            # Example preview, keyboard focus, copy and download all use the same artifact.
+            # Example preview, keyboard focus, copy and download share one artifact.
             page.locator("[data-view='example']").click()
             ready()
             expect(page.locator("#example-version")).to_have_value(oldest)
@@ -226,13 +226,12 @@ def smoke(site: Path, screenshots: Path | None) -> None:
             }
             # A held older request must not overwrite a newer selection.
             held = []
-            page.route(
-                f"**/versions/{oldest}/example.toml", lambda route: held.append(route)
-            )
+            page.route(f"**/versions/{oldest}/example.toml", held.append)
             page.reload(wait_until="domcontentloaded")
             expect(page.locator("#example-version")).to_be_visible()
             page.wait_for_function(
-                "document.querySelector('#content').getAttribute('aria-busy') === 'true'"
+                "document.querySelector('#content')"
+                ".getAttribute('aria-busy') === 'true'"
             )
             capture("after-loading")
             page.locator("#example-version").select_option(latest)
@@ -310,7 +309,9 @@ def smoke(site: Path, screenshots: Path | None) -> None:
                 )
             browser.close()
         print(
-            f"Browser smoke passed: {len(meta['versions'])} versions; comparison, filters, keyboard, responsive layouts, examples, copy/download, URL state, stale requests and error recovery."
+            f"Browser smoke passed: {len(meta['versions'])} versions; comparison, "
+            "filters, keyboard, responsive layouts, examples, copy/download, "
+            "URL state, stale requests and error recovery."
         )
     finally:
         server.shutdown()

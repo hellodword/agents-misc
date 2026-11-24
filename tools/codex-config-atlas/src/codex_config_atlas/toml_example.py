@@ -13,7 +13,6 @@ from tomlkit.exceptions import ConvertError, InvalidStringError
 from .json_value import canonical_json_key
 from .schema_normalize import SchemaResolver
 
-
 _MISSING = object()
 _CONSTRAINTS = (
     "format",
@@ -225,9 +224,8 @@ class _Example:
                 for description in self.descriptions(branch):
                     lines += _comments(f"     {description}")
                 if "default" in choice:
-                    lines += _comments(
-                        f"     Branch default (JSON): {canonical_json_key(choice['default'])}"
-                    )
+                    branch_default = canonical_json_key(choice["default"])
+                    lines += _comments(f"     Branch default (JSON): {branch_default}")
         return lines
 
     def item_docs(self, original: Any, label: str, refs: tuple[str, ...]) -> list[str]:
@@ -282,7 +280,8 @@ class _Example:
         active = required and active_parent
         if required and not active_parent:
             lines.append(
-                "# Required only when the optional parent / this alternative is configured."
+                "# Required only when the optional parent / "
+                "this alternative is configured."
             )
         if resolved.recursive:
             return lines + [
@@ -312,8 +311,10 @@ class _Example:
                 name = "example"
                 while name in properties:
                     name += "_entry"
+                entry_path = _path(parts + (name,))
                 lines += [
-                    f"# Named entries: replace {_key(name)} in {_path(parts + (name,))} with your own key."
+                    f"# Named entries: replace {_key(name)} in "
+                    f"{entry_path} with your own key."
                 ]
                 lines += self.walk(
                     additional, parts + (name,), False, False, resolved.ref_stack
@@ -332,7 +333,8 @@ class _Example:
             )
         else:
             lines.append(
-                "# No TOML value can be inferred; consult the schema before setting this key."
+                "# No TOML value can be inferred; consult the schema "
+                "before setting this key."
             )
         if isinstance(node.get("items"), dict):
             sample = self.sample(node["items"], resolved.ref_stack)
@@ -349,7 +351,8 @@ class _Example:
                     "properties" in choice or "additionalProperties" in choice
                 ):
                     lines += [
-                        f"# Alternative {index} for {_path(parts)}: use these child keys INSTEAD of the assignment above."
+                        f"# Alternative {index} for {_path(parts)}: use these "
+                        "child keys INSTEAD of the assignment above."
                     ]
                     lines += self.walk(
                         branch, parts, required, False, resolved.ref_stack
@@ -368,11 +371,15 @@ def generate_example_toml(
         "# Codex configuration example",
         f"# Version: {version}",
         f"# Tag: {tag}",
-        "# Generated from the versioned schema; descriptions and defaults are schema data.",
+        "# Generated from the versioned schema; descriptions and "
+        "defaults are schema data.",
         "# Optional settings (including their defaults) remain commented out.",
-        "# Dotted keys are independent of table headers: uncomment only the keys you need.",
-        "# Required children of optional objects remain commented until you enable that object.",
-        "# Values without defaults are illustrative, not inferred Codex runtime defaults.",
+        "# Dotted keys are independent of table headers: uncomment "
+        "only the keys you need.",
+        "# Required children of optional objects remain commented "
+        "until you enable that object.",
+        "# Values without defaults are illustrative, not inferred "
+        "Codex runtime defaults.",
         "# Alternatives are mutually exclusive examples; do not enable them all.",
         "# TOML has no null; omit null-default keys. Replace named 'example' entries.",
         "",

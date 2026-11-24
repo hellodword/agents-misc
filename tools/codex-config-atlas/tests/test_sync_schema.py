@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import os
 import subprocess
 import tempfile
 import unittest
+import urllib.error
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,6 +16,7 @@ from codex_config_atlas.cli import (
     _fetch_limited,
     _handle_sync_schema,
     _resolve_tag_commit,
+    main,
 )
 from codex_config_atlas.registry import (
     SCHEMA_FILE_IN_UPSTREAM,
@@ -21,7 +25,10 @@ from codex_config_atlas.registry import (
     schema_url_for_commit,
     sha256_bytes,
 )
-
+from codex_config_atlas.upstream import (
+    github_request_headers,
+    list_upstream_stable_versions,
+)
 
 VERSION = "0.148.0"
 TAG = f"rust-v{VERSION}"
@@ -436,6 +443,285 @@ class SyncSchemaTests(unittest.TestCase):
                 _handle_sync_schema(sync_args(schemas))
 
             self.assertEqual(tree_digest(schemas), original)
+
+
+class UpstreamDiscoveryAndReleaseSyncTests(unittest.TestCase):
+    def test_github_token_header_is_scoped_exclusively_to_github_api(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"GITHUB_TOKEN": "ghs_test_token_value", "GH_TOKEN": ""},
+            clear=False,
+        ):
+            api_headers = github_request_headers(
+                "https://api.github.com/repos/openai/codex/releases?per_page=50&page=1"
+            )
+            raw_headers = github_request_headers(
+                "https://raw.githubusercontent.com/openai/codex/deadbeef/schema.json"
+            )
+        self.assertEqual(
+            api_headers.get("Authorization"), "Bearer ghs_test_token_value"
+        )
+        self.assertNotIn("Authorization", raw_headers)
+
+    def test_rate_limit_error_surfaces_actionable_guidance(self) -> None:
+        http_err = urllib.error.HTTPError(
+            url="https://api.github.com/repos/openai/codex/releases",
+            code=403,
+            msg="rate limit exceeded",
+            hdrs=None,  # type: ignore[arg-type]
+            fp=None,
+        )
+        try:
+            with (
+                patch(
+                    "codex_config_atlas.cli.urllib.request.urlopen",
+                    side_effect=http_err,
+                ),
+                self.assertRaisesRegex(
+                    RuntimeError, "set GITHUB_TOKEN or GH_TOKEN for authenticated quota"
+                ),
+            ):
+                _fetch_limited(
+                    "https://api.github.com/repos/openai/codex/releases",
+                    timeout_seconds=1.0,
+                    max_bytes=1024,
+                )
+        finally:
+            http_err.close()
+
+    def test_paginates_and_filters_upstream_stable_versions(self) -> None:
+        pages = [
+            (
+                [
+                    {
+                        "tag_name": "rust-v0.150.0",
+                        "draft": False,
+                        "prerelease": False,
+                        "published_at": "2026-09-02T00:00:00Z",
+                    },
+                    {
+                        "tag_name": "rust-v0.151.0-alpha.1",
+                        "draft": False,
+                        "prerelease": False,
+                        "published_at": "2026-09-03T00:00:00Z",
+                    },
+                    {
+                        "tag_name": "rust-v0.151.0",
+                        "draft": True,
+                        "prerelease": False,
+                        "published_at": "2026-09-03T00:00:00Z",
+                    },
+                    {
+                        "tag_name": "rust-v0.152.0",
+                        "draft": False,
+                        "prerelease": True,
+                        "published_at": "2026-09-04T00:00:00Z",
+                    },
+                    {
+                        "tag_name": "v0.153.0",
+                        "draft": False,
+                        "prerelease": False,
+                        "published_at": "2026-09-05T00:00:00Z",
+                    },
+                ],
+                {
+                    "Link": (
+                        "<https://api.github.com/repos/openai/codex/releases"
+                        '?per_page=50&page=2>; rel="next"'
+                    )
+                },
+            ),
+            (
+                [
+                    {
+                        "tag_name": "rust-v0.128.0",
+                        "draft": False,
+                        "prerelease": False,
+                        "published_at": "2026-07-01T00:00:00Z",
+                    },
+                    {
+                        "tag_name": "rust-v0.149.0",
+                        "draft": False,
+                        "prerelease": False,
+                        "published_at": "2026-09-01T00:00:00Z",
+                    },
+                ],
+                {
+                    "Link": (
+                        "<https://api.github.com/repos/openai/codex/releases"
+                        '?per_page=50&page=1>; rel="prev"'
+                    )
+                },
+            ),
+        ]
+        calls: list[str] = []
+
+        def fake_fetch_page(
+            url: str, _timeout: float, _max_bytes: int
+        ) -> tuple[list[object], dict[str, str]]:
+            calls.append(url)
+            return pages[len(calls) - 1]
+
+        discovered = list_upstream_stable_versions(
+            min_version="0.129.0",
+            timeout_seconds=2.0,
+            fetch_page=fake_fetch_page,
+        )
+        self.assertEqual(discovered, ["0.149.0", "0.150.0"])
+        self.assertEqual(len(calls), 2)
+
+    def test_sync_releases_supports_dry_run_and_stops_on_incompatible_schema(
+        self,
+    ) -> None:
+        valid_v149 = (
+            b'{"title":"CodexConfig","type":"object",'
+            b'"properties":{"model":{"type":"string","default":"gpt-5"}}}\n'
+        )
+        incompatible_v150 = (
+            b'{"title":"CodexConfig","type":"object",'
+            b'"required":["model"],'
+            b'"properties":{"model":{"type":"string"}}}\n'
+        )
+        commit_149 = "c" * 40
+        commit_150 = "d" * 40
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            schemas = Path(temporary_directory) / "schemas"
+            seed_registry(schemas)
+
+            with patch(
+                "codex_config_atlas.cli.list_upstream_stable_versions",
+                return_value=["0.148.0", "0.149.0", "0.150.0"],
+            ):
+                dry_out = io.StringIO()
+                with redirect_stdout(dry_out):
+                    code = main(
+                        ["sync-releases", "--schemas", str(schemas), "--dry-run"]
+                    )
+                self.assertEqual(code, 0)
+                self.assertEqual(
+                    dry_out.getvalue().splitlines(),
+                    [
+                        "missing 0.149.0 (rust-v0.149.0)",
+                        "missing 0.150.0 (rust-v0.150.0)",
+                    ],
+                )
+                self.assertFalse((schemas / "rust-v0.149.0").exists())
+
+                def fake_resolve(tag: str, *, timeout_seconds: float) -> str:
+                    return commit_149 if tag == "rust-v0.149.0" else commit_150
+
+                def fake_schema(
+                    commit_sha: str, *, timeout_seconds: float, max_bytes: int
+                ) -> bytes:
+                    return valid_v149 if commit_sha == commit_149 else incompatible_v150
+
+                out = io.StringIO()
+                err = io.StringIO()
+                with (
+                    patch(
+                        "codex_config_atlas.cli._resolve_tag_commit",
+                        side_effect=fake_resolve,
+                    ),
+                    patch(
+                        "codex_config_atlas.cli._fetch_schema",
+                        side_effect=fake_schema,
+                    ),
+                    redirect_stdout(out),
+                    redirect_stderr(err),
+                ):
+                    code = main(["sync-releases", "--schemas", str(schemas)])
+
+                self.assertEqual(code, 1)
+                self.assertIn("ESCALATION REQUIRED for Codex 0.150.0", err.getvalue())
+                self.assertIn("preserved synced versions [0.149.0]", err.getvalue())
+                manifest = json_load(schemas / "manifest.json")
+                self.assertEqual(
+                    [entry["version"] for entry in manifest["versions"]],
+                    ["0.148.0", "0.149.0"],
+                )
+                self.assertTrue(
+                    (schemas / "rust-v0.149.0" / "config.schema.json").is_file()
+                )
+                self.assertFalse((schemas / "rust-v0.150.0").exists())
+
+    def test_sync_schema_normalizes_rust_v_prefix_and_marks_intent_to_add(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repo = Path(temporary_directory) / "repo"
+            schemas = repo / "tools" / "codex-config-atlas" / "schemas"
+            seed_registry(schemas)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "add",
+                    "--",
+                    "tools/codex-config-atlas/schemas",
+                ],
+                check=True,
+            )
+
+            commit_149 = "e" * 40
+            schema_149 = (
+                b'{"title":"CodexConfig","type":"object",'
+                b'"properties":{"approval_policy":{"type":"string","default":"on-request"}}}\n'
+            )
+            out = io.StringIO()
+            with (
+                patch(
+                    "codex_config_atlas.cli._resolve_tag_commit",
+                    return_value=commit_149,
+                ),
+                patch(
+                    "codex_config_atlas.cli._fetch_schema",
+                    return_value=schema_149,
+                ),
+                redirect_stdout(out),
+            ):
+                code = main(
+                    [
+                        "sync-schema",
+                        "--repo",
+                        str(repo),
+                        "--version",
+                        "rust-v0.149.0",
+                        "--intent-to-add",
+                    ]
+                )
+
+            expected_schema_rel = (
+                "tools/codex-config-atlas/schemas/rust-v0.149.0/config.schema.json"
+            )
+            expected_meta_rel = (
+                "tools/codex-config-atlas/schemas/rust-v0.149.0/metadata.json"
+            )
+            self.assertEqual(code, 0)
+            self.assertIn(f"intent-to-add: {expected_schema_rel}", out.getvalue())
+            status = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "status",
+                    "--porcelain=v1",
+                    "--",
+                    "tools/codex-config-atlas/schemas/rust-v0.149.0",
+                ],
+                check=True,
+                text=True,
+                capture_output=True,
+            ).stdout.splitlines()
+            self.assertEqual(
+                status,
+                [
+                    f" A {expected_schema_rel}",
+                    f" A {expected_meta_rel}",
+                ],
+            )
 
 
 if __name__ == "__main__":

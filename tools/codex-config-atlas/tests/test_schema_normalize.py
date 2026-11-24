@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from copy import deepcopy
 import unittest
+from copy import deepcopy
 
 from codex_config_atlas.schema_normalize import SchemaResolver, normalize_schema
 
