@@ -5,11 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"net/http"
 	"os"
 	"path"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,10 +28,8 @@ type retainedArtifact struct {
 }
 
 // Retained build trees remain executor-owned until the worker's handoff receipt.
-// Their bytes participate in admission pressure even before an inventory exists.
-func (e *Executor) retainedBuildBytes() (int64, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+// Their bytes participate in admission pressure while keeping readiness probes non-blocking.
+func (e *Executor) retainedBuildBytes(ctx context.Context) (int64, error) {
 	seen := map[[2]uint64]bool{}
 	var total int64
 	err := fs.WalkDir(e.root.FS(), "builds", func(name string, entry fs.DirEntry, err error) error {
@@ -61,6 +61,78 @@ func (e *Executor) retainedBuildBytes() (int64, error) {
 		return nil
 	})
 	return total, err
+}
+
+func (e *Executor) startEvidenceScan() <-chan struct{} {
+	e.mu.Lock()
+	if e.closing || e.evidenceScanning {
+		e.mu.Unlock()
+		return nil
+	}
+	e.evidenceScanning = true
+	parent := e.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	e.wg.Add(1)
+	e.mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer e.wg.Done()
+		ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+		used, err := e.retainedBuildBytes(ctx)
+		cancel()
+		now := time.Now().UTC()
+		e.mu.Lock()
+		e.evidenceScanning = false
+		if err == nil {
+			e.evidenceBytes = used
+			e.evidenceSampled = true
+			e.evidenceObserved = now
+			e.evidenceRefreshErr = nil
+		} else {
+			e.evidenceRefreshErr = wire.Safe(err)
+		}
+		e.mu.Unlock()
+	}()
+	return done
+}
+
+func (e *Executor) populateEvidenceUsage(v *Description) {
+	e.mu.Lock()
+	sampled := e.evidenceSampled
+	stale := !sampled || time.Since(e.evidenceObserved) >= 5*time.Second
+	scanning := e.evidenceScanning
+	e.mu.Unlock()
+
+	var done <-chan struct{}
+	if stale && !scanning {
+		done = e.startEvidenceScan()
+	}
+	if !sampled && done != nil {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	v.EvidenceBytes = e.evidenceBytes
+	if !e.evidenceObserved.IsZero() {
+		observed := e.evidenceObserved
+		v.EvidenceObserved = &observed
+	}
+	if e.evidenceRefreshErr != nil {
+		if !e.evidenceSampled && e.evidenceRefreshErr.Code != "backend_timeout" {
+			v.EvidenceError = e.evidenceRefreshErr
+		} else {
+			v.EvidenceRefreshError = e.evidenceRefreshErr
+		}
+	} else if !e.evidenceSampled && e.evidenceScanning {
+		v.EvidenceRefreshError = wire.Safe(errors.Join(context.DeadlineExceeded))
+	}
 }
 
 // The resource receipt seals the build directory before inventory or reads.
@@ -107,8 +179,19 @@ func (e *Executor) artifactInventory(s Session) ([]retainedArtifact, error) {
 		if entry.Type()&os.ModeSymlink != 0 {
 			return nil
 		}
-		// Nix may retain several failed dependencies. Only the adapter's
-		// designated evidence directory is transferable.
+		// Nix may retain large unpacked build trees from failed dependencies.
+		// Prune any subtree outside <top>/vm-test-evidence or <top>/build/vm-test-evidence.
+		if name != base && entry.IsDir() {
+			parts := strings.Split(strings.TrimPrefix(name, base+"/"), "/")
+			if !slices.Contains(parts, "vm-test-evidence") {
+				if len(parts) == 2 && parts[1] != "vm-test-evidence" && parts[1] != "build" {
+					return fs.SkipDir
+				}
+				if len(parts) >= 3 && parts[1] == "build" && parts[2] != "vm-test-evidence" {
+					return fs.SkipDir
+				}
+			}
+		}
 		marker := "/vm-test-evidence/"
 		index := strings.Index(name, marker)
 		if entry.IsDir() || index < 0 {
@@ -165,6 +248,9 @@ func (e *Executor) artifactCall(method string, a Request) (any, error) {
 			return nil, err
 		}
 		*r.session = session
+		e.mu.Unlock()
+		e.startEvidenceScan()
+		e.mu.Lock()
 		return session, nil
 	}
 	if session.ArtifactsReleased {

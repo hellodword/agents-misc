@@ -61,8 +61,34 @@ def install(Driver):
         closed = False
         save(collection={"state": "collecting"})
 
+        def record(item):
+            with result_lock:
+                if not closed:
+                    results.append(item)
+
+        def run_guest(machine):
+            budget = min(10.0, max(0.1, 30.0 - (time.monotonic() - started)))
+            holder = {}
+
+            def invoke():
+                try:
+                    holder["result"] = machine.execute(
+                        "systemctl --failed --no-pager; journalctl -b -n 150 --no-pager",
+                        timeout=datetime.timedelta(seconds=min(10.0, budget)),
+                    )
+                except BaseException as exc:
+                    holder["error"] = exc
+
+            worker = threading.Thread(target=invoke, daemon=True)
+            worker.start()
+            worker.join(budget)
+            if worker.is_alive():
+                raise TimeoutError("guest diagnostic command timed out")
+            if "error" in holder:
+                raise holder["error"]
+            return holder.get("result")
+
         def node(machine):
-            items = []
             process = getattr(machine, "process", None)
             running = process is not None and process.poll() is None
             # Machine methods retain the locked framework's monitor, guest
@@ -71,22 +97,27 @@ def install(Driver):
             actions = [
                 ("state", lambda: {"running": running, "guest_ready": machine.is_up()}),
                 ("screenshot", lambda: machine.screenshot(f"final-{machine.name}.png")),
-                (
-                    "guest",
-                    lambda: machine.execute(
-                        "systemctl --failed --no-pager; journalctl -b -n 150 --no-pager",
-                        timeout=datetime.timedelta(seconds=10),
-                    ),
-                ),
+                ("guest", lambda: run_guest(machine)),
             ]
+            trailing = None
             if not running:
                 actions = actions[:1]
             elif not getattr(machine, "booted", False):
                 actions = actions[:2]
-                items.append({
-                    "node": machine.name, "name": "guest", "state": "unavailable",
+                trailing = {
+                    "node": machine.name,
+                    "name": "guest",
+                    "state": "unavailable",
                     "error": "VM startup has not completed",
-                })
+                }
+            elif not getattr(machine, "connected", False):
+                actions = actions[:2]
+                trailing = {
+                    "node": machine.name,
+                    "name": "guest",
+                    "state": "unavailable",
+                    "error": "guest shell backdoor is not connected",
+                }
             for name, action in actions:
                 if time.monotonic() - started >= 30:
                     break
@@ -95,10 +126,9 @@ def install(Driver):
                     item["result"] = action()
                 except BaseException as error:
                     item.update(state="unavailable", error=str(error))
-                items.append(item)
-            with result_lock:
-                if not closed:
-                    results.extend(items)
+                record(item)
+            if trailing is not None and time.monotonic() - started < 30:
+                record(trailing)
 
         threads = []
         try:

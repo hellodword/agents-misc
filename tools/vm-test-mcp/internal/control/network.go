@@ -10,7 +10,7 @@ import (
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
-const networkBudget = 5 * time.Second
+const networkBudget = 10 * time.Second
 
 type networkProgressKey struct{}
 type networkProgress func(string)

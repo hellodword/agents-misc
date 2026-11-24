@@ -137,7 +137,7 @@ func Defaults() Config {
 		Service: Service{Listen: "127.0.0.1:8765"},
 		Tasks:   Tasks{DefaultTimeout: Duration(time.Hour), MaxDuration: Duration(24 * time.Hour), CleanupTimeout: Duration(5 * time.Minute), EvidenceTimeout: Duration(5 * time.Minute)},
 		VirtualBox: VirtualBox{StartupParallelism: 1, StartupTimeout: Duration(10 * time.Minute), ShutdownTimeout: Duration(time.Minute), UnavailableAfter: Duration(30 * time.Second),
-			Network: Network{LAN: "10.77.0.0/24", WAN: "10.0.2.0/24", DNS: []string{"1.1.1.1", "9.9.9.9"}, Listen: "127.0.0.1", Sources: []string{"127.0.0.1/32"}, PortMin: 20000, PortMax: 29999, LeaseSeconds: 15}},
+			Network: Network{LAN: "10.77.0.0/24", WAN: "10.0.2.0/24", DNS: []string{"1.1.1.1", "9.9.9.9"}, Listen: "127.0.0.1", Sources: []string{"127.0.0.1/32"}, PortMin: 20000, PortMax: 29999, LeaseSeconds: 30}},
 		Nix: Worker{ControllerUID: -1, Nix: "nix"}, Storage: Storage{SuccessDays: 1, FailureDays: 7, SummaryDays: 30, EvidenceBytes: 40 << 30, LowWaterBytes: 32 << 30, InputBytes: 16 << 30, UploadIdle: Duration(time.Hour), MaxUploadBytes: 8 << 30},
 		Executor: executorDefaults(),
 	}
@@ -328,7 +328,7 @@ func (c *Config) Validate() error {
 			return bad("invalid IPv4 address")
 		}
 	}
-	if len(c.VirtualBox.Network.DNS) == 0 || len(c.VirtualBox.Network.DNS) > 8 || c.VirtualBox.Network.PortMin < 1024 || c.VirtualBox.Network.PortMax > 65535 || c.VirtualBox.Network.PortMin > c.VirtualBox.Network.PortMax || c.VirtualBox.Network.LeaseSeconds < 5 || c.VirtualBox.Network.LeaseSeconds > 60 {
+	if len(c.VirtualBox.Network.DNS) == 0 || len(c.VirtualBox.Network.DNS) > 8 || c.VirtualBox.Network.PortMin < 1024 || c.VirtualBox.Network.PortMax > 65535 || c.VirtualBox.Network.PortMin > c.VirtualBox.Network.PortMax || c.VirtualBox.Network.LeaseSeconds < 10 || c.VirtualBox.Network.LeaseSeconds > 120 {
 		return bad("network limits")
 	}
 	return nil

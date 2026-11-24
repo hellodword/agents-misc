@@ -42,7 +42,7 @@ func Init(ctx context.Context, seedFile string) error {
 	if len(s.Password) != 64 || strings.Trim(s.Password, "0123456789abcdef") != "" {
 		return fmt.Errorf("invalid seed credential")
 	}
-	p := network.Policy{LAN: s.LAN, WAN: s.WAN, DNS: []string{"1.1.1.1"}, LeaseSeconds: 15}
+	p := network.Policy{LAN: s.LAN, WAN: s.WAN, DNS: []string{"1.1.1.1"}, LeaseSeconds: 30}
 	if e = p.Validate(); e != nil {
 		return e
 	}

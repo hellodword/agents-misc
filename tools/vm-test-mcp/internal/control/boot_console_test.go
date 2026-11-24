@@ -210,3 +210,63 @@ func TestBootConsoleRecoveryRejectsMissingOversizedAndSymlinkLogs(t *testing.T) 
 		})
 	}
 }
+
+type largeLogRunner struct{ payload []byte }
+
+func (r largeLogRunner) Run(_ context.Context, _ string, _ []string, _ io.Reader) ([]byte, error) {
+	return r.payload, nil
+}
+
+type vboxDiagBackend struct {
+	fakeBackend
+	vbox *VBoxBackend
+}
+
+func (d *vboxDiagBackend) Action(ctx context.Context, task *Task, node *Node, action NodeAction) (json.RawMessage, error) {
+	if action.Action == "diagnostics" {
+		return d.vbox.Action(ctx, task, node, action)
+	}
+	return d.fakeBackend.Action(ctx, task, node, action)
+}
+
+func TestVBoxLogHeadTailTruncationMarksDiagnosticItemPartial(t *testing.T) {
+	exe := filepath.Join(t.TempDir(), "VBoxManage")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	logPayload := append([]byte("VBOX-HEADER\n"), bytes.Repeat([]byte("z"), (1<<20)+8192)...)
+	logPayload = append(logPayload, []byte("\nVBOX-CRASH-TAIL")...)
+
+	vbox := &VBoxBackend{Runner: largeLogRunner{payload: logPayload}}
+	s, task, _ := fixtureLab(t, &vboxDiagBackend{vbox: vbox}, time.Second)
+	vbox.Config = s.cfg
+	vbox.Config.VirtualBox.Executable = exe
+	node := task.lab().Nodes[0]
+
+	rawReport, err := s.diagnose(context.Background(), task.ID, []string{node.ID}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := rawReport.(DiagnosticReport)
+	var found *DiagnosticItem
+	for i := range report.Items {
+		if report.Items[i].Name == "VBox.log" {
+			found = &report.Items[i]
+			break
+		}
+	}
+	if found == nil || found.State != "partial" || found.ArtifactID == "" {
+		t.Fatalf("expected partial VBox.log diagnostic item, got %+v", found)
+	}
+	meta, ok := found.Result.(map[string]any)
+	if !ok || meta["truncated"] != true {
+		t.Fatalf("expected truncated metadata, got %+v", found.Result)
+	}
+	retained, err := s.root.Read(filepath.ToSlash(filepath.Join("tasks", task.ID, "artifacts", found.ArtifactID)), 2<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(retained, []byte("VBOX-HEADER\n")) || !bytes.HasSuffix(retained, []byte("\nVBOX-CRASH-TAIL")) || len(retained) > 1<<20 {
+		t.Fatalf("retained VBox.log lost header/tail or exceeded 1 MiB: len=%d", len(retained))
+	}
+}

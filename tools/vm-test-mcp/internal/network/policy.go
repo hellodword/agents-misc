@@ -89,7 +89,7 @@ func (p Policy) Validate() error {
 	if e != nil || !wan.Addr().Is4() || wan != wan.Masked() || wan.Bits() > 28 || lan.Overlaps(wan) {
 		return bad()
 	}
-	if p.LeaseSeconds < 5 || p.LeaseSeconds > 60 || len(p.Nodes) > 64 || len(p.Entries) > 128 || len(p.Protected) > 2048 || len(p.DNS) < 1 || len(p.DNS) > 8 {
+	if p.LeaseSeconds < 10 || p.LeaseSeconds > 120 || len(p.Nodes) > 64 || len(p.Entries) > 128 || len(p.Protected) > 2048 || len(p.DNS) < 1 || len(p.DNS) > 8 {
 		return bad()
 	}
 	for _, s := range p.Protected {

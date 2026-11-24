@@ -43,14 +43,16 @@ type Session struct {
 }
 
 type Description struct {
-	EvidenceBytes  int64              `json:"evidence_bytes"`
-	EvidenceError  *wire.Error        `json:"evidence_error,omitempty"`
-	Build          wire.BuildIdentity `json:"build"`
-	InstanceID     string             `json:"instance_id"`
-	Ready          bool               `json:"ready"`
-	Active         []Session          `json:"active"`
-	StopGrace      int                `json:"stop_grace_seconds"`
-	ReleaseTimeout int                `json:"release_timeout_seconds"`
+	EvidenceBytes        int64              `json:"evidence_bytes"`
+	EvidenceError        *wire.Error        `json:"evidence_error,omitempty"`
+	EvidenceRefreshError *wire.Error        `json:"evidence_refresh_error,omitempty"`
+	EvidenceObserved     *time.Time         `json:"evidence_observed,omitempty"`
+	Build                wire.BuildIdentity `json:"build"`
+	InstanceID           string             `json:"instance_id"`
+	Ready                bool               `json:"ready"`
+	Active               []Session          `json:"active"`
+	StopGrace            int                `json:"stop_grace_seconds"`
+	ReleaseTimeout       int                `json:"release_timeout_seconds"`
 }
 
 type Caller interface {

@@ -278,6 +278,9 @@ func (s *Server) collectDiagnostics(ctx context.Context, t, snapshot *Task, node
 				if result, ok := item.Result.(map[string]any); ok && action.Action == "boot_log" && (result["truncated"] != false || result["error"] != nil) {
 					item.State = "partial"
 				}
+				if result, ok := item.Result.(map[string]any); ok && action.Action == "diagnostics" && result["truncated"] == true {
+					item.State = "partial"
+				}
 				if err != nil {
 					item.State = "unavailable"
 					item.Error = wire.Safe(err)

@@ -44,6 +44,11 @@ type Executor struct {
 	groups, boot, invocation string
 	sessions                 map[string]*runtimeSession
 	closing                  bool
+	evidenceSampled          bool
+	evidenceScanning         bool
+	evidenceBytes            int64
+	evidenceObserved         time.Time
+	evidenceRefreshErr       *wire.Error
 	ctx                      context.Context
 	cancel                   context.CancelFunc
 	wg                       sync.WaitGroup
@@ -223,11 +228,7 @@ func (e *Executor) Call(method string, a Request) (any, error) {
 			}
 		}
 		e.mu.Unlock()
-		used, err := e.retainedBuildBytes()
-		v.EvidenceBytes = used
-		if err != nil {
-			v.EvidenceError = wire.Safe(err)
-		}
+		e.populateEvidenceUsage(&v)
 		e.mu.Lock()
 		return v, nil
 	}
@@ -587,7 +588,13 @@ func (e *Executor) Shutdown(ctx context.Context) error {
 }
 
 func (e *Executor) Close() {
-	e.cancel()
+	e.mu.Lock()
+	e.closing = true
+	cancel := e.cancel
+	e.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	e.wg.Wait()
 	for _, r := range e.sessions {
 		if r.group != nil {

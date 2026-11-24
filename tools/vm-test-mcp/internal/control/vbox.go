@@ -44,6 +44,17 @@ func (b *VBoxBackend) run(ctx context.Context, args ...string) ([]byte, error) {
 	b.recordCall(started, 0, "virtualbox", args[0], "", "", result, err)
 	return result.Stdout, b.executionError(args[0], err)
 }
+
+func (b *VBoxBackend) runHeadTail(ctx context.Context, headMax, tailMax int, args ...string) (hostexec.Result, error) {
+	exe, err := config.Program(b.Config.VirtualBox.Executable, "VBoxManage")
+	if err != nil {
+		return hostexec.Result{}, wire.Fail("virtualbox_unavailable", "VBoxManage was not found in PATH")
+	}
+	started := time.Now()
+	result, err := hostexec.CaptureHeadTail(ctx, b.Runner, exe, args, headMax, tailMax)
+	b.recordCall(started, 0, "virtualbox", args[0], "", "", result, err)
+	return result, b.executionError(args[0], err)
+}
 func (b *VBoxBackend) redact(value string) string {
 	values := []string{b.Config.Service.Token, b.Config.ControllerDir()}
 	for _, t := range b.Config.VirtualBox.Templates {
@@ -802,9 +813,18 @@ func (b *VBoxBackend) Action(ctx context.Context, t *Task, n *Node, a NodeAction
 			e = b.copyFrom(ctx, t, n, out, a.Local)
 		}
 	case "diagnostics":
-		raw, e = b.run(ctx, "showvminfo", n.UUID, "--log", "0")
+		var diagResult hostexec.Result
+		diagResult, e = b.runHeadTail(ctx, 256<<10, 768<<10, "showvminfo", n.UUID, "--log", "0")
 		if e == nil {
-			e = b.publish(a.Local, strings.NewReader(string(raw)))
+			e = b.publish(a.Local, bytesReader(diagResult.Stdout))
+		}
+		if e == nil {
+			return wire.JSON(map[string]any{
+				"delivered":      true,
+				"truncated":      diagResult.StdoutTruncated,
+				"observed_bytes": diagResult.ObservedStdout,
+				"retained_bytes": len(diagResult.Stdout),
+			}), nil
 		}
 	case "screenshot":
 		stage, err := os.MkdirTemp(b.runtime(t), "screen-")

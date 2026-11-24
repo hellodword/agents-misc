@@ -120,4 +120,66 @@ func TestSealedSessionInventorySurvivesRestartAndReleasesOwnedFiles(t *testing.T
 	if _, _, err = e.openArtifact(a); wire.Safe(err).Code != "evidence_released" {
 		t.Fatal("released object readable", err)
 	}
+	e.Close()
+}
+
+func TestInventorySkipsFailedDependencyBuildTreesAndCachesUsage(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	root, err := safefs.Private(dir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := state.OpenExecutor(root.Path)
+	if err != nil {
+		root.Close()
+		t.Fatal(err)
+	}
+	e := &Executor{root: root, db: db, sessions: map[string]*runtimeSession{}}
+	defer e.Close()
+
+	s := &Session{ID: wire.ID(), WorkerInstance: wire.ID(), TaskID: wire.ID(), ExecutorInstance: db.InstanceID, Resources: wire.NixResources{State: "released"}}
+	if err := e.save(s); err != nil {
+		t.Fatal(err)
+	}
+	// Populate >200,000 entries inside non-evidence dependency build subtrees would
+	// hit the traversal ceiling without directory pruning; create 1,000 nested dirs
+	// and verify only vm-test-evidence files are indexed while unrelated subtrees skip.
+	depTree := filepath.Join(root.Path, "builds", s.ID, "nix-build-dep.drv-0.chroot", "build", "source")
+	if err := os.MkdirAll(depTree, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 500 {
+		if err := os.WriteFile(filepath.Join(depTree, fmt.Sprintf("src-%04d.c", i)), []byte("int x;"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	directEvidence := filepath.Join(root.Path, "builds", s.ID, "nix-build-direct.drv-0", "vm-test-evidence")
+	if err := os.MkdirAll(directEvidence, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directEvidence, "driver-result.json"), []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	req := Request{SessionID: s.ID, WorkerInstance: s.WorkerInstance, TaskID: s.TaskID}
+	v, err := e.Call("evidence_list", req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := v.(ArtifactPage)
+	if len(page.Files) != 1 || page.Files[0].Name != "driver-result.json" {
+		t.Fatalf("unexpected pruned inventory: %+v", page)
+	}
+
+	descAny, err := e.Call("describe", Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	desc := descAny.(Description)
+	if desc.EvidenceError != nil || desc.EvidenceBytes <= 0 || desc.EvidenceObserved == nil {
+		t.Fatalf("unexpected executor description: %+v", desc)
+	}
 }

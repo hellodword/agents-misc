@@ -800,8 +800,28 @@ func (s *Server) commandInput(a InputRequest, payload BodyRef) (any, error) {
 	return map[string]any{"accepted": true, "persisted": true, "sequence": packet.Sequence, "delivery": delivery}, nil
 }
 func (s *Server) changeNetwork(id string, a NetworkRequest, recover bool) (any, error) {
+	canMutate := func(t *Task) bool {
+		if t.Kind != "lab" {
+			return false
+		}
+		if t.State == "running" {
+			return true
+		}
+		return recover && t.State == "preparing" && t.lab().Router != nil && t.lab().Router.Intent && !t.lab().Router.Cleaned
+	}
 	s.mu.Lock()
-	t, r, e := s.running(id)
+	t, e := s.task(id)
+	var r *Runtime
+	if e == nil {
+		r = s.runtime[id]
+		if !canMutate(t) || r == nil {
+			if recover {
+				e = wire.Fail("invalid_state", "Network recovery requires a preparing or running lab with an allocated router")
+			} else {
+				e = wire.Fail("invalid_state", "A running lab is required")
+			}
+		}
+	}
 	if e == nil && !recover && t.lab().Network != "ready" {
 		e = wire.Fail("network_degraded", "Explicit network_recover is required")
 	}
@@ -821,7 +841,7 @@ func (s *Server) changeNetwork(id string, a NetworkRequest, recover bool) (any, 
 	}
 	defer lock.Unlock()
 	s.mu.Lock()
-	if t.State != "running" || (!recover && t.lab().Network != "ready") {
+	if !canMutate(t) || (!recover && t.lab().Network != "ready") {
 		s.mu.Unlock()
 		return nil, wire.Fail("invalid_state", "Lab or network state changed")
 	}

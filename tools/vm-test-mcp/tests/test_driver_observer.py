@@ -58,6 +58,106 @@ class DriverLifecycle(unittest.TestCase):
                 if outcome in ("failed", "driver_failed"):
                     self.assertTrue((output / "driver-error.log").stat().st_size)
 
+    def test_progressive_capture_and_unconnected_backdoor_isolation(self):
+        import importlib.util
+        import threading
+
+        observer_dir = Path(
+            os.environ.get(
+                "VM_TEST_OBSERVER",
+                Path(__file__).resolve().parents[1] / "internal" / "submit",
+            )
+        )
+        spec = importlib.util.spec_from_file_location(
+            "observer_under_test", observer_dir / "sitecustomize.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        class AliveProcess:
+            @staticmethod
+            def poll():
+                return None
+
+        class RawImageMachine:
+            name = "raw"
+            process = AliveProcess()
+            booted = True
+            connected = False
+
+            @staticmethod
+            def is_up():
+                return True
+
+            @staticmethod
+            def screenshot(filename):
+                return filename
+
+            @staticmethod
+            def execute(*_args, **_kwargs):
+                raise AssertionError("execute must not be called without backdoor")
+
+        hang_event = threading.Event()
+
+        class HungBackdoorMachine:
+            name = "hung"
+            process = AliveProcess()
+            booted = True
+            connected = True
+
+            @staticmethod
+            def is_up():
+                return True
+
+            @staticmethod
+            def screenshot(filename):
+                return filename
+
+            @staticmethod
+            def execute(*_args, **_kwargs):
+                hang_event.wait(0.25)
+                raise TimeoutError("backdoor hung")
+
+        class SyntheticDriver:
+            def __init__(self):
+                self.machines = [RawImageMachine(), HungBackdoorMachine()]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def test_script(self):
+                pass
+
+            def run_tests(self):
+                self.test_script()
+
+            def terminate_test(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "evidence"
+            output.mkdir()
+            os.environ["VM_TEST_EVIDENCE"] = str(output)
+            os.environ["VM_TEST_RUN_ID"] = "b" * 32
+            module.install(SyntheticDriver)
+            with SyntheticDriver() as drv:
+                drv.run_tests()
+            hang_event.set()
+
+            report = json.loads((output / "driver-diagnostics.json").read_text())
+            by_key = {(item["node"], item["name"]): item for item in report["items"]}
+            self.assertEqual(by_key[("raw", "state")]["state"], "complete")
+            self.assertEqual(by_key[("raw", "screenshot")]["state"], "complete")
+            self.assertEqual(by_key[("raw", "guest")]["state"], "unavailable")
+            self.assertIn("backdoor", by_key[("raw", "guest")]["error"])
+            self.assertEqual(by_key[("hung", "state")]["state"], "complete")
+            self.assertEqual(by_key[("hung", "screenshot")]["state"], "complete")
+            self.assertEqual(by_key[("hung", "guest")]["state"], "unavailable")
+            self.assertEqual(report["state"], "partial")
+
 
 if __name__ == "__main__":
     unittest.main()

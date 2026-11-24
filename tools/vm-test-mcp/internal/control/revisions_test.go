@@ -299,7 +299,7 @@ func (f *slowStatusBackend) Network(ctx context.Context, task *Task, protected [
 func TestSlowGuestPollDoesNotStarveNetworkLease(t *testing.T) {
 	f := &slowStatusBackend{entered: make(chan struct{}, 1), updates: make(chan struct{}, 10)}
 	c := testConfig(t)
-	c.VirtualBox.Network.LeaseSeconds = 5
+	c.VirtualBox.Network.LeaseSeconds = 10
 	s, err := New(c, f)
 	if err != nil {
 		t.Fatal(err)
@@ -324,7 +324,7 @@ func TestSlowGuestPollDoesNotStarveNetworkLease(t *testing.T) {
 	for len(f.updates) > 0 {
 		<-f.updates
 	}
-	deadline := time.After(4 * time.Second)
+	deadline := time.After(8 * time.Second)
 	for range 2 {
 		select {
 		case <-f.updates:

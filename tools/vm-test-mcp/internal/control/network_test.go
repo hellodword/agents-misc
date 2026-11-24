@@ -208,3 +208,24 @@ func TestStaleLeaseExpiryCannotDegradeNewConfirmation(t *testing.T) {
 		t.Fatal("stale expiry suspended a new lease")
 	}
 }
+
+func TestNetworkRecoverAllowedWhileLabPreparing(t *testing.T) {
+	s, task, r, _ := networkFixture(t)
+	s.mu.Lock()
+	task.State = "preparing"
+	task.lab().Router.Preparation.Stage = "ready"
+	s.mu.Unlock()
+	s.degrade(task, r, wire.Fail("network_degraded", "Router restarted while nodes were preparing"))
+	if task.lab().Network != "degraded" {
+		t.Fatalf("expected degraded network, got %s", task.lab().Network)
+	}
+	if _, err := s.changeNetwork(task.ID, NetworkRequest{}, false); wire.Safe(err).Code != "invalid_state" {
+		t.Fatalf("expected network_set to require running lab, got %v", err)
+	}
+	if _, err := s.changeNetwork(task.ID, NetworkRequest{}, true); err != nil {
+		t.Fatalf("expected network_recover during preparing to succeed, got %v", err)
+	}
+	if task.lab().Network != "ready" {
+		t.Fatalf("expected recovered network to be ready, got %s", task.lab().Network)
+	}
+}
