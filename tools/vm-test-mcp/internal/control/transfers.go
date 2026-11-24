@@ -505,6 +505,10 @@ func (s *Server) Files(w http.ResponseWriter, r *http.Request) {
 	expectedSize, expectedHash, expectedErr := s.db.ExpectedObject(ctx, t.ID, name)
 	if expectedErr != nil {
 		s.mu.Unlock()
+		if ctx.Err() != nil {
+			httpError(w, 408, ctx.Err())
+			return
+		}
 		httpError(w, 409, wire.Fail("manifest_required", "Object must be declared in the immutable manifest"))
 		return
 	}
@@ -527,6 +531,10 @@ func (s *Server) Files(w http.ResponseWriter, r *http.Request) {
 	e = s.db.QueryRowContext(ctx, "SELECT body FROM input_objects WHERE sha256=? AND size=?", expectedHash, expectedSize).Scan(&retained)
 	s.mu.Unlock()
 	if e != nil {
+		if ctx.Err() != nil {
+			httpError(w, 408, ctx.Err())
+			return
+		}
 		httpError(w, 409, e)
 		return
 	}

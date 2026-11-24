@@ -1,7 +1,7 @@
 package state
 
 // Each role starts with a new database when this contract changes.
-const SchemaVersion = 23
+const SchemaVersion = 24
 
 const controllerSchema = `
 PRAGMA auto_vacuum=INCREMENTAL;
@@ -32,8 +32,9 @@ CREATE TABLE diagnostic_events (task_id TEXT NOT NULL REFERENCES executions(id) 
  event_id TEXT NOT NULL,state TEXT NOT NULL,body BLOB NOT NULL,PRIMARY KEY(task_id,event_id));
 CREATE INDEX diagnostic_events_pending ON diagnostic_events(state,task_id,event_id);
 CREATE TABLE operations (
- sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, request_id TEXT NOT NULL UNIQUE,
- task_id TEXT NOT NULL, state TEXT NOT NULL, created TEXT NOT NULL, ended TEXT,revision INTEGER NOT NULL,intent_stage TEXT NOT NULL,intent_file TEXT NOT NULL,intent_size INTEGER NOT NULL,intent_sha256 TEXT NOT NULL, body BLOB NOT NULL);
+ sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+ tool TEXT NOT NULL, request_id TEXT NOT NULL,
+ task_id TEXT NOT NULL, state TEXT NOT NULL, created TEXT NOT NULL, ended TEXT,revision INTEGER NOT NULL,intent_stage TEXT NOT NULL,intent_file TEXT NOT NULL,intent_size INTEGER NOT NULL,intent_sha256 TEXT NOT NULL, body BLOB NOT NULL, UNIQUE(tool, request_id));
 CREATE INDEX operations_execution ON operations(task_id,state);
 CREATE INDEX operations_retention ON operations(state,ended);
 CREATE INDEX operations_recovery ON operations(state,sequence);
@@ -83,7 +84,7 @@ CREATE INDEX worker_files_execution ON worker_files(task_id,sequence);
 
 const metadataSchema = `
 CREATE TABLE store (singleton INTEGER PRIMARY KEY CHECK(singleton=1), role TEXT NOT NULL, instance_id TEXT NOT NULL);
-PRAGMA user_version=23;
+PRAGMA user_version=24;
 `
 
 const executorSchema = `

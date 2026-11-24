@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-const Version = "0.15.0"
+const Version = "0.16.0"
 const MaxJSON = 1 << 20
 
 // NixExecution reports worker execution independently of scheduler and daemon

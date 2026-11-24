@@ -120,6 +120,62 @@ func TestSchemaRejectsBytesWithoutEchoingContentOrAllocatingReceipt(t *testing.T
 	}
 }
 
+func TestUnknownFieldsReportAllowedFieldsAndPerToolIdempotencyAndZeroWait(t *testing.T) {
+	s, _ := testServer(t)
+
+	// 1. Unknown field diagnostics name unknown_fields and allowed_fields without allocating receipts.
+	_, err := s.Call(context.Background(), "execution_log", wire.JSON(schemaMap{"execution_id": wire.ID(), "max_bytes": 1024}))
+	e := wire.Safe(err)
+	if e == nil || e.Code != "invalid_argument" {
+		t.Fatal("expected invalid_argument for unknown field, got", err)
+	}
+	unknown, _ := e.Details["unknown_fields"].([]string)
+	allowed, _ := e.Details["allowed_fields"].([]string)
+	if len(unknown) != 1 || unknown[0] != "max_bytes" || len(allowed) != 3 {
+		t.Fatalf("unexpected field details: %+v", e.Details)
+	}
+	_, err = s.Call(context.Background(), "wait", wire.JSON(schemaMap{"targets": []any{schemaMap{"kind": "lab", "id": wire.ID(), "condition": "ready"}}, "timeout": 5}))
+	if e = wire.Safe(err); e == nil || e.Code != "invalid_argument" || e.Details["unknown_fields"] == nil {
+		t.Fatalf("wait did not report unknown field: %+v", err)
+	}
+
+	// 2. Per-tool (tool, request_id) idempotency allows reusing the same request_id across upload_create and nix_job_create,
+	// while rejecting parameter changes on the same tool.
+	sharedReqID := "run-shared-idempotency-key"
+	upOp := successful(t, s, "upload_create", TransferRequest{Change: Change{RequestID: sharedReqID}, Kind: "cache"})
+	upView := upOp.Result.(map[string]any)
+	upID, upURL := upView["id"].(string), upView["url"].(string)
+	drv, objects := cacheObjects()
+	declareUpload(t, s, upID, upURL, drv, objects)
+	for name, data := range objects {
+		transferHTTP(t, s, "PUT", upURL+"/"+name, data, 200)
+	}
+	zero := 0
+	jobReplyRaw, err := s.Call(context.Background(), "nix_job_create", wire.JSON(NixRequest{Change: Change{RequestID: sharedReqID}, CacheID: upID, WaitSeconds: &zero}))
+	if err != nil {
+		t.Fatal("nix_job_create rejected shared request_id from upload_create:", err)
+	}
+	jobReply := jobReplyRaw.(map[string]any)
+	waitPart := jobReply["wait"].(WaitResult)
+	if len(waitPart.Targets) != 1 || len(waitPart.Continue) != 1 || waitPart.Continue[0].Kind != "nix_job" {
+		t.Fatalf("wait_seconds=0 did not return immediate snapshot and continuation: %+v", waitPart)
+	}
+	if _, err = s.accept(context.Background(), "upload_create", wire.JSON(TransferRequest{Change: Change{RequestID: sharedReqID}, Kind: "file"})); wire.Safe(err).Code != "request_conflict" {
+		t.Fatal("same-tool changed arguments did not trigger request_conflict:", err)
+	}
+
+	// 3. wait(wait_seconds=0) returns immediately with current revision cursor.
+	started := time.Now()
+	snapRaw, err := s.Call(context.Background(), "wait", wire.JSON(WaitRequest{Targets: waitPart.Continue, WaitSeconds: &zero}))
+	if err != nil || time.Since(started) > 2*time.Second {
+		t.Fatal("wait_seconds=0 blocked or failed:", err, time.Since(started))
+	}
+	snap := snapRaw.(WaitResult)
+	if len(snap.Targets) != 1 {
+		t.Fatal(snap)
+	}
+}
+
 func TestEndpointFailuresHaveDistinctRecoveryConditions(t *testing.T) {
 	task := newTask("lab", 60)
 	task.State = "running"

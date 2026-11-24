@@ -12,16 +12,12 @@ import (
 // index, after idempotency lookup so retries remain valid after target deletion.
 func (s *Server) resolveArguments(name string, args any) (any, error) {
 	switch a := args.(type) {
-	case JobID:
-		return TaskID{a.JobID}, nil
-	case JobChange:
-		return TaskChange{a.Change, TaskID{a.JobID.JobID}}, nil
-	case JobRecoverRequest:
-		return RecoverNixRequest{TaskChange{a.Change, TaskID{a.JobID.JobID}}, a.Scope}, nil
+	case ExecutionID:
+		return TaskID{a.ExecutionID}, nil
 	case ExecutionRecoverRequest:
 		return RecoverNixRequest{TaskChange{a.Change, TaskID{a.ExecutionID}}, a.Scope}, nil
-	case JobExtendRequest:
-		return ExtendRequest{TaskChange{a.Change, TaskID{a.JobID.JobID}}, a.Seconds, a.Reason}, nil
+	case ExecutionExtendRequest:
+		return ExtendRequest{TaskChange{a.Change, TaskID{a.ExecutionID}}, a.Seconds, a.Reason}, nil
 	case ExecutionChange:
 		return TaskChange{a.Change, TaskID{a.ExecutionID}}, nil
 	}

@@ -75,6 +75,7 @@ type NixRequest struct {
 	Derivation     string `json:"-"`
 	System         string `json:"-"`
 	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
+	WaitSeconds    *int   `json:"wait_seconds,omitempty"`
 }
 type StartRequest struct {
 	Mode              string `json:"mode,omitempty"`
@@ -97,29 +98,21 @@ type CommandInputReadRequest struct {
 	Offset    int `json:"offset,omitempty"`
 	ByteLimit int `json:"byte_limit,omitempty"`
 }
-type JobID struct {
-	JobID string `json:"job_id"`
-}
-type JobChange struct {
-	Change
-	JobID
-}
-type JobRecoverRequest struct {
-	JobChange
-	Scope string `json:"scope"`
+type ExecutionID struct {
+	ExecutionID string `json:"execution_id"`
 }
 type RecoverNixRequest struct {
 	TaskChange
 	Scope string `json:"scope"`
 }
-type JobExtendRequest struct {
-	JobChange
-	Seconds int    `json:"seconds"`
-	Reason  string `json:"reason"`
-}
 type ExecutionChange struct {
 	Change
 	ExecutionID string `json:"execution_id"`
+}
+type ExecutionExtendRequest struct {
+	ExecutionChange
+	Seconds int    `json:"seconds"`
+	Reason  string `json:"reason"`
 }
 type ExecutionRecoverRequest struct {
 	ExecutionChange
@@ -278,15 +271,14 @@ type Definition struct {
 var Definitions = []Definition{
 	{"execution_recover", "Retry resource release or publication of captured evidence for an ended execution", ExecutionRecoverRequest{}, true},
 	{"template_list", "Page configured VirtualBox templates and their input limits", TemplateListRequest{}, false},
-	{"wait", "Wait up to 600 seconds for any business condition or new failure; transport heartbeats stay outside tool results", WaitRequest{}, false},
-	{"nix_job_get", "Read Nix result, resource release and evidence progress", JobID{}, false},
+	{"wait", "Wait up to 600 seconds (or wait_seconds) for any business condition or new failure; transport heartbeats stay outside tool results", WaitRequest{}, false},
+	{"nix_job_get", "Read Nix result, resource release and evidence progress", ExecutionID{}, false},
 	{"nix_job_list", "Page through Nix jobs", TaskListRequest{}, false},
-	{"nix_job_cancel", "Cancel a Nix job and await worker resource release", JobChange{}, true},
-	{"nix_job_recover", "Recover resource release or evidence handoff for an ended Nix job", JobRecoverRequest{}, true},
+	{"nix_job_cancel", "Cancel a Nix job and await worker resource release", ExecutionChange{}, true},
 	{"lab_inspect", "Read lab nodes, networking, resource ledger and diagnostics", TaskID{}, false},
 	{"command_details", "Read command argv, working directory and environment", CommandGetRequest{}, false},
 	{"command_input_read", "Read retained stdin by sequence within a byte budget", CommandInputReadRequest{}, false},
-	{"nix_job_extend", "Extend a running Nix job with a continued-work reason, up to 24 hours total", JobExtendRequest{}, true},
+	{"nix_job_extend", "Extend a running Nix job with a continued-work reason, up to 24 hours total", ExecutionExtendRequest{}, true},
 	{"command_list", "Page through command summaries in a lab", LabCollectionRequest{}, false},
 	{"endpoint_list", "Page through endpoint summaries in a lab", LabCollectionRequest{}, false},
 	{"capture_list", "Page through capture summaries in a lab", LabCollectionRequest{}, false},
@@ -386,11 +378,14 @@ func (s *Server) accept(ctx context.Context, name string, raw []byte) (any, erro
 	if def == nil {
 		return nil, wire.Fail("not_found", "Unknown tool")
 	}
-	v := reflect.New(reflect.TypeOf(def.Args))
-	if e := wire.Decode(raw, v.Interface()); e != nil {
+	if e := wire.CheckJSON(raw); e != nil {
 		return nil, e
 	}
 	if e := validateArguments(reflect.TypeOf(def.Args), raw); e != nil {
+		return nil, e
+	}
+	v := reflect.New(reflect.TypeOf(def.Args))
+	if e := wire.Decode(raw, v.Interface()); e != nil {
 		return nil, e
 	}
 	args := normalizeArguments(v.Elem().Interface())
@@ -419,9 +414,9 @@ func (s *Server) accept(ctx context.Context, name string, raw []byte) (any, erro
 	if s.closed {
 		return nil, wire.Fail("unavailable", "Service is stopping")
 	}
-	if op := s.requestOperation(request); op != nil {
+	if op := s.requestOperation(name, request); op != nil {
 		if op.Hash != hash {
-			return nil, wire.Fail("request_conflict", "request_id was already used with different parameters")
+			return nil, wire.Fail("request_conflict", "request_id was already used on this tool with different parameters")
 		}
 		return clone(op), nil
 	}
@@ -433,9 +428,9 @@ func (s *Server) accept(ctx context.Context, name string, raw []byte) (any, erro
 		reason, err := s.backend.Available(probe, "nixos")
 		cancel()
 		s.mu.Lock()
-		if op := s.requestOperation(request); op != nil {
+		if op := s.requestOperation(name, request); op != nil {
 			if op.Hash != hash {
-				return nil, wire.Fail("request_conflict", "request_id was already used with different parameters")
+				return nil, wire.Fail("request_conflict", "request_id was already used on this tool with different parameters")
 			}
 			return clone(op), nil
 		}
@@ -542,7 +537,7 @@ func (s *Server) accept(ctx context.Context, name string, raw []byte) (any, erro
 	}
 	if op.State == "pending" {
 		s.operations[op.ID] = op
-		s.requests[request] = op
+		s.requests[requestKey(name, request)] = op
 	}
 	if execution != nil {
 		return clone(op), nil
@@ -591,7 +586,7 @@ func (s *Server) dispatchOperation(op *Operation, args any, accepted time.Time) 
 		}
 		s.persist(op)
 		delete(s.operations, op.ID)
-		delete(s.requests, op.RequestID)
+		delete(s.requests, requestKey(op.Tool, op.RequestID))
 	}()
 }
 func clone[T any](v *T) *T { var out T; _ = json.Unmarshal(wire.JSON(v), &out); return &out }
@@ -615,12 +610,14 @@ func page(cursor, limit, total int) (int, int, error) {
 	return cursor, end, nil
 }
 
-func (s *Server) requestOperation(request string) *Operation {
-	if o := s.requests[request]; o != nil {
+func requestKey(tool, request string) string { return tool + "\n" + request }
+
+func (s *Server) requestOperation(tool, request string) *Operation {
+	if o := s.requests[requestKey(tool, request)]; o != nil {
 		return o
 	}
 	var o Operation
-	if s.db.OperationForRequest(s.ctx, request, &o) == nil {
+	if s.db.OperationForRequest(s.ctx, tool, request, &o) == nil {
 		return &o
 	}
 	return nil

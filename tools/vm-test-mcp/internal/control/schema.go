@@ -30,10 +30,14 @@ func constrainSchema(t reflect.Type, schema schemaMap) {
 	enum := func(name string, values ...string) { field(name, schemaMap{"enum": values}) }
 	for name := range p {
 		if name == "request_id" {
-			field(name, schemaMap{"pattern": requestPattern.String(), "description": "Stable idempotency key. Reuse unchanged arguments until its receipt is reconciled; changed parameters require a new key."})
+			field(name, schemaMap{"pattern": requestPattern.String(), "description": "Stable per-tool idempotency key. Reuse unchanged arguments on the same tool until its receipt is reconciled; changed parameters require a new key."})
 		} else if strings.HasSuffix(name, "_id") {
 			field(name, schemaMap{"pattern": wire.IDPattern.String()})
 		}
+	}
+	if _, ok := p["wait_seconds"]; ok {
+		rangeOf("wait_seconds", 0, 600)
+		field("wait_seconds", schemaMap{"default": 600, "description": "Observation budget in seconds (0..600, default 600); 0 returns immediately with current state and wait.continue cursors."})
 	}
 	if _, ok := p["screen"]; ok {
 		rangeOf("screen", 0, 63)
@@ -73,7 +77,7 @@ func constrainSchema(t reflect.Type, schema schemaMap) {
 		field("limit", schemaMap{"default": 50})
 	case reflect.TypeFor[LogRequest](), reflect.TypeFor[ReadRequest]():
 		rangeOf("limit", 0, 65536)
-		field("limit", schemaMap{"default": 65536, "description": "0 or omission uses 65536 bytes."})
+		field("limit", schemaMap{"default": 65536, "description": "0 or omission uses 65536 bytes; maximum 65536 bytes."})
 		if t == reflect.TypeFor[ReadRequest]() {
 			enum("stream", "stdout", "stderr")
 		}
@@ -88,7 +92,7 @@ func constrainSchema(t reflect.Type, schema schemaMap) {
 		field("reason", schemaMap{"minLength": 1, "maxLength": 1024, "x-maxBytes": 1024, "pattern": "\\S", "description": "Actual continued work and its purpose; effective total limit comes from service_get."})
 	case reflect.TypeFor[NixRequest]():
 		rangeOf("timeout_seconds", 0, 86400)
-	case reflect.TypeFor[JobRecoverRequest](), reflect.TypeFor[ExecutionRecoverRequest]():
+	case reflect.TypeFor[ExecutionRecoverRequest]():
 		enum("scope", "resources", "evidence")
 	case reflect.TypeFor[StartRequest]():
 		enum("mode", "finite", "service", "interactive")
@@ -110,12 +114,13 @@ func constrainSchema(t reflect.Type, schema schemaMap) {
 	case reflect.TypeFor[CommandInputReadRequest]():
 		field("sequence", schemaMap{"minimum": 0})
 		rangeOf("byte_limit", 0, 65536)
+		field("byte_limit", schemaMap{"default": 65536, "description": "0 or omission uses 65536 bytes; maximum 65536 bytes."})
 	case reflect.TypeFor[CollectionRequest](), reflect.TypeFor[LabCollectionRequest]():
 		field("cursor", schemaMap{"minimum": 0})
 		rangeOf("limit", 0, 200)
-	case reflect.TypeFor[JobExtendRequest]():
+	case reflect.TypeFor[ExecutionExtendRequest]():
 		rangeOf("seconds", 1, 86400)
-		field("reason", schemaMap{"minLength": 1, "maxLength": 1024, "pattern": "\\S"})
+		field("reason", schemaMap{"minLength": 1, "maxLength": 1024, "x-maxBytes": 1024, "pattern": "\\S"})
 	case reflect.TypeFor[InputRequest]():
 		rangeOf("sequence", 0, wire.InputPacketCount-1)
 		field("data", schemaMap{"maxLength": wire.InputPacketLimit, "x-maxBytes": wire.InputPacketLimit, "description": "Raw UTF-8 text, including NUL if required; not base64. Maximum 65536 UTF-8 bytes."})
@@ -246,6 +251,22 @@ func validateArguments(t reflect.Type, raw []byte) error {
 	// than echoing command arguments, credentials or input in a diagnostic.
 	fields := []string{}
 	props := c.schema["properties"].(schemaMap)
+	allowed := make([]string, 0, len(props))
+	for name := range props {
+		allowed = append(allowed, name)
+	}
+	sort.Strings(allowed)
+	unknown := []string{}
+	for name := range value {
+		if _, ok := props[name]; !ok {
+			if requestPattern.MatchString(name) {
+				unknown = append(unknown, name)
+			} else {
+				unknown = append(unknown, "<invalid_field_name>")
+			}
+		}
+	}
+	sort.Strings(unknown)
 	for name, validator := range c.properties {
 		v, exists := value[name]
 		if exists && (validator.Validate(v) != nil || !validByteLengths(props[name].(schemaMap), v)) {
@@ -257,9 +278,17 @@ func validateArguments(t reflect.Type, raw []byte) error {
 			fields = append(fields, name)
 		}
 	}
+	if len(unknown) > 0 {
+		fields = append(fields, unknown...)
+	}
 	sort.Strings(fields)
 	if len(fields) == 0 {
 		fields = append(fields, "cross_field_constraints")
 	}
-	return &wire.Error{Code: "invalid_argument", Message: "Arguments do not match the tool input schema", Details: map[string]any{"fields": fields, "next_action": "Inspect tools/list for field constraints; correct parameters and use a new request_id for a changed mutation"}}
+	details := map[string]any{"fields": fields, "next_action": "Inspect tools/list for field constraints; correct parameters and use a new request_id for a changed mutation"}
+	if len(unknown) > 0 {
+		details["unknown_fields"] = unknown
+		details["allowed_fields"] = allowed
+	}
+	return &wire.Error{Code: "invalid_argument", Message: "Arguments do not match the tool input schema", Details: details}
 }

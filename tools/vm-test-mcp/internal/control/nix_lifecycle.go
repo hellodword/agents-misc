@@ -272,7 +272,7 @@ func (t *Task) applyNixTestResult() {
 }
 
 func nixLifecycleError(t *Task, stage string, err error) *wire.Error {
-	return &wire.Error{Code: stage + "_blocked", Category: "execution", Message: "Nix " + stage + " requires recovery", Retry: "reconcile", NextAction: "Resolve the recorded cause, then call execution_recover for this scope", Details: map[string]any{"stage": stage, "job_id": t.ID, "worker_instance": t.nix().WorkerInstance, "session_id": t.nixResources().SessionID, "cause": wire.LifecycleCause(err), "required_actor": "administrator", "observed": time.Now().UTC()}}
+	return &wire.Error{Code: stage + "_blocked", Category: "execution", Message: "Nix " + stage + " requires recovery", Retry: "reconcile", NextAction: "Resolve the recorded cause, then call execution_recover for this scope", Details: map[string]any{"stage": stage, "execution_id": t.ID, "worker_instance": t.nix().WorkerInstance, "session_id": t.nixResources().SessionID, "cause": wire.LifecycleCause(err), "required_actor": "administrator", "observed": time.Now().UTC()}}
 }
 
 func (s *Server) recoverNix(id, scope string) (any, error) {

@@ -36,7 +36,7 @@ type runRecord struct {
 	CacheAttempt   int            `json:"cache_attempt"`
 	CacheID        string         `json:"upload_id,omitempty"`
 	Submission     map[string]any `json:"submission,omitempty"`
-	TaskID         string         `json:"job_id,omitempty"`
+	TaskID         string         `json:"execution_id,omitempty"`
 	ReleaseInputs  bool           `json:"release_inputs,omitempty"`
 }
 
@@ -340,7 +340,7 @@ func observe(ctx context.Context, session *mcp.ClientSession, root *safefs.Root,
 	offset := st.Size()
 	previous := ""
 	var raw json.RawMessage
-	if err := call(ctx, session, "nix_job_get", map[string]any{"job_id": id}, &raw); err != nil {
+	if err := call(ctx, session, "nix_job_get", map[string]any{"execution_id": id}, &raw); err != nil {
 		return nil, err
 	}
 	refs := []waitReference{{Kind: "nix_job", ID: id, Condition: "complete"}}

@@ -99,7 +99,7 @@ func TestNixRecoverySeparatesResourcesEvidenceAndQueue(t *testing.T) {
 	}
 	s.Start()
 	waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); j, e := s.task(job.ID); return e == nil && j.settled() })
-	result, err := s.Call(context.Background(), "nix_job_get", wire.JSON(JobID{JobID: job.ID}))
+	result, err := s.Call(context.Background(), "nix_job_get", wire.JSON(ExecutionID{ExecutionID: job.ID}))
 	if err != nil {
 		t.Fatal(err)
 	}

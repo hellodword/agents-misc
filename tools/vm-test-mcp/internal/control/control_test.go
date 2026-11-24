@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -304,7 +305,21 @@ func TestHTTPAuthenticationAndStrictTransport(t *testing.T) {
 	}
 	server := httptest.NewServer(h)
 	defer server.Close()
-	r, _ := http.NewRequest("POST", server.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
+	initReq, _ := http.NewRequest("POST", server.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`))
+	initReq.Host = "localhost"
+	initReq.Header.Set("Authorization", "Bearer synthetic-test-token")
+	initReq.Header.Set("Content-Type", "application/json")
+	initReq.Header.Set("Accept", "application/json, text/event-stream")
+	initResp, e := http.DefaultClient.Do(initReq)
+	if e != nil {
+		t.Fatal(e)
+	}
+	initBody, _ := io.ReadAll(initResp.Body)
+	initResp.Body.Close()
+	if initResp.StatusCode != 200 || !strings.Contains(string(initBody), "wait_seconds") {
+		t.Fatalf("missing server instructions in initialize response: status=%d body=%s", initResp.StatusCode, string(initBody))
+	}
+	r, _ := http.NewRequest("POST", server.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`))
 	r.Host = "localhost"
 	r.Header.Set("Authorization", "Bearer synthetic-test-token")
 	r.Header.Set("Content-Type", "application/json")
@@ -346,7 +361,7 @@ func TestUploadReuseEvidenceAndResourceIdentities(t *testing.T) {
 		t.Fatal("accepted forged node", err)
 	}
 	s.mu.Lock()
-	forged := s.requests[bad.RequestID]
+	forged := s.requests[requestKey("guest_file_put", bad.RequestID)]
 	s.mu.Unlock()
 	if forged != nil {
 		t.Fatal("forged path allocated a receipt", forged)

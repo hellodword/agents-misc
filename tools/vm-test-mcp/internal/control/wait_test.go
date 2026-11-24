@@ -42,7 +42,7 @@ func TestDefaultBusinessWaitAndDisconnect(t *testing.T) {
 		t.Fatal("observer should time out")
 	}
 	s.mu.Lock()
-	pending := clone(s.requestOperation("disconnected"))
+	pending := clone(s.requestOperation("lab_create", "disconnected"))
 	s.mu.Unlock()
 	if pending == nil || pending.TaskID == "" {
 		t.Fatal("accepted target was lost")

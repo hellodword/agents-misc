@@ -131,7 +131,7 @@ func New(cfg config.Config, b Backend) (*Server, error) {
 					}
 				}
 				s.operations[o.ID] = &o
-				s.requests[o.RequestID] = &o
+				s.requests[requestKey(o.Tool, o.RequestID)] = &o
 			case "transfer":
 				var t Transfer
 				if e = json.Unmarshal(row, &t); e != nil {

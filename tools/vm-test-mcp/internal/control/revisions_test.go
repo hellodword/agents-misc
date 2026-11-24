@@ -145,7 +145,7 @@ func TestNixTaskRetainsExecutionThroughCompletionAndCancellationCleanup(t *testi
 			s.Start()
 			if cancelled {
 				waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return job.State == "running" })
-				successful(t, s, "nix_job_cancel", JobChange{Change: Change{"cancel-nix-result"}, JobID: JobID{job.ID}})
+				successful(t, s, "nix_job_cancel", ExecutionChange{Change: Change{"cancel-nix-result"}, ExecutionID: job.ID})
 			}
 			waitFor(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return job.Cleanup == "complete" })
 			s.mu.Lock()
@@ -420,7 +420,7 @@ func TestNixTerminalReplyPreservesConcurrentTaskTermination(t *testing.T) {
 				t.Fatal("status did not start")
 			}
 			if termination == "cancelled" {
-				successful(t, s, "nix_job_cancel", JobChange{Change: Change{"cancel-inflight-nix-result"}, JobID: JobID{job.ID}})
+				successful(t, s, "nix_job_cancel", ExecutionChange{Change: Change{"cancel-inflight-nix-result"}, ExecutionID: job.ID})
 			} else {
 				s.mu.Lock()
 				expired := time.Now().Add(-time.Second)

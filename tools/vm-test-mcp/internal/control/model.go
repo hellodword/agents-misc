@@ -32,6 +32,7 @@ type LabRequest struct {
 	DNS            []string      `json:"dns,omitempty"`
 	Internet       *bool         `json:"internet,omitempty"`
 	TimeoutSeconds int           `json:"timeout_seconds,omitempty"`
+	WaitSeconds    *int          `json:"wait_seconds,omitempty"`
 }
 type Node struct {
 	ID string `json:"id"`

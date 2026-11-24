@@ -141,7 +141,7 @@ func putChild(ctx context.Context, tx *sql.Tx, table, owner, id string, position
 }
 func (o *Operation) store(ctx context.Context, tx *sql.Tx) error {
 	o.PrepareSave()
-	_, err := tx.ExecContext(ctx, `INSERT INTO operations(id,request_id,task_id,state,created,ended,revision,intent_stage,intent_file,intent_size,intent_sha256,body) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET task_id=excluded.task_id,state=excluded.state,ended=excluded.ended,revision=excluded.revision,intent_stage=excluded.intent_stage,intent_file=excluded.intent_file,intent_size=excluded.intent_size,intent_sha256=excluded.intent_sha256,body=excluded.body WHERE operations.body<>excluded.body`, o.ID, o.RequestID, o.TaskID, o.State, o.Created.Format(time.RFC3339Nano), dbTime(o.Ended), o.Revision, o.IntentStage, o.Intent.File, o.Intent.Size, o.Intent.SHA256, wire.JSON(o))
+	_, err := tx.ExecContext(ctx, `INSERT INTO operations(id,tool,request_id,task_id,state,created,ended,revision,intent_stage,intent_file,intent_size,intent_sha256,body) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET task_id=excluded.task_id,state=excluded.state,ended=excluded.ended,revision=excluded.revision,intent_stage=excluded.intent_stage,intent_file=excluded.intent_file,intent_size=excluded.intent_size,intent_sha256=excluded.intent_sha256,body=excluded.body WHERE operations.body<>excluded.body`, o.ID, o.Tool, o.RequestID, o.TaskID, o.State, o.Created.Format(time.RFC3339Nano), dbTime(o.Ended), o.Revision, o.IntentStage, o.Intent.File, o.Intent.Size, o.Intent.SHA256, wire.JSON(o))
 	return err
 }
 func (t *Transfer) store(ctx context.Context, tx *sql.Tx) error {
@@ -286,9 +286,9 @@ func (d *repository) list(ctx context.Context, kind, table, where string) ([][]b
 	}
 	return out, nil
 }
-func (d *repository) OperationForRequest(ctx context.Context, request string, v any) error {
+func (d *repository) OperationForRequest(ctx context.Context, tool, request string, v any) error {
 	var body []byte
-	if err := d.QueryRowContext(ctx, "SELECT body FROM operations WHERE request_id=?", request).Scan(&body); err != nil {
+	if err := d.QueryRowContext(ctx, "SELECT body FROM operations WHERE tool=? AND request_id=?", tool, request).Scan(&body); err != nil {
 		return err
 	}
 	return json.Unmarshal(body, v)

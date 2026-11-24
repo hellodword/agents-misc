@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -23,8 +24,17 @@ type WaitTarget struct {
 	SeenRevision int64  `json:"seen_revision,omitempty"`
 }
 type WaitRequest struct {
-	Targets []WaitTarget `json:"targets"`
+	Targets     []WaitTarget `json:"targets"`
+	WaitSeconds *int         `json:"wait_seconds,omitempty"`
 }
+
+func effectiveWaitBudget(waitSeconds *int) time.Duration {
+	if waitSeconds == nil {
+		return WaitWindow
+	}
+	return time.Duration(*waitSeconds) * time.Second
+}
+
 type TargetState struct {
 	Manual bool `json:"manual_intervention,omitempty"`
 	WaitTarget
@@ -246,11 +256,19 @@ func (s *Server) wait(ctx context.Context, req WaitRequest, budget time.Duration
 			return WaitResult{}, wire.Fail("invalid_argument", "Invalid wait reference")
 		}
 	}
-	timer := time.NewTimer(budget)
-	defer timer.Stop()
-	tick := time.NewTicker(100 * time.Millisecond)
-	defer tick.Stop()
-	expired := false
+	expired := budget <= 0
+	var timer *time.Timer
+	var timerCh <-chan time.Time
+	var tick *time.Ticker
+	var tickCh <-chan time.Time
+	if !expired {
+		timer = time.NewTimer(budget)
+		defer timer.Stop()
+		timerCh = timer.C
+		tick = time.NewTicker(100 * time.Millisecond)
+		defer tick.Stop()
+		tickCh = tick.C
+	}
 	for {
 		result := WaitResult{Reason: "timeout", Targets: []TargetState{}, Continue: []WaitTarget{}}
 		s.mu.Lock()
@@ -289,9 +307,9 @@ func (s *Server) wait(ctx context.Context, req WaitRequest, budget time.Duration
 			return result, ctx.Err()
 		case <-s.ctx.Done():
 			return result, wire.Fail("unavailable", "Observer stopped; accepted execution remains durable")
-		case <-timer.C:
+		case <-timerCh:
 			expired = true
-		case <-tick.C:
+		case <-tickCh:
 		}
 	}
 }
@@ -300,11 +318,17 @@ func (s *Server) wait(ctx context.Context, req WaitRequest, budget time.Duration
 // inherits the observing HTTP request's cancellation after acceptance.
 func (s *Server) Call(ctx context.Context, name string, raw []byte) (any, error) {
 	if name == "wait" {
+		if err := wire.CheckJSON(raw); err != nil {
+			return nil, err
+		}
+		if err := validateArguments(reflect.TypeFor[WaitRequest](), raw); err != nil {
+			return nil, err
+		}
 		var req WaitRequest
 		if err := wire.Decode(raw, &req); err != nil {
 			return nil, err
 		}
-		return s.wait(ctx, req, WaitWindow)
+		return s.wait(ctx, req, effectiveWaitBudget(req.WaitSeconds))
 	}
 	started := time.Now()
 	value, err := s.accept(ctx, name, raw)
@@ -315,7 +339,15 @@ func (s *Server) Call(ctx context.Context, name string, raw []byte) (any, error)
 	if !ok {
 		return value, nil
 	}
-	reply, err := s.wait(ctx, WaitRequest{[]WaitTarget{{Kind: "operation", ID: op.ID, Condition: "complete"}}}, max(0, WaitWindow-time.Since(started)))
+	budget := WaitWindow
+	if oneOf(name, "lab_create", "nix_job_create") {
+		var windowArgs struct {
+			WaitSeconds *int `json:"wait_seconds"`
+		}
+		_ = json.Unmarshal(raw, &windowArgs)
+		budget = effectiveWaitBudget(windowArgs.WaitSeconds)
+	}
+	reply, err := s.wait(ctx, WaitRequest{Targets: []WaitTarget{{Kind: "operation", ID: op.ID, Condition: "complete"}}}, max(0, budget-time.Since(started)))
 	if err != nil {
 		return nil, err
 	}
@@ -354,11 +386,8 @@ func (s *Server) Call(ctx context.Context, name string, raw []byte) (any, error)
 			if args.Scope == "evidence" {
 				target.Condition = "evidence_complete"
 			}
-		case "nix_job_cancel", "nix_job_recover":
+		case "nix_job_cancel":
 			target = WaitTarget{Kind: "nix_job", ID: op.TaskID, Condition: "resources_released"}
-			if args.Scope == "evidence" {
-				target.Condition = "evidence_complete"
-			}
 		case "lab_finish", "lab_cancel":
 			target = WaitTarget{Kind: "lab", ID: op.TaskID, Condition: "complete"}
 		case "lab_cleanup":
@@ -378,7 +407,7 @@ func (s *Server) Call(ctx context.Context, name string, raw []byte) (any, error)
 			}
 		}
 		if target.Kind != "operation" {
-			reply, err = s.wait(ctx, WaitRequest{[]WaitTarget{target}}, max(0, WaitWindow-time.Since(started)), true)
+			reply, err = s.wait(ctx, WaitRequest{Targets: []WaitTarget{target}}, max(0, budget-time.Since(started)), true)
 			if err != nil {
 				return nil, err
 			}

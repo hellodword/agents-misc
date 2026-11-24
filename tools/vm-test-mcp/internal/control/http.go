@@ -16,8 +16,15 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+const ServerInstructions = "VM Test MCP manages disposable VirtualBox labs (lab_*) and sandboxed host-KVM NixOS tests (nix_job_*) on a shared FIFO scheduler. " +
+	"Authenticate /mcp requests with the configured Bearer token; /files/ transfers use scoped capability URLs without Bearer headers. " +
+	"Every mutating tool scopes idempotency by (tool, request_id): reuse the exact arguments when retrying an uncertain call on that tool, and generate a fresh request_id whenever arguments change. " +
+	"Executions use execution_id across nix_job_get, nix_job_cancel, nix_job_extend, execution_log, execution_events, evidence_list, execution_recover and execution_delete (lab tools address their lab via lab_id). " +
+	"lab_create, nix_job_create and wait accept optional wait_seconds (0..600, default 600): pass 0 to return immediately after admission or a single snapshot with wait.continue cursors, or configure client tool timeouts >= 660s for full 600s observation windows. " +
+	"Track resources.state (released/unallocated vs blocked) separately from evidence.state (complete vs blocked); use execution_recover(scope=\"resources\"|\"evidence\") after resolving a recorded blocker."
+
 func (s *Server) Handler() http.Handler {
-	server := mcp.NewServer(&mcp.Implementation{Name: "vm-test-mcp", Version: wire.Version}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "vm-test-mcp", Version: wire.Version}, &mcp.ServerOptions{Instructions: ServerInstructions})
 	for _, d := range Definitions {
 		server.AddTool(&mcp.Tool{Name: d.Name, Description: d.Description, InputSchema: Schema(reflect.TypeOf(d.Args)), OutputSchema: outputSchema(d.Name)}, func(ctx context.Context, r *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			if stream, ok := ctx.Value(heartbeatKey{}).(*heartbeatWriter); ok {

@@ -171,7 +171,7 @@ func TestExtensionRequiresBoundedReasonAndPreservesDeadlineOnRejection(t *testin
 		t.Fatal("invalid hold changed execution deadline", bad)
 	}
 	s.mu.Lock()
-	rejectedReceipt := s.requests["empty-hold"]
+	rejectedReceipt := s.requests[requestKey("lab_extend", "empty-hold")]
 	s.mu.Unlock()
 	if rejectedReceipt != nil {
 		t.Fatal("schema rejection allocated receipt")
