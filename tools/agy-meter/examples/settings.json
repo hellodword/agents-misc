@@ -1,0 +1,8 @@
+{
+  "statusLine": {
+    "type": "command",
+    "command": "python3 \"$HOME/.gemini/antigravity-cli/meter/meter_client.py\" statusline",
+    "stack_with_default": true,
+    "enabled": true
+  }
+}

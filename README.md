@@ -11,6 +11,8 @@ This repository contains the following components and maintenance entrypoints:
 | [Agent Rules Kit](AGENTS.md)                             | Shared agent rules and reusable workflow skills                     | `AGENTS.md`, `.agents/**`              | [Maintenance guide](.project-agent/rules/maintenance.md)             |
 | [VM Test MCP](tools/vm-test-mcp/README.md)               | Disposable Windows/Linux labs and sandboxed NixOS VM tests          | `tools/vm-test-mcp/**`                 | `just --justfile tools/vm-test-mcp/justfile test`                    |
 | [Codex Config Atlas](tools/codex-config-atlas/README.md) | Versioned upstream schema registry, CLI, and static comparison site | tracked schema registry and Web source | `nix build --no-link .#checks.x86_64-linux.codex-config-atlas-tests` |
+| [Tokscale Sandbox](tools/tokscale-sandbox/README.md)     | Offline `runsc`-isolated token analytics across local coding agents | `tools/tokscale-sandbox/**`            | [Component guide](tools/tokscale-sandbox/README.md)                  |
+| [AGY Meter](tools/agy-meter/README.md)                   | Real-time TTFT/TPS status line and SQLite telemetry for `agy`       | `tools/agy-meter/**`                   | [Component guide](tools/agy-meter/README.md)                         |
 
 Atlas data and site trees are generated Nix outputs. Its tracked schema registry
 and Web source are the durable inputs.

@@ -1,0 +1,741 @@
+#!/usr/bin/env python3
+import json
+import os
+import queue
+import re
+import socket
+import sqlite3
+import struct
+import subprocess
+import sys
+import threading
+import time
+
+METER_DIR = os.path.expanduser(
+    os.environ.get("AGY_METER_DIR", "~/.gemini/antigravity-cli/meter")
+)
+DB_PATH = os.path.join(METER_DIR, "metrics.db")
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+AF_NETLINK = getattr(socket, "AF_NETLINK", 16)
+NETLINK_SOCK_DIAG = getattr(socket, "NETLINK_SOCK_DIAG", 4)
+SOCK_DIAG_BY_FAMILY = 20
+NLMSG_ERROR = 2
+NLMSG_DONE = 3
+NLM_F_REQUEST = 0x01
+NLM_F_DUMP = 0x300
+INET_DIAG_INFO = 2
+TCPF_ESTABLISHED = 1 << 1
+
+
+def find_real_agy():
+    override = os.environ.get("AGY_REAL_BIN")
+    if override and os.path.isfile(override):
+        return override
+    self_real = os.path.realpath(__file__)
+    for p in os.environ.get("PATH", "").split(os.pathsep):
+        cand = os.path.join(p, "agy")
+        if (
+            os.path.isfile(cand)
+            and os.access(cand, os.X_OK)
+            and os.path.realpath(cand) != self_real
+        ):
+            return cand
+    fallback = os.path.expanduser("~/.local/bin/agy")
+    if os.path.isfile(fallback):
+        return fallback
+    sys.stderr.write("agy-mon: 'agy' binary not found in PATH\n")
+    sys.exit(127)
+
+
+def percentile(vals, q):
+    if not vals:
+        return None
+    s = sorted(vals)
+    return s[min(len(s) - 1, max(0, round((len(s) - 1) * q)))]
+
+
+def fmt_dur(ms):
+    if ms is None:
+        return "--"
+    return f"{ms:.0f}ms" if ms < 1000.0 else f"{ms / 1000.0:.2f}s"
+
+
+def clip_ansi(text, max_cols):
+    if max_cols <= 20:
+        return text
+    vis = len(ANSI_RE.sub("", text))
+    if vis <= max_cols:
+        return text
+    out, count, i = [], 0, 0
+    limit = max_cols - 1
+    while i < len(text) and count < limit:
+        m = ANSI_RE.match(text, i)
+        if m:
+            out.append(m.group(0))
+            i = m.end()
+        else:
+            out.append(text[i])
+            count += 1
+            i += 1
+    out.append("…\033[0m")
+    return "".join(out)
+
+
+def get_tree_socket_inodes(root_pid):
+    inodes, pids, seen = set(), [root_pid], set()
+    while pids:
+        pid = pids.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        try:
+            for fd in os.listdir(f"/proc/{pid}/fd"):
+                try:
+                    lnk = os.readlink(f"/proc/{pid}/fd/{fd}")
+                    if lnk.startswith("socket:[") and lnk.endswith("]"):
+                        inodes.add(int(lnk[8:-1]))
+                except OSError:
+                    pass
+            for tid in os.listdir(f"/proc/{pid}/task"):
+                try:
+                    with open(f"/proc/{pid}/task/{tid}/children") as cf:
+                        for tok in cf.read().split():
+                            pids.append(int(tok))
+                except OSError:
+                    pass
+        except OSError:
+            pass
+    return inodes
+
+
+class KernelSocketReader:
+    """Unprivileged TCP byte counter via NETLINK_SOCK_DIAG with /proc/net/dev fallback."""
+
+    def __init__(self):
+        self.nl = None
+        self.seq = 1
+        self.my_uid = os.getuid()
+        try:
+            self.nl = socket.socket(AF_NETLINK, socket.SOCK_DGRAM, NETLINK_SOCK_DIAG)
+            self.nl.bind((0, 0))
+            self.nl.settimeout(0.05)
+        except OSError:
+            self.nl = None
+
+    def read_https_sockets(self, target_inodes):
+        if self.nl is not None:
+            res, ok = {}, False
+            for fam in (socket.AF_INET, socket.AF_INET6):
+                try:
+                    self.seq += 1
+                    req = struct.pack(
+                        "<BBBxI48s",
+                        fam,
+                        socket.IPPROTO_TCP,
+                        1 << (INET_DIAG_INFO - 1),
+                        TCPF_ESTABLISHED,
+                        b"\x00" * 48,
+                    )
+                    hdr = struct.pack(
+                        "<IHHII",
+                        16 + len(req),
+                        SOCK_DIAG_BY_FAMILY,
+                        NLM_F_REQUEST | NLM_F_DUMP,
+                        self.seq,
+                        0,
+                    )
+                    self.nl.sendto(hdr + req, (0, 0))
+                    done = False
+                    while not done:
+                        buf = self.nl.recv(65536)
+                        if not buf:
+                            break
+                        off = 0
+                        while off + 16 <= len(buf):
+                            nl_len, nl_type, _, _, _ = struct.unpack_from(
+                                "<IHHII", buf, off
+                            )
+                            if nl_len < 16 or off + nl_len > len(buf):
+                                done = True
+                                break
+                            if nl_type in (NLMSG_DONE, NLMSG_ERROR):
+                                done = True
+                                break
+                            if nl_type == SOCK_DIAG_BY_FAMILY and nl_len >= 88:
+                                m_off = off + 16
+                                _, dport = struct.unpack_from("!HH", buf, m_off + 4)
+                                uid, inode = struct.unpack_from("<II", buf, m_off + 64)
+                                if dport == 443 and (
+                                    inode in target_inodes
+                                    or (not target_inodes and uid == self.my_uid)
+                                ):
+                                    r_off, m_end = m_off + 72, off + nl_len
+                                    while r_off + 4 <= m_end:
+                                        r_len, r_type = struct.unpack_from(
+                                            "<HH", buf, r_off
+                                        )
+                                        if r_len < 4 or r_off + r_len > m_end:
+                                            break
+                                        if (r_type & 0x7FFF) == INET_DIAG_INFO and (
+                                            r_len - 4
+                                        ) >= 136:
+                                            t_off = r_off + 4
+                                            b_acked, b_rx = struct.unpack_from(
+                                                "<QQ", buf, t_off + 120
+                                            )
+                                            b_tx = (
+                                                struct.unpack_from(
+                                                    "<Q", buf, t_off + 200
+                                                )[0]
+                                                if (r_len - 4) >= 208
+                                                else b_acked
+                                            )
+                                            key = (
+                                                inode if inode else (fam, dport, r_off)
+                                            )
+                                            res[key] = (b_tx, b_rx)
+                                            ok = True
+                                        r_off += (r_len + 3) & ~3
+                            off += (nl_len + 3) & ~3
+                except OSError:
+                    pass
+            if ok or res:
+                return res, "netlink"
+
+        rx_sum = tx_sum = 0
+        try:
+            with open("/proc/net/dev") as f:
+                for line in f.readlines()[2:]:
+                    if ":" not in line:
+                        continue
+                    iface, rest = line.split(":", 1)
+                    if iface.strip() == "lo":
+                        continue
+                    cols = rest.split()
+                    if len(cols) >= 9:
+                        rx_sum += int(cols[0])
+                        tx_sum += int(cols[8])
+        except OSError:
+            pass
+        return {0: (tx_sum, rx_sum)}, "netdev"
+
+
+def analyze_trace(sock_trace, t_fallback, now, finalized=False):
+    bursts = sock_trace["bursts"]
+    if not bursts:
+        return None
+    t_origin = sock_trace["t_req_sent"] or t_fallback
+    tot_rx = max(0, sock_trace["prev_rx"] - sock_trace["base_rx"])
+    t0, b0 = bursts[0]
+
+    if len(bursts) == 1:
+        if not finalized and b0 <= 380 and (t0 - t_origin) < 0.35 and (now - t0) > 0.25:
+            return None
+        token_bursts = bursts
+    else:
+        t1, _ = bursts[1]
+        gap0_ms = (t1 - t0) * 1000.0
+        rest_gaps = [
+            (bursts[i][0] - bursts[i - 1][0]) * 1000.0 for i in range(2, len(bursts))
+        ]
+        med_itl = percentile(rest_gaps, 0.50) if rest_gaps else 60.0
+        if b0 <= 380 and (t0 - t_origin) < 0.35 and gap0_ms > max(250.0, 4.0 * med_itl):
+            token_bursts = bursts[1:]
+        else:
+            token_bursts = bursts
+
+    t_first = token_bursts[0][0]
+    t_last = token_bursts[-1][0]
+    ttft_ms = max(1.0, (t_first - t_origin) * 1000.0)
+    decode_ms = max(0.0, (t_last - t_first) * 1000.0)
+    itls_ms = [
+        (token_bursts[i][0] - token_bursts[i - 1][0]) * 1000.0
+        for i in range(1, len(token_bursts))
+    ]
+    return {
+        "ttft_ms": ttft_ms,
+        "decode_ms": decode_ms,
+        "itls_ms": itls_ms,
+        "chunks": len(token_bursts),
+        "rx_bytes": tot_rx,
+    }
+
+
+class MeterDaemon:
+    def __init__(self, hud_cache_path):
+        self.lock = threading.Lock()
+        self.wake_ev = threading.Event()
+        self.db_queue = queue.Queue()
+        self.agy_pid = None
+        self.hud_cache_path = hud_cache_path
+
+        self.active_invs = {}
+        self.pending_invs = {}
+        self.seen_tot_out = {}
+        self.last_hud = {}
+        self.global_hud = None
+        self.last_valid_gen = {}
+        self.global_valid_gen = None
+
+        self._init_db()
+        self.db_thread = threading.Thread(target=self._db_worker, daemon=True)
+        self.db_thread.start()
+        threading.Thread(target=self._sampler_loop, daemon=True).start()
+
+    def _connect_db(self):
+        os.makedirs(METER_DIR, exist_ok=True)
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn.execute("PRAGMA journal_mode=TRUNCATE;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
+        return conn
+
+    def _init_db(self):
+        with self._connect_db() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS invocations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts REAL NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    invocation_num INTEGER,
+                    model TEXT,
+                    input_tokens INTEGER DEFAULT 0,
+                    cache_read_tokens INTEGER DEFAULT 0,
+                    output_tokens INTEGER NOT NULL,
+                    ttft_ms REAL,
+                    decode_ms REAL,
+                    llm_ms REAL NOT NULL,
+                    tps_gen REAL,
+                    tps_eff REAL NOT NULL,
+                    itl_p50_ms REAL,
+                    itl_p95_ms REAL,
+                    sse_chunks INTEGER DEFAULT 0,
+                    rx_bytes INTEGER DEFAULT 0,
+                    engine TEXT DEFAULT 'netlink'
+                )
+                """
+            )
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(invocations)")}
+            if "rx_bytes" not in cols:
+                conn.execute(
+                    "ALTER TABLE invocations ADD COLUMN rx_bytes INTEGER DEFAULT 0"
+                )
+            if "engine" not in cols:
+                conn.execute(
+                    "ALTER TABLE invocations ADD COLUMN engine TEXT DEFAULT 'netlink'"
+                )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_inv_ts ON invocations(ts)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_inv_cid ON invocations(conversation_id)"
+            )
+
+            gen_row = conn.execute(
+                "SELECT tps_gen FROM invocations WHERE tps_gen IS NOT NULL ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if gen_row:
+                self.global_valid_gen = gen_row[0]
+
+            row = conn.execute(
+                """
+                SELECT conversation_id, ttft_ms, tps_gen, tps_eff, output_tokens
+                FROM invocations ORDER BY id DESC LIMIT 1
+                """
+            ).fetchone()
+            if row:
+                hud = {
+                    "ttft_ms": row[1],
+                    "tps_gen": row[2] if row[2] is not None else self.global_valid_gen,
+                    "gen_carried": row[2] is None and self.global_valid_gen is not None,
+                    "tps_eff": row[3],
+                    "delta_out": row[4],
+                }
+                self.global_hud = hud
+                self.last_hud[row[0]] = hud
+
+    def _db_worker(self):
+        while True:
+            params = self.db_queue.get()
+            if params is None:
+                break
+            try:
+                with self._connect_db() as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO invocations (
+                            ts, conversation_id, invocation_num, model,
+                            input_tokens, cache_read_tokens, output_tokens,
+                            ttft_ms, decode_ms, llm_ms, tps_gen, tps_eff,
+                            itl_p50_ms, itl_p95_ms, sse_chunks, rx_bytes, engine
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        params,
+                    )
+            except sqlite3.Error:
+                pass
+
+    def shutdown(self, timeout=1.0):
+        self.db_queue.put(None)
+        self.db_thread.join(timeout=timeout)
+
+    def _sampler_loop(self):
+        reader = KernelSocketReader()
+        last_inode_scan = 0.0
+        cached_inodes = set()
+
+        while True:
+            self.wake_ev.wait()
+            with self.lock:
+                if not self.active_invs:
+                    self.wake_ev.clear()
+                    continue
+                pid = self.agy_pid
+
+            now = time.monotonic()
+            if pid and (now - last_inode_scan >= 0.05 or not cached_inodes):
+                cached_inodes = get_tree_socket_inodes(pid)
+                last_inode_scan = now
+
+            snap, engine = reader.read_https_sockets(cached_inodes)
+            now = time.monotonic()
+
+            with self.lock:
+                for act in self.active_invs.values():
+                    act["engine"] = engine
+                    if not act["initialized"]:
+                        act["initialized"] = True
+                        for sk, (tx, rx) in snap.items():
+                            act["socks"][sk] = {
+                                "base_tx": tx,
+                                "prev_tx": tx,
+                                "base_rx": rx,
+                                "prev_rx": rx,
+                                "t_req_sent": None,
+                                "bursts": [],
+                            }
+                        continue
+
+                    for sk, (tx, rx) in snap.items():
+                        tr = act["socks"].get(sk)
+                        if tr is None:
+                            tr = {
+                                "base_tx": 0,
+                                "prev_tx": tx,
+                                "base_rx": 0,
+                                "prev_rx": rx,
+                                "t_req_sent": now if tx >= 120 else None,
+                                "bursts": (
+                                    [(now, rx)] if (tx >= 120 and rx >= 90) else []
+                                ),
+                            }
+                            act["socks"][sk] = tr
+                        else:
+                            d_tx = max(0, tx - tr["prev_tx"])
+                            d_rx = max(0, rx - tr["prev_rx"])
+                            tot_tx = max(0, tx - tr["base_tx"])
+                            tot_rx = max(0, rx - tr["base_rx"])
+                            if d_tx >= 120 and tot_rx < 90:
+                                tr["t_req_sent"] = now
+                            if tot_tx >= 120 and d_rx >= 90:
+                                tr["bursts"].append((now, d_rx))
+                            tr["prev_tx"] = tx
+                            tr["prev_rx"] = rx
+
+            time.sleep(0.005)
+
+    def _best_trace(self, act):
+        cands = [
+            tr
+            for tr in act["socks"].values()
+            if (tr["prev_tx"] - tr["base_tx"]) >= 120
+            and (tr["prev_rx"] - tr["base_rx"]) >= 90
+        ]
+        if not cands:
+            return None
+        cands.sort(key=lambda tr: (tr["prev_rx"] - tr["base_rx"], len(tr["bursts"])))
+        return cands[-1]
+
+    def on_rpc(self, req):
+        ev = req.get("event")
+        now = time.monotonic()
+
+        if ev == "pre":
+            cid = req.get("cid") or "default"
+            with self.lock:
+                self.active_invs[cid] = {
+                    "inv": req.get("inv", 0),
+                    "t_pre": now,
+                    "initialized": False,
+                    "engine": "netlink",
+                    "socks": {},
+                }
+            self.wake_ev.set()
+            return {"ok": True}
+
+        if ev == "post":
+            cid = req.get("cid") or "default"
+            time.sleep(0.008)
+            now = time.monotonic()
+            with self.lock:
+                act = self.active_invs.pop(cid, None)
+                if not act:
+                    return {"ok": True}
+                llm_ms = max(1.0, (now - act["t_pre"]) * 1000.0)
+                best = self._best_trace(act)
+                parsed = (
+                    analyze_trace(best, act["t_pre"], now, finalized=True)
+                    if best
+                    else None
+                )
+
+                self.pending_invs.setdefault(cid, []).append(
+                    {
+                        "inv": act["inv"],
+                        "ttft_ms": parsed["ttft_ms"] if parsed else None,
+                        "decode_ms": parsed["decode_ms"] if parsed else None,
+                        "llm_ms": llm_ms,
+                        "itl_p50": (
+                            percentile(parsed["itls_ms"], 0.50) if parsed else None
+                        ),
+                        "itl_p95": (
+                            percentile(parsed["itls_ms"], 0.95) if parsed else None
+                        ),
+                        "chunks": parsed["chunks"] if parsed else 0,
+                        "rx_bytes": parsed["rx_bytes"] if parsed else 0,
+                        "engine": act["engine"],
+                    }
+                )
+            return {"ok": True}
+
+        if ev == "statusline":
+            with self.lock:
+                line = self._render_statusline(req.get("payload") or {}, now)
+            try:
+                tmp = f"{self.hud_cache_path}.tmp"
+                with open(tmp, "w") as f:
+                    f.write(line)
+                os.replace(tmp, self.hud_cache_path)
+            except OSError:
+                pass
+            return {"line": line}
+
+        return {"ok": False}
+
+    def _render_statusline(self, data, now):
+        cid = data.get("conversation_id") or data.get("session_id") or "default"
+        raw_state = (data.get("agent_state") or data.get("state") or "idle").lower()
+        term_w = int(data.get("terminal_width") or 120)
+
+        m_raw = data.get("model")
+        model = (
+            (m_raw.get("display_name") or m_raw.get("id"))
+            if isinstance(m_raw, dict)
+            else m_raw
+        ) or "unknown"
+
+        cw = data.get("context_window") or {}
+        tot_out = cw.get("total_output_tokens") or 0
+        used_pct = cw.get("used_percentage") or 0.0
+        cur = cw.get("current_usage") or {}
+        in_tok = cur.get("input_tokens") or 0
+        cache_tok = cur.get("cache_read_input_tokens") or cur.get("cached_tokens") or 0
+        cur_out = cur.get("output_tokens") or 0
+
+        pending = self.pending_invs.get(cid) or []
+        if cid not in self.seen_tot_out and not pending:
+            self.seen_tot_out[cid] = tot_out
+
+        prev_out = self.seen_tot_out.get(cid, 0)
+        if pending and tot_out > prev_out:
+            delta_out = tot_out - prev_out
+            if prev_out == 0 and len(pending) == 1 and 0 < cur_out < delta_out:
+                delta_out = cur_out
+            self.seen_tot_out[cid] = tot_out
+            self.pending_invs[cid] = []
+
+            sum_llm_ms = sum(x["llm_ms"] for x in pending)
+            tps_eff = delta_out / (sum_llm_ms / 1000.0) if sum_llm_ms > 0 else 0.0
+
+            all_have_dec = all(x["decode_ms"] is not None for x in pending)
+            sum_dec_ms = sum(
+                x["decode_ms"] for x in pending if x["decode_ms"] is not None
+            )
+            sum_chunks = sum(x["chunks"] for x in pending)
+            sum_rx = sum(x["rx_bytes"] for x in pending)
+            bytes_per_tok = sum_rx / max(1, delta_out)
+
+            # Pure streaming requires >=5 chunks, >=800ms decode window, and either a
+            # substantial decode share or >=2.5 RX bytes/token to exclude server-side
+            # silent thinking followed by a short tail batch flush.
+            is_valid_stream = (
+                all_have_dec
+                and sum_chunks >= 5
+                and sum_dec_ms >= 800.0
+                and (sum_dec_ms >= 0.45 * sum_llm_ms or bytes_per_tok >= 2.5)
+            )
+            tps_gen_measured = (
+                (delta_out / (sum_dec_ms / 1000.0)) if is_valid_stream else None
+            )
+
+            if tps_gen_measured is not None:
+                self.last_valid_gen[cid] = tps_gen_measured
+                self.global_valid_gen = tps_gen_measured
+
+            carried_gen = self.last_valid_gen.get(cid) or self.global_valid_gen
+            last = pending[-1]
+            hud = {
+                "ttft_ms": last["ttft_ms"],
+                "tps_gen": (
+                    tps_gen_measured if tps_gen_measured is not None else carried_gen
+                ),
+                "gen_carried": tps_gen_measured is None and carried_gen is not None,
+                "tps_eff": tps_eff,
+                "delta_out": delta_out,
+            }
+            self.last_hud[cid] = hud
+            self.global_hud = hud
+
+            self.db_queue.put(
+                (
+                    time.time(),
+                    cid,
+                    last["inv"],
+                    str(model),
+                    in_tok,
+                    cache_tok,
+                    delta_out,
+                    last["ttft_ms"],
+                    sum_dec_ms if all_have_dec else None,
+                    sum_llm_ms,
+                    tps_gen_measured,
+                    tps_eff,
+                    last["itl_p50"],
+                    last["itl_p95"],
+                    sum_chunks,
+                    sum_rx,
+                    last["engine"],
+                )
+            )
+
+        hud = self.last_hud.get(cid) or self.global_hud or {}
+        settled_ttft = fmt_dur(hud.get("ttft_ms"))
+        tps_gen_v = hud.get("tps_gen")
+        gen_carried = hud.get("gen_carried", False)
+        tps_eff_v = hud.get("tps_eff")
+        delta_out_v = hud.get("delta_out")
+
+        act = self.active_invs.get(cid)
+        if act:
+            elapsed = max(0.0, now - act["t_pre"])
+            best = self._best_trace(act)
+            live = (
+                analyze_trace(best, act["t_pre"], now, finalized=False)
+                if best
+                else None
+            )
+            if live:
+                state_badge = f"\033[32m▶ STREAM {elapsed:.1f}s\033[0m"
+                ttft_slot = f"\033[33m{fmt_dur(live['ttft_ms'])}\033[0m"
+            else:
+                state_badge = f"\033[35m◐ PREFILL {elapsed:.1f}s\033[0m"
+                prev_hint = f" (last {settled_ttft})" if settled_ttft != "--" else ""
+                ttft_slot = f"\033[33m…{elapsed:.1f}s\033[0m{prev_hint}"
+        else:
+            state_map = {
+                "idle": "\033[36m● READY\033[0m",
+                "tool_use": "\033[33m⚙ TOOL\033[0m",
+                "working": "\033[32m◐ WORK\033[0m",
+                "thinking": "\033[35m◐ THINK\033[0m",
+                "reviewing": "\033[34m◈ REVIEW\033[0m",
+                "error": "\033[31m✖ ERROR\033[0m",
+            }
+            state_badge = state_map.get(
+                raw_state, f"\033[36m● {raw_state.upper()}\033[0m"
+            )
+            ttft_slot = f"\033[33m{settled_ttft}\033[0m"
+
+        if tps_gen_v is not None and tps_eff_v is not None:
+            gen_disp = (
+                f"~{tps_gen_v:.1f}"
+                if gen_carried
+                else f"\033[32m{tps_gen_v:.1f}\033[0m"
+            )
+            tps_slot = f"{gen_disp} gen / {tps_eff_v:.1f} eff"
+        elif tps_eff_v is not None:
+            tps_slot = f"batch / {tps_eff_v:.1f} eff"
+        else:
+            tps_slot = "--"
+
+        out_prefix = f"+{delta_out_v} " if delta_out_v else ""
+        out_slot = f"{out_prefix}({tot_out / 1000.0:.1f}k)"
+
+        line = (
+            f"{state_badge} │ TTFT {ttft_slot} │ TPS {tps_slot} │ "
+            f"Out {out_slot} │ Ctx {used_pct:.0f}%"
+        )
+        return clip_ansi(line, max(40, term_w - 2))
+
+
+def handle_client(conn, daemon):
+    try:
+        raw = b""
+        while not raw.endswith(b"\n"):
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            raw += chunk
+        if raw:
+            resp = daemon.on_rpc(json.loads(raw.decode("utf-8", "replace")))
+            conn.sendall((json.dumps(resp) + "\n").encode("utf-8"))
+    except (OSError, ValueError):
+        pass
+    finally:
+        conn.close()
+
+
+def serve_unix_socket(sock_path, daemon):
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(sock_path)
+    srv.listen(32)
+    while True:
+        try:
+            conn, _ = srv.accept()
+        except OSError:
+            break
+        threading.Thread(target=handle_client, args=(conn, daemon), daemon=True).start()
+
+
+def main():
+    real_agy = find_real_agy()
+    pid = os.getpid()
+    sock_path = f"/tmp/agy_meter_{pid}.sock"
+    hud_cache_path = f"/tmp/agy_hud_{pid}.txt"
+
+    daemon = MeterDaemon(hud_cache_path)
+    threading.Thread(
+        target=serve_unix_socket, args=(sock_path, daemon), daemon=True
+    ).start()
+
+    env = os.environ.copy()
+    env["AGY_METER_SOCK"] = sock_path
+    env["AGY_HUD_CACHE"] = hud_cache_path
+
+    rc = 1
+    try:
+        proc = subprocess.Popen([real_agy] + sys.argv[1:], env=env)
+        with daemon.lock:
+            daemon.agy_pid = proc.pid
+        rc = proc.wait()
+        daemon.shutdown(timeout=1.0)
+    finally:
+        for p in (sock_path, hud_cache_path):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+    sys.exit(rc)
+
+
+if __name__ == "__main__":
+    main()

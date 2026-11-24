@@ -1,0 +1,19 @@
+{
+  "agy-ttft-tps-meter": {
+    "enabled": true,
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "python3 \"$HOME/.gemini/antigravity-cli/meter/meter_client.py\" pre",
+        "timeout": 5
+      }
+    ],
+    "PostInvocation": [
+      {
+        "type": "command",
+        "command": "python3 \"$HOME/.gemini/antigravity-cli/meter/meter_client.py\" post",
+        "timeout": 5
+      }
+    ]
+  }
+}
