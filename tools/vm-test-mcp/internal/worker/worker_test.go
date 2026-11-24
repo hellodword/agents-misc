@@ -423,3 +423,64 @@ func TestRestartBlocksDaemonAndConfinesArtifacts(t *testing.T) {
 		t.Fatal("remote reconciliation exposed")
 	}
 }
+
+func TestCancellationAndDeadlineProduceCleanTerminalStates(t *testing.T) {
+	shell, err := exec.LookPath("sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sleepExe, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name      string
+		timeout   int
+		cancelJob bool
+		wantState string
+	}{
+		{name: "explicit cancel", timeout: 60, cancelJob: true, wantState: "cancelled"},
+		{name: "deadline expiry", timeout: 1, cancelJob: false, wantState: "timed_out"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, _ := fixture(t, os.Getuid())
+			defer w.Close()
+			drv := "/nix/store/" + strings.Repeat("0", 32) + "-slow.drv"
+			metadata := wire.JSON(map[string]any{drv: map[string]any{"system": "x86_64-linux", "env": map[string]string{"vmTestRunID": strings.Repeat("a", 32), "vmTestAdapterVersion": "1", "allowSubstitutes": "", "requiredSystemFeatures": "kvm"}}})
+			marker := filepath.Join(w.root.Path, "building")
+			w.cfg.Nix = filepath.Join(w.root.Path, "fake-nix")
+			script := fmt.Sprintf("#!%s\ncase \"$1\" in\nstore) printf '{\"trusted\":false}';;\ncopy) exit 0;;\nderivation) printf '%%s' '%s';;\nbuild) : > '%s'; exec '%s' 30;;\n*) exit 98;;\nesac\n", shell, metadata, marker, sleepExe)
+			if err := os.WriteFile(w.cfg.Nix, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			id := wire.ID()
+			if _, err := w.Call("start", Request{RunID: strings.Repeat("a", 32), UploadID: strings.Repeat("a", 32), InstanceID: w.db.InstanceID, TaskID: id, Derivation: drv, System: "x86_64-linux", Cache: "/files/synthetic", TimeoutSeconds: tc.timeout}); err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				if _, statErr := os.Stat(marker); statErr == nil {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if tc.cancelJob {
+				if _, err := w.Call("cancel", Request{InstanceID: w.db.InstanceID, TaskID: id}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			waitExecution(t, w, id)
+			waitLifecycle(t, w, id)
+			w.mu.Lock()
+			j := w.jobs[id]
+			state := j.State
+			execErr := j.Execution.Error
+			cleanup := j.Cleanup
+			active := w.active
+			w.mu.Unlock()
+			if state != tc.wantState || execErr != nil || cleanup != "complete" || active != "" {
+				t.Fatalf("state=%s error=%v cleanup=%s active=%q", state, execErr, cleanup, active)
+			}
+		})
+	}
+}

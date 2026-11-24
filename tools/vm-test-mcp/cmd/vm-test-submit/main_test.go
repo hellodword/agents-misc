@@ -30,6 +30,7 @@ func TestCLIUsage(t *testing.T) {
 		{nil, 2},
 		{[]string{"--unknown"}, 2},
 		{[]string{"--config", "unused.yaml", "--upload-id", "manual-cache"}, 2},
+		{[]string{"--config", "unused.yaml", "--apply", "t: t"}, 2},
 		{[]string{"--config", "unused.yaml", "--timeout-seconds", "-1"}, 2},
 		{[]string{"--config", "unused.yaml", "unexpected"}, 2},
 	} {

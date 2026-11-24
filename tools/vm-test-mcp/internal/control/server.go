@@ -664,7 +664,7 @@ func (s *Server) observe(t *Task, r *Runtime) {
 					}
 				}
 				s.mu.Unlock()
-				if v.State == "succeeded" || v.State == "failed" || v.State == "cleanup_required" || v.State == "interrupted" {
+				if oneOf(v.State, "succeeded", "failed", "cleanup_required", "interrupted", "cancelled", "timed_out") {
 					s.mu.Lock()
 					// A reply already in flight can arrive after task cancellation or
 					// timeout. Its execution evidence remains valid independently.
@@ -674,11 +674,12 @@ func (s *Server) observe(t *Task, r *Runtime) {
 					}
 					t.State = "finished"
 					t.Conclusion = "inconclusive"
-					if v.State != "succeeded" {
+					switch v.State {
+					case "succeeded":
+					case "interrupted", "cancelled", "timed_out":
+						t.State = v.State
+					default:
 						t.State = "failed"
-					}
-					if v.State == "interrupted" {
-						t.State, t.Conclusion = "interrupted", "inconclusive"
 					}
 					t.applyNixTestResult()
 					s.save(t)

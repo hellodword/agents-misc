@@ -45,9 +45,18 @@ func (s *Server) uploadManifest(w http.ResponseWriter, r *http.Request, t *Trans
 		httpError(w, 400, wire.Fail("invalid_manifest", "File input requires one blob object"))
 		return
 	}
-	if t.Kind == "cache" && (!wire.IDPattern.MatchString(m.RunID) || !wire.StorePattern.MatchString(m.Derivation) || !strings.HasSuffix(m.Derivation, ".drv") || !oneOf(m.System, "x86_64-linux", "aarch64-linux")) {
-		httpError(w, 400, wire.Fail("invalid_manifest", "Nix input requires its derivation and system"))
-		return
+	if t.Kind == "cache" {
+		switch {
+		case !wire.IDPattern.MatchString(m.RunID):
+			httpError(w, 400, wire.Fail("invalid_manifest", "Nix cache manifest requires a valid 32-hex test_run_id"))
+			return
+		case !wire.StorePattern.MatchString(m.Derivation) || !strings.HasSuffix(m.Derivation, ".drv"):
+			httpError(w, 400, wire.Fail("invalid_manifest", "Nix cache manifest requires a store .drv derivation path"))
+			return
+		case !oneOf(m.System, "x86_64-linux", "aarch64-linux"):
+			httpError(w, 400, wire.Fail("invalid_manifest", "Nix cache manifest requires system x86_64-linux or aarch64-linux"))
+			return
+		}
 	}
 	slices.SortFunc(m.Objects, func(a, b wire.UploadObject) int { return strings.Compare(a.Name, b.Name) })
 	var total int64

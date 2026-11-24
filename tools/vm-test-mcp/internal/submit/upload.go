@@ -27,9 +27,10 @@ func uploadManifest(ctx context.Context, client *http.Client, o Options, cache *
 	if err != nil {
 		return fmt.Errorf("upload manifest: %w", wire.Safe(err))
 	}
+	manifestReply, manifestReadErr := io.ReadAll(io.LimitReader(response.Body, 65537))
 	response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("upload manifest returned HTTP %d", response.StatusCode)
+		return decodeUploadFailure("manifest_upload", "", response.StatusCode, manifestReply, manifestReadErr)
 	}
 	objects := make(map[string]wire.UploadObject, len(m.Objects))
 	var totalBytes, missingBytes int64

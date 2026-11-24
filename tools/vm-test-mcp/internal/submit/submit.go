@@ -20,9 +20,9 @@ import (
 )
 
 type Options struct {
-	Nix, Test, SmokeProject, SmokeFile, RequestID, CacheURL, CacheID, WorkDir, SigningKey, CacheDir string
-	CacheBytes                                                                                      int64
-	Progress                                                                                        io.Writer
+	Nix, Test, Apply, SmokeProject, SmokeFile, RequestID, CacheURL, CacheID, WorkDir, SigningKey, CacheDir string
+	CacheBytes                                                                                             int64
+	Progress                                                                                               io.Writer
 }
 type Metadata struct {
 	RunID      string   `json:"test_run_id,omitempty"`
@@ -45,6 +45,13 @@ func Expression(id string) string {
 	return `t: (` + adapterNix + `) t ` + nixString(id) + ` ` + nixString(driverObserver)
 }
 
+func ApplyExpression(id, apply string) string {
+	if strings.TrimSpace(apply) == "" {
+		return Expression(id)
+	}
+	return `t: (` + Expression(id) + `) ((` + apply + `) t)`
+}
+
 func nixString(value string) string {
 	return `"` + strings.NewReplacer(
 		`\`, `\\`, `"`, `\"`, "${", `\${`,
@@ -54,6 +61,12 @@ func nixString(value string) string {
 func Prepare(ctx context.Context, o Options) (map[string]any, error) {
 	if !requestIDPattern.MatchString(o.RequestID) || !wire.IDPattern.MatchString(o.CacheID) || (o.Test == "") == (o.SmokeProject == "") || strings.HasPrefix(o.Test, "-") {
 		return nil, usage("invalid request ID, cache ID or test attribute")
+	}
+	if o.Apply != "" && o.SmokeProject != "" {
+		return nil, usage("apply requires an explicit --test attribute")
+	}
+	if !wire.ValidText(o.Apply, 32768) {
+		return nil, usage("invalid apply expression")
 	}
 	identity := o.Test
 	if o.SmokeProject != "" {
@@ -75,7 +88,7 @@ func Prepare(ctx context.Context, o Options) (map[string]any, error) {
 	if o.CacheDir != "" && !filepath.IsAbs(o.CacheDir) {
 		return nil, usage("cache-dir must be absolute")
 	}
-	root, e := safefs.Private(o.WorkDir, true)
+	root, e := safefs.ClientPrivate(o.WorkDir, true)
 	if e != nil {
 		return nil, e
 	}
@@ -98,12 +111,13 @@ func Prepare(ctx context.Context, o Options) (map[string]any, error) {
 			RequestID   string   `json:"request_id"`
 			ExecutionID string   `json:"execution_id"`
 			Test        string   `json:"test"`
+			Apply       string   `json:"apply,omitempty"`
 			Metadata    Metadata `json:"metadata"`
 		}
 		if e = wire.Decode(old, &saved); e != nil {
 			return nil, e
 		}
-		if saved.RequestID != o.RequestID || saved.Test != identity || !wire.IDPattern.MatchString(saved.ExecutionID) {
+		if saved.RequestID != o.RequestID || saved.Test != identity || saved.Apply != o.Apply || !wire.IDPattern.MatchString(saved.ExecutionID) {
 			return nil, usage("work directory belongs to a different submission")
 		}
 		meta = saved.Metadata
@@ -132,7 +146,7 @@ func Prepare(ctx context.Context, o Options) (map[string]any, error) {
 			expression := `let project = builtins.getFlake ` + strings.ReplaceAll(string(project), "${", `\${`) + `; pkgs = import project.inputs.nixpkgs { system = builtins.currentSystem; }; test = pkgs.testers.runNixOSTest (import (builtins.toPath ` + strings.ReplaceAll(string(module), "${", `\${`) + `)); in (` + Expression(executionID) + `) test`
 			args = append(args, "--impure", "--expr", expression)
 		} else {
-			args = append(args, "--apply", Expression(executionID), o.Test)
+			args = append(args, "--apply", ApplyExpression(executionID, o.Apply), o.Test)
 		}
 		cmd := exec.CommandContext(ctx, o.Nix, args...)
 		cmd.Stderr = log
@@ -151,7 +165,11 @@ func Prepare(ctx context.Context, o Options) (map[string]any, error) {
 		if e = keep.Run(); e != nil {
 			return nil, fmt.Errorf("retain evaluated derivation: %w", e)
 		}
-		data := wire.JSON(map[string]any{"request_id": o.RequestID, "execution_id": executionID, "test": identity, "metadata": meta})
+		record := map[string]any{"request_id": o.RequestID, "execution_id": executionID, "test": identity, "metadata": meta}
+		if o.Apply != "" {
+			record["apply"] = o.Apply
+		}
+		data := wire.JSON(record)
 		temporary := metaFile + "." + wire.ID() + ".partial"
 		defer os.Remove(temporary)
 		f, e := os.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
@@ -227,6 +245,14 @@ func uploadCacheObject(ctx context.Context, client *http.Client, base, name, fil
 	if response.StatusCode == http.StatusOK {
 		return nil
 	}
+	return decodeUploadFailure("cache_upload", name, response.StatusCode, body, readErr)
+}
+
+func decodeUploadFailure(boundary, object string, status int, body []byte, readErr error) error {
+	prefix := "upload manifest"
+	if object != "" {
+		prefix = fmt.Sprintf("cache object %q upload", object)
+	}
 	var envelope struct {
 		Error *wire.Error `json:"error"`
 	}
@@ -236,8 +262,11 @@ func uploadCacheObject(ctx context.Context, client *http.Client, base, name, fil
 		if failure.Details == nil {
 			failure.Details = map[string]any{}
 		}
-		failure.Details["boundary"], failure.Details["object"], failure.Details["http_status"] = "cache_upload", name, response.StatusCode
-		return fmt.Errorf("cache object %q upload returned HTTP %d: %w", name, response.StatusCode, failure)
+		failure.Details["boundary"], failure.Details["http_status"] = boundary, status
+		if object != "" {
+			failure.Details["object"] = object
+		}
+		return fmt.Errorf("%s returned HTTP %d: %w", prefix, status, failure)
 	}
-	return fmt.Errorf("cache object %q upload returned HTTP %d without a valid error response", name, response.StatusCode)
+	return fmt.Errorf("%s returned HTTP %d without a valid error response", prefix, status)
 }

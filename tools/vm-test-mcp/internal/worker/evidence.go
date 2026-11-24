@@ -260,7 +260,7 @@ func (w *Worker) applyTestReceipt(j *Job, test *wire.NixTestResult) {
 			test.Phase, test.Outcome = "not_started", "not_started"
 		}
 		process := j.Execution.Process
-		if process != nil && process.Exited && process.ExitCode != nil && *process.ExitCode != 0 {
+		if j.Session.StopReason == "" && process != nil && process.Exited && process.ExitCode != nil && *process.ExitCode != 0 {
 			test.Phase, test.Outcome = "not_started", "not_started"
 			code, message := "input_failed", "Test driver did not start because input preparation failed"
 			if process.Stage == "build" {

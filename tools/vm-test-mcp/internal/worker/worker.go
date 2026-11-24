@@ -791,12 +791,21 @@ func (w *Worker) complete(j *Job, e error, interrupted bool) {
 	}
 	now := time.Now().UTC()
 	j.Execution.Finished = &now
-	if e != nil {
-		j.State = "failed"
-		j.Execution.Error = wire.Safe(e)
-	}
-	if interrupted {
-		j.State = "interrupted"
+	switch j.Session.StopReason {
+	case "cancelled":
+		j.State = "cancelled"
+		j.Execution.Error = nil
+	case "deadline":
+		j.State = "timed_out"
+		j.Execution.Error = nil
+	default:
+		if e != nil {
+			j.State = "failed"
+			j.Execution.Error = wire.Safe(e)
+		}
+		if interrupted {
+			j.State = "interrupted"
+		}
 	}
 	if cancel := w.cancel[j.Request.TaskID]; cancel != nil {
 		cancel()

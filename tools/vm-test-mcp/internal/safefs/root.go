@@ -51,7 +51,7 @@ func Private(dir string, lock bool) (*Root, error) {
 	}
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok || int(st.Uid) != os.Geteuid() || fi.Mode().Perm() != 0700 {
-		return nil, fmt.Errorf("state directory must be owned by this user with mode 0700")
+		return nil, fmt.Errorf("state directory must be owned by this user with mode 0700 (found mode %04o)", fi.Mode().Perm())
 	}
 	r, err := os.OpenRoot(dir)
 	if err != nil {
@@ -73,6 +73,24 @@ func Private(dir string, lock bool) (*Root, error) {
 		root.lock = f
 	}
 	return root, nil
+}
+
+// ClientPrivate opens a task-owned client directory, tightening an existing
+// empty directory created with standard mkdir permissions (0750/0755/0775) to 0700.
+func ClientPrivate(dir string, lock bool) (*Root, error) {
+	if filepath.IsAbs(dir) && filepath.Clean(dir) == dir {
+		if fi, err := os.Lstat(dir); err == nil && fi.IsDir() && fi.Mode()&os.ModeSymlink == 0 {
+			if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) == os.Geteuid() {
+				perm := fi.Mode().Perm()
+				if perm != 0700 && (perm == 0755 || perm == 0750 || perm == 0775) {
+					if entries, readErr := os.ReadDir(dir); readErr == nil && len(entries) == 0 {
+						_ = os.Chmod(dir, 0700)
+					}
+				}
+			}
+		}
+	}
+	return Private(dir, lock)
 }
 func (r *Root) Close() error {
 	if r.lock != nil {

@@ -199,11 +199,12 @@ type narInfo struct {
 func parseNarInfo(name string, data []byte) (narInfo, error) {
 	var n narInfo
 	bad := func() (narInfo, error) { return n, wire.Fail("invalid_cache", "Malformed or unsafe narinfo") }
-	if !cacheKey.MatchString(name) || len(data) > 65536 {
+	if !cacheKey.MatchString(name) || len(data) > wire.MaxNarInfoBytes {
 		return bad()
 	}
 	fields := map[string]string{}
 	scan := bufio.NewScanner(strings.NewReader(string(data)))
+	scan.Buffer(make([]byte, 64<<10), wire.MaxNarInfoBytes)
 	for scan.Scan() {
 		line := scan.Text()
 		k, v, ok := strings.Cut(line, ": ")
@@ -289,7 +290,7 @@ func (s *Server) verifyUpload(target, t *Transfer) error {
 				continue
 			}
 			count++
-			data, e := s.root.Read(object.File, 65536)
+			data, e := s.root.Read(object.File, wire.MaxNarInfoBytes)
 			if e != nil {
 				return e
 			}
@@ -574,7 +575,11 @@ func (s *Server) Files(w http.ResponseWriter, r *http.Request) {
 	}
 	var reader io.Reader = uploadReader{ctx, r.Body}
 	if strings.HasSuffix(name, ".narinfo") || name == "nix-cache-info" {
-		data, err := io.ReadAll(io.LimitReader(reader, min(expectedSize, 65536)+1))
+		limit := int64(wire.MaxNarInfoBytes)
+		if name == "nix-cache-info" {
+			limit = 65536
+		}
+		data, err := io.ReadAll(io.LimitReader(reader, min(expectedSize, limit)+1))
 		e = err
 		if e == nil && name != "nix-cache-info" {
 			_, e = parseNarInfo(name, data)

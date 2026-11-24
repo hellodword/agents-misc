@@ -19,6 +19,7 @@ import (
 
 const Version = "0.16.0"
 const MaxJSON = 1 << 20
+const MaxNarInfoBytes = 2 << 20
 
 // NixExecution reports worker execution independently of scheduler and daemon
 // cleanup. Process results describe the local Nix client, not a QEMU exit.

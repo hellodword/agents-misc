@@ -31,6 +31,7 @@ type runRecord struct {
 	Endpoint       string         `json:"endpoint"`
 	RequestID      string         `json:"request_id"`
 	Test           string         `json:"test"`
+	Apply          string         `json:"apply,omitempty"`
 	SmokeProject   string         `json:"smoke_project"`
 	TimeoutSeconds int            `json:"timeout_seconds"`
 	CacheAttempt   int            `json:"cache_attempt"`
@@ -161,12 +162,18 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 			return nil, err
 		}
 	}
-	root, err := safefs.Private(o.WorkDir, true)
+	if o.Apply != "" && o.SmokeProject != "" {
+		return nil, usage("apply requires an explicit --test attribute")
+	}
+	if !wire.ValidText(o.Apply, 32768) {
+		return nil, usage("invalid apply expression")
+	}
+	root, err := safefs.ClientPrivate(o.WorkDir, true)
 	if err != nil {
 		return nil, err
 	}
 	defer root.Close()
-	j := runRecord{Endpoint: o.Endpoint, RequestID: o.RequestID, Test: o.Test, SmokeProject: o.SmokeProject, TimeoutSeconds: o.TimeoutSeconds}
+	j := runRecord{Endpoint: o.Endpoint, RequestID: o.RequestID, Test: o.Test, Apply: o.Apply, SmokeProject: o.SmokeProject, TimeoutSeconds: o.TimeoutSeconds}
 	if old, err := root.Read("run.json", 1<<20); err == nil {
 		if err := wire.Decode(old, &j); err != nil {
 			return nil, err
@@ -176,8 +183,11 @@ func Run(ctx context.Context, o RunOptions) (json.RawMessage, error) {
 		}
 		if o.Test == "" && o.SmokeProject == "" {
 			o.Test, o.SmokeProject = j.Test, j.SmokeProject
+			if o.Apply == "" {
+				o.Apply = j.Apply
+			}
 		}
-		if j.Endpoint != o.Endpoint || j.Test != o.Test || j.SmokeProject != o.SmokeProject || j.TimeoutSeconds != o.TimeoutSeconds || o.RequestID != "" && j.RequestID != o.RequestID {
+		if j.Endpoint != o.Endpoint || j.Test != o.Test || j.Apply != o.Apply || j.SmokeProject != o.SmokeProject || j.TimeoutSeconds != o.TimeoutSeconds || o.RequestID != "" && j.RequestID != o.RequestID {
 			return nil, usage("work-dir belongs to a different submission; reuse its original arguments")
 		}
 	} else if !os.IsNotExist(err) {

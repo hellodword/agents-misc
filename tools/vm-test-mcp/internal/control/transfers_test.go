@@ -367,3 +367,52 @@ func TestDistinctInputBodiesStreamConcurrently(t *testing.T) {
 		t.Fatal("concurrent publication lost completion")
 	}
 }
+
+func TestLargeClosureNarInfoAndManifestFieldValidation(t *testing.T) {
+	s, _ := testServer(t)
+	id, url := newUpload(t, s, "cache")
+	drv, objects := cacheObjects()
+	depHash := strings.Repeat("1", 32)
+	depPath := "/nix/store/" + depHash + "-dep"
+	nar := objects["nar/fixture.nar"]
+	digest := sha256.Sum256([]byte(nar))
+	hash := nixHash(hex.EncodeToString(digest[:]))
+	objects[depHash+".narinfo"] = fmt.Sprintf("StorePath: %s\nURL: nar/fixture.nar\nCompression: none\nFileHash: sha256:%s\nFileSize: %d\nNarHash: sha256:%s\nNarSize: %d\nReferences: \n", depPath, hash, len(nar), hash, len(nar))
+
+	var refs []string
+	for i := range 3600 {
+		refs = append(refs, fmt.Sprintf("%s-dep-%04d", depHash, i))
+	}
+	largeInfo := fmt.Sprintf("StorePath: %s\nURL: nar/fixture.nar\nCompression: none\nFileHash: sha256:%s\nFileSize: %d\nNarHash: sha256:%s\nNarSize: %d\nReferences: %s\n", drv, hash, len(nar), hash, len(nar), strings.Join(refs, " "))
+	if len(largeInfo) <= 128<<10 {
+		t.Fatalf("expected >128 KiB narinfo line, got %d", len(largeInfo))
+	}
+	objects[strings.Repeat("0", 32)+".narinfo"] = largeInfo
+
+	for _, bad := range []struct {
+		manifest wire.UploadManifest
+		field    string
+	}{
+		{wire.UploadManifest{UploadID: id, Derivation: drv, System: "x86_64-linux", Objects: []wire.UploadObject{{Name: "nix-cache-info", Size: 1, SHA256: strings.Repeat("a", 64)}}}, "test_run_id"},
+		{wire.UploadManifest{UploadID: id, RunID: id, Derivation: "/nix/store/" + depHash + "-not-drv", System: "x86_64-linux", Objects: []wire.UploadObject{{Name: "nix-cache-info", Size: 1, SHA256: strings.Repeat("a", 64)}}}, "derivation"},
+		{wire.UploadManifest{UploadID: id, RunID: id, Derivation: drv, System: "x86_64-darwin", Objects: []wire.UploadObject{{Name: "nix-cache-info", Size: 1, SHA256: strings.Repeat("a", 64)}}}, "system"},
+	} {
+		reply := transferHTTP(t, s, "PUT", url+"/manifest", string(wire.JSON(bad.manifest)), 400)
+		if !strings.Contains(reply, bad.field) {
+			t.Fatalf("expected %s diagnostic, got %s", bad.field, reply)
+		}
+	}
+
+	declareUpload(t, s, id, url, drv, objects)
+	for name, data := range objects {
+		transferHTTP(t, s, "PUT", url+"/"+name, data, 200)
+	}
+	if readUpload(t, s, id)["state"] != "ready" {
+		t.Fatal("large narinfo closure did not verify")
+	}
+
+	oversized := strings.Repeat("a", wire.MaxNarInfoBytes+1)
+	if _, err := parseNarInfo(strings.Repeat("0", 32)+".narinfo", []byte(oversized)); err == nil {
+		t.Fatal("oversized narinfo accepted")
+	}
+}

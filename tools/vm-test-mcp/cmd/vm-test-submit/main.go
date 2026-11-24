@@ -30,6 +30,7 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 	evidence := f.String("evidence", "all", "automatic mode: all downloads registered artifacts; manifest saves their inventory")
 	f.StringVar(&o.Nix, "nix", "nix", "Nix executable in this container")
 	f.StringVar(&o.Test, "test", "", "locked project test flake attribute; with --config, omission selects the smoke test")
+	f.StringVar(&o.Apply, "apply", "", "optional Nix function applied to --test before driver observation")
 	f.StringVar(&o.RequestID, "request-id", "", "execution identity; generated in automatic mode, reused on retries")
 	f.StringVar(&o.CacheURL, "upload-url", "", "cache upload capability URL")
 	f.StringVar(&o.CacheID, "upload-id", "", "input upload ID")
@@ -52,6 +53,7 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 	if f.NArg() != 0 || o.CacheBytes < 1 || o.CacheDir != "" && !filepath.IsAbs(o.CacheDir) || *timeout < 0 || *timeout > 86400 ||
 		(*configFile != "" && (o.CacheID != "" || o.CacheURL != "")) ||
 		(*evidence != "all" && *evidence != "manifest") ||
+		(o.Apply != "" && o.Test == "" && (*configFile == "" || o.WorkDir == "")) ||
 		(*configFile == "" && (o.Test == "" || o.RequestID == "" || o.CacheID == "" || o.CacheURL == "" || o.WorkDir == "")) {
 		f.Usage()
 		return 2

@@ -53,7 +53,7 @@ func openExportCache(ctx context.Context, o Options) (*exportCache, error) {
 		}
 		dir = filepath.Join(base, "vm-test-submit")
 	}
-	root, err := safefs.Private(dir, false)
+	root, err := safefs.ClientPrivate(dir, false)
 	if err != nil {
 		return nil, err
 	}
@@ -171,9 +171,12 @@ func openExportCache(ctx context.Context, o Options) (*exportCache, error) {
 func (c *exportCache) Close() { c.lock.Close(); c.root.Close() }
 
 func (c *exportCache) narReference(name string) (string, error) {
-	data, err := c.root.Read(path.Join("files", name), 65536)
+	data, err := c.root.Read(path.Join("files", name), wire.MaxNarInfoBytes)
 	if err != nil {
-		return "", err
+		if os.IsNotExist(err) {
+			return "", err
+		}
+		return "", fmt.Errorf("cache narinfo %s: %w", name, err)
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		if value, ok := strings.CutPrefix(line, "URL: "); ok && cacheNarName.MatchString(value) {
