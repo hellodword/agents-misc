@@ -1,7 +1,7 @@
 # Executing NixOS VM tests
 
 Evaluate in the development container using the tested project's locked nixpkgs.
-The prepared VM Test MCP 0.15 worker submits the derivation through a task-specific
+The prepared VM Test MCP 0.16 worker submits the derivation through a task-specific
 Nix daemon owned by the host executor; QEMU nodes run directly on host KVM inside its strict sandbox.
 
 ## Submission
@@ -33,9 +33,9 @@ vm-test-submit --test '.#checks.x86_64-linux.integration' \
   --work-dir /absolute/ignored/task-workspace --timeout-seconds 3600
 ```
 
-Submit stdout JSON through `nix_job_create`. The helper refuses lockfile updates,
+Submit stdout JSON through `nix_job_create` (`request_id` idempotency is scoped per tool, so `upload_create` and `nix_job_create` do not collide). Optional `--apply EXPR` transforms `--test` before driver observation and is recorded in `submission.json`; empty owner-matched `--work-dir` and `--cache-dir` directories (`0750`/`0755`/`0775`) are tightened to `0700` automatically. The helper refuses lockfile updates,
 checks `qemu.forceAccel` and QEMU nodes, and uses the consuming project's original
-framework, node configuration and script checks. Its top-level derivation has a
+framework, node configuration and script checks. `.narinfo` metadata accepts up to 2 MiB for large closures. Its top-level derivation has a
 fresh test run identity and disables substitution; dependencies retain their
 cache identities. The saved derivation and GC-root link survive checkout changes
 and replacement of an expired unaccepted upload. New tests use new workspaces and
@@ -58,13 +58,13 @@ trust policy. The worker remains an ordinary Nix client with signature validatio
 ## Observation and cleanup
 
 The initial `nix_job_create` waits for execution, evidence and cleanup, for at most
-600 seconds. Use Codex CLI 0.163.0+ and `tool_timeout_sec=660`. If the window expires,
+600 seconds by default (`wait_seconds` in `0..600`; `wait_seconds=0` enqueues and returns `continue` immediately so parallel local tool calls are not head-of-line blocked). Configure Streamable HTTP MCP clients with a single-call tool timeout of at least 660 seconds (such as `tool_timeout_sec=660` in Codex CLI 0.163.0+) or pass a smaller `wait_seconds`. If the window expires,
 call `wait` with the returned `continue` targets; expiry is not execution failure.
 For example, a 15-minute execution uses ten minutes plus one five-minute continuation.
 SSE sends invisible transport heartbeats every 15 seconds. HTTP disconnect, tool
 timeout and MCP cancellation stop observation only. Use `nix_job_get`,
-`execution_events` and byte-offset `execution_log` for explicit diagnosis.
-`nix_job_get(job_id=…)` separates `phase`, `result`, `resources`, `collection` and
+`execution_events` and byte-offset `execution_log` (`limit` up to `65536` bytes) for explicit diagnosis.
+`nix_job_get(execution_id=…)` separates `phase`, `result`, `resources`, `collection` and
 `evidence`. Query and wait receipts use the same result projection.
 `execution.process` records the Nix client exit; `execution.test` records driver
 initialization, script outcome and timeout. Failure before the build phase records
@@ -73,12 +73,12 @@ and an unconfirmed outcome. Logs are base64 bytes
 with `next_offset`. The FIFO queue is shared with VirtualBox
 labs. The daemon owns build parallelism; test definitions own node CPUs/RAM.
 
-List registered files with `evidence_list(execution_id=…)` and retrieve scoped URLs
+List registered files with `evidence_list(execution_id=…)` (stop paging when `items` is `[]` or `next_cursor` stops advancing) and retrieve scoped URLs
 with `evidence_get`. Driver receipts, original logs/output and available final
 screenshots survive script failure and timeout. Diagnosis shares 30 seconds across
-nodes before release. `collection.state` records complete, partial or unavailable
-capture. The executor seals retained build directories after its cgroup is empty
-and exposes task-bound ordinary files. Controller size/hash verification precedes
+nodes before release, appending completed items progressively and skipping guest shell commands immediately on nodes without a connected test-driver backdoor. `collection.state` records complete, partial or unavailable
+capture. The executor seals retained build directories after its cgroup is empty,
+pruning non-evidence build subtrees during indexing and exposing task-bound ordinary files. Controller size/hash verification precedes
 durable handoff and release of build directories, worker copies and GC roots.
 Host Nix GC is independent. Automatic downloads verify the same sizes/hashes and
 resume partial files; local `downloads` tracks that stage.
@@ -88,7 +88,7 @@ Prepare and evaluate inputs before submitting a batch to the shared executor.
 history and its sequence cursor for paging. Queue details identify occupied or
 blocked cleanup without exposing another task's command inputs.
 
-`nix_job_cancel` requests cancellation, including abandonment while queued.
+`nix_job_cancel(execution_id=…)` requests cancellation, including abandonment while queued, recording `termination: "cancelled"` without inventing a `backend_error`.
 Wait for `resources.state: released` or `unallocated` before the next execution
 batch. `resources.state: blocked` retains scheduler ownership and includes the
 cause, session identity and required actor. Report that blocker and continue
@@ -100,8 +100,8 @@ the test. Evidence failure keeps its files and roots for recovery, independently
 of the execution slot. Reconnect to the original job after HTTP loss.
 
 The wait conditions are `resources_released`, `evidence_complete` and `complete`;
-`complete` requires the result, released resources and complete evidence. A manual
-blocker returns `attention` and is excluded from `continue`. Read its cause before
+`complete` requires the result, released resources and complete evidence. When a job has ended and released resources while `evidence.state` is still `pending`, `collecting` or `transferring`, `wait(condition="complete")` may return `reason="attention"` without `manual_intervention: true`; pass `continue` to `wait` until `evidence.state` reaches `complete`. A manual
+blocker (`manual_intervention: true`) returns `attention` and is excluded from `continue`. Read its cause before
 recovering; repeated waits do not resolve an administrator prerequisite.
 `execution_delete` requires a terminal result, released resources and complete
 evidence. Defaults retain successful evidence for 1 day, other evidence

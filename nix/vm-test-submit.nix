@@ -15,7 +15,7 @@ let
 in
 pkgs.buildGoModule {
   pname = "vm-test-submit";
-  version = "0.15.0";
+  version = "0.16.0";
   src = source;
   vendorHash = "sha256-H3zVpMTG/crvB5DxpauMXMQacFCZPVwyKGViFlTuWNY=";
   subPackages = [ "cmd/vm-test-submit" ];

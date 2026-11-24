@@ -1,6 +1,6 @@
 # Executing VirtualBox labs
 
-Use a prepared VM Test MCP 0.15 executor. `service_get` reports protocol
+Use a prepared VM Test MCP 0.16 executor. `service_get` reports protocol
 capabilities, backend availability, endpoint address and effective limits.
 `template_list` pages template resources, media policy and input intervals.
 Service token holders share task authority. Use the advertised tool schemas; do not infer
@@ -8,8 +8,8 @@ host paths, VM UUIDs or executable options from guest data.
 
 ## Create and observe
 
-`lab_create` takes a fresh `request_id`, a fixed `nodes` list and optional
-`upload_ids`, `lan`, `dhcp`, `dns`, `internet`, `timeout_seconds`. Each node has a unique lowercase
+`lab_create` takes a fresh `request_id` (idempotency is scoped per `(tool, request_id)`), a fixed `nodes` list and optional
+`upload_ids`, `lan`, `dhcp`, `dns`, `internet`, `timeout_seconds`, `wait_seconds` (`0..600`, default `600`). Each node has a unique lowercase
 name and a registered template, optional IPv4/CPU/memory overrides, per-node GUI
 and media requests. Using the same Windows template twice creates independent
 clones. The private router is not a test-command target.
@@ -27,13 +27,13 @@ Each node's `gui` flag selects its host frontend: omitted or `false` uses headle
 `true` opens a host-visible VirtualBox window. A GUI frontend requires the
 controller to run in the VM owner's graphical session.
 
-Use Codex CLI 0.163.0+ with `tool_timeout_sec=660`. `lab_create` waits for
-readiness and returns `{operation, wait}`. A window expires after 600 seconds;
+Configure Streamable HTTP MCP clients with a single-call tool timeout of at least 660 seconds (such as `tool_timeout_sec=660` in Codex CLI 0.163.0+) or pass a smaller `wait_seconds` (`0..600`). `lab_create` waits for
+readiness and returns `{operation, wait}` (`wait_seconds=0` enqueues and returns `continue` immediately so parallel short tool calls are not blocked). A default window expires after 600 seconds;
 continue with `wait({targets: response.wait.continue})`. Expiry is not execution
 failure. SSE heartbeats every 15 seconds are transport-only. Multiple targets can
 be observed together; ordinary waits ignore log growth/healthy samples. Request
 condition `output` when output changes matter. Read `lab_inspect(lab_id=…)` for node IDs. Node and command operations take only
-their resource ID; `command_list`, `endpoint_list`, `capture_list` and `upload_list`
+their resource ID; `command_list`, `endpoint_list`, `capture_list`, `upload_list` and `evidence_list` (stop paging when `items` is `[]` or `next_cursor` stops advancing)
 page through history separately. `node_get` exposes preparation stage, expected power state,
 capabilities and health observations while the lab prepares. Keep original IDs after disconnects and retry identical
 mutations with the original request ID. A changed request requires a new ID.
@@ -140,11 +140,11 @@ whether guest renewal/reconfiguration is needed. Use privileged commands for gue
 addresses, DNS, routes and firewall rules. Disabling DHCP does not remove a guest's
 current address. `node_network_link` connects/disconnects its first NIC. Egress-only
 changes preserve LAN and published services.
-Host, metadata and protected destinations remain denied. `network.state=suspect`
+Host, metadata and protected destinations remain denied. Router policy leases default to 30 seconds (10–120 seconds, 10-second heartbeat budget). `network.state=suspect`
 means a late observation within the confirmed policy lease; inspect the retained
 stage/error/budget and wait for the next bounded observation. `degraded` suspends
 egress/entries while retaining VMs. Inspect task events and explicitly call
-`network_recover`; failed recovery must leave networking suspended. Reconcile the
+`network_recover` (supported while `preparing` with an allocated router or `running`); failed recovery must leave networking suspended. Reconcile the
 original command after a connection loss; endpoint EOF is not a command exit.
 LAN-local
 IPv6 communication is possible, with no managed IPv6 egress/publication.
@@ -205,7 +205,7 @@ operations supersede earlier pending observations.
 
 `node_get.health` separates VirtualBox, Guest Control and command-service
 observations, including last success, failure duration and error. `lab_diagnose`
-collects available metadata, VBox logs, screenshots and guest initialization/system
+collects available metadata, VBox logs (up to 1 MiB, preserving the first 256 KiB boot header and trailing 768 KiB crash window with `state: "partial"` when truncated), screenshots and guest initialization/system
 logs within a shared 30-second budget. It accepts selected test-node IDs; omission
 collects the full lab including its router. Retain partial evidence and the manifest. Automatic collection has a durable event
 identity for an unexpected command exit, node incident or execution end. Repeated

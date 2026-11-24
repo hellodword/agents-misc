@@ -1,4 +1,4 @@
-# VM Test MCP 0.15.0
+# VM Test MCP 0.16.0
 
 One Go module, one public MCP service, with separate VirtualBox and Nix domains
 for disposable Windows/Linux VirtualBox labs and strict NixOS sandbox
@@ -110,7 +110,9 @@ Diagnostics go to stderr. Streamable HTTP is at `/mcp`, authenticated with
 `Authorization: Bearer TOKEN`, with optional exact Host/Origin allowlists (empty or omitted allows any). All token
 holders share authority over all tasks.
 
-Use Codex CLI **0.163.0+** with a 660-second tool timeout:
+Configure your Streamable HTTP MCP client with a single-call tool timeout of at least
+660 seconds (covering the default 600-second observation window), or pass a smaller
+`wait_seconds` (`0..600`) per call. For example, in Codex CLI **0.163.0+**:
 
 ```toml
 [mcp_servers.vm_test]
@@ -119,17 +121,20 @@ bearer_token_env_var = "VM_TEST_TOKEN"
 tool_timeout_sec = 660
 ```
 
-The [Codex MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)
-defines this timeout setting. SSE carries structured results and 15-second
-transport heartbeats. Disconnects, timeout and MCP cancellation end observation;
-explicit business cancellation ends execution. Use empty controller, worker and
-executor state for initial installation of this release; old schemas/configuration are intentionally incompatible.
+See the [Codex MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)
+for this setting; other MCP hosts use their corresponding per-tool HTTP timeout option.
+`InitializeResult.instructions` advertises core queue, `(tool, request_id)` idempotency,
+`execution_id`, `wait_seconds`, and completion conventions automatically. SSE carries
+structured results and 15-second transport heartbeats. Disconnects, timeout and MCP
+cancellation end observation; explicit business cancellation ends execution. Use empty
+controller, worker and executor state for initial installation of this release; old
+schemas/configuration are intentionally incompatible.
 
 1. Prepare scripts and dependencies locally. Allocate file inputs with `upload_create`,
    PUT their immutable manifests and bytes, and wait for automatic `ready` state.
    Call `service_get` for protocol capabilities, backend status and effective limits,
    `template_list` for template pages, and `lab_list` for compact active/queued summaries.
-2. Call `lab_create` with a fresh `request_id`, a fixed list of named nodes and optional ready `upload_ids`.
+2. Call `lab_create` with a fresh `request_id` (scoped per tool), a fixed list of named nodes, optional ready `upload_ids`, and optional `wait_seconds` (`0..600`, default `600`; `0` enqueues and returns `continue` immediately).
    Select a deadline for one continuous test batch. Reusing a template creates
    independent clones with separate UUIDs, MACs and disks.
 3. Creation waits for readiness and returns `{operation, wait}`. If the 600-second
@@ -303,15 +308,15 @@ usage or client configuration exits 2.
 ```sh
 vm-test-submit --config /absolute/client.yaml --work-dir /absolute/retained/workspace
 vm-test-submit --config /absolute/client.yaml --test '.#checks.x86_64-linux.integration' \
-  --timeout-seconds 3600 --evidence manifest
+  --apply 't: t' --timeout-seconds 3600 --evidence manifest
 ```
 
-The same workspace resumes its recorded request, evaluated derivation and accepted
-job even after checkout changes or an interrupted reply. An expired unaccepted
+The same workspace resumes its recorded request, optional `--apply` expression, evaluated derivation and accepted
+job even after checkout changes or an interrupted reply. Pre-created empty owner-matched `--work-dir` and `--cache-dir` directories (`0750`/`0755`/`0775`) are tightened automatically to `0700`. An expired unaccepted
 upload gets a new reservation for that saved derivation. A fresh workspace and
 request produce a fresh test run. `--timeout-seconds` applies in both call forms;
 0 selects the server default. Ctrl-C stops local observation while the remote
-task keeps its deadline. Explicit `nix_job_cancel` ends the remote job.
+task keeps its deadline. Explicit `nix_job_cancel(execution_id=…)` ends the remote job.
 
 For submission through an MCP tool, allocate `upload_create(kind="cache")` and run:
 

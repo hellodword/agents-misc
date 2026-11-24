@@ -1,6 +1,6 @@
-# VM Test MCP 0.15：controller、Nix worker 和 root executor 共用此文件。
-# 新契约只接受空 state / 新数据库；旧服务与资源必须先由用户停止、清理。
-# Codex CLI >=0.163.0，MCP tool_timeout_sec=660；服务等待窗口 600s，SSE 心跳 15s。
+# VM Test MCP 0.16：controller、Nix worker 和 root executor 共用此文件。
+# 新契约只接受空 state / 新数据库（schema 24）；旧服务与资源必须先由用户停止、清理。
+# Streamable HTTP MCP 客户端建议单次工具超时 >= 660s（如 Codex CLI >=0.163.0 设 tool_timeout_sec=660）；服务默认等待窗口 600s（可传 wait_seconds: 0..600），SSE 心跳 15s。
 # 三个程序均使用 --config /绝对路径/config.yaml；配置文件不要求特定权限。
 # 显式 sudo 启动 executor 表示管理员信任当前构建和此配置；executor 启动时读取并固定策略。
 # config.yaml 被 Git 忽略；本示例只使用合成值。controller 和 worker 使用同一普通账户。
@@ -152,12 +152,13 @@ service:
 #     # 每个入口需要公开中继端口和 loopback NAT 端口。
 #     port_min: 20000
 #     port_max: 29999
-#     # 默认 15，5..60 秒。心跳约每三分之一周期续租；过期须 network_recover。
-#     lease_seconds: 15
+#     # 默认 30，10..120 秒。心跳约每三分之一周期续租（单次预算 10s）；过期可在 preparing/running 阶段调用 network_recover。
+#     lease_seconds: 30
 
 # 启动 root executor 时填写；worker_uid 是普通 worker 账号的 UID。
 # executable 必须是管理员选择的宿主 Nix 绝对路径。
 # executor 状态固定存放于 /var/lib/vm-test-nix-executor，控制 socket 固定为 /run/vm-test-nix-executor/control.sock。
+# /var/lib/vm-test-nix-executor 同时承载 builds/<session> 构建树与 keep-failed 现场；根分区为小容量 tmpfs（如 impermanence 主机）时必须挂载到持久大容量磁盘。
 # 状态目录及 socket 父目录由 root 管理。
 # executor:
 #   worker_uid: 1000

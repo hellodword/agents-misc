@@ -1,12 +1,13 @@
-# VM Test MCP 0.15 contract
+# VM Test MCP 0.16 contract
 
 ## Transport and identity
 
-`/mcp` implements official SDK Streamable HTTP. Every request requires the configured
+`/mcp` implements official SDK Streamable HTTP and returns concise workflow guidance
+in `InitializeResult.instructions`. Every request requires the configured
 Bearer token. Empty or omitted Host/Origin allowlists permit any value; nonempty
 lists require exact matches (requests without Origin remain allowed).
 JSON is bounded to 1 MiB and depth 64, rejects duplicate fields, and tool arguments
-reject unknown fields. YAML configuration rejects unknown/duplicate fields and
+reject unknown fields (reporting `details.unknown_fields` and `details.allowed_fields`). YAML configuration rejects unknown/duplicate fields and
 multiple documents. Timestamps are UTC RFC3339. All token holders share authority.
 
 `service_get.protocol` reports protocol version 1 and the supported capabilities:
@@ -49,7 +50,7 @@ without scoped execution evidence; input delivery alone is not application succe
 
 Service-generated execution/node/command/upload/evidence/operation IDs are 32 lowercase
 hex digits. Caller `request_id` is 1–128 ASCII identifier characters
-(`A-Z a-z 0-9 _ . : -`, first character alphanumeric). Every mutation requires it.
+(`A-Z a-z 0-9 _ . : -`, first character alphanumeric), scoped per `(tool, request_id)` so distinct tools maintain independent idempotency namespaces. Every mutation requires it.
 Fixed defaults are normalized before hashing; environment-dependent defaults are
 frozen at admission. The same ID and normalized parameters return the original
 receipt, even after its target has been deleted; changed parameters return
@@ -94,7 +95,10 @@ it is not evidence that the worker rejected or never accepted the request.
 
 ## Business waits and observation
 
-Codex CLI **0.163.0 or newer** is required; configure `tool_timeout_sec = 660`.
+Configure Streamable HTTP MCP clients with a single-call tool timeout of at least
+**660 seconds** (for example `tool_timeout_sec = 660` in Codex CLI 0.163.0+) when
+using the default 600-second observation window, or pass a smaller `wait_seconds`
+(`0..600`) per call.
 Tools return structured JSON in SSE. Every 15 seconds the transport sends an SSE
 comment, not an MCP notification, model-visible progress item or SQLite event.
 Binary content uses the separate HTTP routes below.
@@ -111,7 +115,7 @@ default. Reboot/reset require a new boot identity. `wait_until="power_state"`
 selects the narrower power observation. A later power operation supersedes an
 earlier pending one. Other mutations wait for their durable receipt to resolve.
 
-Each call observes for at most **600 seconds**, including dispatch time. Early
+Each call observes for at most **600 seconds** by default (`wait_seconds` in `0..600` on `lab_create`, `nix_job_create` and `wait`), including dispatch time. `wait_seconds: 0` returns immediately after durable admission or a single target snapshot with populated `continue` cursors. Early
 completion returns immediately. Expiry returns `wait.reason="timeout"` and current
 summaries; it is not execution failure. Pass the returned `continue` array to
 `wait({targets: …})`. A 15-minute job normally needs the initial ten-minute call
@@ -149,21 +153,20 @@ host executable, directory, VM UUID or raw backend option.
 | `service_get`                                       | No parameters; protocol, build, backend availability, admission, active execution and effective limits                                                                             |
 | `template_list`                                     | Optional alias `cursor`, `limit` (50 default, 200 maximum); sorted template resources, media/camera aliases and configured fingerprint                                             |
 | `service_observe`                                   | Optional `seconds` (1..240, default 30); bounded host/controller samples and call timings                                                                                          |
-| `lab_create`                                        | `nodes`, optional ready `upload_ids`, `lan`, `dhcp`, `dns`, `internet`, `timeout_seconds`; queued lab, waits for readiness                                                         |
-| `nix_job_create`                                    | Ready `upload_id`, optional `timeout_seconds`; derivation/system come from its manifest, waits for result, resource release and evidence                                           |
+| `lab_create`                                        | `nodes`, optional ready `upload_ids`, `lan`, `dhcp`, `dns`, `internet`, `timeout_seconds`, `wait_seconds` (`0..600`); queued lab, waits for readiness                              |
+| `nix_job_create`                                    | Ready `upload_id`, optional `timeout_seconds`, `wait_seconds` (`0..600`); derivation/system come from its manifest, waits for result, resource release and evidence                |
 | `lab_list`, `nix_job_list`                          | Optional sequence `cursor`, `limit`, `phase` (`active` default, `all`, `queued`, `preparing`, `running`, `ended`)                                                                  |
 | `lab_get`, `lab_inspect`                            | `lab_id`; compact summary or node inventory, network and resource ledger                                                                                                           |
-| `nix_job_get`                                       | `job_id`; result, resources, evidence and observed worker execution                                                                                                                |
+| `nix_job_get`                                       | `execution_id`; result, resources, evidence and observed worker execution                                                                                                          |
 | `lab_finish`                                        | `lab_id`, `conclusion`, `summary`; record the caller's conclusion and await cleanup                                                                                                |
 | `lab_cancel`, `lab_cleanup`                         | `lab_id`; cancel or retry cleanup and await resource release                                                                                                                       |
-| `nix_job_cancel`                                    | `job_id`; cancel and await resource release                                                                                                                                        |
-| `execution_recover`                                 | `execution_id`, `scope` (`resources` or `evidence`); recover the original lab or Nix job                                                                                           |
-| `nix_job_recover`                                   | `job_id`, `scope` (`resources` or `evidence`); recover the original job and await that boundary                                                                                    |
-| `lab_extend`, `nix_job_extend`                      | `lab_id` or `job_id`, positive `seconds`, `reason` (1..1024 bytes)                                                                                                                 |
+| `nix_job_cancel`                                    | `execution_id`; cancel and await resource release                                                                                                                                  |
+| `execution_recover`                                 | `execution_id`, `scope` (`resources` or `evidence`); recover the original lab or Nix job and await that boundary                                                                   |
+| `lab_extend`, `nix_job_extend`                      | `lab_id` or `execution_id`, positive `seconds`, `reason` (1..1024 bytes)                                                                                                           |
 | `execution_delete`                                  | `execution_id`; delete a cleaned execution and unpinned detail; independent pins/receipts remain                                                                                   |
-| `execution_events`, `execution_log`                 | `execution_id`; event `cursor`/`limit` or byte `offset`/`limit`                                                                                                                    |
+| `execution_events`, `execution_log`                 | `execution_id`; event `cursor`/`limit` or byte `offset`/`limit` (maximum `65536` bytes)                                                                                            |
 | `operation_get`                                     | `operation_id`; compact durable receipt                                                                                                                                            |
-| `wait`                                              | `targets`; business observation described above                                                                                                                                    |
+| `wait`                                              | `targets`, optional `wait_seconds` (`0..600`); business observation described above                                                                                                |
 | `node_get`                                          | `node_id`; power, expected transition, preparation, health and capabilities                                                                                                        |
 | `lab_diagnose`                                      | `lab_id`, optional `node_ids`; bounded diagnostic manifest and evidence IDs                                                                                                        |
 | `node_exec`                                         | `node_id`, absolute guest `argv`, optional `expected_exit_codes`, `cwd`, `env`, `timeout_seconds` (10 default, 30 maximum); direct Guest Control                                   |
@@ -228,7 +231,7 @@ retransmissions, including after exit. `command_input_read` returns base64 byte
 windows with continuation coordinates; `command_details` reads only the spec.
 Status changes do not rewrite payloads or load historical stdin into memory.
 Command logs cap at 64 MiB per stream; the process continues after that limit.
-VBox diagnostic logs cap at 1 MiB per collection and are collected at termination when available. Captures use the first NIC or display. Metrics retain the latest 3600 one-second
+VBox diagnostic logs cap at 1 MiB per collection (retaining the first 256 KiB boot header, an omission marker, and the trailing 768 KiB crash window with `truncated: true` and manifest item `state: "partial"` when larger) and are collected at termination when available. Captures use the first NIC or display. Metrics retain the latest 3600 one-second
 samples. Video caps at 1 GiB. A lab may have at most 128 active endpoints; closed history does not consume this limit. Guest archives remain opaque on the host.
 
 ## Lifecycle and recovery
@@ -323,8 +326,11 @@ leaves the test outcome `unconfirmed`. Process status retains the actual client
 exit independently. Recovery can establish the assertion conclusion after an
 interrupted observation while preserving its recorded termination.
 
-Before driver cleanup, one collector shares 30 seconds across nodes. It retains
-available screenshots, guest journals/state, the original output and driver error
+Before driver cleanup, one collector shares 30 seconds across nodes, appending each
+completed node diagnostic item immediately. Nodes without an active test-driver
+shell backdoor (such as raw disk images) mark guest shell collection `unavailable`
+without blocking; connected guest commands run under the remaining collection budget.
+It retains available screenshots, guest journals/state, the original output and driver error
 details. The original driver still owns test execution and shutdown. Successful
 output roots and sealed failed-build evidence both participate in indexing;
 worker restart can recover successful outputs from the original Nix GC-root links.
@@ -333,11 +339,13 @@ worker restart can recover successful outputs from the original Nix GC-root link
 `evidence` for an ended lab or Nix job. Resource recovery reuses recorded ownership;
 evidence recovery reuses captured files, outputs and manifests. For VirtualBox,
 publication recovery preserves the sealed diagnostic event. For Nix, it preserves
-the original build and session. `lab_cleanup` and `nix_job_recover` also address
-their existing backend scopes. Repeated requests preserve
+the original build and session. `lab_cleanup` also addresses VirtualBox resource cleanup. Repeated requests preserve
 receipt identity. Nix waits accept `resources_released`, `evidence_complete` and
 `complete`; the last requires an ended result, released resources and complete
-evidence. Manual blockers return `attention`, `manual_intervention: true` and no
+evidence. When an ended Nix job's `evidence.state` is still `pending`, `collecting`
+or `transferring`, `wait(condition="complete")` may return `reason="attention"`
+without `manual_intervention: true`; passing `continue` resumes observation until
+`evidence.state` reaches `complete`. Manual blockers return `attention`, `manual_intervention: true` and no
 automatic continuation for that target. Other targets remain observable. Errors
 retain stage, job/worker/session identity, observed time, cause, retry disposition,
 required actor and next action. Operating-system causes use `system_error` with
@@ -648,7 +656,7 @@ Use `command_start` for durable output, stdin and process-group supervision.
 Endpoint ports default to 20000–29999; each entry uses a public relay port and
 a loopback NAT port. Up to 128 declared entries and 256 relay connections/UDP peers
 per entry are supported. UDP peer mappings expire after 30 seconds idle. An egress
-lease defaults to 15 seconds and is refreshed every five seconds. `network.state`
+lease defaults to 30 seconds (configurable 10–120 seconds) and is refreshed every ten seconds with a 10-second heartbeat budget. `network.state`
 is `pending`, `ready`, `suspect` or `degraded`; this describes policy observation,
 independently of guest addresses. It includes the conservative `lease_expires`,
 `policy_updated`, router node ID/boot fingerprint, and the last attempt's stage,
@@ -657,7 +665,7 @@ covers both waiting and execution. A timeout or occupied control channel can
 remain `suspect` only while the unchanged, previously confirmed policy lease is
 valid. Existing relays remain open in that window; a subsequent confirmation
 returns to `ready`. Host-protection changes, identity/policy errors and expired
-leases close relays, suspend entries and require explicit recovery. Degradation
+leases close relays, suspend entries and require explicit recovery (`network_recover`, valid while the lab is `preparing` with an allocated router or `running`). Degradation
 and late-observation events retain the trigger and lease/identity evidence.
 Source addresses may be rewritten.
 Explicit recovery verifies router ownership, starts or resumes it when needed,
@@ -680,6 +688,11 @@ external-value conflict. There is no arbitrary extradata or generic VM-settings 
 uses a minimal YAML file with `endpoint` and `token`, prepares/uploads inputs,
 submits, observes and downloads evidence. `--test REF --upload-id ID --upload-url
 URL` prepares an existing upload and emits public `nix_job_create` arguments.
+Optional `--apply EXPR` transforms the `--test` attribute before driver observation
+and is recorded in `submission.json`. Empty owner-matched `--work-dir` and
+`--cache-dir` directories created with standard `mkdir` permissions (`0750`/`0755`/`0775`)
+are tightened automatically to `0700`. Non-200 manifest and object upload responses
+surface bounded structured `wire.Error` diagnostics without disclosing capability URLs.
 `--timeout-seconds` applies to both forms. Exit codes are 0 for success, 1 for a
 runtime/test outcome and 2 for usage/configuration errors. Stdout carries JSON;
 stderr carries aggregate progress and the workspace location.
@@ -747,7 +760,7 @@ Unbound uploads expire after one idle hour.
 
 File objects are named `blob`. Cache objects are `nix-cache-info`, Nix store hash
 `.narinfo` files and relative `nar/*.nar[.xz|.bz2|.zst]` files. Narinfo is bounded
-to 64 KiB; names, sizes, SHA-256, references and relative URLs are verified against
+to 2 MiB; names, sizes, SHA-256, references and relative URLs are verified against
 the complete declared closure. Nix verifies NAR content and signatures on import.
 Each immutable file is synced before its index row commits. Interrupted uploads
 and unreferenced publication files are reclaimable without changing accepted
@@ -764,7 +777,7 @@ Worker database
 identity persists across restarts and is bound into accepted Nix jobs. A replacement
 worker database cannot confirm that an old execution was never accepted.
 
-Controller, worker and executor require fresh **schema 23** databases and guest protocol **2**. Before
+Controller, worker and executor require fresh **schema 24** databases and guest protocol **2**. Before
 initial deployment the user stops old services, confirms resources are released,
 backs up needed evidence and provides empty state/new configuration. Baselines and
 the host Nix store remain independent; update baseline guest executables through

@@ -275,7 +275,11 @@ administrative trust boundary. Runtime worker requests cannot change the policy.
 
 The executor stores state at `/var/lib/vm-test-nix-executor` and listens at
 `/run/vm-test-nix-executor/control.sock`. Both paths are fixed, and the worker
-connects to that socket. State and socket-directory ancestors must be root-owned real directories
+connects to that socket. Because `/var/lib/vm-test-nix-executor` holds active
+`builds/<session>` trees and `keep-failed` build directories until evidence handoff
+acknowledgement, mount or bind-mount `/var/lib/vm-test-nix-executor` onto persistent
+high-capacity storage when `/` is a small `tmpfs` (such as on impermanence hosts).
+State and socket-directory ancestors must be root-owned real directories
 without write access for other accounts. The executor creates its private state
 with mode `0700` and its dedicated socket directory with mode `0711`; socket
 files grant access only to the configured worker UID.
@@ -370,13 +374,13 @@ services or creating state. The executor checks host directory ownership and
 cgroup delegation at startup, before creating state or sockets. Configuration
 is loaded at startup. Restart after tasks finish when changing policy or paths.
 
-When relocating existing schema-23 state, finish resource release and evidence
+When relocating existing schema-24 state, finish resource release and evidence
 handoff, then stop the services. Move the complete role directory to its required
 location, preserving ownership, permissions, database identity and evidence.
 Retain any previous destination as a separate offline backup.
 
 This release requires new configuration and empty controller, worker and executor state
-with fresh schema-23 databases. The user must stop the old services, confirm all
+with fresh schema-24 databases. The user must stop the old services, confirm all
 old VM/daemon/port resources are released, and clear or retire the old state before
 starting. Preserve any required old evidence in private offline backups first.
 Do not run the new binary against a live old state or attempt an in-place schema
