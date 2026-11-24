@@ -1,6 +1,6 @@
 # Codex Config Atlas 例行新增版本操作手册（SOP）
 
-本手册面向例行收录上游 OpenAI Codex 新发布版本的执行者与自动化代理。**无需阅读源码或前端构建细节，严格按以下固定步骤执行即可。**
+本手册面向例行收录上游 OpenAI Codex 新发布版本的执行者与自动化代理。**例行同步只需阅读本文件并按顺序执行下方固定命令，无需阅读 `README.md`、`src/`、`web/`、`tests/` 或加载 `Contracts` / `Generated artifacts` 等开发规则。**
 
 ## 一、三条硬性红线
 
@@ -73,9 +73,9 @@ bash tools/codex-config-atlas/scripts/verify.sh
 
 ## 四、异常情况速查表（无需猜测，按表执行）
 
-| 看到的输出 / 报错                                        | 唯一正确动作                                                                                                                                                                                                |
-| :------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `up to date: ...`                                        | 直接结束并汇报当前已是最新正式版，无需改动任何文件。                                                                                                                                                        |
-| `GitHub API rate limit or access error (HTTP 403 / 429)` | 若环境已登录 `gh` CLI，可带令牌重试一次：`GH_TOKEN="$(gh auth token)" nix run --accept-flake-config .#codex-config-atlas -- sync-releases --repo . --intent-to-add`；若仍限流则直接停止并汇报网络配额阻塞。 |
-| `ESCALATION REQUIRED for Codex <V>`                      | 前面已通过预检的版本已安全保留在 `schemas/` 中（可先对已保留版本运行 `verify.sh` 确认健康），**严禁修改任何代码或测试**，将失败版本号 `<V>` 与完整报错原样上报给维护者。                                    |
-| `untracked files under ... are invisible to Nix flakes`  | 复制报错提示中给出的精确 `git add -N -- ...` 命令执行一次，再重跑 `bash tools/codex-config-atlas/scripts/verify.sh`。                                                                                       |
+| 看到的输出 / 报错                                        | 唯一正确动作                                                                                                                                                                                                                                                                                                                               |
+| :------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `up to date: ...`                                        | 直接结束并汇报当前已是最新正式版，无需改动任何文件。                                                                                                                                                                                                                                                                                       |
+| `GitHub API rate limit or access error (HTTP 403 / 429)` | 若 `command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1` 成功，带令牌重试一次：`GH_TOKEN="$(gh auth token)" nix run --accept-flake-config .#codex-config-atlas -- sync-releases --repo . --intent-to-add`；否则若报错中 `preserved synced versions` 不为 `none` 则对已保留版本跑一次 `verify.sh`，随后直接停止并汇报配额阻塞。 |
+| `ESCALATION REQUIRED for Codex <V>`                      | 若报错中 `preserved synced versions` 不为 `none`，对已保留版本运行一次 `bash tools/codex-config-atlas/scripts/verify.sh` 确认健康（若为 `none` 则无需运行）；**严禁修改任何代码或测试**，立刻停手并将失败版本号 `<V>` 与完整报错原样上报。                                                                                                 |
+| `untracked files under ... are invisible to Nix flakes`  | 复制报错提示中给出的精确 `git add -N -- ...` 命令执行一次，再重跑 `bash tools/codex-config-atlas/scripts/verify.sh`。                                                                                                                                                                                                                      |

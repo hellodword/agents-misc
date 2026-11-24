@@ -36,5 +36,6 @@ Use this index at the start of a repository task to select routes for active wor
 - Local NixOS VM test flows, ordinary Nix builds, executor setup, and `systemd-nspawn` tests do not trigger `nixos-vm-test`.
 - Component tests and ordinary screenshots do not trigger browser E2E or `ai-visual-review`.
 - Dependency lockfiles use the `Dependencies` route; transient build outputs do not trigger `Generated artifacts`.
+- Routine data or registry refresh covered by a component runbook (such as `MAINTENANCE.md`) follows that runbook directly without loading `Contracts`, `Generated artifacts`, or component source files.
 - Task complexity or starting/resuming a Goal does not trigger `long-task-plan` unless planning is requested.
 - Passing tests, reviews, and status checks do not authorize commits.

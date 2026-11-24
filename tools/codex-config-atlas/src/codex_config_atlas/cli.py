@@ -49,6 +49,7 @@ from .upstream import (
     mark_intent_to_add,
     normalize_version_arg,
     preflight_candidate_version,
+    resolve_tags_git_ls_remote,
 )
 
 GLOBAL_OPTION_NAMES = {
@@ -263,6 +264,7 @@ def _sync_single_version(
     max_bytes: int,
     expected_commit: str | None = None,
     expected_sha256: str | None = None,
+    resolved_commit: str | None = None,
     intent_to_add: bool = False,
 ) -> Path | None:
     ensure_supported_version(version, min_version)
@@ -276,7 +278,9 @@ def _sync_single_version(
         validate_manifest(schemas_dir, installed_manifest, min_version=min_version)
 
     tag = tag_for_version(version)
-    commit_sha = _resolve_tag_commit(tag, timeout_seconds=timeout_seconds)
+    commit_sha = resolved_commit or _resolve_tag_commit(
+        tag, timeout_seconds=timeout_seconds
+    )
     if expected_commit is not None:
         _checked_sha(expected_commit, "--expected-commit")
         if commit_sha != expected_commit:
@@ -440,6 +444,7 @@ def _handle_sync_releases(args: argparse.Namespace) -> int:
         min_version=args.min_version,
         timeout_seconds=args.timeout_seconds,
         fetch_page=_fetch_json_list_page,
+        known_versions=registered,
     )
     missing = [v for v in upstream_versions if v not in registered]
 
@@ -456,6 +461,13 @@ def _handle_sync_releases(args: argparse.Namespace) -> int:
             sys.stdout.write(f"missing {version} ({tag_for_version(version)})\n")
         return 0
 
+    batch_commits: dict[str, str] = {}
+    if urlsplit(GITHUB_API_ROOT).hostname == GITHUB_API_HOST:
+        batch_commits = resolve_tags_git_ls_remote(
+            [tag_for_version(v) for v in missing],
+            timeout_seconds=args.timeout_seconds,
+        )
+
     synced: list[str] = []
     for version in missing:
         try:
@@ -465,12 +477,22 @@ def _handle_sync_releases(args: argparse.Namespace) -> int:
                 min_version=args.min_version,
                 timeout_seconds=args.timeout_seconds,
                 max_bytes=args.max_bytes,
+                resolved_commit=batch_commits.get(tag_for_version(version)),
                 intent_to_add=bool(args.intent_to_add),
             )
             synced.append(version)
         except SchemaCompatibilityError as exc:
             print(
                 f"error: {format_escalation_message(version, exc, synced)}",
+                file=sys.stderr,
+            )
+            raise _EscalationReportedError(version) from exc
+        except Exception as exc:
+            preserved = ", ".join(synced) if synced else "none"
+            print(
+                f"error: failed while syncing {version}: {exc}\n"
+                f"status: preserved synced versions [{preserved}] "
+                "(registry remains valid).",
                 file=sys.stderr,
             )
             raise _EscalationReportedError(version) from exc

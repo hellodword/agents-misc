@@ -29,12 +29,63 @@ from .toml_generate import generate_toml
 
 GITHUB_API_HOST = "api.github.com"
 GITHUB_RELEASES_URL = "https://api.github.com/repos/openai/codex/releases"
+GITHUB_GIT_REPO_URL = "https://github.com/openai/codex.git"
 RELEASES_PER_PAGE = 25
 MAX_RELEASES_PAGES = 200
 MAX_RELEASES_PAGE_BYTES = 16 * 1024 * 1024
 STABLE_TAG_RE = re.compile(
     r"^rust-v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$"
 )
+HEX_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def resolve_tags_git_ls_remote(
+    tags: list[str],
+    *,
+    timeout_seconds: float,
+    repo_url: str = GITHUB_GIT_REPO_URL,
+) -> dict[str, str]:
+    if not tags:
+        return {}
+    refspecs: list[str] = []
+    for tag in tags:
+        refspecs.append(f"refs/tags/{tag}")
+        refspecs.append(f"refs/tags/{tag}^{{}}")
+    try:
+        completed = subprocess.run(
+            ["git", "ls-remote", "--", repo_url, *refspecs],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if completed.returncode != 0:
+        return {}
+
+    direct: dict[str, str] = {}
+    peeled: dict[str, str] = {}
+    for line in completed.stdout.splitlines():
+        parts = line.strip().split("\t", 1)
+        if len(parts) != 2:
+            continue
+        sha, ref = parts
+        if HEX_SHA_RE.fullmatch(sha) is None or not ref.startswith("refs/tags/"):
+            continue
+        name = ref.removeprefix("refs/tags/")
+        if name.endswith("^{}"):
+            peeled[name[:-3]] = sha
+        else:
+            direct[name] = sha
+
+    resolved: dict[str, str] = {}
+    for tag in tags:
+        commit = peeled.get(tag) or direct.get(tag)
+        if commit:
+            resolved[tag] = commit
+    return resolved
 
 
 class SchemaCompatibilityError(ValueError):
@@ -76,10 +127,11 @@ def list_upstream_stable_versions(
     min_version: str,
     timeout_seconds: float,
     fetch_page: Callable[[str, float, int], tuple[list[Any], Mapping[str, str]]],
+    known_versions: set[str] | None = None,
 ) -> list[str]:
     min_parsed = parse_version(min_version)
     discovered: set[str] = set()
-    older_only_pages = 0
+    settled_pages = 0
 
     for page in range(1, MAX_RELEASES_PAGES + 1):
         url = f"{GITHUB_RELEASES_URL}?per_page={RELEASES_PER_PAGE}&page={page}"
@@ -87,8 +139,8 @@ def list_upstream_stable_versions(
         if not items:
             break
 
-        page_supported = 0
-        page_older_stable = 0
+        page_new_supported = 0
+        page_known_or_older = 0
         for item in items:
             if not isinstance(item, dict):
                 raise ValueError(f"invalid release entry on page {page} from {url}")
@@ -107,16 +159,19 @@ def list_upstream_stable_versions(
             version = match.group(1)
             if parse_version(version) >= min_parsed:
                 discovered.add(version)
-                page_supported += 1
+                if known_versions is not None and version in known_versions:
+                    page_known_or_older += 1
+                else:
+                    page_new_supported += 1
             else:
-                page_older_stable += 1
+                page_known_or_older += 1
 
-        if page_supported == 0 and page_older_stable > 0:
-            older_only_pages += 1
-            if older_only_pages >= 2:
+        if page_new_supported == 0 and page_known_or_older > 0:
+            settled_pages += 1
+            if settled_pages >= 2:
                 break
         else:
-            older_only_pages = 0
+            settled_pages = 0
 
         link_header = headers.get("Link") or headers.get("link")
         if link_header is not None:

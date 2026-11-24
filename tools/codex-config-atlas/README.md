@@ -1,6 +1,6 @@
 # Codex Config Atlas
 
-> **Routine release updates:** Follow the step-by-step [Maintenance SOP](MAINTENANCE.md) (`sync-releases` + `scripts/verify.sh`).
+> **Routine release updates:** Read only [MAINTENANCE.md](MAINTENANCE.md) and run its two commands (`sync-releases` + `scripts/verify.sh`); reading `src/`, `web/`, or `tests/` is unnecessary for routine schema sync.
 
 ## Why this exists
 

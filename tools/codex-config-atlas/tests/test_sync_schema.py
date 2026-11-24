@@ -28,6 +28,7 @@ from codex_config_atlas.registry import (
 from codex_config_atlas.upstream import (
     github_request_headers,
     list_upstream_stable_versions,
+    resolve_tags_git_ls_remote,
 )
 
 VERSION = "0.148.0"
@@ -570,6 +571,95 @@ class UpstreamDiscoveryAndReleaseSyncTests(unittest.TestCase):
         self.assertEqual(discovered, ["0.149.0", "0.150.0"])
         self.assertEqual(len(calls), 2)
 
+    def test_early_pagination_stop_and_batch_ls_remote_tag_resolution(self) -> None:
+        pages = [
+            (
+                [
+                    {
+                        "tag_name": "rust-v0.151.0",
+                        "draft": False,
+                        "prerelease": False,
+                        "published_at": "2026-09-05T00:00:00Z",
+                    }
+                ],
+                {"Link": '<https://api.github.com/r?page=2>; rel="next"'},
+            ),
+            (
+                [
+                    {
+                        "tag_name": "rust-v0.150.0",
+                        "draft": False,
+                        "prerelease": False,
+                        "published_at": "2026-09-04T00:00:00Z",
+                    }
+                ],
+                {"Link": '<https://api.github.com/r?page=3>; rel="next"'},
+            ),
+            (
+                [
+                    {
+                        "tag_name": "rust-v0.149.0",
+                        "draft": False,
+                        "prerelease": False,
+                        "published_at": "2026-09-03T00:00:00Z",
+                    }
+                ],
+                {"Link": '<https://api.github.com/r?page=4>; rel="next"'},
+            ),
+            (
+                [
+                    {
+                        "tag_name": "rust-v0.148.0",
+                        "draft": False,
+                        "prerelease": False,
+                        "published_at": "2026-09-02T00:00:00Z",
+                    }
+                ],
+                {"Link": '<https://api.github.com/r?page=5>; rel="next"'},
+            ),
+        ]
+        calls: list[str] = []
+
+        def fake_fetch_page(
+            url: str, _timeout: float, _max_bytes: int
+        ) -> tuple[list[object], dict[str, str]]:
+            calls.append(url)
+            return pages[len(calls) - 1]
+
+        discovered = list_upstream_stable_versions(
+            min_version="0.129.0",
+            timeout_seconds=2.0,
+            fetch_page=fake_fetch_page,
+            known_versions={"0.148.0", "0.149.0", "0.150.0"},
+        )
+        self.assertEqual(discovered, ["0.149.0", "0.150.0", "0.151.0"])
+        self.assertEqual(len(calls), 3)
+
+        tag_obj_sha = "1" * 40
+        peeled_commit_sha = "2" * 40
+        lightweight_sha = "3" * 40
+        ls_remote_out = (
+            f"{tag_obj_sha}\trefs/tags/rust-v0.150.0\n"
+            f"{peeled_commit_sha}\trefs/tags/rust-v0.150.0^{{}}\n"
+            f"{lightweight_sha}\trefs/tags/rust-v0.151.0\n"
+        )
+        with patch(
+            "codex_config_atlas.upstream.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=["git", "ls-remote"], returncode=0, stdout=ls_remote_out, stderr=""
+            ),
+        ):
+            resolved = resolve_tags_git_ls_remote(
+                ["rust-v0.150.0", "rust-v0.151.0"], timeout_seconds=5.0
+            )
+        self.assertEqual(
+            resolved,
+            {
+                "rust-v0.150.0": peeled_commit_sha,
+                "rust-v0.151.0": lightweight_sha,
+            },
+        )
+
     def test_sync_releases_supports_dry_run_and_stops_on_incompatible_schema(
         self,
     ) -> None:
@@ -619,6 +709,10 @@ class UpstreamDiscoveryAndReleaseSyncTests(unittest.TestCase):
                 out = io.StringIO()
                 err = io.StringIO()
                 with (
+                    patch(
+                        "codex_config_atlas.cli.resolve_tags_git_ls_remote",
+                        return_value={"rust-v0.149.0": commit_149},
+                    ),
                     patch(
                         "codex_config_atlas.cli._resolve_tag_commit",
                         side_effect=fake_resolve,
