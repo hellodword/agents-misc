@@ -40,7 +40,7 @@ def worker(options):
                 json.dumps(result, ensure_ascii=False), encoding="utf-8"
             )
             return 0
-        except Exception:
+        except Exception:  # noqa: BLE001 — top-level worker boundary records any scenario fault and screenshot
             traceback.print_exc()
             capture(output / "failure.png")
             return 1
@@ -142,12 +142,12 @@ def supervise(options):
                     raise TimeoutError("Failure screenshot exceeded five seconds")
                 if win32process.GetExitCodeProcess(capture_process) != 0:
                     raise RuntimeError("Failure screenshot process failed")
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 — includes pywintypes.error on Win32
                 report["screenshot_error"] = str(error)
             finally:
                 if capture_process is not None:
                     capture_process.Close()
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 — includes pywintypes.error; ensure Job cleanup runs
         report["reason"], report["error"] = "supervisor_error", str(error)
     finally:
         try:
@@ -173,7 +173,7 @@ def supervise(options):
                 if time.monotonic() >= deadline:
                     break
                 time.sleep(0.05)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 — record Win32 Job query/termination errors in report.json
             report["cleanup_error"] = str(error)
         finally:
             for handle in (process, job):
@@ -219,7 +219,7 @@ def main():
         parser.error("Launch run.py with --controls-python's interpreter")
     try:
         return supervise(options)
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 — CLI entrypoint reports unhandled setup faults to stderr
         print(str(error), file=sys.stderr)
         return 1
 

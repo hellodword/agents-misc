@@ -1,7 +1,7 @@
 """Copy into the tested project and replace selectors/assertions for its app."""
 
-import json
 import ctypes
+import json
 import subprocess
 import time
 from pathlib import Path
@@ -10,8 +10,8 @@ from support import Inputs, locate, wait_for
 
 
 def run(options):
-    from PIL import ImageGrab
     import psutil
+    from PIL import ImageGrab
     from pywinauto import Application, Desktop, keyboard, mouse
 
     output = Path(options["output"])

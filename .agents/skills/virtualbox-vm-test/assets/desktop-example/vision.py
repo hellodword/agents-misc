@@ -31,7 +31,7 @@ def main():
             )
         )
         return 0
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 — serialize any matcher/decode fault to JSON stderr
         print(json.dumps({"error": str(error)}), file=sys.stderr)
         return 1
 

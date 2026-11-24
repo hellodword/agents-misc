@@ -1,14 +1,14 @@
 ---
 name: atomic-commit
-description: Create one narrow, verified, reviewable commit using explicit staging and repository message conventions. Use only after the user, task, or project policy authorizes a commit; do not trigger merely because work has multiple steps or validation passed.
+description: Create one narrow, verified, reviewable commit (or emit the exact commit command when requested) using explicit staging and repository message conventions. Use only after the user, task, approved staged plan, or project policy authorizes a commit; do not trigger merely because work has multiple steps or validation passed.
 ---
 
 # Atomic Commit
 
-1. Use commit authorization already provided by the user, task, or project policy and stay within its scope. Do not ask again. If no authorization exists, leave the changes uncommitted.
-2. Verify that the change is semantically complete and its selected validation passed. Review `git status --short` and the task diff, preserving unrelated work.
-3. Check the intended commit against the root safety rules. Include fixtures, baselines, or generated sources only when they are intentional project inputs.
-4. Stage explicit task paths only. Never use bulk staging or force-add. Inspect the staged diff for unrelated or accidental content before committing.
-5. Follow the repository's message convention. Otherwise use an appropriate Conventional Commit type and an English imperative subject without a trailing period. Add a body when needed to explain coupled changes or compatibility.
-6. If `AI_COMMIT_COAUTHOR` is non-empty, append its value as the final `Co-authored-by:` trailer. Do not expose other environment values.
-7. Commit non-interactively and report the hash, scope, validation, and limitations. If changes cannot be separated safely or commit creation fails, preserve user work and report the blocker without widening staging.
+1. Confirm commit authorization from the user, task, approved staged execution plan (for its defined local commit checkpoints), or project policy, and stay within its scope without asking again. Leave changes uncommitted when unauthorized.
+2. Verify that the unit of work is semantically complete and its selected validation passed. Review `git status --short` and the diff while preserving unrelated work.
+3. Verify root safety rules: exclude secrets, local runtime state, and temporary captures; include synthetic fixtures, baselines, or generated sources only when they are intentional tracked inputs.
+4. If the user asks for commit commands rather than direct commit creation (for example, to sign with a host hardware key), output the exact `git add -- <explicit-paths> && git commit -m ...` command after completing the status and diff checks above, without modifying Git history.
+5. Stage explicit task file paths only (`git add -- <file>...`). Never use bulk staging (`.`, `-A`, `--all`) or `-f`. Inspect `git diff --cached` before committing.
+6. Follow the repository's commit message convention; otherwise use Conventional Commits with an English imperative subject and no trailing period, adding a body when needed for coupled changes or compatibility context. If `AI_COMMIT_COAUTHOR` is non-empty, append `Co-authored-by: <value>` as the final trailer without exposing other environment variables.
+7. Commit non-interactively and report the commit hash, scope, validation, and any remaining limitations. If unrelated edits prevent safe separation or commit creation fails, preserve user work and report the blocker without widening staging.

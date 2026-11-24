@@ -44,6 +44,7 @@ def locate(python, screenshot, template, timeout=10):
         encoding="utf-8",
         capture_output=True,
         timeout=timeout,
+        check=False,
     )
     if result.returncode:
         raise RuntimeError(result.stderr or result.stdout)

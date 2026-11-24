@@ -20,7 +20,10 @@ def main():
     parser.add_argument(
         "--block-uia",
         action="store_true",
-        help="Acceptance case: block WM_GETOBJECT until the outer runner terminates this process",
+        help=(
+            "Acceptance case: block WM_GETOBJECT until the outer runner "
+            "terminates this process"
+        ),
     )
     args = parser.parse_args()
     edit = None
