@@ -1,46 +1,28 @@
 # Nix Development Environments and Outputs
 
-The usual working environment is a Nix-based devcontainer. Prefer project development shells for tools that build, run, and validate the project so work can proceed without changing the host.
+Prefer project Nix development shells (`nix develop .#<shell> --command ...`) so build, validation, and missing-tool additions remain reproducible without mutating the host.
 
-## Autonomous environment work
+## Environments and Just entrypoints
 
-- Add missing project execution tools to the appropriate project shell and retry the affected command. If no flake exists, creating a minimal development shell is authorized as part of the task; retain useful project configuration.
-- Start a new ordinary project with `devShells.<system>.default`. Preserve existing shell names and structure. Add a named shell when real toolchain or environment isolation requires it, without creating shells for symmetry.
-- Prefer existing locked inputs when adequate. For a new flake, prefer `github:NixOS/nixpkgs/nixos-unstable` and let the generated `flake.lock` pin it. Update inputs through Nix when needed; do not align them to an unrelated container revision.
-- Run project execution tools through `nix develop --command <command>` or inside an entered shell. Select an established named shell explicitly, for example `nix develop .#dev --command <command>`.
-- Diagnose host, device, container, display, filesystem, or permission limitations when a project tool declaration cannot solve them. Missing project execution tools do not need a separate troubleshooting workflow.
+- Add missing execution tools to the appropriate project `devShell` and retry the command; creating a minimal flake shell is authorized when none exists. Start greenfield projects with `devShells.<system>.default` and `github:NixOS/nixpkgs/nixos-unstable` pinned in `flake.lock`, adding named shells only for real toolchain or platform isolation.
+- Keep `just` recipes as thin outer entrypoints (`just <recipe>`): enter `nix develop` only for recipes that need shell dependencies, and place non-trivial multi-step logic in reusable scripts under `scripts/` using structured argument lists.
+- A development shell does not authorize adding `packages`, `apps`, `checks`, `formatter`, modules, or overlays; expose those outputs only when explicitly adopted by the project or user.
 
-## Just command entrypoints
+## Source handling and cross-repo locks
 
-- When introducing a Nix/Just workflow, use Just as an outer command entrypoint supplied by the surrounding environment, separate from project development-shell dependencies. Preserve established project conventions unless the task changes them.
-- Invoke recipes directly as `just <recipe>` and keep them as thin wrappers. A recipe that needs the project environment calls `nix develop --command <tool-or-script>`; commands and scripts that need no Nix environment run directly.
-- If Just is unavailable, report the external prerequisite and continue through the underlying commands where practical. Installation follows the existing authorization policy.
-
-## Nix product outputs require an explicit choice
-
-- A development shell does not authorize adding packages, apps, checks, formatter, modules, or overlays. Add these only when the user or project explicitly adopts the interface; pure Nix products may expose outputs required by their stated product scope.
-- An existing output authorizes maintaining that interface, not unrelated outputs. Preserve its consumer contract.
-- Keep flake wiring understandable. Extract reusable logic under `nix/` when useful; do not create empty structure.
+- Never use a `path:` flake reference to bypass Git source filtering. To expose new durable, non-secret, non-ignored files to a Git-backed flake before committing, mark explicit file paths with `git add -N -- <file>...` (never directories, globs, or `-f`) and report them.
+- When updating a flake input locked to a local commit in a sibling repository that has not been pushed to its remote URL, keep the public URL in `flake.nix` and resolve objects locally via transient Git config:
+  `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="url.file:///abs/path/to/repo.insteadOf" GIT_CONFIG_VALUE_0="https://github.com/owner/repo.git" nix flake update <input>`
 
 ## Project-owned Playwright browsers
 
-- Preserve an existing browser source and project policy; ordinary test runs do not call for a migration. For a new Playwright setup in a Nix project, prefer Chromium from locked nixpkgs when the target platform supports it. Branded Google Chrome requires a product need and authorization for the unfree dependency.
-- When using a Nix browser, set an explicit executable path through the project's native Playwright configuration and preserve its existing configuration interface. Fail clearly when that executable is unavailable; do not silently fall back to another browser. No shared helper or new environment-variable convention is required.
-- Run an actual project browser smoke flow on initial provisioning and relevant browser, Playwright, or launch-configuration changes. Separately pinned versions do not establish compatibility; resolve mismatches through the owning inputs or project configuration.
-- Follow the framework and project sandbox settings. For a trusted local E2E flow with an actual sandbox launch failure, inspect project requirements and container limitations; use native `chromiumSandbox: false` in project configuration when needed. If the project explicitly requires an enabled sandbox, fix the environment or report the blocker. Container detection alone does not justify overriding that policy.
+- Preserve the project's configured browser source. For greenfield Nix Playwright setups on supported platforms, pass locked `pkgs.chromium` explicitly via native Playwright configuration without silent fallback downloads (branded Chrome requires explicit product need and unfree authorization). Run a real browser smoke flow when provisioning or changing browser/Playwright wiring; use `chromiumSandbox: false` only when container limitations require it and project policy permits.
 
 ## Remote NixOS VM tests
 
-- Preserve a working project-local VM test flow. When remote execution is selected or local KVM is unavailable, use a prepared HTTP MCP executor and the VM test rule.
-- Evaluate with the project's locked nixpkgs in the client environment. Transfer derivations through the service-issued binary cache and submit a sandbox test build to the physical host's Nix daemon.
-- Require `qemu.forceAccel = true`. Initial acceptance combines administrator-confirmed daemon sandbox policy with a fresh multi-node test that starts its guests and passes assertions on host KVM.
-- Compilation scheduling belongs to the host daemon; node CPUs and memory belong to the test definition. Collect logs and recorded outputs, and use a fresh top-level run identity for each new test execution.
+- Reuse working local VM flows when available; when local KVM is unavailable or remote execution is selected, evaluate against the project's locked `nixpkgs` (`qemu.forceAccel = true`) and submit via a prepared HTTP MCP executor under the VM test rule, keeping build compilation on the host daemon and guest CPU/RAM in the test definition.
 
-## Source handling
+## Validation
 
-- Do not use a `path:` flake reference to bypass Git source filtering. If a required durable file is untracked, use the root rule's exact-path intent-to-add procedure and report it.
-
-## Focused validation
-
-- For a shell tool change, verify the tool and retry the command in that shell. Routine code, documentation, or tool additions do not call for `nix build` or a full `nix flake check`.
-- For an adopted product output, validate the affected output. Evaluate broader flake/check wiring only when that boundary changes or project policy requires it; choose targeted builds before a full repository gate.
+- Distinguish **configuration evaluation** (`nix flake check --no-build --no-write-lock-file`, which cheaply catches cross-module option and wiring errors across all outputs without booting VMs) from **derivation builds and VM test execution**.
+- Routine code, doc, or dev-shell edits use focused shell checks; validate adopted Nix outputs and affected consumers when their inputs or wiring change. On dirty Git trees, batch multiple target attributes into a single `nix build` invocation to avoid repeated store source copies.

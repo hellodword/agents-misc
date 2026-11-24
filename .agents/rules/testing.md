@@ -1,24 +1,19 @@
 # Testing and Validation
 
-Choose validation from changed behavior, risk, existing coverage, and project gates. These are useful options, not a requirement to add a new test for every touched file:
+Select validation proportionate to changed behavior, failure risk, and project gates:
 
-| Boundary                                               | Focused validation                       |
-| ------------------------------------------------------ | ---------------------------------------- |
-| Pure logic                                             | Unit test                                |
-| Database, filesystem, HTTP, process, or FFI            | Integration test                         |
-| API, config, CLI, protocol, or persisted format        | Contract test and example                |
-| Persisted-data transition                              | Required supported data/schema paths     |
-| Generated artifact                                     | Generator plus a consuming build or test |
-| UI state or interaction                                | Component or widget test                 |
-| Browser-specific behavior or a browser-only regression | Project-owned E2E                        |
+| Boundary                                       | Focused validation                       |
+| ---------------------------------------------- | ---------------------------------------- |
+| Pure logic or state machine                    | Unit test                                |
+| Database, filesystem, HTTP, process, or FFI    | Integration test                         |
+| API, config, CLI, protocol, or persisted state | Contract test                            |
+| Generated artifact                             | Generator plus a consuming build or test |
+| UI state or interaction                        | Component or widget test                 |
+| Real-browser behavior or regression            | Project-owned browser E2E                |
 
-- Run focused checks first. Broaden when build/CI wiring, dependency graphs, public shared contracts, migration infrastructure, generated infrastructure, or project policy requires it.
-- Keep time fixed, randomness seeded, temporary directories isolated, and tests independent of execution order.
-- Avoid real network access outside an explicit integration scope. Use small synthetic fixtures, never real user data.
-- Add or extend tests when they provide meaningful coverage of observable behavior, a supported contract, or a concrete failure risk. Reuse existing coverage; simple reversible changes can be verified through existing checks or direct inspection.
-- Assert meaningful outcomes at the smallest suitable boundary. Avoid tests that merely repeat private implementation steps or check incidental documentation wording, source-code spelling, or implementation shape.
-- Do not set an arbitrary coverage percentage. Cover important decisions, contracts, failures, and regressions.
-- Attribute failures as introduced, pre-existing, or environment-caused with evidence. Retry the narrow command after a relevant change or to resolve uncertainty, rather than repeating an unchanged failure mechanically.
-- For Go changes involving goroutines, channels, mutexes, atomics, shared maps, slices or caches, workers, concurrent HTTP handlers, database connection lifecycle, context cancellation, timers, watchers, or signals, run the affected package or command with `go test -race`. If the race detector is unavailable in the declared environment, report that limitation instead of silently substituting an ordinary test.
-- Use browser E2E only for browser-specific behavior, a primary browser flow, or a regression that cannot be covered below that boundary.
-- Use AI visual review only when the user explicitly requests it.
+- Run focused checks first; widen to integration or full repository gates when shared contracts, build/CI wiring, dependency graphs, or project policy require it.
+- Keep time deterministic, randomness seeded, temporary directories isolated, and tests offline outside explicit integration scopes.
+- Test observable contracts, state transitions, error boundaries, and cross-layer invariants rather than private assembly steps, source wording, or echoed literal constants. When refactoring, consolidate fragmented regression checks into cohesive contract tests rather than accumulating narrow single-literal tests.
+- For boundaries governed by payload size, framing, encoding density, pagination, MTU, or QR/barcode capacity, test with synthetic payloads at realistic upper-bound dimensions rather than toy strings.
+- For Go code touching goroutines, channels, mutexes, atomics, shared maps/slices, concurrent handlers, timers, signals, or connection pools, run `go test -race` on the affected packages (reporting environment limits if the race detector is unavailable).
+- Use AI visual review only when explicitly requested by the user.

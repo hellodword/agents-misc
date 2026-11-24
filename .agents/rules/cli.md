@@ -1,26 +1,14 @@
 # Command-Line Interfaces
 
-## Language choice for greenfield CLIs
+Preserve an existing CLI's language, parser, output format, exit codes, and precedence.
 
-- Use Go when no constraint selects a language.
-- Use Rust when the CLI shares a Rust core or requires systems-level behavior.
-- Use Python for Python ecosystems, automation, or data-science workflows.
-- Use Node with TypeScript for frontend, npm, or browser-tooling workflows.
+## Greenfield defaults
 
-Preserve an existing project's language and command framework.
-
-## Framework defaults
-
-- Go: use `flag` for one command; use Cobra when subcommands or shell completion are required.
-- Rust: use clap derive.
-- Python: use `argparse` and the project's uv environment.
-- Node: use TypeScript, `tsc --noEmit`, an esbuild Node bundle, npm, and its lockfile.
+- Language: Go by default; Rust when sharing a Rust core or requiring systems-level control; Python (`argparse`) for Python/automation ecosystems; TypeScript (`tsc --noEmit`, esbuild bundle, npm) for frontend/browser tooling.
+- Go parser: standard `flag` for single-command tools; Cobra when subcommands or shell completions are needed. Rust parser: `clap` derive.
 
 ## Contract
 
-- Define command name, subcommands, positional arguments, flags, defaults, stdin, stdout, stderr, and exit status.
-- For greenfield behavior, start with flags and arguments. Do not create config files or environment overrides without a requirement.
-- Put the primary result on stdout and human diagnostics on stderr. Keep structured output free of progress text.
-- For a new CLI, return 0 for success, 2 for usage or input errors, and 1 for runtime failure. Preserve an established exit-status contract.
-- Preserve scriptable output and existing precedence. Treat renames, defaults, output, exit codes, config, and environment behavior as compatibility-sensitive.
-- Validate parsing, representative output, stderr, exit status, and precedence when those behaviors change.
+- Start with explicit flags and arguments rather than inventing config files or environment overrides without a concrete use case.
+- Write primary machine-readable or generated output to `stdout` and human diagnostics/progress to `stderr`.
+- For new CLIs, exit `0` on success, `2` on usage/argument validation errors, and `1` on runtime failures. Test argument parsing, representative stdout/stderr separation, and exit codes when changing CLI contracts.

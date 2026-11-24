@@ -1,22 +1,19 @@
-# Web Frontends
+# Browser Web Frontends
 
-## Greenfield React application
+Apply to browser web applications and static web sites; native mobile, React Native, and desktop host shells follow their own platform conventions.
 
-- Use TypeScript strict mode with accessible semantics and project-owned styling tokens. The new-project route owns the initial framework and package-manager choices.
-- Produce a static single-page application. Pre-render known SEO or content routes; retain a correct SPA fallback for all other client routes.
-- In a Go or Rust monorepo, proxy `/api` during development. In production, let the backend or reverse proxy serve `build/client` with static assets and the correct SPA fallback.
-- Use ESLint with React Hooks rules, Prettier defaults, Vitest, and React Testing Library.
+## Greenfield browser React SPA
 
-## Existing or explicitly selected Vue application
+- Use TypeScript strict mode, accessible HTML semantics, and project-owned styling tokens (initial framework and package-manager defaults live in [New project](new-project.md)).
+- Build a static SPA, pre-rendering known SEO/content routes while serving a SPA fallback for client routes; proxy `/api` in monorepo development and serve `build/client` in production.
+- Default to ESLint with React Hooks rules, Prettier defaults, Vitest, and React Testing Library.
 
-- Preserve the established Vue toolchain and use TypeScript.
-- Use `vue-i18n` when localization is required.
-- Use Vitest and Vue Test Utils for component behavior.
+## Existing or selected Vue web application
 
-## Shared UI behavior
+- Preserve the project's Vue toolchain with TypeScript, `vue-i18n` when localized, and Vitest + Vue Test Utils for component behavior.
 
-- Keep user-visible copy, loading, empty, error, disabled, focus, and responsive states explicit.
-- Use semantic HTML, keyboard access, visible focus, labels, and sufficient contrast.
-- Apply relevant WCAG 2.2 A/AA success criteria to changed behavior; do not claim whole-product conformance without a full audit.
-- Validate untrusted content before rendering. Do not bypass framework escaping without a reviewed sanitizer and contract.
-- Prefer component tests. Use project-owned browser E2E only for behavior that depends on a real browser boundary.
+## Shared browser UI behavior
+
+- Make loading, empty, error, disabled, keyboard-focus, and responsive states explicit.
+- Apply relevant WCAG 2.2 A/AA criteria (semantic landmarks, labels, keyboard navigation, contrast) to changed views without claiming whole-product conformance unverified.
+- Escape or sanitize untrusted content under an explicit contract; prefer component tests and reserve browser E2E for real-browser boundaries.
