@@ -527,7 +527,7 @@ class UpstreamDiscoveryAndReleaseSyncTests(unittest.TestCase):
                 {
                     "Link": (
                         "<https://api.github.com/repos/openai/codex/releases"
-                        '?per_page=50&page=2>; rel="next"'
+                        '?per_page=25&page=2>; rel="next"'
                     )
                 },
             ),
@@ -549,7 +549,7 @@ class UpstreamDiscoveryAndReleaseSyncTests(unittest.TestCase):
                 {
                     "Link": (
                         "<https://api.github.com/repos/openai/codex/releases"
-                        '?per_page=50&page=1>; rel="prev"'
+                        '?per_page=25&page=1>; rel="prev"'
                     )
                 },
             ),

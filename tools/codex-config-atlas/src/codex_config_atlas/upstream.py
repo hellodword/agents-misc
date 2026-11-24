@@ -29,9 +29,9 @@ from .toml_generate import generate_toml
 
 GITHUB_API_HOST = "api.github.com"
 GITHUB_RELEASES_URL = "https://api.github.com/repos/openai/codex/releases"
-RELEASES_PER_PAGE = 50
-MAX_RELEASES_PAGES = 100
-MAX_RELEASES_PAGE_BYTES = 8 * 1024 * 1024
+RELEASES_PER_PAGE = 25
+MAX_RELEASES_PAGES = 200
+MAX_RELEASES_PAGE_BYTES = 16 * 1024 * 1024
 STABLE_TAG_RE = re.compile(
     r"^rust-v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$"
 )
@@ -79,6 +79,7 @@ def list_upstream_stable_versions(
 ) -> list[str]:
     min_parsed = parse_version(min_version)
     discovered: set[str] = set()
+    older_only_pages = 0
 
     for page in range(1, MAX_RELEASES_PAGES + 1):
         url = f"{GITHUB_RELEASES_URL}?per_page={RELEASES_PER_PAGE}&page={page}"
@@ -86,6 +87,8 @@ def list_upstream_stable_versions(
         if not items:
             break
 
+        page_supported = 0
+        page_older_stable = 0
         for item in items:
             if not isinstance(item, dict):
                 raise ValueError(f"invalid release entry on page {page} from {url}")
@@ -104,6 +107,16 @@ def list_upstream_stable_versions(
             version = match.group(1)
             if parse_version(version) >= min_parsed:
                 discovered.add(version)
+                page_supported += 1
+            else:
+                page_older_stable += 1
+
+        if page_supported == 0 and page_older_stable > 0:
+            older_only_pages += 1
+            if older_only_pages >= 2:
+                break
+        else:
+            older_only_pages = 0
 
         link_header = headers.get("Link") or headers.get("link")
         if link_header is not None:

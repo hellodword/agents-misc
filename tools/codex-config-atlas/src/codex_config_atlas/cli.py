@@ -6,6 +6,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
@@ -117,40 +118,52 @@ def _schemas_dir_from_args(args: argparse.Namespace) -> Path:
 def _fetch_limited_response(
     url: str, *, timeout_seconds: float, max_bytes: int
 ) -> tuple[bytes, Mapping[str, str]]:
-    request = urllib.request.Request(url, headers=github_request_headers(url))
-    try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310
-            headers = dict(response.headers.items())
-            content_length = response.headers.get("Content-Length")
-            if content_length is not None:
-                try:
-                    declared_size = int(content_length)
-                except ValueError as exc:
-                    raise ValueError(f"invalid Content-Length from {url}") from exc
-                if declared_size < 0 or declared_size > max_bytes:
-                    raise ValueError(
-                        f"response from {url} exceeds maximum {max_bytes} bytes"
-                    )
+    for attempt in range(3):
+        request = urllib.request.Request(url, headers=github_request_headers(url))
+        try:
+            with urllib.request.urlopen(  # noqa: S310
+                request, timeout=timeout_seconds
+            ) as response:
+                headers = dict(response.headers.items())
+                content_length = response.headers.get("Content-Length")
+                if content_length is not None:
+                    try:
+                        declared_size = int(content_length)
+                    except ValueError as exc:
+                        raise ValueError(
+                            f"invalid Content-Length from {url}"
+                        ) from exc
+                    if declared_size < 0 or declared_size > max_bytes:
+                        raise ValueError(
+                            f"response from {url} exceeds maximum {max_bytes} bytes"
+                        )
 
-            payload = bytearray()
-            while True:
-                chunk = response.read(min(64 * 1024, max_bytes + 1 - len(payload)))
-                if not chunk:
-                    break
-                payload.extend(chunk)
-                if len(payload) > max_bytes:
-                    raise ValueError(
-                        f"response from {url} exceeds maximum {max_bytes} bytes"
+                payload = bytearray()
+                while True:
+                    chunk = response.read(
+                        min(64 * 1024, max_bytes + 1 - len(payload))
                     )
-            return bytes(payload), headers
-    except urllib.error.HTTPError as exc:
-        if urlsplit(url).hostname == GITHUB_API_HOST and exc.code in {403, 429}:
-            raise RuntimeError(
-                f"GitHub API rate limit or access error (HTTP {exc.code}) for {url}; "
-                "set GITHUB_TOKEN or GH_TOKEN for authenticated quota, "
-                "or wait for reset"
-            ) from exc
-        raise
+                    if not chunk:
+                        break
+                    payload.extend(chunk)
+                    if len(payload) > max_bytes:
+                        raise ValueError(
+                            f"response from {url} exceeds maximum {max_bytes} bytes"
+                        )
+                return bytes(payload), headers
+        except urllib.error.HTTPError as exc:
+            exc.close()
+            if exc.code in {502, 503, 504} and attempt < 2:
+                time.sleep(1.0 * (attempt + 1))
+                continue
+            if urlsplit(url).hostname == GITHUB_API_HOST and exc.code in {403, 429}:
+                raise RuntimeError(
+                    f"GitHub API rate limit or access error (HTTP {exc.code}) "
+                    f"for {url}; set GITHUB_TOKEN or GH_TOKEN for authenticated "
+                    "quota, or wait for reset"
+                ) from exc
+            raise
+    raise RuntimeError(f"exhausted retries fetching {url}")
 
 
 def _fetch_limited(url: str, *, timeout_seconds: float, max_bytes: int) -> bytes:
