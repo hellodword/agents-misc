@@ -1,0 +1,9 @@
+{
+  "commitSha": "0a94398fa60c4fac0e7659e4213a0a36e613dd46",
+  "fetchedAt": "2026-11-25T00:40:02Z",
+  "schemaFile": "codex-rs/core/config.schema.json",
+  "schemaSha256": "sha256:5840f21e4077914874d4e15e1557baaf1bd614c2d7b00f6175f6cfc8046f1cb3",
+  "schemaUrl": "https://raw.githubusercontent.com/openai/codex/0a94398fa60c4fac0e7659e4213a0a36e613dd46/codex-rs/core/config.schema.json",
+  "tag": "rust-v0.167.1",
+  "version": "0.167.1"
+}

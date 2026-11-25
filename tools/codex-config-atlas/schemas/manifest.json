@@ -396,6 +396,54 @@
       "schemaPath": "rust-v0.167.0/config.schema.json",
       "tag": "rust-v0.167.0",
       "version": "0.167.0"
+    },
+    {
+      "metadataPath": "rust-v0.167.1/metadata.json",
+      "schemaPath": "rust-v0.167.1/config.schema.json",
+      "tag": "rust-v0.167.1",
+      "version": "0.167.1"
+    },
+    {
+      "metadataPath": "rust-v0.167.2/metadata.json",
+      "schemaPath": "rust-v0.167.2/config.schema.json",
+      "tag": "rust-v0.167.2",
+      "version": "0.167.2"
+    },
+    {
+      "metadataPath": "rust-v0.168.0/metadata.json",
+      "schemaPath": "rust-v0.168.0/config.schema.json",
+      "tag": "rust-v0.168.0",
+      "version": "0.168.0"
+    },
+    {
+      "metadataPath": "rust-v0.169.0/metadata.json",
+      "schemaPath": "rust-v0.169.0/config.schema.json",
+      "tag": "rust-v0.169.0",
+      "version": "0.169.0"
+    },
+    {
+      "metadataPath": "rust-v0.169.1/metadata.json",
+      "schemaPath": "rust-v0.169.1/config.schema.json",
+      "tag": "rust-v0.169.1",
+      "version": "0.169.1"
+    },
+    {
+      "metadataPath": "rust-v0.170.0/metadata.json",
+      "schemaPath": "rust-v0.170.0/config.schema.json",
+      "tag": "rust-v0.170.0",
+      "version": "0.170.0"
+    },
+    {
+      "metadataPath": "rust-v0.171.0/metadata.json",
+      "schemaPath": "rust-v0.171.0/config.schema.json",
+      "tag": "rust-v0.171.0",
+      "version": "0.171.0"
+    },
+    {
+      "metadataPath": "rust-v0.172.0/metadata.json",
+      "schemaPath": "rust-v0.172.0/config.schema.json",
+      "tag": "rust-v0.172.0",
+      "version": "0.172.0"
     }
   ]
 }
