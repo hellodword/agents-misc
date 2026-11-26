@@ -15,7 +15,7 @@
 ### 第 1 步：自动发现并渐进同步缺失正式版
 
 ```bash
-nix run --accept-flake-config .#codex-config-atlas -- sync-releases --repo . --intent-to-add
+nix run .#codex-config-atlas -- sync-releases --repo . --intent-to-add
 ```
 
 - 该命令会自动分页查询上游正式发布的稳定版（自动过滤 `draft`、`prerelease` 与非 `rust-v<major>.<minor>.<patch>` 标签），按版本从旧到新逐个下载、完成语义与 TOML 预检、原子写入 `schemas/`，并对新增文件执行精确路径 `git add -N`（以便后续 Nix Flake 构建可见）。
@@ -73,9 +73,9 @@ bash tools/codex-config-atlas/scripts/verify.sh
 
 ## 四、异常情况速查表（无需猜测，按表执行）
 
-| 看到的输出 / 报错                                        | 唯一正确动作                                                                                                                                                                                                                                                                                                                               |
-| :------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `up to date: ...`                                        | 直接结束并汇报当前已是最新正式版，无需改动任何文件。                                                                                                                                                                                                                                                                                       |
-| `GitHub API rate limit or access error (HTTP 403 / 429)` | 若 `command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1` 成功，带令牌重试一次：`GH_TOKEN="$(gh auth token)" nix run --accept-flake-config .#codex-config-atlas -- sync-releases --repo . --intent-to-add`；否则若报错中 `preserved synced versions` 不为 `none` 则对已保留版本跑一次 `verify.sh`，随后直接停止并汇报配额阻塞。 |
-| `ESCALATION REQUIRED for Codex <V>`                      | 若报错中 `preserved synced versions` 不为 `none`，对已保留版本运行一次 `bash tools/codex-config-atlas/scripts/verify.sh` 确认健康（若为 `none` 则无需运行）；**严禁修改任何代码或测试**，立刻停手并将失败版本号 `<V>` 与完整报错原样上报。                                                                                                 |
-| `untracked files under ... are invisible to Nix flakes`  | 复制报错提示中给出的精确 `git add -N -- ...` 命令执行一次，再重跑 `bash tools/codex-config-atlas/scripts/verify.sh`。                                                                                                                                                                                                                      |
+| 看到的输出 / 报错                                        | 唯一正确动作                                                                                                                                                                                                                                                                                                         |
+| :------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `up to date: ...`                                        | 直接结束并汇报当前已是最新正式版，无需改动任何文件。                                                                                                                                                                                                                                                                 |
+| `GitHub API rate limit or access error (HTTP 403 / 429)` | 若 `command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1` 成功，带令牌重试一次：`GH_TOKEN="$(gh auth token)" nix run .#codex-config-atlas -- sync-releases --repo . --intent-to-add`；否则若报错中 `preserved synced versions` 不为 `none` 则对已保留版本跑一次 `verify.sh`，随后直接停止并汇报配额阻塞。 |
+| `ESCALATION REQUIRED for Codex <V>`                      | 若报错中 `preserved synced versions` 不为 `none`，对已保留版本运行一次 `bash tools/codex-config-atlas/scripts/verify.sh` 确认健康（若为 `none` 则无需运行）；**严禁修改任何代码或测试**，立刻停手并将失败版本号 `<V>` 与完整报错原样上报。                                                                           |
+| `untracked files under ... are invisible to Nix flakes`  | 复制报错提示中给出的精确 `git add -N -- ...` 命令执行一次，再重跑 `bash tools/codex-config-atlas/scripts/verify.sh`。                                                                                                                                                                                                |

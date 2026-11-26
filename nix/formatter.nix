@@ -1,6 +1,6 @@
 {
   lib,
-  nixpkgs,
+  pkgsFor,
   supportedSystems,
   treefmt-nix,
 }:
@@ -9,7 +9,7 @@ let
   projects = lib.genAttrs supportedSystems (
     system:
     let
-      pkgs = import nixpkgs { inherit system; };
+      pkgs = pkgsFor system;
       treefmtEval = treefmt-nix.lib.evalModule pkgs ../treefmt.nix;
     in
     {

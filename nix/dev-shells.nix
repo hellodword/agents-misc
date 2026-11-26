@@ -1,13 +1,13 @@
 {
   lib,
-  nixpkgs,
+  pkgsFor,
   supportedSystems,
 }:
 
 lib.genAttrs supportedSystems (
   system:
   let
-    pkgs = import nixpkgs { inherit system; };
+    pkgs = pkgsFor system;
     devShell = pkgs.mkShell {
       packages = with pkgs; [
         actionlint
@@ -33,9 +33,9 @@ lib.genAttrs supportedSystems (
             pythonPackages.playwright
           ]))
         ]
-        ++ lib.optionals pkgs.stdenv.isLinux [ pkgs.chromium ];
+        ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.chromium ];
       }
-      // lib.optionalAttrs pkgs.stdenv.isLinux {
+      // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
         PLAYWRIGHT_NIX_BROWSER_PATH = lib.getExe pkgs.chromium;
         PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1";
       }

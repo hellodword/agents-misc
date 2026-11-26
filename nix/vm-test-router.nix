@@ -79,7 +79,6 @@ let
           squashfsCompression = "zstd -Xcompression-level 6";
         };
         boot.loader.timeout = lib.mkForce 0;
-        boot.initrd.systemd.enable = false;
         boot.initrd.includeDefaultModules = false;
         swapDevices = [ ];
         users.users.root.initialHashedPassword = "!";

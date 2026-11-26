@@ -22,9 +22,9 @@ During an active turn, `agy` communicates with upstream model endpoints over TCP
 
 Polling those byte counters every `5 ms` (`200 Hz`) acts as a high-frequency scale at the container boundary without inspecting encrypted payloads:
 
-- **Request dispatch ($t_{\text{req}}$)**: Outbound `tx` jumps by `>= 120 B` while `rx` remains `< 90 B`, anchoring the moment the serialized prompt leaves the client.
-- **First token arrival ($t_{\text{first}}$)**: After prefill silence, inbound `rx` jumps by `>= 90 B` (above HTTP/2 control-frame noise), yielding $\text{TTFT} = t_{\text{first}} - t_{\text{req}}$ at millisecond resolution.
-- **Pure decode window ($T_{\text{decode}}$) and `ITL`**: Each subsequent `rx >= 90 B` burst marks a streamed chunk arrival. Inter-burst deltas form the inter-token/chunk latency distribution (`ITL` P50/P95), and $T_{\text{decode}} = t_{\text{last}} - t_{\text{first}}$ isolates pure token generation duration from prefill wait.
+- **Request dispatch ($t\_{\text{req}}$)**: Outbound `tx` jumps by `>= 120 B` while `rx` remains `< 90 B`, anchoring the moment the serialized prompt leaves the client.
+- **First token arrival ($t\_{\text{first}}$)**: After prefill silence, inbound `rx` jumps by `>= 90 B` (above HTTP/2 control-frame noise), yielding $\text{TTFT} = t_{\text{first}} - t_{\text{req}}$ at millisecond resolution.
+- **Pure decode window ($T\_{\text{decode}}$) and `ITL`**: Each subsequent `rx >= 90 B` burst marks a streamed chunk arrival. Inter-burst deltas form the inter-token/chunk latency distribution (`ITL` P50/P95), and $T_{\text{decode}} = t_{\text{last}} - t_{\text{first}}$ isolates pure token generation duration from prefill wait.
 
 When Netlink socket byte counters are masked by a sandbox kernel (such as gVisor `runsc`), `KernelSocketReader` falls back automatically to summing non-loopback interface counters from the container's dedicated `/proc/net/dev` namespace (`engine = "netdev"`).
 
@@ -49,8 +49,8 @@ Across a single prompt turn:
 2. **First valid chunk (`e.g. 4.35 s` — lock `TTFT`)**: Inbound `:443` bytes cross the content threshold; `agy-mon` locks live `TTFT = 4.35s` and switches the HUD to `▶ STREAM │ TTFT 4.35s` while recording subsequent chunk timestamps.
 3. **`PostInvocation` (`e.g. 12.10 s` — park trace)**: Model output finishes. `meter_client.py post` pops the active invocation, parks the sampler back into `0%` CPU sleep, selects the primary `:443` socket trace, and queues `ttft_ms`, `decode_ms`, `llm_ms`, `itl_p50`, `itl_p95`, `chunks`, and `rx_bytes` for token reconciliation.
 4. **`statusLine` reconciliation (`e.g. 12.20 s` — dual TPS settlement)**: `agy` invokes `statusLine` with updated `context_window.total_output_tokens`. `agy-mon` computes $\Delta N_{\text{out}} = N_{\text{new}} - N_{\text{prev}}$ and settles two complementary throughput metrics:
-   - **Pure streaming throughput (`TPS_gen` $= \Delta N_{\text{out}} / T_{\text{decode}}$)**: generation speed once streaming begins, excluding prefill and queueing latency.
-   - **End-to-end effective throughput (`TPS_eff` $= \Delta N_{\text{out}} / T_{\text{llm}}$)**: net token delivery rate across the entire invocation window (queueing + prefill + thinking + decode).
+   - **Pure streaming throughput (`TPS_gen` $= \Delta N\_{\text{out}} / T\_{\text{decode}}$)**: generation speed once streaming begins, excluding prefill and queueing latency.
+   - **End-to-end effective throughput (`TPS_eff` $= \Delta N\_{\text{out}} / T\_{\text{llm}}$)**: net token delivery rate across the entire invocation window (queueing + prefill + thinking + decode).
 5. **Asynchronous persistence**: A background worker writes the settled record to `~/.gemini/antigravity-cli/meter/metrics.db` using `PRAGMA journal_mode=TRUNCATE`, avoiding shared-memory `-shm` files across container bind mounts while letting `agy-perf` aggregate time-weighted throughput ($\sum \Delta N_{\text{out}} / \sum T$) at any time.
 
 ## 4. Anti-distortion calibrations

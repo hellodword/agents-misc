@@ -69,13 +69,13 @@ Nix packaging and generated-output checks live in
 Run the packaged CLI through its flake app:
 
 ```bash
-nix run --accept-flake-config .#codex-config-atlas -- current
-nix run --accept-flake-config .#codex-config-atlas -- sync-releases --repo . --dry-run
-nix run --accept-flake-config .#codex-config-atlas -- check-registry --schemas tools/codex-config-atlas/schemas
-nix run --accept-flake-config .#codex-config-atlas -- diff --schemas tools/codex-config-atlas/schemas --from 0.143.0 --to 0.144.1
-nix run --accept-flake-config .#codex-config-atlas -- diff-defaults --schemas tools/codex-config-atlas/schemas --from 0.143.0 --to 0.144.1
-nix run --accept-flake-config .#codex-config-atlas -- gen-toml --schemas tools/codex-config-atlas/schemas --version 0.144.1 --mode reference
-nix run --accept-flake-config .#codex-config-atlas -- gen-toml --schemas tools/codex-config-atlas/schemas --version 0.160.0 --mode example
+nix run .#codex-config-atlas -- current
+nix run .#codex-config-atlas -- sync-releases --repo . --dry-run
+nix run .#codex-config-atlas -- check-registry --schemas tools/codex-config-atlas/schemas
+nix run .#codex-config-atlas -- diff --schemas tools/codex-config-atlas/schemas --from 0.143.0 --to 0.144.1
+nix run .#codex-config-atlas -- diff-defaults --schemas tools/codex-config-atlas/schemas --from 0.143.0 --to 0.144.1
+nix run .#codex-config-atlas -- gen-toml --schemas tools/codex-config-atlas/schemas --version 0.144.1 --mode reference
+nix run .#codex-config-atlas -- gen-toml --schemas tools/codex-config-atlas/schemas --version 0.160.0 --mode example
 ```
 
 The CLI exposes these subcommands:
@@ -148,14 +148,14 @@ annotated tags to their peeled commit when supplying `--expected-commit`.
 Sync all missing stable releases (following the [Maintenance SOP](MAINTENANCE.md)):
 
 ```bash
-nix run --accept-flake-config .#codex-config-atlas -- sync-releases --repo . --intent-to-add
+nix run .#codex-config-atlas -- sync-releases --repo . --intent-to-add
 bash tools/codex-config-atlas/scripts/verify.sh
 ```
 
 Or register one explicit upstream version:
 
 ```bash
-nix run --accept-flake-config .#codex-config-atlas -- sync-schema --schemas tools/codex-config-atlas/schemas --version 0.148.0 --intent-to-add
+nix run .#codex-config-atlas -- sync-schema --schemas tools/codex-config-atlas/schemas --version 0.148.0 --intent-to-add
 ```
 
 Each candidate schema is preflight-checked (normalization, TOML determinism,
@@ -189,10 +189,10 @@ inspection, each selected comparison also writes a copyable `新增` / `移除` 
 documented CLI commands above followed by:
 
 ```bash
-nix build --no-link --accept-flake-config .#checks.x86_64-linux.codex-config-atlas-tests
-nix build --no-link --accept-flake-config .#checks.x86_64-linux.codex-config-atlas-registry
-nix build --no-link --accept-flake-config .#checks.x86_64-linux.codex-config-atlas-data
-nix build --no-link --accept-flake-config .#checks.x86_64-linux.codex-config-atlas-site
+nix build --no-link .#checks.x86_64-linux.codex-config-atlas-tests
+nix build --no-link .#checks.x86_64-linux.codex-config-atlas-registry
+nix build --no-link .#checks.x86_64-linux.codex-config-atlas-data
+nix build --no-link .#checks.x86_64-linux.codex-config-atlas-site
 ```
 
 The Python package, dependencies, current Codex version, schema inputs, and Web

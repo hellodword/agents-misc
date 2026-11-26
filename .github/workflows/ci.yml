@@ -16,66 +16,91 @@ jobs:
   build:
     name: Build and check Atlas
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     defaults:
       run:
         shell: bash
     env:
-      NIX_CONTAINER: atlas-ci
-      NIX_CONFIG: |
-        experimental-features = nix-command flakes
-        accept-flake-config = false
-        sandbox = false
-        fallback = true
+      NIX_IMAGE: docker.io/nixos/nix@sha256:53b5ec518b696373829ea305c3c07a8c870113e44648c88ec484ef078550fd4f
 
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
-      - name: Start Nix container
+      - name: Start isolated Nix container
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p "$RUNNER_TEMP/atlas-ci"
-          docker run --detach --name "$NIX_CONTAINER" \
-            --ulimit nofile=65536:65536 \
-            --mount "type=volume,source=$NIX_CONTAINER-store,target=/nix" \
-            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
-            --mount "type=bind,source=$RUNNER_TEMP/atlas-ci,target=/ci" \
+          set -euo pipefail
+          run_tag="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          state_dir="$RUNNER_TEMP/nix-ci-${run_tag}"
+          build_tmp="$RUNNER_TEMP/nix-build-${run_tag}"
+          container_name="nix-ci-${run_tag}"
+          store_volume="nix-ci-store-${run_tag}"
+
+          mkdir -p "$state_dir" "$build_tmp"
+          cat > "$state_dir/nix.conf" <<'CONFIG'
+          experimental-features = nix-command flakes
+          sandbox = false
+          accept-flake-config = false
+          cores = 0
+          fallback = true
+          max-substitution-jobs = 4
+          http-connections = 8
+          require-sigs = true
+          CONFIG
+
+          cat > "$state_dir/gitconfig" <<'GITCONFIG'
+          [safe]
+            directory = /workspace
+          GITCONFIG
+
+          nix_config="$(printf 'experimental-features = nix-command flakes\naccess-tokens = github.com=%s\n' "$GITHUB_TOKEN")"
+          delimiter="EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+          {
+            printf 'NIX_CI_STATE=%s\n' "$state_dir"
+            printf 'NIX_CI_BUILD_TMP=%s\n' "$build_tmp"
+            printf 'NIX_CI_CONTAINER=%s\n' "$container_name"
+            printf 'NIX_CI_STORE_VOLUME=%s\n' "$store_volume"
+            printf 'NIX_CONFIG<<%s\n%s\n%s\n' "$delimiter" "$nix_config" "$delimiter"
+          } >> "$GITHUB_ENV"
+
+          docker volume create "$store_volume" >/dev/null
+          NIX_CONFIG="$nix_config" docker run --detach --name "$container_name" \
+            --ulimit nofile=65536:1048576 \
             --workdir /workspace \
+            --mount "type=volume,source=$store_volume,target=/nix" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$state_dir,target=/ci" \
+            --mount "type=bind,source=$state_dir/gitconfig,target=/root/.gitconfig,readonly" \
+            --mount "type=bind,source=$build_tmp,target=/build" \
             --env NIX_CONFIG \
             --env NIX_USER_CONF_FILES=/ci/nix.conf \
-            docker.io/nixos/nix@sha256:53b5ec518b696373829ea305c3c07a8c870113e44648c88ec484ef078550fd4f \
-            sleep infinity
-          docker exec "$NIX_CONTAINER" git config --global --add safe.directory /workspace
+            --env TMPDIR=/build \
+            "$NIX_IMAGE" \
+            sleep infinity >/dev/null
 
-      - name: Configure binary caches
-        run: |
-          docker exec -i "$NIX_CONTAINER" bash -euo pipefail <<'BASH'
-          nix eval --raw --file nix/cache-config.nix public > /ci/nix.conf
-          if oranc=$(nix build --no-link --no-write-lock-file --print-out-paths .#oranc); then
-            listen=$(nix eval --raw --file nix/cache-config.nix listen)
-            substituter=$(nix eval --raw --file nix/cache-config.nix substituter)
-            nohup "$oranc/bin/oranc" server --listen "$listen" > /ci/oranc.log 2>&1 < /dev/null &
-            if curl --fail --silent --show-error --retry 3 --retry-connrefused \
-              --retry-delay 1 --connect-timeout 5 --max-time 15 \
-              "$substituter/nix-cache-info" > /dev/null; then
-              nix eval --raw --file nix/cache-config.nix ci > /ci/nix.conf
-              exit 0
-            fi
-            cat /ci/oranc.log
-          fi
-          printf '%s\n' '::warning::Shared binary cache unavailable; continuing with public caches and source builds.'
+          docker exec -i "$container_name" bash -euo pipefail <<'BASH'
+          nix eval --no-update-lock-file --impure --raw --expr \
+            '((builtins.getFlake "git+file:///workspace").inputs.core.lib.cache.mkCacheConfig { }).public.text' \
+            >> /ci/nix.conf
           BASH
 
-      - name: Check and build site
+      - name: Lint workflow, check Atlas, and export site
         run: |
-          docker exec -i "$NIX_CONTAINER" bash -euo pipefail <<'BASH'
-          nix build --no-link --no-write-lock-file --print-build-logs \
+          set -euo pipefail
+          docker exec -i "$NIX_CI_CONTAINER" bash -euo pipefail <<'BASH'
+          export PYTHONNOUSERSITE=1
+          nix develop --no-update-lock-file .#dev --command actionlint .github/workflows/ci.yml
+          nix build --no-link --no-update-lock-file --print-build-logs \
             .#checks.x86_64-linux.formatting \
             .#checks.x86_64-linux.codex-config-atlas-registry \
             .#checks.x86_64-linux.codex-config-atlas-data \
             .#checks.x86_64-linux.codex-config-atlas-site \
-            .#checks.x86_64-linux.codex-config-atlas-tests
-          site=$(nix build --no-link --no-write-lock-file --print-out-paths .#codex-config-atlas-site)
+            .#checks.x86_64-linux.codex-config-atlas-tests \
+            .#codex-config-atlas-site
+          site="$(nix build --no-link --no-update-lock-file --print-out-paths .#codex-config-atlas-site)"
           mkdir -p /ci/site
           cp -RL "$site/." /ci/site/
           BASH
@@ -83,13 +108,20 @@ jobs:
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
-          path: ${{ runner.temp }}/atlas-ci/site
+          path: ${{ env.NIX_CI_STATE }}/site
 
-      - name: Clean up container
+      - name: Tear down Nix container and store volume
         if: always()
         run: |
-          docker rm --force "$NIX_CONTAINER" || true
-          docker volume rm "$NIX_CONTAINER-store" || true
+          if [[ -n "${NIX_CI_CONTAINER:-}" ]]; then
+            docker rm --force "$NIX_CI_CONTAINER" >/dev/null 2>&1 || true
+          fi
+          if [[ -n "${NIX_CI_STORE_VOLUME:-}" ]]; then
+            docker volume rm --force "$NIX_CI_STORE_VOLUME" >/dev/null 2>&1 || true
+          fi
+          if [[ -n "${NIX_CI_STATE:-}" || -n "${NIX_CI_BUILD_TMP:-}" ]]; then
+            rm -rf -- "${NIX_CI_STATE:-}" "${NIX_CI_BUILD_TMP:-}" || true
+          fi
 
   deploy:
     name: Deploy Atlas

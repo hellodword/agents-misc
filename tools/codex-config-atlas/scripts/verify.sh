@@ -56,7 +56,7 @@ if [[ -n "$code_changes" ]]; then
 fi
 
 printf '==> Running CI-equivalent Nix checks on %s (pairwise historical diff check takes ~2-4 min)...\n' "$system" >&2
-nix build --no-link --accept-flake-config --no-write-lock-file --print-build-logs \
+nix build --no-link --no-update-lock-file --print-build-logs \
   ".#checks.${system}.formatting" \
   ".#checks.${system}.codex-config-atlas-registry" \
   ".#checks.${system}.codex-config-atlas-data" \

@@ -70,7 +70,7 @@ The [long-task plan](.agents/skills/long-task-plan/SKILL.md) keeps completion ev
   ```sh
   nix develop .#dev --command actionlint .github/workflows/ci.yml
   ```
-- The [CI workflow](.github/workflows/ci.yml) checks formatting, runs the four Atlas checks, and builds the site in a digest-pinned Nix container on pushes to `master` and manual dispatches, sharing one Nix store and exporting the site to GitHub Pages. Public binary caches live in [flake.nix](flake.nix), and CI reads the shared cache through a loopback `oranc` proxy configured by [nix/cache-config.nix](nix/cache-config.nix) with signature verification.
+- Flake inputs follow upstream `nixos-config/infra` (`core`). The [CI workflow](.github/workflows/ci.yml) configures public binary caches from `core`, validates workflow syntax and formatting, runs the four Atlas checks, and builds the site in an isolated digest-pinned Nix container on pushes to `master` and manual dispatches, exporting the site to GitHub Pages.
 - Format changed files with `nix fmt`. For Nix output or check wiring changes, run `nix flake check --no-build --no-write-lock-file` and build the affected checks.
 - Review the final diff and `git status --short --ignored`. Preserve and disclose relevant pre-existing ignored work, and follow the [temporary workspace and retention policy](AGENTS.md#temporary-workspace-and-retention).
 

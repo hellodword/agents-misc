@@ -19,8 +19,21 @@ def main() -> None:
         run("xorriso", "-osirrox", "on", "-indev", iso, "-extract", "/", directory)
         assert (root / "nix-store.squashfs").is_file(), "missing compressed store"
         assert (root / "EFI/BOOT/BOOTX64.EFI").is_file(), "missing EFI loader"
+        pvd = subprocess.run(
+            ("xorriso", "-indev", iso, "-pvd_info"),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert "Volume Id    : VMTESTROUTER" in (pvd.stdout + pvd.stderr), (
+            "missing VMTESTROUTER ISO volume label"
+        )
+        fstab = (pathlib.Path(system) / "etc/fstab").read_text()
+        assert "/dev/disk/by-label/VMTESTROUTER" in fstab, (
+            "missing VMTESTROUTER initrd mount in fstab"
+        )
         grub = (root / "EFI/BOOT/grub.cfg").read_text()
-        assert "VMTESTROUTER" in grub and "init=" + system + "/init" in grub
+        assert "init=" + system + "/init" in grub and "root=fstab" in grub
         # The default entry reads squashfs on demand rather than copying to RAM.
         first_boot = next(
             line for line in grub.splitlines() if line.strip().startswith("linux ")
