@@ -6,13 +6,13 @@ controller requests cannot select host programs, directories or devices.
 
 ## Execution environment
 
-| Role                  | Requirements                                                                                                                      |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| Development container | `vm-test-submit`, Nix with `nix-command` and `flakes`, the tested project's inputs, and HTTP access to the controller             |
-| Physical Linux host   | Hardware virtualization, sufficient RAM and disk, VirtualBox for labs, and multi-user Nix with working `/dev/kvm` for NixOS tests |
-| MCP controller        | The service package and the VirtualBox owner account when labs are enabled                                                        |
-| Nix worker            | An ordinary account, the worker package, Nix CLI, executor socket access and a separate private state directory                   |
-| NixOS test nodes      | Driver and guest packages supplied by the tested project's locked nixpkgs                                                         |
+| Role                  | Requirements                                                                                                                                                                 |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Development container | Nix with `nix-command` and `flakes` (invoking `nix run github:hellodword/agents-misc#vm-test-submit -- ...`), the tested project's inputs, and HTTP access to the controller |
+| Physical Linux host   | Hardware virtualization, sufficient RAM and disk, VirtualBox for labs, and multi-user Nix with working `/dev/kvm` for NixOS tests                                            |
+| MCP controller        | The service package and the VirtualBox owner account when labs are enabled                                                                                                   |
+| Nix worker            | An ordinary account, the worker package, Nix CLI, executor socket access and a separate private state directory                                                              |
+| NixOS test nodes      | Driver and guest packages supplied by the tested project's locked nixpkgs                                                                                                    |
 
 ## Accounts and shared configuration
 
@@ -374,21 +374,15 @@ services or creating state. The executor checks host directory ownership and
 cgroup delegation at startup, before creating state or sockets. Configuration
 is loaded at startup. Restart after tasks finish when changing policy or paths.
 
-When relocating existing schema-24 state, finish resource release and evidence
-handoff, then stop the services. Move the complete role directory to its required
+When relocating existing state, finish resource release and evidence handoff,
+then stop the services. Move the complete role directory to its required
 location, preserving ownership, permissions, database identity and evidence.
 Retain any previous destination as a separate offline backup.
 
-This release requires new configuration and empty controller, worker and executor state
-with fresh schema-24 databases. The user must stop the old services, confirm all
-old VM/daemon/port resources are released, and clear or retire the old state before
-starting. Preserve any required old evidence in private offline backups first.
-Do not run the new binary against a live old state or attempt an in-place schema
-migration. Guest protocol remains 2; prepared baselines with the configured matching
-supervisor identities can continue to use that protocol.
-Keep the new state for subsequent restart/recovery acceptance. VirtualBox baselines and host Nix-store contents remain independent.
-Old private backups can contain credentials and command inputs; keep them outside
-version control and the Nix store.
+Initial deployment starts from empty controller, worker and executor state directories.
+VirtualBox baselines (guest protocol 2 with matching supervisor identities) and host
+Nix-store contents remain independent. Keep state directories for subsequent restart
+and recovery, and keep any offline state backups outside version control and the Nix store.
 
 ## Recovery
 
@@ -455,15 +449,12 @@ Recovery publishes the retained bytes; resource retries preserve completed captu
 
 A manual blocker is a reportable outcome. Retain its job/session identities and
 cause, continue independent local work, and confirm runtime release before another
-executor batch. Initial rollout may retire old state only after the administrator
-has stopped old physical resources and retained any required evidence. Normal
-restart recovery keeps all three state directories.
+executor batch. Normal restart recovery retains all three state directories.
 
 ## Acceptance
 
-Run the reproducible [Codex transport check](README.md#development-and-verification)
-with CLI 0.163.0 and 0.165.0. Record these real-host results separately from the
-adapter/transport suites:
+Record real-host acceptance results separately from the synthetic adapter and
+transport test suites:
 
 1. Two nodes from one generalized Windows snapshot have independent identities,
    MACs and disk state; the baseline remains unchanged.

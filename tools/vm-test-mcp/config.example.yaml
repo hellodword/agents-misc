@@ -1,6 +1,5 @@
-# VM Test MCP 0.16：controller、Nix worker 和 root executor 共用此文件。
-# 新契约只接受空 state / 新数据库（schema 24）；旧服务与资源必须先由用户停止、清理。
-# Streamable HTTP MCP 客户端建议单次工具超时 >= 660s（如 Codex CLI >=0.163.0 设 tool_timeout_sec=660）；服务默认等待窗口 600s（可传 wait_seconds: 0..600），SSE 心跳 15s。
+# VM Test MCP：controller、Nix worker 和 root executor 共用此文件。
+# Streamable HTTP MCP 客户端建议单次工具调用超时 >= 660s；服务默认观察窗口 600s（可传 wait_seconds: 0..600），SSE 心跳 15s。
 # 三个程序均使用 --config /绝对路径/config.yaml；配置文件不要求特定权限。
 # 显式 sudo 启动 executor 表示管理员信任当前构建和此配置；executor 启动时读取并固定策略。
 # config.yaml 被 Git 忽略；本示例只使用合成值。controller 和 worker 使用同一普通账户。
@@ -105,7 +104,7 @@ service:
 #         audio_output: true
 #         accelerate_3d: true
 #       # 可选，默认 {}。别名格式同模板名，值来自宿主 VBoxManage list webcams。
-#       # 请求只引用别名；使用摄像头还需 media.camera: true。
+#       # 节点请求在 media.camera 中填写别名；模板须开启 media.camera: true。
 #       # cameras: {front: /dev/video0}
 #     linux:
 #       kind: linux

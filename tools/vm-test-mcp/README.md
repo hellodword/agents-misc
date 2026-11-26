@@ -1,4 +1,4 @@
-# VM Test MCP 0.16.0
+# VM Test MCP
 
 One Go module, one public MCP service, with separate VirtualBox and Nix domains
 for disposable Windows/Linux VirtualBox labs and strict NixOS sandbox
@@ -110,37 +110,27 @@ Diagnostics go to stderr. Streamable HTTP is at `/mcp`, authenticated with
 `Authorization: Bearer TOKEN`, with optional exact Host/Origin allowlists (empty or omitted allows any). All token
 holders share authority over all tasks.
 
-Configure your Streamable HTTP MCP client with a single-call tool timeout of at least
-660 seconds (covering the default 600-second observation window), or pass a smaller
-`wait_seconds` (`0..600`) per call. For example, in Codex CLI **0.163.0+**:
-
-```toml
-[mcp_servers.vm_test]
-url = "http://127.0.0.1:8765/mcp"
-bearer_token_env_var = "VM_TEST_TOKEN"
-tool_timeout_sec = 660
-```
-
-See the [Codex MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)
-for this setting; other MCP hosts use their corresponding per-tool HTTP timeout option.
-`InitializeResult.instructions` advertises core queue, `(tool, request_id)` idempotency,
-`execution_id`, `wait_seconds`, and completion conventions automatically. SSE carries
-structured results and 15-second transport heartbeats. Disconnects, timeout and MCP
-cancellation end observation; explicit business cancellation ends execution. Use empty
-controller, worker and executor state for initial installation of this release; old
-schemas/configuration are intentionally incompatible.
+Configure your Streamable HTTP MCP client against `/mcp` (`Authorization: Bearer <token>`)
+with a single-call tool timeout of at least 660 seconds (covering the default
+600-second observation window), or pass a smaller `wait_seconds` (`0..600`) per call.
+`InitializeResult.instructions` advertises core queue, `(tool, request_id)` idempotency
+(which excludes `wait_seconds`), `execution_id`, `wait_seconds`, and completion conventions
+automatically. SSE carries structured results and 15-second transport heartbeats.
+Disconnects, timeout and MCP cancellation end observation; explicit business
+cancellation ends execution. Initial deployment starts from empty controller, worker
+and executor state directories.
 
 1. Prepare scripts and dependencies locally. Allocate file inputs with `upload_create`,
    PUT their immutable manifests and bytes, and wait for automatic `ready` state.
    Call `service_get` for protocol capabilities, backend status and effective limits,
    `template_list` for template pages, and `lab_list` for compact active/queued summaries.
-2. Call `lab_create` with a fresh `request_id` (scoped per tool), a fixed list of named nodes, optional ready `upload_ids`, and optional `wait_seconds` (`0..600`, default `600`; `0` enqueues and returns `continue` immediately).
+2. Call `lab_create` with a fresh `request_id` (scoped per tool), a fixed list of named nodes (setting `media.camera` to an allowed camera alias when needed), optional ready `upload_ids`, and optional `wait_seconds` (`0..600`, default `600`; `0` enqueues and returns `continue` immediately).
    Select a deadline for one continuous test batch. Reusing a template creates
    independent clones with separate UUIDs, MACs and disks.
 3. Creation waits for readiness and returns `{operation, wait}`. If the 600-second
    window expires, call `wait` with its `continue` targets. Read `lab_inspect` for
    node IDs. Identical retries reuse the receipt; changed parameters conflict.
-4. Use `command_start` with guest argv (finite mode waits for completion; explicit
+4. Use `command_start` with guest argv and optional `wait_seconds` (`0..600`; finite mode waits for completion, explicit
    service/interactive mode waits for start), `command_read` for output and `command_input`
    for numbered stdin packets/EOF. `expected_exit_codes` defaults to `[0]`. Unexpected
    exits schedule diagnostics for the affected node; the caller supplies the lab conclusion.
@@ -227,7 +217,7 @@ artifacts. Automatic evidence bundles include available VM logs, screenshots, in
 
 `lab_get` separates `phase` (`queued`, `preparing`, `running`, `ended`), `result`
 and `cleanup`. Queue views expose position and blocking task; resource states
-distinguish never allocated from released. `lab_list` defaults to active work,
+distinguish `unallocated` from `released`. `lab_list` defaults to active work,
 including blocked cleanup; request `phase=ended` or `all` for compact history.
 Task status omits histories and command payloads. `command_get` reads status and
 stdin progress; `command_details` reads argv/cwd/environment. `command_input_read`
@@ -293,7 +283,8 @@ CPU counts and inter-node connectivity.
 
 Automatic submission allocates an input, evaluates and retains the test derivation,
 exports its closure, uploads missing objects, submits the job and observes its
-result. Progress summaries go to stderr; full preparation and task logs are files.
+result. Progress summaries go to stderr (and Nix preparation failures include the
+path and trailing lines of `inputs/prepare.log`); full preparation and task logs are files.
 Stdout contains one final JSON result. The local workspace defaults to
 `tmp/agent/vm-test-runs/ID` and retains `run.json`, `inputs/submission.json`,
 `inputs/prepare.log`, `task.log`, `result.json` and `evidence.json`.
@@ -306,8 +297,10 @@ evidence mode exits 0. Execution, transport or evidence failures exit 1; invalid
 usage or client configuration exits 2.
 
 ```sh
-vm-test-submit --config /absolute/client.yaml --work-dir /absolute/retained/workspace
-vm-test-submit --config /absolute/client.yaml --test '.#checks.x86_64-linux.integration' \
+nix run github:hellodword/agents-misc#vm-test-submit -- \
+  --config /absolute/client.yaml --smoke-project /absolute/project-dir --work-dir /absolute/retained/workspace
+nix run github:hellodword/agents-misc#vm-test-submit -- \
+  --config /absolute/client.yaml --test '.#checks.x86_64-linux.integration' \
   --apply 't: t' --timeout-seconds 3600 --evidence manifest
 ```
 
@@ -321,7 +314,8 @@ task keeps its deadline. Explicit `nix_job_cancel(execution_id=…)` ends the re
 For submission through an MCP tool, allocate `upload_create(kind="cache")` and run:
 
 ```sh
-vm-test-submit --test '.#checks.x86_64-linux.integration' \
+nix run github:hellodword/agents-misc#vm-test-submit -- \
+  --test '.#checks.x86_64-linux.integration' \
   --request-id integration-001 --upload-id UPLOAD_ID --upload-url UPLOAD_URL \
   --work-dir /absolute/ignored/task-workspace --timeout-seconds 3600
 ```
@@ -373,22 +367,7 @@ SQLite extension loading is compiled out with `sqlite_omit_load_extension`.
 The standalone client package evaluates its generated observer through Nix and
 runs the locked NixOS driver through success, assertion failure, initialization
 failure and global timeout.
-SDK ABI tests load a synthetic C API library. Router builds inspect EFI boot content, squashfs, initialization units and bundled tools. The reproducible Codex transport check uses actual 0.163.0 and 0.165.0 binaries:
-
-```sh
-nix develop .#vm-test-mcp --command python3 tools/vm-test-mcp/scripts/check-codex.py \
-  --codex-0163 /absolute/codex-0.163.0 --codex-0165 /absolute/codex-0.165.0 \
-  --work-dir /absolute/ignored/new-acceptance-directory
-```
-
-It takes about eleven minutes, uses the production MCP transport with synthetic
-VM adapters, and makes no model API calls. It checks the real 600-second window,
-continuation, FIFO, client timeout/cancellation and explicit cleanup. The report
-records binary hashes and timings. Logs and `result.json` are retained in the output
-directory; the fixture executable and isolated Codex profiles live under `runtime/`
-and are removed after process-group exit confirmation, including on failure or
-interruption. Unconfirmed exit retains `runtime/` and records the pending resource
-for recovery. Supplied Codex executables remain caller-owned. These checks are implementation evidence;
+SDK ABI tests load a synthetic C API library. Router builds inspect EFI boot content, squashfs, initialization units and bundled tools. These checks are implementation evidence;
 complete [real-host acceptance](preparation.md#acceptance) after setup.
 
 The official VirtualBox SDK 7.2.20 is fetched with its published checksum in a
