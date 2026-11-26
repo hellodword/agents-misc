@@ -64,7 +64,11 @@ func constrainSchema(t reflect.Type, schema schemaMap) {
 		enum("kind", "lab", "nix_job", "command", "operation", "upload")
 		field("id", schemaMap{"pattern": wire.IDPattern.String()})
 		enum("condition", "ready", "started", "complete", "cleaned", "resources_released", "evidence_complete", "changed", "output", "input_delivered", "input_written")
-		field("seen_revision", schemaMap{"minimum": 0})
+		field("condition", schemaMap{"description": "ready/complete/changed/output on executions (cleaned on lab; resources_released/evidence_complete on nix_job); started/complete/changed/output/input_delivered/input_written on command; complete/changed on operation and upload."})
+		enum("stream", "stdout", "stderr")
+		field("stream", schemaMap{"description": "Output stream (stdout or stderr) when kind is command and condition is output."})
+		field("sequence", schemaMap{"minimum": 0, "description": "Stdin packet sequence (>= 0) when condition is input_delivered or input_written."})
+		field("seen_revision", schemaMap{"minimum": 0, "description": "Last observed revision from wait.continue; advances changed waits and suppresses already-observed attention states."})
 	case reflect.TypeFor[ListRequest](), reflect.TypeFor[EventsRequest]():
 		field("cursor", schemaMap{"minimum": 0})
 		rangeOf("limit", 0, 200)
@@ -92,6 +96,7 @@ func constrainSchema(t reflect.Type, schema schemaMap) {
 		field("reason", schemaMap{"minLength": 1, "maxLength": 1024, "x-maxBytes": 1024, "pattern": "\\S", "description": "Actual continued work and its purpose; effective total limit comes from service_get."})
 	case reflect.TypeFor[NixRequest]():
 		rangeOf("timeout_seconds", 0, 86400)
+		field("upload_id", schemaMap{"pattern": wire.IDPattern.String(), "description": "Ready cache upload ID populated by nix run github:hellodword/agents-misc#vm-test-submit."})
 	case reflect.TypeFor[ExecutionRecoverRequest]():
 		enum("scope", "resources", "evidence")
 	case reflect.TypeFor[StartRequest]():
@@ -104,6 +109,10 @@ func constrainSchema(t reflect.Type, schema schemaMap) {
 	case reflect.TypeFor[ExecRequest]():
 		rangeOf("timeout_seconds", 0, 30)
 		field("timeout_seconds", schemaMap{"default": 10, "description": "0 or omission uses 10 seconds. Diagnostic Guest Control execution, without durable supervisor semantics."})
+		field("argv", schemaMap{
+			"prefixItems": []any{schemaMap{"type": "string", "maxLength": 32768, "x-maxBytes": 32768, "pattern": "^(?:/|[A-Za-z]:[\\\\/])[^\\x00]*$"}},
+			"description": "Direct Guest Control argv; argv[0] must be an absolute guest executable path (no PATH lookup or shell expansion).",
+		})
 	case reflect.TypeFor[TemplateListRequest]():
 		rangeOf("limit", 0, 200)
 		field("limit", schemaMap{"default": 50})
@@ -127,12 +136,13 @@ func constrainSchema(t reflect.Type, schema schemaMap) {
 		field("eof", schemaMap{"default": false, "description": "Close stdin after this packet; no later packet is accepted. Explicit EOF is required."})
 	case reflect.TypeFor[TransferRequest]():
 		enum("kind", "file", "cache")
+		field("kind", schemaMap{"description": "file: single-file guest input declaring one \"blob\" object in PUT <url>/manifest; cache: Nix binary cache input prepared by vm-test-submit."})
 	case reflect.TypeFor[PutRequest](), reflect.TypeFor[GetRequest]():
 		field("path", schemaMap{"maxLength": 32768, "x-maxBytes": 32768, "pattern": "^(?:/|[A-Za-z]:[\\\\/])[^\\x00]*$", "description": "Absolute guest path. For put, create and verify the parent directory first; transfer must be fully uploaded. Get archives a file/directory without host extraction."})
 	case reflect.TypeFor[PowerRequest]():
 		enum("wait_until", "ready", "power_state")
 		enum("action", "start", "shutdown", "reboot", "poweroff", "pause", "resume", "reset")
-		field("action", schemaMap{"description": "Hypervisor/node power control. pause/resume does not test guest OS sleep or hibernation."})
+		field("action", schemaMap{"description": "Hypervisor/node power control. Desktop environments may prompt on ACPI shutdown; use poweroff or a guest command for non-interactive stop. pause/resume does not test guest OS sleep or hibernation."})
 	case reflect.TypeFor[GUIRequest]():
 		enum("max_guest_resolution", "any", "auto")
 	case reflect.TypeFor[EndpointRequest]():
@@ -157,6 +167,7 @@ func constrainSchema(t reflect.Type, schema schemaMap) {
 		schema["else"] = schemaMap{"not": schemaMap{"required": []string{"scancodes"}}}
 	case reflect.TypeFor[MediaRequest]():
 		enum("device", "camera", "audio_input", "audio_output")
+		field("camera", schemaMap{"pattern": wire.NamePattern.String(), "description": "Allowed camera alias from template_list; required when device is camera."})
 		schema["if"] = schemaMap{"properties": schemaMap{"device": schemaMap{"const": "camera"}}}
 		schema["then"] = schemaMap{"required": []string{"camera"}}
 		schema["else"] = schemaMap{"not": schemaMap{"required": []string{"camera"}}}
@@ -167,11 +178,14 @@ func constrainSchema(t reflect.Type, schema schemaMap) {
 		field("nodes", schemaMap{"maxItems": 64, "description": "0..64 independent nodes; [] creates a router-only lab. Effective resource limits are in service_get."})
 		rangeOf("timeout_seconds", 0, 86400)
 		field("lan", schemaMap{"description": "Private IPv4 CIDR; omitted uses the configured lab subnet."})
+	case reflect.TypeFor[NodeMedia]():
+		field("camera", schemaMap{"pattern": wire.NamePattern.String(), "description": "Allowed camera alias from template_list to attach at boot; omit to keep camera disabled."})
 	case reflect.TypeFor[NodeRequest]():
 		field("name", schemaMap{"pattern": wire.NamePattern.String()})
 		field("template", schemaMap{"pattern": wire.NamePattern.String(), "description": "Template alias from template_list."})
 		field("cpus", schemaMap{"minimum": 0, "description": "0/omission uses template default; maximum from template_list."})
 		field("memory_mib", schemaMap{"minimum": 0, "description": "0/omission uses template default; effective value >=128 and <= template maximum."})
+		field("media", schemaMap{"description": "Requested media capabilities (default disabled); set media.camera to an allowed alias from template_list to attach a camera."})
 	}
 }
 
@@ -227,11 +241,17 @@ func validByteLengths(schema schemaMap, value any) bool {
 		}
 	}
 	if items, ok := value.([]any); ok {
-		if item, ok := schema["items"].(schemaMap); ok {
-			for _, v := range items {
-				if !validByteLengths(item, v) {
-					return false
+		prefixes, _ := schema["prefixItems"].([]any)
+		rest, _ := schema["items"].(schemaMap)
+		for i, v := range items {
+			item := rest
+			if i < len(prefixes) {
+				if p, ok := prefixes[i].(schemaMap); ok {
+					item = p
 				}
+			}
+			if item != nil && !validByteLengths(item, v) {
+				return false
 			}
 		}
 	}

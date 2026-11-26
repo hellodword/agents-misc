@@ -4,7 +4,14 @@ package control
 // resolved once when building the durable execution at admission.
 func normalizeArguments(args any) any {
 	switch a := args.(type) {
+	case LabRequest:
+		a.WaitSeconds = nil
+		return a
+	case NixRequest:
+		a.WaitSeconds = nil
+		return a
 	case StartRequest:
+		a.WaitSeconds = nil
 		a.ExpectedExitCodes = expectedExitCodes(a.ExpectedExitCodes)
 		if a.Context == "" {
 			a.Context = "service"

@@ -104,7 +104,7 @@ func (s *Server) targetLocked(target WaitTarget, business bool) (TargetState, er
 		case "ready":
 			out.Satisfied = t.State == "running"
 		case "complete", "cleaned":
-			if business && t.Terminal() {
+			if t.Terminal() {
 				out.Attention = out.Manual || t.cleanupState() == "blocked"
 			}
 			if t.Kind == "nixos" {
@@ -340,7 +340,7 @@ func (s *Server) Call(ctx context.Context, name string, raw []byte) (any, error)
 		return value, nil
 	}
 	budget := WaitWindow
-	if oneOf(name, "lab_create", "nix_job_create") {
+	if oneOf(name, "lab_create", "nix_job_create", "command_start") {
 		var windowArgs struct {
 			WaitSeconds *int `json:"wait_seconds"`
 		}

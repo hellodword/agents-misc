@@ -6,22 +6,26 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hellodword/agents-misc/vm-test-mcp/internal/config"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/execution"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/nixos"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/state"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
 )
 
+type NodeMedia struct {
+	Camera       string `json:"camera,omitempty"`
+	AudioInput   bool   `json:"audio_input,omitempty"`
+	AudioOutput  bool   `json:"audio_output,omitempty"`
+	Accelerate3D bool   `json:"accelerate_3d,omitempty"`
+}
 type NodeRequest struct {
-	Name      string       `json:"name"`
-	Template  string       `json:"template"`
-	IPv4      string       `json:"ipv4,omitempty"`
-	CPUs      int          `json:"cpus,omitempty"`
-	MemoryMiB int          `json:"memory_mib,omitempty"`
-	GUI       bool         `json:"gui,omitempty"`
-	Media     config.Media `json:"media,omitempty"`
-	Camera    string       `json:"camera,omitempty"`
+	Name      string    `json:"name"`
+	Template  string    `json:"template"`
+	IPv4      string    `json:"ipv4,omitempty"`
+	CPUs      int       `json:"cpus,omitempty"`
+	MemoryMiB int       `json:"memory_mib,omitempty"`
+	GUI       bool      `json:"gui,omitempty"`
+	Media     NodeMedia `json:"media,omitempty"`
 }
 type LabRequest struct {
 	UploadIDs      []string      `json:"upload_ids,omitempty"`
@@ -171,7 +175,7 @@ func (n *Node) resourceState(ended bool) string {
 	}
 	if !n.Intent {
 		if ended {
-			return "never_allocated"
+			return "unallocated"
 		}
 		return "planned"
 	}

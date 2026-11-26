@@ -374,8 +374,8 @@ func (b *VBoxBackend) Prepare(ctx context.Context, t *Task, n *Node) error {
 	}
 	reportProgress(ctx, "ready", nil, nil)
 	// Keep both DVDs attached: a diskless router needs its seed on every boot.
-	if !router && n.Media.Camera {
-		if _, e = b.run(ctx, "controlvm", n.UUID, "webcam", "attach", template.Cameras[n.Camera]); e != nil {
+	if !router && n.Media.Camera != "" {
+		if _, e = b.run(ctx, "controlvm", n.UUID, "webcam", "attach", template.Cameras[n.Media.Camera]); e != nil {
 			return e
 		}
 	}

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hellodword/agents-misc/vm-test-mcp/internal/config"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/network"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/telemetry"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
@@ -486,15 +487,14 @@ func (s *Server) buildLab(a LabRequest, op *Operation) (*Task, error) {
 		if v.MemoryMiB == 0 {
 			v.MemoryMiB = template.MemoryMiB
 		}
-		if v.CPUs < 1 || v.CPUs > template.MaxCPUs || v.MemoryMiB < 128 || v.MemoryMiB > template.MaxMemoryMiB || !template.Media.Allows(v.Media) {
+		allowed := config.Media{Camera: v.Media.Camera != "", AudioInput: v.Media.AudioInput, AudioOutput: v.Media.AudioOutput, Accelerate3D: v.Media.Accelerate3D}
+		if v.CPUs < 1 || v.CPUs > template.MaxCPUs || v.MemoryMiB < 128 || v.MemoryMiB > template.MaxMemoryMiB || !template.Media.Allows(allowed) {
 			return nil, wire.Fail("policy_denied", "Node exceeds template resource or media policy")
 		}
-		if v.Media.Camera {
-			if _, ok := template.Cameras[v.Camera]; !ok {
+		if v.Media.Camera != "" {
+			if _, ok := template.Cameras[v.Media.Camera]; !ok {
 				return nil, wire.Fail("policy_denied", "An allowed camera alias is required")
 			}
-		} else if v.Camera != "" {
-			return nil, wire.Fail("invalid_argument", "Camera alias requires media.camera")
 		}
 		if v.IPv4 == "" {
 			for used[next.String()] {
@@ -1094,8 +1094,11 @@ func (s *Server) media(a MediaRequest) (any, error) {
 		s.mu.Lock()
 		switch a.Device {
 		case "camera":
-			n.Media.Camera = a.Enabled
-			n.Camera = a.Camera
+			if a.Enabled {
+				n.Media.Camera = a.Camera
+			} else {
+				n.Media.Camera = ""
+			}
 		case "audio_input":
 			n.Media.AudioInput = a.Enabled
 		case "audio_output":

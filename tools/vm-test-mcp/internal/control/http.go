@@ -16,12 +16,12 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const ServerInstructions = "VM Test MCP manages disposable VirtualBox labs (lab_*) and sandboxed host-KVM NixOS tests (nix_job_*) on a shared FIFO scheduler. " +
+const ServerInstructions = "VM Test MCP manages disposable VirtualBox labs (lab_*) and sandboxed host-KVM NixOS tests (nix_job_*) on a shared FIFO scheduler; HTTP disconnect or tool timeout ends only that observation without cancelling accepted work. " +
 	"Authenticate /mcp requests with the configured Bearer token; /files/ transfers use scoped capability URLs without Bearer headers. " +
-	"Every mutating tool scopes idempotency by (tool, request_id): reuse the exact arguments when retrying an uncertain call on that tool, and generate a fresh request_id whenever arguments change. " +
+	"Every mutating tool scopes idempotency by (tool, request_id): reuse identical business arguments when retrying an uncertain call on that tool, and generate a fresh request_id whenever business parameters change (wait_seconds does not affect idempotency). " +
 	"Executions use execution_id across nix_job_get, nix_job_cancel, nix_job_extend, execution_log, execution_events, evidence_list, execution_recover and execution_delete (lab tools address their lab via lab_id). " +
-	"lab_create, nix_job_create and wait accept optional wait_seconds (0..600, default 600): pass 0 to return immediately after admission or a single snapshot with wait.continue cursors, or configure client tool timeouts >= 660s for full 600s observation windows. " +
-	"Track resources.state (released/unallocated vs blocked) separately from evidence.state (complete vs blocked); use execution_recover(scope=\"resources\"|\"evidence\") after resolving a recorded blocker."
+	"lab_create, nix_job_create, command_start and wait accept optional wait_seconds (0..600, default 600): pass 0 to return immediately after admission or a single snapshot with wait.continue cursors, and pass wait.continue to wait when reason is timeout. " +
+	"Confirm resources.state is released or unallocated before starting the next batch; track evidence.state separately and use execution_recover(scope=\"resources\"|\"evidence\") after resolving a recorded manual_intervention blocker."
 
 func (s *Server) Handler() http.Handler {
 	server := mcp.NewServer(&mcp.Implementation{Name: "vm-test-mcp", Version: wire.Version}, &mcp.ServerOptions{Instructions: ServerInstructions})

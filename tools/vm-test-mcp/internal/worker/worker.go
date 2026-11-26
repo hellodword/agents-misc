@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -801,7 +802,17 @@ func (w *Worker) complete(j *Job, e error, interrupted bool) {
 	default:
 		if e != nil {
 			j.State = "failed"
-			j.Execution.Error = wire.Safe(e)
+			var known *wire.Error
+			process := j.Execution.Process
+			if !interrupted && !errors.As(e, &known) && process != nil && process.Exited && process.ExitCode != nil && *process.ExitCode != 0 {
+				if process.Stage == "build" {
+					j.Execution.Error = nil
+				} else {
+					j.Execution.Error = wire.Safe(wire.Fail("input_failed", "Test driver did not start because input preparation failed"))
+				}
+			} else {
+				j.Execution.Error = wire.Safe(e)
+			}
 		}
 		if interrupted {
 			j.State = "interrupted"

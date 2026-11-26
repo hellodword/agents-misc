@@ -99,6 +99,12 @@ func TestExecutionRetainsPhaseAndObservedClientResult(t *testing.T) {
 				t.Fatal(err)
 			}
 			waitExecution(t, w, id)
+			w.mu.Lock()
+			if tc.code == "build_failed" && w.jobs[id].Execution.Error != nil && w.jobs[id].Execution.Error.Code == "backend_error" {
+				w.mu.Unlock()
+				t.Fatal("build exit reported transient backend_error before driver receipt indexing")
+			}
+			w.mu.Unlock()
 			waitLifecycle(t, w, id)
 			check := func() {
 				t.Helper()

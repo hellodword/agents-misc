@@ -86,6 +86,7 @@ type StartRequest struct {
 	Cwd            string            `json:"cwd,omitempty"`
 	Env            map[string]string `json:"env,omitempty"`
 	TimeoutSeconds int               `json:"timeout_seconds,omitempty"`
+	WaitSeconds    *int              `json:"wait_seconds,omitempty"`
 }
 type CommandRequest struct {
 	TaskID    `json:"-"`
@@ -290,8 +291,8 @@ var Definitions = []Definition{
 	{"upload_objects", "Read a page of immutable upload object metadata", UploadObjectsRequest{}, false},
 	{"service_get", "Describe protocol capabilities, backend availability, admission and effective limits", struct{}{}, false},
 	{"service_observe", "Read bounded host pressure, controller cgroup quotas and call timings from the last 1..240 seconds (default 30); missing data is explicit and no argv, environment or output is included", ObserveRequest{}, false},
-	{"lab_create", "Queue independent linked-clone nodes and a private router", LabRequest{}, true},
-	{"nix_job_create", "Queue an uploaded derivation closure for sandboxed host KVM execution", NixRequest{}, true},
+	{"lab_create", "Queue independent linked-clone nodes and a private router; waits for readiness (read node IDs with lab_inspect, finish with lab_finish)", LabRequest{}, true},
+	{"nix_job_create", "Queue a derivation closure uploaded via upload_create(kind=\"cache\") and vm-test-submit for sandboxed host KVM execution", NixRequest{}, true},
 	{"lab_list", "Page through compact task summaries; phase defaults to active (queued, preparing, running or blocked cleanup). Use phase=ended or all for history; cursor is the last scanned submission sequence", TaskListRequest{}, false}, {"lab_get", "Read a compact laboratory summary and revision; use lab_inspect for the resource ledger", TaskID{}, false},
 	{"node_get", "Read node capabilities, observations and expected state", NodeID{}, false},
 	{"lab_diagnose", "Collect bounded host and guest evidence, including the private router boot console before Guest Additions is ready", DiagnoseRequest{}, true},
@@ -299,14 +300,14 @@ var Definitions = []Definition{
 	{"lab_cleanup", "Release remaining resources of an ended VirtualBox lab and verify cleanup", TaskChange{}, true},
 	{"execution_events", "Read events after a cursor", EventsRequest{}, false}, {"execution_log", "Read task log bytes at an offset", LogRequest{}, false}, {"operation_get", "Read a durable operation receipt", OperationRequest{}, false},
 	{"lab_finish", "Submit a running lab conclusion and release resources; wait for cleanup.state=complete", FinishRequest{}, true}, {"lab_cancel", "Cancel a queued or executing task; wait for cleanup.state=complete", TaskChange{}, true}, {"lab_extend", "Extend an executing task with a concrete continued-work reason; independent startup deadlines do not change", ExtendRequest{}, true}, {"execution_delete", "Delete a cleaned execution and unpinned details; independent pins and receipts remain", ExecutionChange{}, true},
-	{"command_start", "Start argv; finite mode waits for exit, process-group release and output, service/interactive for confirmed start", StartRequest{}, true}, {"command_get", "Read compact command status and revision", CommandRequest{}, false}, {"command_read", "Read base64 output by byte offset; at_end is the current prefix, eof requires complete retention", ReadRequest{}, false}, {"command_input", "Persist ordered UTF-8 stdin or EOF (64KiB per packet, 64MiB and 4096 packets per command)", InputRequest{}, true}, {"command_cancel", "Request cancellation of one supervised process group; inspect command_get for confirmed termination", CancelCommandRequest{}, true},
-	{"upload_create", "Allocate an input; PUT its immutable manifest and objects to the issued capability URL", TransferRequest{}, true}, {"upload_get", "Inspect compact upload state and revision; return a fresh scoped capability; use upload_objects for checksums", TransferGetRequest{}, false},
-	{"guest_file_put", "Bind a ready upload to one lab and copy it to a guest path", PutRequest{}, true}, {"guest_file_get", "Archive a guest file or directory as an artifact", GetRequest{}, true},
+	{"command_start", "Start argv; finite mode waits for exit, process-group release and output, service/interactive for confirmed start", StartRequest{}, true}, {"command_get", "Read compact command status and revision", CommandRequest{}, false}, {"command_read", "Read base64 output by byte offset; at_end is the current prefix, eof requires complete retention", ReadRequest{}, false}, {"command_input", "Persist ordered UTF-8 stdin or EOF (64KiB per packet, 64MiB and 4096 packets per command); waits for guest delivery (wait on input_written for child pipe write)", InputRequest{}, true}, {"command_cancel", "Request cancellation of one supervised process group; inspect command_get for confirmed termination", CancelCommandRequest{}, true},
+	{"upload_create", "Allocate an input and capability URL (/files/ uses no Bearer header). For kind=\"file\", PUT <url>/manifest {\"upload_id\",\"objects\":[{\"name\":\"blob\",\"size\",\"sha256\"}]}, GET <url>/missing, and PUT <url>/blob; for kind=\"cache\", pass --upload-id and --upload-url to vm-test-submit", TransferRequest{}, true}, {"upload_get", "Inspect compact upload state and revision; return a fresh scoped capability; use upload_objects for checksums", TransferGetRequest{}, false},
+	{"guest_file_put", "Bind a ready upload to one lab and copy it to a guest path", PutRequest{}, true}, {"guest_file_get", "Archive a bounded guest file or directory as tar evidence within the 30-second Guest Control budget (stream large data via endpoint_open)", GetRequest{}, true},
 	{"node_control", "Start, shut down, reboot, power off, pause, resume or reset a lab node", PowerRequest{}, true},
 	{"network_set", "Set public egress, DHCP, DNS and node address registrations within the lab LAN", NetworkRequest{}, true}, {"network_recover", "Revalidate router, host protection and declared endpoints", TaskChange{}, true},
 	{"node_network_link", "Connect or disconnect the node's lab network cable", LinkRequest{}, true},
 	{"lab_gui_set", "Set the lab's global GUI resolution policy (any or auto); restore on cleanup", GUIRequest{}, true},
-	{"endpoint_open", "Publish a node TCP or UDP service to allowed client sources", EndpointRequest{}, true}, {"endpoint_close", "Revoke a published endpoint", CloseEndpointRequest{}, true},
+	{"endpoint_open", "Publish a node TCP or UDP port via host relay to allowed client sources (source addresses may be rewritten; test source-IP preservation inside the LAN)", EndpointRequest{}, true}, {"endpoint_close", "Revoke a published endpoint", CloseEndpointRequest{}, true},
 	{"node_screenshot", "Collect a framebuffer screenshot", ScreenshotRequest{}, true}, {"node_display", "Request a guest display size", DisplayRequest{}, true}, {"node_input", "Deliver serialized native input with a durable receipt", InputNodeRequest{}, true}, {"node_media", "Change an administrator-approved media device", MediaRequest{}, true},
 	{"capture_start", "Start video, NIC packet or metrics capture", CaptureRequest{}, true}, {"capture_get", "Read capture status", CaptureGetRequest{}, false}, {"capture_stop", "Stop capture and retain evidence", CaptureStopRequest{}, true},
 	{"evidence_list", "Page through retained artifacts", ArtifactListRequest{}, false}, {"evidence_get", "Issue a scoped artifact download credential", ArtifactGetRequest{}, false},

@@ -3,17 +3,16 @@ package control
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/hellodword/agents-misc/vm-test-mcp/internal/config"
 	"github.com/hellodword/agents-misc/vm-test-mcp/internal/wire"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestDefaultBusinessWaitAndDisconnect(t *testing.T) {
@@ -124,6 +123,24 @@ func TestWaitRevisionsMultiTargetAndOutput(t *testing.T) {
 	if err != nil || result.Reason != "timeout" {
 		t.Fatal("same fault woke observer again", result, err)
 	}
+	nixJob := newTask("nixos", 60)
+	now := time.Now().UTC()
+	nixJob.State, nixJob.Conclusion, nixJob.Cleanup, nixJob.Ended = "failed", "inconclusive", "complete", &now
+	nixJob.nix().Dispatched = true
+	nixJob.nix().NixExecution = &wire.NixExecution{Resources: wire.NixResources{State: "released"}, Evidence: wire.NixEvidence{State: "pending"}}
+	nixJob.nix().Evidence = wire.NixEvidence{State: "pending"}
+	s.tasks = append(s.tasks, nixJob)
+	s.save(nixJob)
+	result, err = s.wait(context.Background(), WaitRequest{Targets: []WaitTarget{{Kind: "nix_job", ID: nixJob.ID, Condition: "complete"}}}, 15*time.Millisecond)
+	if err != nil || result.Reason != "timeout" || result.Targets[0].Satisfied || result.Targets[0].Attention {
+		t.Fatal("pending evidence woke complete wait early", result, err)
+	}
+	nixJob.nix().Evidence.State = "complete"
+	s.save(nixJob)
+	result, err = s.wait(context.Background(), WaitRequest{Targets: result.Continue}, time.Second)
+	if err != nil || result.Reason != "satisfied" || !result.Targets[0].Satisfied {
+		t.Fatal("settled nix_job did not satisfy complete wait", result, err)
+	}
 }
 
 func TestDeletedTargetPreservesReceiptAndOtherWaitTargets(t *testing.T) {
@@ -219,45 +236,10 @@ func TestStartupInterruptsOnlyRecoveredExecutions(t *testing.T) {
 	}
 }
 
-// Used by scripts/check-codex.py with actual CLI binaries. All backend resources
-// are synthetic; the same production Handler/Call/wait/database code is exercised.
-type delayedFixture struct {
-	fakeBackend
-	delay time.Duration
-	once  atomic.Bool
-}
-
-func (b *delayedFixture) Prepare(ctx context.Context, t *Task, n *Node) error {
-	if b.once.CompareAndSwap(false, true) {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(b.delay):
-		}
-	}
-	return b.fakeBackend.Prepare(ctx, t, n)
-}
-func TestCodexTransportFixture(t *testing.T) {
-	file := os.Getenv("VM_TEST_CODEX_FIXTURE")
-	if file == "" {
-		t.Skip("requires the Codex client acceptance runner")
-	}
-	delay := 625
-	if value := os.Getenv("VM_TEST_CODEX_DELAY"); value != "" {
-		var err error
-		delay, err = strconv.Atoi(value)
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
+func TestStreamableHTTPCancellationRetainsQueuedExecution(t *testing.T) {
 	cfg := testConfig(t)
-	cfg.Service.Hosts = nil
-	cfg.Service.Origins = nil
-	cfg.VirtualBox.StartupTimeout = config.Duration(time.Hour)
-	cfg.Tasks.DefaultTimeout = config.Duration(time.Hour)
-	cfg.Tasks.MaxDuration = config.Duration(24 * time.Hour)
-	backend := &delayedFixture{delay: time.Duration(delay) * time.Second}
-	s, err := New(cfg, backend)
+	cfg.Service.Hosts, cfg.Service.Origins = nil, nil
+	s, err := New(cfg, &fakeBackend{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,25 +247,46 @@ func TestCodexTransportFixture(t *testing.T) {
 	s.Start()
 	srv := httptest.NewServer(s.Handler())
 	defer srv.Close()
-	info := map[string]any{"url": srv.URL + "/mcp", "token": cfg.Service.Token, "state": cfg.ControllerDir(), "delay": delay}
-	raw, _ := json.Marshal(info)
-	if err = os.WriteFile(file, raw, 0600); err != nil {
+	client := mcp.NewClient(&mcp.Implementation{Name: "transport-test", Version: "1"}, nil)
+	httpClient := &http.Client{Transport: testBearerTransport{token: cfg.Service.Token}}
+	session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: srv.URL + "/mcp", HTTPClient: httpClient, DisableStandaloneSSE: true}, nil)
+	if err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.NewTimer(20 * time.Minute)
-	defer deadline.Stop()
-	tick := time.NewTicker(100 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		select {
-		case <-deadline.C:
-			t.Fatal("Codex fixture deadline expired")
-		case <-tick.C:
-			if _, err = os.Stat(file + ".stop"); err == nil {
-				return
-			}
+	defer session.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	first, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "lab_create", Arguments: LabRequest{RequestID: "http-occupier", Nodes: []NodeRequest{}}})
+	if err != nil || first.IsError {
+		t.Fatal(first, err)
+	}
+	occupier := first.StructuredContent.(map[string]any)["operation"].(map[string]any)["execution_id"].(string)
+	shortCtx, stop := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	_, err = session.CallTool(shortCtx, &mcp.CallToolParams{Name: "lab_create", Arguments: LabRequest{RequestID: "http-cancelled", Nodes: []NodeRequest{}}})
+	stop()
+	if err == nil {
+		t.Fatal("expected Streamable HTTP call cancellation")
+	}
+	zero := 0
+	reconciled, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "lab_create", Arguments: LabRequest{RequestID: "http-cancelled", Nodes: []NodeRequest{}, WaitSeconds: &zero}})
+	if err != nil || reconciled.IsError {
+		t.Fatal(reconciled, err)
+	}
+	queued := reconciled.StructuredContent.(map[string]any)["operation"].(map[string]any)["execution_id"].(string)
+	for _, id := range []string{queued, occupier} {
+		ended, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "lab_cancel", Arguments: TaskChange{Change: Change{"stop-" + id}, TaskID: TaskID{id}}})
+		if err != nil || ended.IsError {
+			t.Fatal(id, ended, err)
 		}
 	}
+}
+
+type testBearerTransport struct{ token string }
+
+func (t testBearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	clone := r.Clone(r.Context())
+	clone.Header.Set("Authorization", "Bearer "+t.token)
+	return http.DefaultTransport.RoundTrip(clone)
 }
 
 func TestFiniteCommandsWaitForGroupAndRetainedOutput(t *testing.T) {
@@ -344,5 +347,16 @@ func TestFiniteCommandsWaitForGroupAndRetainedOutput(t *testing.T) {
 	state := v.(map[string]any)["wait"].(WaitResult).Targets[0]
 	if !state.Satisfied || state.Condition != "started" {
 		t.Fatal(state)
+	}
+	zeroBudget := 0
+	args.RequestID = "finite-zero-wait"
+	args.Mode = "finite"
+	args.WaitSeconds = &zeroBudget
+	nonBlocking, err := s.Call(ctx, "command_start", wire.JSON(args))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cont := nonBlocking.(map[string]any)["wait"].(WaitResult).Continue; len(cont) != 1 {
+		t.Fatal("command_start wait_seconds=0 omitted continuation", nonBlocking)
 	}
 }

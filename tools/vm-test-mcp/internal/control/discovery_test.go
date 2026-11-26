@@ -67,7 +67,7 @@ func TestQueuedCancellationHasNoAllocatedResources(t *testing.T) {
 		t.Fatal(view)
 	}
 	for _, r := range cleanup["resources"].([]any) {
-		if r.(map[string]any)["state"] != "never_allocated" {
+		if r.(map[string]any)["state"] != "unallocated" {
 			t.Fatal(cleanup)
 		}
 	}

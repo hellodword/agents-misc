@@ -63,9 +63,13 @@ func TestDiscoveredSchemaAndRuntimeAcceptTheSameBoundaries(t *testing.T) {
 		{"auto resize", DisplayRequest{}, schemaMap{"auto_resize": false}, true},
 		{"no display request", DisplayRequest{}, schemaMap{}, false},
 		{"desktop", StartRequest{}, schemaMap{"argv": []string{"fixture"}, "context": "desktop"}, true},
+		{"command wait window", StartRequest{}, schemaMap{"argv": []string{"fixture"}, "wait_seconds": 0}, true},
 		{"bad context", StartRequest{}, schemaMap{"argv": []string{"fixture"}, "context": "auto"}, false},
 		{"relative cwd", StartRequest{}, schemaMap{"argv": []string{"fixture"}, "cwd": "relative"}, false},
 		{"windows cwd", StartRequest{}, schemaMap{"argv": []string{"fixture"}, "cwd": `C:\Task`}, true},
+		{"linux exec", ExecRequest{}, schemaMap{"argv": []string{"/bin/true", "relative-arg"}}, true},
+		{"windows exec", ExecRequest{}, schemaMap{"argv": []string{`C:\Windows\System32\cmd.exe`, "/c", "ver"}}, true},
+		{"relative exec", ExecRequest{}, schemaMap{"argv": []string{"systemctl", "status"}}, false},
 		{"input path", PutRequest{}, schemaMap{"path": "/tmp/fixture", "upload_id": wire.ID()}, true},
 		{"udp endpoint", EndpointRequest{}, schemaMap{"protocol": "udp", "port": 65535}, true},
 		{"invalid endpoint", EndpointRequest{}, schemaMap{"protocol": "tcp", "port": 65536}, false},
@@ -97,6 +101,23 @@ func TestDiscoveredSchemaAndRuntimeAcceptTheSameBoundaries(t *testing.T) {
 			t.Fatal(test)
 		}
 	}
+	for _, test := range []struct {
+		typ   any
+		v     schemaMap
+		valid bool
+	}{
+		{LabRequest{}, schemaMap{"request_id": "cam-ok", "nodes": []any{schemaMap{"name": "app", "template": "windows", "media": schemaMap{"camera": "front", "audio_input": true}}}}, true},
+		{LabRequest{}, schemaMap{"request_id": "cam-top-rejected", "nodes": []any{schemaMap{"name": "app", "template": "windows", "camera": "front"}}}, false},
+		{LabRequest{}, schemaMap{"request_id": "cam-bad-alias", "nodes": []any{schemaMap{"name": "app", "template": "windows", "media": schemaMap{"camera": "INVALID_ALIAS"}}}}, false},
+		{WaitRequest{}, schemaMap{"targets": []any{schemaMap{"kind": "command", "id": wire.ID(), "condition": "output", "stream": "stdout", "offset": 0}}}, true},
+		{WaitRequest{}, schemaMap{"targets": []any{schemaMap{"kind": "command", "id": wire.ID(), "condition": "output", "stream": "combined"}}}, false},
+		{WaitRequest{}, schemaMap{"targets": []any{schemaMap{"kind": "command", "id": wire.ID(), "condition": "input_written", "sequence": -1}}}, false},
+	} {
+		typ := reflect.TypeOf(test.typ)
+		if advertised, runtime := compiledSchema(typ).full.Validate(test.v) == nil, validateArguments(typ, wire.JSON(test.v)) == nil; advertised != test.valid || runtime != test.valid {
+			t.Fatal(test, advertised, runtime)
+		}
+	}
 }
 
 func TestSchemaRejectsBytesWithoutEchoingContentOrAllocatingReceipt(t *testing.T) {
@@ -106,13 +127,18 @@ func TestSchemaRejectsBytesWithoutEchoingContentOrAllocatingReceipt(t *testing.T
 	}
 	defer s.Close()
 	marker := "synthetic-sensitive-value"
-	for _, args := range []schemaMap{
-		{"request_id": "invalid-argument", "node_id": wire.ID(), "argv": []string{strings.Repeat(marker, 2000)}},
-		{"request_id": "byte-limit", "node_id": wire.ID(), "argv": []string{strings.Repeat("界", 12000)}},
+	for _, call := range []struct {
+		tool string
+		args schemaMap
+	}{
+		{"command_start", schemaMap{"request_id": "invalid-argument", "node_id": wire.ID(), "argv": []string{strings.Repeat(marker, 2000)}}},
+		{"command_start", schemaMap{"request_id": "byte-limit", "node_id": wire.ID(), "argv": []string{strings.Repeat("界", 12000)}}},
+		{"node_exec", schemaMap{"request_id": "relative-exec", "node_id": wire.ID(), "argv": []string{"relative"}}},
+		{"node_exec", schemaMap{"request_id": "exec-byte-limit", "node_id": wire.ID(), "argv": []string{"/" + strings.Repeat("界", 12000)}}},
 	} {
-		_, err = s.accept(context.Background(), "command_start", wire.JSON(args))
+		_, err = s.accept(context.Background(), call.tool, wire.JSON(call.args))
 		if err == nil || wire.Safe(err).Code != "invalid_argument" || wire.Safe(err).Category != "validation" || strings.Contains(string(wire.JSON(wire.Safe(err))), marker) {
-			t.Fatal(err)
+			t.Fatal(call.tool, err)
 		}
 	}
 	if len(s.operations) != 0 || len(s.requests) != 0 {
@@ -159,6 +185,10 @@ func TestUnknownFieldsReportAllowedFieldsAndPerToolIdempotencyAndZeroWait(t *tes
 	waitPart := jobReply["wait"].(WaitResult)
 	if len(waitPart.Targets) != 1 || len(waitPart.Continue) != 1 || waitPart.Continue[0].Kind != "nix_job" {
 		t.Fatalf("wait_seconds=0 did not return immediate snapshot and continuation: %+v", waitPart)
+	}
+	five := 5
+	if repeated, err := s.accept(context.Background(), "nix_job_create", wire.JSON(NixRequest{Change: Change{RequestID: sharedReqID}, CacheID: upID, WaitSeconds: &five})); err != nil || repeated.(*Operation).ID != jobReply["operation"].(map[string]any)["id"] {
+		t.Fatal("changing wait_seconds mutated business idempotency hash:", repeated, err)
 	}
 	if _, err = s.accept(context.Background(), "upload_create", wire.JSON(TransferRequest{Change: Change{RequestID: sharedReqID}, Kind: "file"})); wire.Safe(err).Code != "request_conflict" {
 		t.Fatal("same-tool changed arguments did not trigger request_conflict:", err)
