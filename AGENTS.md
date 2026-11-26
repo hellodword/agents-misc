@@ -35,6 +35,7 @@ Make reversible implementation choices autonomously after inspecting the codebas
 - Describe current behavior and design directly in documentation, comments, and identifiers, integrating revisions into the owning sections. Include migration or compatibility notes only when readers or consumers need them to act accurately.
 - Document reproducible mechanism or environment pitfalls and their causes directly; omit comparative "patch-history" narration against superseded or unchosen designs.
 - In non-English technical writing, keep standard English engineering terms (`derivation`, `closure`, `cgroup`, `lease`, `schema`, `idempotency`, `backdoor`, `patch`, `bounding box`, etc.) intact where literal translation reduces precision.
+- Design user-facing product interfaces around domain concepts and user tasks, placing file paths, protocol/storage settings, and low-level diagnostics in operator or advanced views rather than primary flows.
 
 ## Safety and authorization
 
@@ -43,7 +44,7 @@ Make reversible implementation choices autonomously after inspecting the codebas
 - Never weaken, skip, or delete assertions merely to hide failures. Never mutate host or global state (`curl|sh` installers, host package managers, global installs) by default. Preserve tracked `.vscode/**` and `.devcontainer/**` configuration when relevant without adding unrequested machine-local editor or container files. Preserve unrelated user changes in the working tree.
 - Treat dependency lockfiles (`Cargo.lock`, `flake.lock`, `package-lock.json`, and equivalents) as tool-generated data: update them exclusively through the repository's documented command or declared dependency tool, never via text editors, patches, or ad hoc scripts. If the declared command fails or is unavailable, diagnose or report the blocker; manual content edits are permitted only when an explicit project contract or official documentation published by the dependency-tool maintainer requires that exact operation for that lockfile.
 - Task authorization includes ordinary reversible implementation, tests, documentation, project dev-shell tools, and necessary adaptations to existing CI. Reuse granted authorization within its stated scope without asking again.
-- Create local commits only when the user requests it, the task enables auto-commit, an approved execution plan defines commit checkpoints, or project policy directly enables it. Stage explicit task file paths only (`git add -- <file>...`); never use `git add .`, `-A`, `--all`, or `-f`.
+- Create local commits only when the user requests it (which applies across follow-up turns and plans in the same session unless narrowed), the task enables auto-commit, an approved execution plan defines commit checkpoints, or project policy directly enables it. Stage explicit task file paths only (`git add -- <file>...`); never use `git add .`, `-A`, `--all`, or `-f`.
 - When a Git-backed Nix flake must see new durable, non-secret, non-ignored files before committing, mark explicit file paths with `git add -N -- <file>...` (never directories, globs, or `-f`), leave intent-to-add in place, and disclose those paths in the report.
 
 ## Temporary workspace and retention

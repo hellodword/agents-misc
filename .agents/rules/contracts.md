@@ -21,6 +21,7 @@ Preserve required compatibility unless the user authorizes the specific break. T
 
 - Choose unknown-field handling for each interface. Rejecting unknown config keys can catch typos; extensible protocols and forward-compatible passthrough may need different behavior. Preserve an existing interface's policy.
 - Define config precedence when config sources are needed; do not invent environment overrides without a use case.
+- For multi-language or binary wire interfaces (such as JSON Schema, OpenAPI, Protobuf, or FlatBuffers), maintain one authoritative definition and consume its generated or imported types, constants, and enums across layers.
 
 ## Time and normalization
 

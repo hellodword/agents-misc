@@ -1,11 +1,11 @@
 ---
 name: long-task-plan
-description: Plan autonomous long-running, unattended, resumable, or Codex Goal execution when the user explicitly requests that planning. Produce a self-contained plan that can adapt to discoveries while preserving completion criteria and authorization. Do not trigger for ordinary implementation, task complexity alone, or merely starting or resuming a Goal.
+description: Plan autonomous long-running, unattended, resumable, or goal-driven execution when the user explicitly requests that planning. Produce a self-contained plan that can adapt to discoveries while preserving completion criteria and authorization. Do not trigger for ordinary implementation, task complexity alone, or merely starting or resuming an autonomous goal.
 ---
 
 # Long Task Plan
 
-Prepare a plan that lets an executor make useful decisions as evidence changes. Planning alone does not authorize implementation. Respect the executor's lifecycle, budgets, and available tools; do not create a Goal or invent a budget merely because the plan mentions one.
+Prepare a plan that lets an executor make useful decisions as evidence changes. Planning alone does not authorize implementation. Respect the executor's lifecycle, budgets, and available tools; do not start autonomous execution or invent a budget merely because the plan mentions one.
 
 ## Plan contents
 

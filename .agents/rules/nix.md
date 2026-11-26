@@ -20,9 +20,9 @@ Prefer project Nix development shells (`nix develop .#<shell> --command ...`) so
 
 ## Remote NixOS VM tests
 
-- Reuse working local VM flows when available; when local KVM is unavailable or remote execution is selected, evaluate against the project's locked `nixpkgs` (`qemu.forceAccel = true`) and submit via a prepared HTTP MCP executor under the VM test rule, keeping build compilation on the host daemon and guest CPU/RAM in the test definition.
+- Reuse working local VM flows when available; when local KVM is unavailable or remote execution is selected, evaluate against the project's locked `nixpkgs` (`qemu.forceAccel = true`) and submit through a prepared HTTP MCP executor using the [nixos-vm-test](../skills/nixos-vm-test/SKILL.md) skill, keeping build compilation on the host daemon and guest CPU/RAM in the test definition.
 
 ## Validation
 
-- Distinguish **configuration evaluation** (`nix flake check --no-build --no-write-lock-file`, which cheaply catches cross-module option and wiring errors across all outputs without booting VMs) from **derivation builds and VM test execution**.
+- Distinguish **configuration evaluation** (`nix flake check --no-build --no-write-lock-file`, which cheaply catches cross-module option and wiring errors across all outputs without booting VMs) from **derivation builds and VM test execution**. Keep `flake.nix` and `devShell` evaluation pure—consuming `nixpkgs` attributes directly rather than Import-From-Derivation on unbuilt store paths—so `nix flake check --no-build --no-write-lock-file` succeeds before building toolchains.
 - Routine code, doc, or dev-shell edits use focused shell checks; validate adopted Nix outputs and affected consumers when their inputs or wiring change. On dirty Git trees, batch multiple target attributes into a single `nix build` invocation to avoid repeated store source copies.
