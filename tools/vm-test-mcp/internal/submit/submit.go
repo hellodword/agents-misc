@@ -93,6 +93,7 @@ func Prepare(ctx context.Context, o Options) (map[string]any, error) {
 		return nil, e
 	}
 	defer root.Close()
+	logPath := filepath.Join(o.WorkDir, "prepare.log")
 	log, e := root.OpenFile("prepare.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if e != nil {
 		return nil, e
@@ -131,7 +132,7 @@ func Prepare(ctx context.Context, o Options) (map[string]any, error) {
 			resolve.Stderr = log
 			raw, err := resolve.Output()
 			if err != nil {
-				return nil, fmt.Errorf("resolve smoke project: %w", err)
+				return nil, prepareCommandError(logPath, "resolve smoke project", err)
 			}
 			var source struct {
 				URL string `json:"resolvedUrl"`
@@ -152,7 +153,7 @@ func Prepare(ctx context.Context, o Options) (map[string]any, error) {
 		cmd.Stderr = log
 		raw, e := cmd.Output()
 		if e != nil {
-			return nil, e
+			return nil, prepareCommandError(logPath, "evaluate test derivation", e)
 		}
 		if e = wire.Decode(raw, &meta); e != nil {
 			return nil, e
@@ -163,7 +164,7 @@ func Prepare(ctx context.Context, o Options) (map[string]any, error) {
 		keep := exec.CommandContext(ctx, o.Nix, "build", "--offline", "--out-link", filepath.Join(o.WorkDir, "derivation"), meta.Derivation)
 		keep.Stdout, keep.Stderr = log, log
 		if e = keep.Run(); e != nil {
-			return nil, fmt.Errorf("retain evaluated derivation: %w", e)
+			return nil, prepareCommandError(logPath, "retain evaluated derivation", e)
 		}
 		record := map[string]any{"request_id": o.RequestID, "execution_id": executionID, "test": identity, "metadata": meta}
 		if o.Apply != "" {
@@ -269,4 +270,37 @@ func decodeUploadFailure(boundary, object string, status int, body []byte, readE
 		return fmt.Errorf("%s returned HTTP %d: %w", prefix, status, failure)
 	}
 	return fmt.Errorf("%s returned HTTP %d without a valid error response", prefix, status)
+}
+
+func prepareCommandError(logPath, step string, err error) error {
+	tail := readLogTail(logPath, 2048, 16)
+	if tail == "" {
+		return fmt.Errorf("%s (%s): %w", step, logPath, err)
+	}
+	return fmt.Errorf("%s (%s): %w\n%s", step, logPath, err, tail)
+}
+
+func readLogTail(logPath string, maxBytes int64, maxLines int) string {
+	f, err := os.Open(logPath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || st.Size() <= 0 {
+		return ""
+	}
+	start := max(int64(0), st.Size()-maxBytes)
+	buf := make([]byte, st.Size()-start)
+	n, _ := f.ReadAt(buf, start)
+	lines := []string{}
+	for _, line := range strings.Split(strings.ToValidUTF8(string(buf[:n]), "\ufffd"), "\n") {
+		if trimmed := strings.TrimRight(line, "\r"); strings.TrimSpace(trimmed) != "" {
+			lines = append(lines, trimmed)
+		}
+	}
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+	return strings.Join(lines, "\n")
 }

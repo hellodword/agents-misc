@@ -25,7 +25,7 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 	o := submit.Options{}
 	version := f.Bool("version", false, "print JSON build and running-binary identity without configuration, evaluation or upload")
 	configFile := f.String("config", "", "client YAML with endpoint and token: allocate, submit, observe and download evidence")
-	project := f.String("project", ".", "locked project for the default three-node smoke test")
+	smokeProject := f.String("smoke-project", ".", "locked project supplying nixpkgs when --config omits --test")
 	timeout := f.Int("timeout-seconds", 0, "remote task deadline; 0 uses the server default")
 	evidence := f.String("evidence", "all", "automatic mode: all downloads registered artifacts; manifest saves their inventory")
 	f.StringVar(&o.Nix, "nix", "nix", "Nix executable in this container")
@@ -49,6 +49,16 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	}
+	smokeSet := false
+	f.Visit(func(fl *flag.Flag) {
+		if fl.Name == "smoke-project" {
+			smokeSet = true
+		}
+	})
+	if smokeSet && (*configFile == "" || o.Test != "") {
+		fmt.Fprintln(stderr, "--smoke-project applies only when --config omits --test; pass PATH#ATTR to --test or run from the project directory")
+		return 2
 	}
 	if f.NArg() != 0 || o.CacheBytes < 1 || o.CacheDir != "" && !filepath.IsAbs(o.CacheDir) || *timeout < 0 || *timeout > 86400 ||
 		(*configFile != "" && (o.CacheID != "" || o.CacheURL != "")) ||
@@ -80,7 +90,7 @@ func runCLI(args []string, stdout, stderr io.Writer) int {
 		}
 		o.SmokeFile = filepath.Clean(filepath.Join(filepath.Dir(exe), "..", "share", "vm-test-mcp", "vm-smoke.nix"))
 		if o.Test == "" && (o.WorkDir == "" || resumeErr != nil) {
-			o.SmokeProject, err = filepath.Abs(*project)
+			o.SmokeProject, err = filepath.Abs(*smokeProject)
 			if err != nil {
 				fmt.Fprintln(stderr, err)
 				return 1

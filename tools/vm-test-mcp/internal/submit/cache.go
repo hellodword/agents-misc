@@ -271,11 +271,12 @@ func (c *exportCache) retain(active map[string]bool) error {
 
 func (c *exportCache) export(ctx context.Context, o Options, meta Metadata, log io.Writer) (wire.UploadManifest, error) {
 	m := wire.UploadManifest{RunID: meta.RunID, UploadID: o.CacheID, Derivation: meta.Derivation, System: meta.System}
+	logPath := filepath.Join(o.WorkDir, "prepare.log")
 	query := exec.CommandContext(ctx, o.Nix, "path-info", "--recursive", meta.Derivation)
 	query.Stderr = log
 	raw, err := query.Output()
 	if err != nil {
-		return m, fmt.Errorf("query saved derivation closure: %w", err)
+		return m, prepareCommandError(logPath, "query saved derivation closure", err)
 	}
 	paths := strings.Fields(string(raw))
 	if len(paths) == 0 || len(paths) > 100000 {
@@ -291,7 +292,7 @@ func (c *exportCache) export(ctx context.Context, o Options, meta Metadata, log 
 	cmd := exec.CommandContext(ctx, o.Nix, "copy", "--derivation", "--to", destination.String(), meta.Derivation)
 	cmd.Stdout, cmd.Stderr = log, log
 	if err = cmd.Run(); err != nil {
-		return m, fmt.Errorf("export saved derivation closure: %w", err)
+		return m, prepareCommandError(logPath, "export saved derivation closure", err)
 	}
 	if _, _, err = c.root.Write("files/nix-cache-info", strings.NewReader("StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 30\n"), 1024); err != nil {
 		return m, err
