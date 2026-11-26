@@ -28,19 +28,35 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Start isolated Nix container
+      - name: Lint workflow, check Atlas, and export site
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          run_tag="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          state_dir="$RUNNER_TEMP/nix-ci-${run_tag}"
-          build_tmp="$RUNNER_TEMP/nix-build-${run_tag}"
-          container_name="nix-ci-${run_tag}"
-          store_volume="nix-ci-store-${run_tag}"
+          site_dir="$RUNNER_TEMP/atlas-site"
+          rm -rf -- "$site_dir"
+          mkdir -p "$site_dir"
+          host_uid="$(id -u)"
+          host_gid="$(id -g)"
+          nix_config="$(printf 'experimental-features = nix-command flakes\naccess-tokens = github.com=%s\n' "$GITHUB_TOKEN")"
 
-          mkdir -p "$state_dir" "$build_tmp"
-          cat > "$state_dir/nix.conf" <<'CONFIG'
+          NIX_CONFIG="$nix_config" \
+          HOST_UID="$host_uid" \
+          HOST_GID="$host_gid" \
+            docker run --rm -i \
+              --ulimit nofile=65536:1048576 \
+              --workdir /workspace \
+              --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+              --mount "type=bind,source=$site_dir,target=/site" \
+              --env NIX_CONFIG \
+              --env NIX_USER_CONF_FILES=/tmp/nix.conf \
+              --env HOST_UID \
+              --env HOST_GID \
+              "$NIX_IMAGE" \
+              bash -euo pipefail <<'BASH'
+          export PYTHONNOUSERSITE=1
+          git config --global --add safe.directory /workspace
+          cat > /tmp/nix.conf <<'CONFIG'
           experimental-features = nix-command flakes
           sandbox = false
           accept-flake-config = false
@@ -50,48 +66,9 @@ jobs:
           http-connections = 8
           require-sigs = true
           CONFIG
-
-          cat > "$state_dir/gitconfig" <<'GITCONFIG'
-          [safe]
-            directory = /workspace
-          GITCONFIG
-
-          nix_config="$(printf 'experimental-features = nix-command flakes\naccess-tokens = github.com=%s\n' "$GITHUB_TOKEN")"
-          delimiter="EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
-          {
-            printf 'NIX_CI_STATE=%s\n' "$state_dir"
-            printf 'NIX_CI_BUILD_TMP=%s\n' "$build_tmp"
-            printf 'NIX_CI_CONTAINER=%s\n' "$container_name"
-            printf 'NIX_CI_STORE_VOLUME=%s\n' "$store_volume"
-            printf 'NIX_CONFIG<<%s\n%s\n%s\n' "$delimiter" "$nix_config" "$delimiter"
-          } >> "$GITHUB_ENV"
-
-          docker volume create "$store_volume" >/dev/null
-          NIX_CONFIG="$nix_config" docker run --detach --name "$container_name" \
-            --ulimit nofile=65536:1048576 \
-            --workdir /workspace \
-            --mount "type=volume,source=$store_volume,target=/nix" \
-            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
-            --mount "type=bind,source=$state_dir,target=/ci" \
-            --mount "type=bind,source=$state_dir/gitconfig,target=/root/.gitconfig,readonly" \
-            --mount "type=bind,source=$build_tmp,target=/build" \
-            --env NIX_CONFIG \
-            --env NIX_USER_CONF_FILES=/ci/nix.conf \
-            --env TMPDIR=/build \
-            "$NIX_IMAGE" \
-            sleep infinity >/dev/null
-
-          docker exec -i "$container_name" bash -euo pipefail <<'BASH'
           nix eval --no-update-lock-file --impure --raw --expr \
             '((builtins.getFlake "git+file:///workspace").inputs.core.lib.cache.mkCacheConfig { }).public.text' \
-            >> /ci/nix.conf
-          BASH
-
-      - name: Lint workflow, check Atlas, and export site
-        run: |
-          set -euo pipefail
-          docker exec -i "$NIX_CI_CONTAINER" bash -euo pipefail <<'BASH'
-          export PYTHONNOUSERSITE=1
+            >> /tmp/nix.conf
           nix develop --no-update-lock-file .#dev --command actionlint .github/workflows/ci.yml
           nix build --no-link --no-update-lock-file --print-build-logs \
             .#checks.x86_64-linux.formatting \
@@ -101,27 +78,14 @@ jobs:
             .#checks.x86_64-linux.codex-config-atlas-tests \
             .#codex-config-atlas-site
           site="$(nix build --no-link --no-update-lock-file --print-out-paths .#codex-config-atlas-site)"
-          mkdir -p /ci/site
-          cp -RL "$site/." /ci/site/
+          cp -RL "$site/." /site/
+          chown -R "$HOST_UID:$HOST_GID" /site
           BASH
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
-          path: ${{ env.NIX_CI_STATE }}/site
-
-      - name: Tear down Nix container and store volume
-        if: always()
-        run: |
-          if [[ -n "${NIX_CI_CONTAINER:-}" ]]; then
-            docker rm --force "$NIX_CI_CONTAINER" >/dev/null 2>&1 || true
-          fi
-          if [[ -n "${NIX_CI_STORE_VOLUME:-}" ]]; then
-            docker volume rm --force "$NIX_CI_STORE_VOLUME" >/dev/null 2>&1 || true
-          fi
-          if [[ -n "${NIX_CI_STATE:-}" || -n "${NIX_CI_BUILD_TMP:-}" ]]; then
-            rm -rf -- "${NIX_CI_STATE:-}" "${NIX_CI_BUILD_TMP:-}" || true
-          fi
+          path: ${{ runner.temp }}/atlas-site
 
   deploy:
     name: Deploy Atlas

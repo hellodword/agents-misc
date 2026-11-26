@@ -4,7 +4,7 @@
   inputs = {
     core.url = "git+https://github.com/hellodword/nixos-config.git?ref=master&dir=infra";
     nixpkgs.follows = "core/nixpkgs";
-    treefmt-nix.follows = "core/oranc/treefmt-nix";
+    treefmt-nix.follows = "core/treefmt-nix";
   };
 
   outputs =
